@@ -1,0 +1,11 @@
+node_modules/
+dist/
+web/dist/
+.env
+.env.*
+!.env.example
+config.json
+omp-telegram.json
+.omp-telegram/
+.data/
+*.log
