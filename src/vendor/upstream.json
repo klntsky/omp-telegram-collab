@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/can1357/oh-my-pi",
+  "commit": "fbc3ac6a148d24d50f573e9b531999e32bae42eb",
+  "files": {
+    "codec.ts": "packages/collab-web/src/lib/codec.ts",
+    "link.ts": "packages/collab-web/src/lib/link.ts"
+  },
+  "license": "MIT",
+  "modifications": []
+}
