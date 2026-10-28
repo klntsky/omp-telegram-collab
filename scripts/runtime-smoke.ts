@@ -24,6 +24,7 @@ const config: AppConfig = {
     maxSessions: 1, startupTimeoutMs: 60_000, relayUrl: relay.url,
   },
 };
+writeConfig(config);
 const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(

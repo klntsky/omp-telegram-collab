@@ -9,7 +9,7 @@ import { isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError } from './runtime.js';
-import { configWritable, findInstance, readConfig, writeConfig } from './config.js';
+import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 
@@ -81,7 +81,8 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — set the forum default in General, or switch this session (instance admin)\n/list_model_presets — list presets and the forum default (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)';
+const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — set the forum default in General, or switch this session (instance admin)\n/list_model_presets — list presets and the forum default (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (instance admin)';
+const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
@@ -92,6 +93,7 @@ const groupCommands = [
   { command: 'status', description: 'Check forum and session readiness' },
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
+  { command: 'terminate', description: 'Terminate all agents and suspend the service (instance admin)' },
   { command: 'model_preset', description: 'Set default in General or switch session (admin)' },
   { command: 'list_model_presets', description: 'List presets and forum default (instance admin)' },
   { command: 'help', description: 'Show commands and prompt settings' },
@@ -141,6 +143,7 @@ export class BotService {
   private readonly topicIcons = new Map<string, { status?: TopicActivity; tail: Promise<void> }>();
   private readonly sessionKillHandlers = new Set<(sessionId: string) => void>();
   private readonly commandModes = new Map<number, boolean>();
+  private termination?: Promise<void>;
   private readonly promptProposals = new Map<string, PromptProposal>();
   private readonly receivedMessages = new WeakSet<Context>();
   private iconIds?: Promise<Record<TopicActivity, string>>;
@@ -157,10 +160,12 @@ export class BotService {
     this.token = options.token;
     this.bot.use(async ctx => {
       if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => undefined);
-      if (++this.queuedUpdates > 256) { this.queuedUpdates--; return; }
+      const urgent = /^\/terminate(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(messageText(ctx.message) ?? '');
+      if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
       const received = this.receiveMessage(ctx);
-      const task = this.updateTail.then(async () => { await received; await this.handle(ctx); });
-      this.updateTail = task.catch(() => undefined);
+      const process = async () => { await received; await this.handle(ctx); };
+      const task = urgent ? process() : this.updateTail.then(process);
+      if (!urgent) this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) {
         console.error('Telegram operation failed.', error);
         if (ctx.chat && !(error instanceof SessionCapacityError)) {
@@ -184,6 +189,7 @@ export class BotService {
   private async receiveMessage(ctx: Context, interaction = false): Promise<void> {
     const message = ctx.message;
     const text = messageText(message);
+    if (this.options.config.terminated) return;
     if (this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
         !text || 'forward_origin' in message || 'forward_date' in message) return;
     if (this.receivedMessages.has(ctx)) return;
@@ -198,6 +204,24 @@ export class BotService {
       () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.path === assigned.path).catch(() => undefined);
     this.receivedMessages.add(ctx);
   }
+  async applyTermination(): Promise<void> {
+    if (!this.options.config.terminated) { this.termination = undefined; return; }
+    this.termination ??= (async () => {
+      this.capacityRequests.clear();
+      this.promptProposals.clear();
+      const sessions = this.options.store.listSessions();
+      for (const session of sessions) {
+        this.options.store.cancelInitialTask(session.id);
+        this.options.store.advanceSessionGeneration(session.id);
+        this.dropListener(session.id);
+        for (const handler of this.sessionKillHandlers) handler(session.id);
+      }
+      const results = await Promise.allSettled(sessions.map(session => this.options.runtime.kill(session)));
+      const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+      if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
+    })().catch(error => { this.termination = undefined; throw error; });
+    await this.termination;
+  }
   get id(): number { return this.bot.botInfo?.id ?? 0; }
   async initialize(): Promise<void> {
     this.bot.botInfo ??= await this.bot.telegram.getMe();
@@ -206,8 +230,9 @@ export class BotService {
       { scope: { type: 'all_group_chats' } },
     );
     await this.syncCommandMenus();
+    if (refreshTermination(this.options.config)) await this.applyTermination();
     for (const existing of this.options.store.listSessions(this.id)) {
-      if (!this.sessionAssigned(existing)) continue;
+      if (this.options.config.terminated || !this.sessionAssigned(existing)) continue;
       const generation = this.options.store.getSessionGeneration(existing.id);
       void (async () => {
         const shouldListen = existing.status === 'open' && (this.options.store.hasPendingInitialTask(existing.id) || await this.options.runtime.isRunning(existing));
@@ -219,7 +244,7 @@ export class BotService {
       });
     }
     this.statusTimer ??= setInterval(() => {
-      if (this.stopped || this.checkingStatuses) return;
+      if (this.stopped || this.options.config.terminated || this.checkingStatuses) return;
       this.checkingStatuses = true;
       void (async () => {
         for (const session of this.options.store.listSessions(this.id)) {
@@ -324,9 +349,11 @@ export class BotService {
     await Promise.all([...this.topicIcons.values()].map(icon => icon.tail));
   }
   async authorize(chatId: number, userId: number): Promise<void> {
+    if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
     const [chat, user, bot] = await Promise.all([this.bot.telegram.getChat(chatId), this.bot.telegram.getChatMember(chatId, userId), this.bot.telegram.getChatMember(chatId, this.id)]);
+    if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
     if (chat.type !== 'supergroup' || !chat.is_forum || !isActiveMember(user) || bot.status !== 'administrator' || !bot.can_manage_topics) throw new Error('Group access denied');
   }
@@ -351,6 +378,7 @@ export class BotService {
     try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
   }
   private requireSessionAssignment(session: TopicSession): void {
+    if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
     if (!this.sessionAssigned(session)) throw new Error('This session is not assigned to its configured instance path');
   }
   private allMessagesArePrompts(chatId: number): boolean {
@@ -398,6 +426,8 @@ export class BotService {
   }
   async reconcileConfiguration(): Promise<void> {
     await this.syncCommandMenus();
+    if (this.options.config.terminated) { await this.applyTermination(); return; }
+    this.termination = undefined;
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
@@ -671,6 +701,19 @@ export class BotService {
     await this.listen(session);
     await this.sendInitial(session);
   }
+  private async promptImages(ctx: Context): Promise<ImageContent[] | undefined> {
+    const message = ctx.message;
+    if (!message) return undefined;
+    const photo = 'photo' in message && message.photo.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
+    const document = 'document' in message && message.document.mime_type?.startsWith('image/') ? message.document : undefined;
+    if (!photo && !document) return undefined;
+    const mimeType = photo ? 'image/jpeg' : document!.mime_type!;
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
+    const url = await this.bot.telegram.getFileLink((photo ?? document)!.file_id);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
+    return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
+  }
   private async routePrompt(ctx: Context, text: string, session?: TopicSession): Promise<void> {
     const admin = await this.instanceAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
@@ -680,6 +723,12 @@ export class BotService {
       this.requireSessionAssignment(session);
       if (session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before sending instructions.'); return; }
     }
+    const instancePath = this.assignedPath(ctx.chat!.id);
+    const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    const images = await this.promptImages(ctx);
+    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
+    if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
+        this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (admin) {
       if (session) await this.submitSessionPrompt(ctx, session, text, images);
       else await this.newSession(ctx, text, undefined, undefined, images);
@@ -697,19 +746,6 @@ export class BotService {
       if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
       await ctx.reply(body.slice(offset,end), {
         ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id} : {}),
-  private async promptImages(ctx: Context): Promise<ImageContent[] | undefined> {
-    const message = ctx.message;
-    if (!message) return undefined;
-    const photo = 'photo' in message && message.photo.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
-    const document = 'document' in message && message.document.mime_type?.startsWith('image/') ? message.document : undefined;
-    if (!photo && !document) return undefined;
-    const mimeType = photo ? 'image/jpeg' : document!.mime_type!;
-    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
-    const url = await this.bot.telegram.getFileLink((photo ?? document)!.file_id);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
-    return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
-  }
       });
       offset = end;
     }
@@ -719,12 +755,6 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-    const instancePath = this.assignedPath(ctx.chat!.id);
-    const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
-    const images = await this.promptImages(ctx);
-    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
-        this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
       source:ctx,text,images,instancePath,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
@@ -783,6 +813,14 @@ export class BotService {
   }
   private async handle(ctx: Context): Promise<void> {
     if (this.stopped) return;
+    if (refreshTermination(this.options.config)) {
+      try { await this.applyTermination(); }
+      finally {
+        if (ctx.chat && (ctx.callbackQuery || messageText(ctx.message))) await ctx.reply(terminationMessage);
+      }
+      return;
+    }
+    this.termination = undefined;
     if (ctx.callbackQuery) {
       if (!('data' in ctx.callbackQuery) || !ctx.chat || !ctx.from || ctx.from.is_bot) return;
       if (ctx.callbackQuery.data === 'setup:check') await this.setup(ctx);
@@ -842,6 +880,21 @@ export class BotService {
     }
     const command = text?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
     if (command?.[2] && command[2].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
+    if (command?.[1]?.toLowerCase() === 'terminate') {
+      if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Termination requires a configured instance admin.'); return; }
+      const persisted = readConfig(this.options.config.configPath);
+      const assigned = findInstance(persisted, this.id, ctx.chat.id);
+      if (!ctx.from?.username || !assigned?.instance.admins.includes(ctx.from.username.toLowerCase())) {
+        await ctx.reply('Termination requires a configured instance admin.');
+        return;
+      }
+      persisted.terminated = true;
+      writeConfig(persisted);
+      this.options.config.terminated = true;
+      try { await this.applyTermination(); }
+      finally { await ctx.reply(terminationMessage); }
+      return;
+    }
     if (ctx.chat.type === 'private') {
       const instances = Object.values(this.options.config.instances).filter(instance => instance.chats.some(chat => chat.botId === this.id));
       const allowed = ctx.from?.username && instances.some(instance => instance.admins.includes(ctx.from!.username!.toLowerCase()));
@@ -1079,7 +1132,7 @@ export class BotService {
     if (prompt) await this.routePrompt(ctx,prompt,session);
   }
   private scheduleReconnect(session: TopicSession, attempt = 0): void {
-    if (this.stopped || !this.sessionAssigned(session)) return;
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
@@ -1228,6 +1281,7 @@ export class BotService {
     const question = this.questions.get(token);
     if (!question || this.stopped || this.listeners.get(question.session.id) !== question.listener ||
         !this.sessionAssigned(question.session) || this.options.store.getSession(question.session.id)?.status !== 'open') return;
+    this.requireSessionAssignment(question.session);
     question.answer = receipt ?? (value === undefined ? 'Question cancelled.' : 'Custom answer sent.');
     if (messageId !== undefined) question.listener.pendingAnswers.set(question.request.reqId,messageId);
     try {

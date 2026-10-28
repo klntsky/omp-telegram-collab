@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
+import { writeConfig } from '../src/config.js';
 
 const owner = { id: ownerId, first_name: 'Ada', username: ownerUsername, is_bot: false };
 
@@ -170,13 +171,16 @@ test('instance admins are isolated by canonical path and bot-chat assignment', a
   }
 });
 
-test('unbound setup requests require current Telegram administration and transition only after local assignment', async () => {
+test('unbound setup requests require current Telegram administration and transition only after local assignment', async t => {
+  const configDirectory = await mkdtemp(join(tmpdir(), 'omp-operator-config-'));
+  t.after(() => rm(configDirectory, {recursive:true,force:true}));
   const app = await createSmokeApp();
   try {
     const instances = app.config.instances;
     const originalPath = Object.keys(instances)[0]!;
     app.config.instances = {};
-    app.config.configPath = "/tmp/operator's config.yaml";
+    app.config.configPath = join(configDirectory, "operator's config.yaml");
+    writeConfig(app.config);
     app.setCurrentMember({ username: 'current_admin', status: 'member' });
     await app.update({ text: '/setup' }, { ...owner, username: 'stale_owner' });
     assert.deepEqual(app.store.listSetupRequests(), []);
@@ -189,7 +193,7 @@ test('unbound setup requests require current Telegram administration and transit
     assert.equal(request.title, title);
     assert.equal(app.store.isEnrolled(botId, chatId), false);
     const suggestion = String(app.messages.at(-1)?.text);
-    assert.ok(suggestion.includes(`omp-telegram --config '/tmp/operator'\\''s config.yaml' approve ${request.code}`));
+    assert.ok(suggestion.includes(`omp-telegram --config '${app.config.configPath.replaceAll("'", "'\\''")}' approve ${request.code}`));
     assert.equal(suggestion.includes(title), false);
     assert.equal(suggestion.includes(originalPath), false);
     await app.update({ text: '/new Not locally approved' });

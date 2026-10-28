@@ -46,6 +46,7 @@ const argumentSchema = literal.refine(value => {
 });
 const configSchema = z.object({
   version: z.literal(1).optional(),
+  terminated: z.boolean().optional(),
   bots: z.array(z.object({
     id: positiveInteger,
     token: z.string().regex(tokenPattern),
@@ -145,6 +146,20 @@ export function readConfig(input: string): AppConfig {
     if (error instanceof ConfigError) throw error;
     throw failure(path, ['config'], 'Cannot read a regular, non-symlink YAML configuration file.');
   }
+}
+
+const terminationStats = new WeakMap<AppConfig, Stats>();
+
+export function refreshTermination(config: AppConfig): boolean {
+  const current = lstatSync(config.configPath);
+  const previous = terminationStats.get(config);
+  if (!previous || !sameFile(previous, current) || previous.ctimeMs !== current.ctimeMs) {
+    const fresh = readConfig(config.configPath);
+    if (fresh.terminated === undefined) delete config.terminated;
+    else config.terminated = fresh.terminated;
+    terminationStats.set(config, current);
+  }
+  return config.terminated === true;
 }
 
 function modeAllows(stat: Stats, write: boolean): boolean {

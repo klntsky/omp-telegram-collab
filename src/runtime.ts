@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, HostBinding, TopicSession } from '../shared/contracts.js';
 import { parseCollabLink } from './vendor/link.js';
-import { findInstance } from './config.js';
+import { findInstance, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 
 export class SessionCapacityError extends Error {
@@ -205,12 +205,18 @@ export class OmpRuntime {
     this.#idleTimer = setInterval(() => { void this.retireIdle().catch(() => {}); }, 60000);
     this.#idleTimer.unref();
   }
+  #assertActive(): void {
+    if (refreshTermination(this.#config)) {
+      throw new Error('The service got terminated, only admin can resume it (remove terminated: true from the config)');
+    }
+  }
   getSessionLimit(): number { return this.#sessionLimit; }
   setSessionLimit(limit: number): void {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid OMP session limit');
     this.#sessionLimit = limit;
   }
   increaseSessionLimit(expectedLimit: number): boolean {
+    this.#assertActive();
     if (this.#closed || this.#sessionLimit !== expectedLimit || !Number.isSafeInteger(expectedLimit * 2)) return false;
     this.#sessionLimit = expectedLimit * 2;
     return true;
@@ -250,6 +256,7 @@ export class OmpRuntime {
     return activity;
   }
   retain(id: string): () => void {
+    this.#assertActive();
     if (this.#managed.get(id)?.retiring || this.#stopping.has(id)) throw new Error('Session is retiring; rejoin after it settles');
     const activity = this.#hostActivity(id);
     activity.leases++;
@@ -263,6 +270,7 @@ export class OmpRuntime {
     };
   }
   markPrompt(id: string): void {
+    this.#assertActive();
     if (this.#managed.get(id)?.retiring || this.#stopping.has(id)) throw new Error('Session is retiring; resend after it settles');
     const activity = this.#hostActivity(id);
     activity.busy = true;
@@ -323,6 +331,7 @@ export class OmpRuntime {
     this.#admission = promise;
     await previous;
     try {
+      this.#assertActive();
       await this.#acquire();
       const hosts = await this.#list(Date.now()+this.#config.omp.startupTimeoutMs);
       await this.#discoverManaged(hosts);
@@ -344,6 +353,7 @@ export class OmpRuntime {
     return this.#ensureManaged(session);
   }
   async isRunning(session: TopicSession): Promise<boolean> {
+    this.#assertActive();
     if (this.#closed || !/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return false;
     if (this.#pending.has(session.id)) return true;
     const hosts = await this.#list(Date.now() + this.#config.omp.startupTimeoutMs);
@@ -360,6 +370,7 @@ export class OmpRuntime {
   }
 
   ensure(session: TopicSession): Promise<HostBinding> {
+    try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
     if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
     if (!Object.hasOwn(this.#config.instances, session.instancePath)) return Promise.reject(new Error('Instance path is not configured'));
     const pending = this.#pending.get(session.id);
@@ -379,6 +390,7 @@ export class OmpRuntime {
   }
 
   async #nativeSetting(instancePath: string, key: string): Promise<unknown> {
+    this.#assertActive();
     const args: string[] = [];
     const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
     for (const arg of ompArguments(this.#config.omp.args)) {
@@ -456,6 +468,7 @@ export class OmpRuntime {
   }
 
   async modelPresets(session: TopicSession, name?: string): Promise<string> {
+    this.#assertActive();
     if (session.runtime.kind !== 'managed') {
       throw new Error('Model preset control is unavailable for attached OMP hosts. Use a managed topic session or run /modelpreset in the attached host.');
     }
@@ -468,6 +481,7 @@ export class OmpRuntime {
         throw new Error('OMP host does not support model preset control. Retire this managed host and rejoin to load the updated lifecycle extension.');
       }
       const validate = async () => {
+        this.#assertActive();
         if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
         const current = (await this.#list(deadline)).find(host => host.instanceId === binding.instanceId);
         const descriptor = await this.#lifecycle(session.id);
@@ -509,7 +523,14 @@ export class OmpRuntime {
       };
       const timer = setTimeout(() => done(new Error('OMP model preset control timed out; check the host before retrying a switch')), Math.max(1, deadline - Date.now()));
       socket.setEncoding('utf8');
-      socket.once('connect', () => socket.write(request));
+      socket.once('connect', () => {
+        try {
+          this.#assertActive();
+          socket.write(request);
+        } catch (error) {
+          done(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
       socket.once('error', error => done(error));
       socket.once('end', () => done(new Error('OMP model preset control closed without a response')));
       socket.once('close', () => done(new Error('OMP model preset control disconnected without a response')));
@@ -539,6 +560,7 @@ export class OmpRuntime {
   }
 
   async attach(instanceId: string, instancePath: string): Promise<HostBinding> {
+    this.#assertActive();
     if (this.#closed) throw new Error('OMP runtime is stopping');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(instanceId)) throw new Error('Invalid OMP instance identifier');
     await this.#acquire();
@@ -549,6 +571,7 @@ export class OmpRuntime {
     if (await realpath(instancePath) !== instancePath || await realpath(host.cwd) !== instancePath) throw new Error('Attached host does not belong to this instance path');
     const binding = await this.#resolve(host, deadline);
     if (this.#closed) throw new Error('OMP runtime is stopping');
+    this.#assertActive();
     return binding;
   }
 
@@ -689,6 +712,7 @@ export class OmpRuntime {
       await this.#acquire();
       const { dir, pin } = prepared;
       if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
+      this.#assertActive();
       let hosts = await this.#list(deadline);
       const matches = hosts.filter(host => host.sessionId === pin.sessionId);
       if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
@@ -698,6 +722,7 @@ export class OmpRuntime {
         while (!await this.#presetReady(dir, pin, host.pid)) {
           if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
           if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
+          this.#assertActive();
           await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
         const binding = await this.#resolve(host,deadline);
@@ -706,6 +731,7 @@ export class OmpRuntime {
         owned.binding = binding;
         owned.retiring = lifecycle?.retiring === true;
         this.#managed.set(id,owned);
+        this.#assertActive();
         return binding;
       }
       if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
@@ -722,6 +748,7 @@ export class OmpRuntime {
       } else {
         await unlink(startupFile).catch(error => { if (!errno(error, 'ENOENT')) throw error; });
       }
+      this.#assertActive();
       const child = spawn(process.execPath, [
         fileURLToPath(new URL('./host-supervisor.mjs',import.meta.url)),
         this.#config.omp.executable,
@@ -749,6 +776,7 @@ export class OmpRuntime {
       });
       while (Date.now() < deadline) {
         if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
+        this.#assertActive();
         if (record.failure) throw new Error(record.failure);
         if (launch.preset !== undefined) await this.#presetReady(dir, pin);
         if (record.exited || !child.pid) throw new Error('Managed OMP process exited before its host was available');
@@ -758,6 +786,7 @@ export class OmpRuntime {
           if (!await this.#presetReady(dir, pin, host.pid)) continue;
           const binding = await this.#resolve(host,deadline);
           record.binding = binding;
+          this.#assertActive();
           return binding;
         }
         await delay(Math.min(200,Math.max(1,deadline-Date.now())));
@@ -808,6 +837,7 @@ export class OmpRuntime {
   }
 
   async #resolve(host: RegistryHost, deadline: number): Promise<HostBinding> {
+    this.#assertActive();
     if (host.access !== 'control' || !host.relayConnected) throw new Error('OMP host does not publish a connected control room');
     const link = await this.#json(['collab', 'link', host.instanceId, '--json'], deadline);
     if (link.version !== 1 || link.instanceId !== host.instanceId || link.generation !== host.generation || link.access !== 'control' || typeof link.url !== 'string') {

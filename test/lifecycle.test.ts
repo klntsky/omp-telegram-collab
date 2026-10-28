@@ -16,7 +16,9 @@ import { writeConfig } from '../src/config.js';
 import { runAdmin } from '../src/cli-admin.js';
 import { botId, botToken, chatId, ownerUsername } from './telegram-data.js';
 
-test('shutdown while deleting the webhook cannot start an orphan Telegram poller', { timeout: 10_000 }, async () => {
+test('shutdown while deleting the webhook cannot start an orphan Telegram poller', { timeout: 10_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-poller-lifecycle-'));
+  t.after(() => rm(directory, {recursive:true,force:true}));
   const events = new EventEmitter();
   let releaseWebhook: () => void = () => assert.fail('webhook request has not arrived');
   let polls = 0;
@@ -41,10 +43,11 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
   assert.ok(address && typeof address !== 'string');
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'collab' }],
-    instances: {}, configPath: '/unused/lifecycle-config.yaml',
-    publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: '.data',
+    instances: {}, configPath: join(directory, 'config.yaml'),
+    publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: directory,
     omp: { executable: 'omp', args: [], maxSessions: 1, startupTimeoutMs: 1000 },
   };
+  writeConfig(config);
   const store = new Store(':memory:');
   const runtime = {
     async ensure(): Promise<never> { throw new Error('No sessions expected in lifecycle check'); },

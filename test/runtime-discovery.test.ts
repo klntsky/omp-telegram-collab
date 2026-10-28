@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { promisify } from 'node:util';
 import type { AppConfig } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { writeConfig } from '../src/config.js';
 
 const execute = promisify(execFile);
 
@@ -16,9 +17,10 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
     const executable = join(directory, 'omp');
     const config: AppConfig = {
       bots: [], instances: {}, configPath: join(directory, 'config.yaml'),
-      publicUrl: 'http://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
+      publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
       omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 10000 },
     };
+    writeConfig(config);
     const runtime = new OmpRuntime(config);
     try {
       if (failure !== 'missing executable') {

@@ -12,6 +12,7 @@ import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { connectCollab } from '../src/collab.js';
 import { startLocalRelay } from './local-relay.js';
+import { writeConfig } from '../src/config.js';
 
 const execute = promisify(execFile);
 
@@ -41,13 +42,14 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, label: strin
 export async function verifyRuntimeKill(directory: string, executable: string, relayUrl: string): Promise<void> {
   const config: AppConfig = {
     bots: [], instances: { [directory]: { admins: [], chats: [] } }, configPath: join(directory, 'config.yaml'),
-    publicUrl: 'http://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
+    publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: {
       executable,
       args: ['--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title'],
       maxSessions: 2, startupTimeoutMs: 60000, relayUrl,
     },
   };
+  writeConfig(config);
   const managed: TopicSession = {
     id: 'runtime-kill-managed', botId: 123, chatId: -100123, threadId: 41,
     instancePath: directory,

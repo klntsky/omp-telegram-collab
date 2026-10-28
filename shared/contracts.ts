@@ -12,6 +12,7 @@ export interface InstanceConfig {
 }
 
 export interface AppConfig {
+  terminated?: boolean;
   bots: BotConfig[];
   instances: Record<string, InstanceConfig>;
   publicUrl: string;
