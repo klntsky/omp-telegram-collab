@@ -2,6 +2,8 @@
 
 Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram forum topics on your own machine. Telegram, the Mini App, and the local OMP terminal connect to the same session.
 
+![OMP Telegram Collab conversations organized into Telegram forum topics](assets/telegram-topics.jpg)
+
 - Give each topic its own conversation and saved history.
 - Send prompts and answer agent questions in Telegram or the Mini App.
 - Attach existing local OMP sessions.
