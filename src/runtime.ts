@@ -47,7 +47,7 @@ interface ManagedHost {
 }
 
 interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
-interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 1 }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2 }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -218,20 +218,23 @@ export class OmpRuntime {
   async validateSessionPaths(sessions: TopicSession[], config = this.#config): Promise<void> {
     for (const session of sessions) {
       const assigned = findInstance(config, session.botId, session.chatId);
-      if (!assigned || session.runtime.kind !== 'managed') continue;
+      if (!assigned) continue;
+      if (session.instancePath !== assigned.path) throw new Error(`Chat ${session.chatId} has history pinned to another instance path`);
+      if (await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance path identity changed');
+      if (session.runtime.kind !== 'managed') continue;
       const directory = path.resolve(config.dataDir, 'sessions', session.id);
       const history = path.join(directory, 'history.jsonl');
       let pin: DurableBinding | undefined;
       try {
         pin = JSON.parse(await readFile(path.join(directory, 'binding.json'), 'utf8')) as DurableBinding;
-        if (pin.version !== 1 || pin.cwd !== assigned.path || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
-          throw new Error(`Saved session ${session.id} conflicts with instance path ${assigned.path}`);
+        if (pin.version !== 1 || pin.cwd !== session.instancePath || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
+          throw new Error(`Saved session ${session.id} conflicts with instance path ${session.instancePath}`);
         }
       } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
       try {
         const header = await readHeader(history);
-        if (header.cwd !== assigned.path || (pin && header.id !== pin.sessionId)) {
-          throw new Error(`Saved history ${session.id} conflicts with instance path ${assigned.path}`);
+        if (header.cwd !== session.instancePath || (pin && header.id !== pin.sessionId)) {
+          throw new Error(`Saved history ${session.id} conflicts with instance path ${session.instancePath}`);
         }
       } catch (error) {
         if (!errno(error, 'ENOENT') || pin) throw error;
@@ -461,7 +464,7 @@ export class OmpRuntime {
       const binding = await this.ensure(session);
       const deadline = Date.now() + 15000;
       const lifecycle = await this.#lifecycle(session.id);
-      if (!lifecycle || lifecycle.modelPresets !== 1) {
+      if (!lifecycle || lifecycle.modelPresets !== 2) {
         throw new Error('OMP host does not support model preset control. Retire this managed host and rejoin to load the updated lifecycle extension.');
       }
       const validate = async () => {
@@ -471,7 +474,7 @@ export class OmpRuntime {
         if (!current || current.sessionId !== binding.sessionId || current.generation !== binding.generation ||
             current.pid !== lifecycle.pid || current.cwd !== session.instancePath ||
             descriptor?.pid !== lifecycle.pid || descriptor.sessionId !== binding.sessionId ||
-            descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 1) {
+            descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 2) {
           throw new Error('OMP host identity changed during model preset control');
         }
         if (descriptor.retiring || this.#managed.get(session.id)?.retiring) throw new Error('Session is retiring; rejoin after it settles');

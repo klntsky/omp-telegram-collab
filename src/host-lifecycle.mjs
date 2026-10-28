@@ -229,7 +229,7 @@ export default async function hostLifecycle(pi) {
         supervisorPid: Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
         sessionId: context.sessionManager.getSessionId(),
         socketPath,
-        modelPresets: 1,
+        modelPresets: 2,
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();
