@@ -30,11 +30,11 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 
 Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands.
 
-Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command unless they reply to this bot. The largest photo size is used; image documents retain their original bytes. Each message is handled individually, not combined into an album. Model image support is required.
+Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command unless they reply to this bot. The largest photo size is used; image documents retain their original bytes. Image albums are combined as described in [Prompts and permissions](#12-prompts-and-permissions). Model image support is required.
 
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
-New session topics get a pinned Open Session message before OMP starts. The bot returns a topic link when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
+New session topics get a quietly pinned Open Session message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
 
 Rename a topic to change its stored display name. Close it to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
@@ -97,11 +97,11 @@ Ordinary group members retain Mini App access, `/stop`, and `/kill`. Prompt rest
 
 ### 1.3. Replies, questions, and activity
 
-The bot mirrors agent replies into the topic. It renders supported Markdown, shows model-provided HTML literally, and leaves unsafe or relative links unlinked. Tables and images become text. Long replies split without breaking formatting or Unicode and retain their reply target.
+The bot mirrors agent replies into the topic. It renders supported Markdown, shows model-provided HTML literally, and leaves unsafe or relative links unlinked. Tables and images become text. Long replies split without breaking formatting or Unicode and retain their native reply target across service restarts. Telegram failure replies include the underlying operation error as a literal code block.
 
 Mini App prompts also appear in the topic with the sender's Telegram username, or their display name and numeric ID if they have no username.
 
-Agent questions include the full text and numbered option buttons. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answers from the Mini App or terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses.
+Agent questions include the full text, option descriptions, and numbered option buttons in compact rows of up to five, with Cancel separate. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the Mini App or terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
 
 | Indicator | Meaning |
 | --- | --- |
@@ -114,6 +114,8 @@ Agent questions include the full text and numbered option buttons. Choose Other 
 Approval alone does not produce a receipt reaction. Failed or rejected instructions do not get one. A relay disconnect does not mean OMP stopped. The bot checks liveness every 30 seconds and preserves confirmed icons across restarts. Reactions and icon changes depend on Telegram permissions and rate limits.
 
 Topics created with an initial task start with the ⚡ icon directly and retain it during host startup and initial task admission. Empty topics start stopped.
+
+The running icon remains latched until the agent turn ends, even if intermediate streaming snapshots look idle. The bot removes its own icon-change service notices, not human icon edits or rename notices. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
 
 Telegram delivery uses a per-chat queue with at least 3.1 seconds between scheduled operations. Questions and receipts take priority over icon updates. A Telegram `429` pauses delivery for `retry_after`. Ambiguous network failures are not retried automatically.
 
@@ -163,3 +165,5 @@ The Mini App retains its transcript and draft during transient failures. Reconne
 Instance roots and bot admins can attach a control-shared OMP host whose working directory matches the assigned project; topic admins cannot. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
 
 The Mini App collapses IRC traffic, system notices, reminders, task-result envelopes, and displayed custom notices. Disclosures reveal their contents. Ordinary prose, attachments, code examples, unknown tags, and incomplete envelopes stay visible. Hidden custom entries remain hidden.
+
+Mini App participant names and new transcript prompts use the signed Telegram `@username`, falling back to `user ID <id>` when no username is set. Avatar initials use the username without its `@` prefix.
