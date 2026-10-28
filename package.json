@@ -11,12 +11,12 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx src/cli.ts start",
-    "start": "node --env-file-if-exists=.env dist/cli.js start",
-    "cli": "node --env-file-if-exists=.env dist/cli.js",
+    "dev": "node --import tsx src/cli.ts start",
+    "start": "node dist/cli.js start",
+    "cli": "node dist/cli.js",
     "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs && vite build --config web/vite.config.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-concurrency=5 test/*.test.ts",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:cli": "tsx scripts/smoke.ts cli",
     "smoke:telegram": "tsx scripts/smoke.ts telegram",

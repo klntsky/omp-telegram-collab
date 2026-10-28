@@ -109,8 +109,8 @@ export async function connectCollab(
       if (!Number.isSafeInteger(frame.entryCount) || frame.entryCount < 0) throw new Error('Invalid Collab snapshot');
       welcomed = true;
       total = frame.entryCount;
-    } else if (!welcomed) {
-      throw new Error(frame.t === 'error' ? frame.message : 'Collab frame arrived before welcome');
+    } else if (!welcomed && frame.t === 'snapshot-chunk') {
+      throw new Error('Collab snapshot arrived before welcome');
     }
     if (frame.t === 'snapshot-chunk') {
       if (ready || !Array.isArray(frame.entries) || typeof frame.final !== 'boolean') {

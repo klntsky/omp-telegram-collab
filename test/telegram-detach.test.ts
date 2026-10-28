@@ -26,7 +26,7 @@ test('/detach requires an instance admin and a session topic', async () => {
 });
 
 test('/detach disables prompts and session access and leaves its icon alone across lifecycle events and restart', async () => {
-  const app = await createSmokeApp();
+  const app = await createSmokeApp({persistentStore:true});
   let restarted: BotService | undefined;
   let reopenedStore: Store | undefined;
   let ws: WebSocket | undefined;

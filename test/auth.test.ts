@@ -75,7 +75,7 @@ test('gateway preserves valid domain actions without admitting a supplied identi
 
 test('WebSocket tickets are single-use and expire at their boundary', () => {
   const tickets = new TicketStore();
-  const identity = { botId: 123, sessionId, userId: ownerId, displayName: 'Ada', authDate: seconds };
+  const identity = { botId: 123, sessionId, generation: 0, userId: ownerId, displayName: 'Ada', authDate: seconds };
   const ticket = tickets.issue(identity, now);
   assert.deepEqual(tickets.consume(ticket, now + 59_999), identity);
   assert.equal(tickets.consume(ticket, now + 59_999), undefined);

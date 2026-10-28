@@ -20,6 +20,7 @@ export interface RuntimeLike {
   stop(id: string): Promise<void>;
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
+  availableModelPresets(instancePath: string): Promise<string[]>;
   getSessionLimit(): number;
   increaseSessionLimit(expectedLimit: number): boolean;
   observeFrame(sessionId: string, frame: HostFrame): void;
@@ -77,7 +78,7 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — switch this session’s model preset (instance admin)\n/list_model_presets — list this session’s available presets (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)';
+const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — set the forum default in General, or switch this session (instance admin)\n/list_model_presets — list presets and the forum default (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
@@ -88,8 +89,8 @@ const groupCommands = [
   { command: 'status', description: 'Check forum and session readiness' },
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
-  { command: 'model_preset', description: 'Switch session model preset (instance admin)' },
-  { command: 'list_model_presets', description: 'List model presets (instance admin)' },
+  { command: 'model_preset', description: 'Set default in General or switch session (admin)' },
+  { command: 'list_model_presets', description: 'List presets and forum default (instance admin)' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
@@ -899,12 +900,43 @@ export class BotService {
       }
       if (action === 'model_preset' || action === 'list_model_presets') {
         if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Model preset commands require a configured instance admin.'); return; }
-        if (threadId === 1 || !session) { await ctx.reply(`Use /${action} inside a session topic, not General or an unrelated chat.`); return; }
-        if (session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before using model preset commands.'); return; }
+        if (threadId !== 1 && !session) { await ctx.reply(`Use /${action} in General or a session topic.`); return; }
+        if (session && session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before using model preset commands.'); return; }
         if (action === 'model_preset' ? !/^[A-Za-z][\w-]*$/.test(arg) : Boolean(arg)) {
           await ctx.reply(action === 'model_preset' ? 'Usage: /model_preset <name> (a letter, then letters, digits, - or _)' : 'Usage: /list_model_presets');
           return;
         }
+        if (threadId === 1) {
+          const instancePath = assigned.path;
+          const names = await this.options.runtime.availableModelPresets(instancePath);
+          await this.authorize(ctx.chat.id,ctx.from.id);
+          if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Model preset commands require a configured instance admin.'); return; }
+          if (this.assignedPath(ctx.chat.id) !== instancePath) throw new Error('The group instance assignment changed');
+          if (action === 'model_preset') {
+            if (!names.includes(arg)) throw new Error(`Unknown model preset: ${arg}. Available presets: ${names.join(', ') || '(none)'}`);
+            const member = await this.bot.telegram.getChatMember(ctx.chat.id,ctx.from.id);
+            const persisted = readConfig(this.options.config.configPath);
+            const current = findInstance(persisted,this.id,ctx.chat.id);
+            if (!current || current.path !== instancePath || !isActiveMember(member) || member.user.is_bot ||
+                !member.user.username || !current.instance.admins.includes(member.user.username.toLowerCase())) {
+              throw new Error('The configured instance assignment or administrator access changed. The default model preset is unchanged.');
+            }
+            const chat = current.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
+            chat.default_model_preset = arg;
+            writeConfig(persisted);
+            const active = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
+              .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
+            active.default_model_preset = arg;
+            await ctx.reply(`Default model preset: ${arg}. Managed sessions will use it when their host starts. Running hosts are unchanged.`);
+          } else {
+            const preset = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
+              .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)?.default_model_preset;
+            const text = `${names.length ? `Model presets: ${names.join(', ')}` : 'No model presets saved. Use /modelpreset save <name> to create one.'}\nDefault model preset: ${preset ?? '(not set)'}`;
+            for (let offset = 0; offset < text.length; offset += 4000) await ctx.reply(text.slice(offset,offset+4000));
+          }
+          return;
+        }
+        if (!session) return;
         const generation = this.options.store.getSessionGeneration(session.id);
         const release = this.options.runtime.retain(session.id);
         try {
@@ -914,7 +946,12 @@ export class BotService {
           this.requireSessionAssignment(session);
           if (this.options.store.getSessionGeneration(session.id) !== generation ||
               this.options.store.getSession(session.id)?.status !== 'open') throw new Error('The session changed before the model preset command could run');
-          const text = await this.options.runtime.modelPresets(session,action === 'model_preset' ? arg : undefined);
+          let text = await this.options.runtime.modelPresets(session,action === 'model_preset' ? arg : undefined);
+          if (action === 'list_model_presets') {
+            const preset = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
+              .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)?.default_model_preset;
+            text += `\nDefault model preset: ${preset ?? '(not set)'}`;
+          }
           for (let offset = 0; offset < text.length;) {
             let end = Math.min(offset+4000,text.length);
             if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;

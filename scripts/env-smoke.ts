@@ -1,52 +1,78 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { readConfig } from '../src/config.js';
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const fixtureToken = '123456789:fixture-token-not-valid-on-telegram';
 
 export async function verifyEnvironmentCli(): Promise<void> {
-  const cwd = await mkdtemp(join(tmpdir(), 'omp-env-cli-'));
-  const processEnv = { PATH: process.env.PATH ?? '' };
-  const envFile = join(cwd, '.env');
+  const cwd = await realpath(await mkdtemp(join(tmpdir(), 'omp-config-cli-')));
+  const processEnv = { PATH: process.env.PATH ?? '', HOME: cwd, XDG_CONFIG_HOME: join(cwd, 'xdg') };
+  const configPath = join(cwd, 'custom.yaml');
   const cli = join(root, 'dist', 'cli.js');
-  const loader = import.meta.resolve('tsx');
-  const probe = `import { loadConfig } from ${JSON.stringify(pathToFileURL(join(root, 'src', 'config.ts')).href)}; const c=loadConfig(); console.log(JSON.stringify({owners:c.bots[0].ownerUsernames,port:c.port,publicUrl:c.publicUrl,dataDir:c.dataDir}));`;
+  const run = (...args: string[]) => execute(process.execPath, [cli, ...args], { cwd, env: processEnv });
   try {
-    await writeFile(envFile, `TELEGRAM_BOT_TOKEN=${fixtureToken}\nTELEGRAM_OWNER_USERNAMES=@FileOwner\nPUBLIC_URL=https://file.example\nPORT=3101\nDATA_DIR=private-data\n`, { mode: 0o600 });
-    const fromFile = await execute(process.execPath, ['--env-file-if-exists=.env', '--import', loader, '--input-type=module', '-e', probe], { cwd, env: processEnv });
-    assert.deepEqual(JSON.parse(fromFile.stdout), { owners: ['fileowner'], port: 3101, publicUrl: 'https://file.example', dataDir: join(cwd, 'private-data') });
-    const overridden = await execute(process.execPath, ['--env-file-if-exists=.env', '--import', loader, '--input-type=module', '-e', probe], { cwd, env: { ...processEnv, TELEGRAM_OWNER_USERNAMES: '@ExportedOwner', PORT: '4102', PUBLIC_URL: 'https://exported.example' } });
-    const actual = JSON.parse(overridden.stdout);
-    assert.deepEqual(actual.owners, ['exportedowner']);
-    assert.equal(actual.port, 4102);
-    assert.equal(actual.publicUrl, 'https://exported.example');
-    const help = await execute(process.execPath, ['--env-file-if-exists=.env', cli, '--help'], { cwd, env: processEnv });
-    assert.ok(help.stdout.includes('TELEGRAM_OWNER_USERNAMES'));
-    await writeFile(envFile, `TELEGRAM_BOT_TOKEN=${fixtureToken}\n`);
-    await assert.rejects(execute(process.execPath, ['--env-file-if-exists=.env', cli, 'start'], { cwd, env: processEnv }), error => {
-      const failure = error as Error & { code?: number; stderr?: string; stdout?: string };
-      assert.equal(failure.code, 1);
-      assert.ok(failure.stderr?.includes('TELEGRAM_OWNER_USERNAMES'));
-      assert.ok(failure.stderr?.includes('PUBLIC_URL'));
-      assert.equal((failure.stderr ?? '').includes(fixtureToken), false);
+    const configured = await run('--config', configPath, 'configure', '--public-url', 'https://cli.example', '--port', '3101', '--data-dir', 'private-data');
+    assert.equal(configured.stdout.includes(fixtureToken), false);
+    await run('--config', configPath, 'create', '.', '--admin', '@PrimaryOwner');
+    const config = readConfig(configPath);
+    assert.equal(config.configPath, configPath);
+    assert.deepEqual(config.instances[cwd]?.admins, ['primaryowner']);
+    assert.equal(config.port, 3101);
+    assert.equal(config.publicUrl, 'https://cli.example');
+    assert.equal(config.dataDir, join(cwd, 'private-data'));
+    assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+    await run('admin', 'add', '.', 'SecondAdmin', '--config', configPath);
+    assert.deepEqual(readConfig(configPath).instances[cwd]?.admins, ['primaryowner', 'secondadmin']);
+    const second = join(cwd, 'other checkout');
+    await mkdir(second);
+    const alias = join(cwd, 'checkout-alias');
+    await symlink(second, alias);
+    await run('--config', configPath, 'create', alias, '--admin', 'OtherAdmin');
+    assert.deepEqual(readConfig(configPath).instances[second]?.admins, ['otheradmin']);
+    assert.equal(readConfig(configPath).instances[alias], undefined);
+    const listed = await run('list', '--config', configPath);
+    assert.ok(listed.stdout.includes(second));
+    assert.equal(listed.stdout.includes(fixtureToken), false);
+    const before = await readFile(configPath, 'utf8');
+    await assert.rejects(run('--config', configPath, 'create', '.', '--admin', 'ReplacementAdmin'));
+    assert.equal(await readFile(configPath, 'utf8'), before, 'duplicate creation must never overwrite an existing instance');
+    await assert.rejects(run('--config', configPath, 'configure', '--public-url', `https://${fixtureToken}@cli.example`), error => {
+      const failure = error as Error & { stderr?: string };
+      assert.ok(failure.stderr?.includes(configPath));
+      assert.equal(failure.stderr?.includes(fixtureToken), false);
       return true;
     });
-    for (const args of [['start', '--config', 'unused.json'], ['init']]) {
-      await assert.rejects(execute(process.execPath, [cli, ...args], { cwd, env: processEnv }), error => {
-        const failure = error as Error & { code?: number; stderr?: string };
-        assert.equal(failure.code, 1);
-        assert.ok(failure.stderr?.includes('Usage:'));
-        return true;
-      });
-    }
-    console.log('PASS actual Node .env loading, exported-value precedence, username normalization, compiled CLI diagnostics, and removed JSON/init paths.');
+    assert.equal(await readFile(configPath, 'utf8'), before, 'invalid configuration must not replace existing YAML');
+    await chmod(configPath, 0o400);
+    await assert.rejects(run('--config', configPath, 'admin', 'add', '.', 'DeniedAdmin'), error => {
+      const failure = error as Error & { stderr?: string };
+      assert.ok(failure.stderr?.includes(configPath));
+      assert.equal(failure.stderr?.includes(fixtureToken), false);
+      return true;
+    });
+    const shown = await run('--config', configPath, 'show', '.');
+    assert.ok(shown.stdout.includes(cwd));
+    assert.ok(shown.stdout.includes('@primaryowner'));
+    assert.ok(shown.stdout.includes('@secondadmin'));
+    assert.equal(shown.stdout.includes(fixtureToken), false);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+    const missing = join(cwd, 'missing.yaml');
+    await assert.rejects(run('start', '--config', missing), error => {
+      const failure = error as Error & { stderr?: string };
+      assert.ok(failure.stderr?.includes(missing));
+      assert.equal(failure.stderr?.includes(fixtureToken), false);
+      return true;
+    });
+    console.log('PASS compiled CLI YAML creation/configuration, alternate config path, canonical path identities, per-instance admins, protected-file reads/write rejection, atomic refusal, and credential-safe errors.');
   } finally {
+    await chmod(configPath, 0o600).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true });
   }
 }

@@ -1,11 +1,23 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import * as pty from '@lydell/node-pty';
+import { createConnection } from 'node:net';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, HostBinding, TopicSession } from '../shared/contracts.js';
 import { parseCollabLink } from './vendor/link.js';
+import { findInstance } from './config.js';
+import { miniAppInterruptionAuthor } from '../shared/interruption.js';
+
+export class SessionCapacityError extends Error {
+  constructor(readonly limit: number) {
+    super(`OMP session limit (${limit}) reached. Ask in the topic to approve more capacity, then rejoin.`);
+    this.name = 'SessionCapacityError';
+  }
+}
 
 interface RegistryHost {
   instanceId: string;
@@ -15,6 +27,7 @@ interface RegistryHost {
   cwd: string;
   access: 'view' | 'control';
   relayConnected: boolean;
+  busy?: boolean;
 }
 
 interface DurableBinding {
@@ -25,14 +38,16 @@ interface DurableBinding {
 }
 
 interface ManagedHost {
-  terminal?: pty.IPty;
+  process?: ChildProcess;
   binding?: HostBinding;
+  sessionId: string;
   exited: boolean;
-  exit: Promise<void>;
-  group: boolean;
+  retiring: boolean;
   failure?: string;
-  shutdown?: Promise<void>;
 }
+
+interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 1 }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -40,6 +55,47 @@ const FORBIDDEN_ARGS: Record<string, true> = {
   '--mode': true, '--print': true, '-p': true, '--goal': true, '--cwd': true,
   '--help': true, '-h': true, '--version': true,
 };
+
+const OMP_STRING_ARGS: Record<string, true> = {
+  '--cwd': true, '--config': true, '--add-dir': true, '--mode': true, '--fork': true,
+  '--provider': true, '--model': true, '--smol': true, '--slow': true, '--goal': true,
+  '--prewalk-into': true, '--plan-yolo-into': true, '--max-time': true, '--warn-cost': true,
+  '--max-cost': true, '--service-tier': true, '--api-key': true, '--system-prompt': true,
+  '--system-prompt-template': true, '--append-system-prompt': true, '--provider-session-id': true,
+  '--prompt-cache-key': true, '--session-dir': true, '--models': true, '--tools': true,
+  '--thinking': true, '--export': true, '--hook': true, '--extension': true, '-e': true,
+  '--trusted-extension': true, '--plugin-dir': true, '--skills': true, '--approval-mode': true,
+  '--profile': true, '--alias': true,
+};
+const PRESET_MODEL_ARGS: Record<string, true> = {
+  '--provider': true, '--model': true, '--smol': true, '--slow': true, '--models': true, '--thinking': true,
+};
+
+function ompArguments(args: string[]): { flag: string; value?: string; args: string[] }[] {
+  const result: { flag: string; value?: string; args: string[] }[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === '--') {
+      result.push({ flag: arg, args: args.slice(index) });
+      break;
+    }
+    const equals = arg.startsWith('--') ? arg.indexOf('=') : -1;
+    const flag = equals < 0 ? arg : arg.slice(0, equals);
+    if (equals >= 0) {
+      result.push({ flag, value: arg.slice(equals + 1), args: [arg] });
+    } else if (Object.hasOwn(OMP_STRING_ARGS, flag) && index + 1 < args.length) {
+      const value = args[++index]!;
+      result.push({ flag, value, args: [arg, value] });
+    } else {
+      result.push({ flag, args: [arg] });
+    }
+  }
+  return result;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 function errno(error: unknown, code: string): boolean {
   return error instanceof Error && 'code' in error && error.code === code;
@@ -49,20 +105,13 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function signal(pid: number, name: NodeJS.Signals): void {
-  try {
-    process.kill(pid, name);
-  } catch (error) {
-    if (!errno(error, 'ESRCH')) throw error;
-  }
-}
 
-async function procIdentity(pid: number): Promise<{ parent: number; group: number } | null> {
+async function procIdentity(pid: number): Promise<{ parent: number; group: number; start: string; state: string } | null> {
   if (process.platform !== 'linux') return null;
   try {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return { parent: Number(fields[1]), group: Number(fields[2]) };
+    return { parent: Number(fields[1]), group: Number(fields[2]), start: fields[19]!, state: fields[0]! };
   } catch (error) {
     if (errno(error, 'ENOENT') || errno(error, 'ESRCH')) return null;
     throw error;
@@ -132,10 +181,16 @@ export class OmpRuntime {
   readonly #pending = new Map<string, Promise<HostBinding>>();
   readonly #managed = new Map<string, ManagedHost | null>();
   readonly #stopping = new Map<string, Promise<void>>();
+  readonly #killing = new Map<string, Promise<void>>();
   #closed = false;
   #closing?: Promise<void>;
   #lock?: DatabaseSync;
   #acquiring?: Promise<void>;
+  readonly #activity = new Map<string, HostActivity>();
+  #admission = Promise.resolve();
+  readonly #idleTimer: NodeJS.Timeout;
+  #sessionLimit: number;
+  #discovered = false;
 
   constructor(config: AppConfig) {
     if (!Number.isInteger(config.omp.maxSessions) || config.omp.maxSessions < 1 || !Number.isFinite(config.omp.startupTimeoutMs) || config.omp.startupTimeoutMs < 1) {
@@ -146,20 +201,170 @@ export class OmpRuntime {
       if (Object.hasOwn(FORBIDDEN_ARGS, flag) || flag.startsWith('--from-')) throw new Error(`OMP argument ${flag} conflicts with managed hosting`);
     }
     this.#config = config;
+    this.#sessionLimit = config.omp.maxSessions;
+    this.#idleTimer = setInterval(() => { void this.retireIdle().catch(() => {}); }, 60000);
+    this.#idleTimer.unref();
+  }
+  getSessionLimit(): number { return this.#sessionLimit; }
+  setSessionLimit(limit: number): void {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid OMP session limit');
+    this.#sessionLimit = limit;
+  }
+  increaseSessionLimit(expectedLimit: number): boolean {
+    if (this.#closed || this.#sessionLimit !== expectedLimit || !Number.isSafeInteger(expectedLimit * 2)) return false;
+    this.#sessionLimit = expectedLimit * 2;
+    return true;
+  }
+  async validateSessionPaths(sessions: TopicSession[], config = this.#config): Promise<void> {
+    for (const session of sessions) {
+      const assigned = findInstance(config, session.botId, session.chatId);
+      if (!assigned || session.runtime.kind !== 'managed') continue;
+      const directory = path.resolve(config.dataDir, 'sessions', session.id);
+      const history = path.join(directory, 'history.jsonl');
+      let pin: DurableBinding | undefined;
+      try {
+        pin = JSON.parse(await readFile(path.join(directory, 'binding.json'), 'utf8')) as DurableBinding;
+        if (pin.version !== 1 || pin.cwd !== assigned.path || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
+          throw new Error(`Saved session ${session.id} conflicts with instance path ${assigned.path}`);
+        }
+      } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+      try {
+        const header = await readHeader(history);
+        if (header.cwd !== assigned.path || (pin && header.id !== pin.sessionId)) {
+          throw new Error(`Saved history ${session.id} conflicts with instance path ${assigned.path}`);
+        }
+      } catch (error) {
+        if (!errno(error, 'ENOENT') || pin) throw error;
+      }
+    }
+  }
+  #hostActivity(id: string): HostActivity {
+    let activity = this.#activity.get(id);
+    if (!activity) {
+      activity = { busy: false, awaitingTurn: false, leases: 0, lastUsed: Date.now() };
+      this.#activity.set(id,activity);
+    }
+    return activity;
+  }
+  retain(id: string): () => void {
+    if (this.#managed.get(id)?.retiring || this.#stopping.has(id)) throw new Error('Session is retiring; rejoin after it settles');
+    const activity = this.#hostActivity(id);
+    activity.leases++;
+    activity.lastUsed = Date.now();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      activity.leases--;
+      activity.lastUsed = Date.now();
+    };
+  }
+  markPrompt(id: string): void {
+    if (this.#managed.get(id)?.retiring || this.#stopping.has(id)) throw new Error('Session is retiring; resend after it settles');
+    const activity = this.#hostActivity(id);
+    activity.busy = true;
+    activity.awaitingTurn = true;
+    activity.lastUsed = Date.now();
+  }
+  observeFrame(id: string, frame: HostFrame): void {
+    const activity = this.#hostActivity(id);
+    if (frame.t === 'event' && frame.event.type === 'agent_start') {
+      activity.busy = true;
+      activity.awaitingTurn = false;
+    } else if ((frame.t === 'event' && (frame.event.type === 'agent_end' || miniAppInterruptionAuthor(frame.event))) || frame.t === 'error') {
+      activity.busy = false;
+      activity.awaitingTurn = false;
+      activity.lastUsed = Date.now();
+    } else if (frame.t === 'state' || frame.t === 'welcome') {
+      activity.busy = activity.awaitingTurn || frame.state.isStreaming || frame.state.queuedMessageCount > 0;
+      if (activity.busy) activity.lastUsed = Date.now();
+    }
+  }
+  async retireIdle(idleMs = 300000): Promise<number> {
+    let retired = 0;
+    const candidates = [...this.#managed.entries()].sort(([a],[b]) => this.#hostActivity(a).lastUsed-this.#hostActivity(b).lastUsed);
+    for (const [id,host] of candidates) {
+      const activity = this.#hostActivity(id);
+      if (!host || host.retiring || this.#pending.has(id) || activity.busy || activity.leases || Date.now()-activity.lastUsed < idleMs) continue;
+      await this.stop(id);
+      if (host.exited) retired++;
+    }
+    return retired;
+  }
+  async #discoverManaged(hosts: RegistryHost[]): Promise<void> {
+    if (this.#discovered) return;
+    const root = path.join(this.#config.dataDir,'sessions');
+    let entries;
+    try { entries = await readdir(root,{withFileTypes:true}); }
+    catch (error) {
+      if (errno(error,'ENOENT')) { this.#discovered = true; return; }
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
+      let pin: DurableBinding;
+      try { pin = JSON.parse(await readFile(path.join(root,entry.name,'binding.json'),'utf8')) as DurableBinding; }
+      catch (error) { if (errno(error,'ENOENT')) continue; throw error; }
+      const host = hosts.find(value => value.sessionId === pin.sessionId && value.cwd === pin.cwd);
+      if (!host) continue;
+      const lifecycle = await this.#lifecycle(entry.name);
+      this.#managed.set(entry.name,{sessionId:pin.sessionId,exited:false,retiring:lifecycle?.retiring===true});
+      this.#hostActivity(entry.name).busy = host.busy !== false;
+    }
+    this.#discovered = true;
+  }
+  async #admitManaged(session: TopicSession): Promise<HostBinding> {
+    const id = session.id;
+    const previous = this.#admission;
+    const {promise,resolve} = Promise.withResolvers<void>();
+    this.#admission = promise;
+    await previous;
+    try {
+      await this.#acquire();
+      const hosts = await this.#list(Date.now()+this.#config.omp.startupTimeoutMs);
+      await this.#discoverManaged(hosts);
+      for (const [other,host] of this.#managed) {
+        if (host && !this.#pending.has(other) && !hosts.some(value => value.sessionId === host.sessionId)) {
+          this.#managed.delete(other);
+          this.#activity.delete(other);
+        }
+      }
+      if (!this.#managed.has(id)) {
+        if (this.#managed.size >= this.#sessionLimit) await this.retireIdle(0);
+        if (this.#managed.size >= this.#sessionLimit) throw new SessionCapacityError(this.#sessionLimit);
+        this.#managed.set(id,null);
+      }
+      this.#hostActivity(id).lastUsed = Date.now();
+    } finally {
+      resolve();
+    }
+    return this.#ensureManaged(session);
+  }
+  async isRunning(session: TopicSession): Promise<boolean> {
+    if (this.#closed || !/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return false;
+    if (this.#pending.has(session.id)) return true;
+    const hosts = await this.#list(Date.now() + this.#config.omp.startupTimeoutMs);
+    const runtime = session.runtime;
+    if (runtime.kind === 'attached') return hosts.some(host => host.instanceId === runtime.instanceId && host.sessionId === runtime.sessionId && host.cwd === session.instancePath);
+    let pin: DurableBinding;
+    try {
+      pin = JSON.parse(await readFile(path.join(this.#config.dataDir,'sessions',session.id,'binding.json'),'utf8')) as DurableBinding;
+    } catch (error) {
+      if (errno(error,'ENOENT')) return false;
+      throw error;
+    }
+    return pin.cwd === session.instancePath && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
   }
 
   ensure(session: TopicSession): Promise<HostBinding> {
     if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
+    if (!Object.hasOwn(this.#config.instances, session.instancePath)) return Promise.reject(new Error('Instance path is not configured'));
     const pending = this.#pending.get(session.id);
     if (pending) return pending;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
-    if (session.runtime.kind === 'managed' && !this.#managed.has(session.id)) {
-      if (this.#managed.size >= this.#config.omp.maxSessions) return Promise.reject(new Error('OMP managed session limit reached'));
-      this.#managed.set(session.id, null);
-    }
     const operation = session.runtime.kind === 'managed'
-      ? this.#ensureManaged(session.id)
-      : this.attach(session.runtime.instanceId).then(binding => {
+      ? this.#admitManaged(session)
+      : this.attach(session.runtime.instanceId, session.instancePath).then(binding => {
         if (session.runtime.kind !== 'attached' || binding.sessionId !== session.runtime.sessionId) {
           throw new Error('Attached OMP session identity changed');
         }
@@ -170,7 +375,167 @@ export class OmpRuntime {
     return result;
   }
 
-  async attach(instanceId: string): Promise<HostBinding> {
+  async #nativeSetting(instancePath: string, key: string): Promise<unknown> {
+    const args: string[] = [];
+    const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
+    for (const arg of ompArguments(this.#config.omp.args)) {
+      if (arg.flag === '--alias') throw new Error('OMP --alias conflicts with native model preset settings discovery');
+      if (arg.flag !== '--profile' && arg.flag !== '--config') continue;
+      if (arg.value === undefined || !arg.value) throw new Error(`OMP ${arg.flag} requires a value for model preset settings discovery`);
+      if (arg.flag === '--profile') args.push(...arg.args);
+      else configFiles.push(arg.value);
+    }
+    args.push('config', 'get', key, '--json');
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    execFile(this.#config.omp.executable, args, {
+      cwd: instancePath,
+      env: { ...process.env, ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
+      timeout: this.#config.omp.startupTimeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 2 * 1024 * 1024,
+      encoding: 'utf8',
+    }, (error, stdout) => error ? reject(error) : resolve(stdout));
+    const output = await promise;
+    let result: unknown;
+    try { result = JSON.parse(output); }
+    catch { throw new Error(`OMP config get ${key} returned invalid JSON`); }
+    if (!record(result) || result.key !== key || !Object.hasOwn(result, 'value')) {
+      throw new Error(`OMP config get ${key} returned an invalid settings response`);
+    }
+    return result.value;
+  }
+
+  async availableModelPresets(instancePath: string): Promise<string[]> {
+    const presets = await this.#nativeSetting(instancePath, 'modelPresets');
+    if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
+    return Object.keys(presets).filter(name => presets[name] !== null && presets[name] !== undefined).sort((a, b) => a.localeCompare(b));
+  }
+
+  async #presetLaunch(session: TopicSession): Promise<{ overlay: Record<string, unknown>; args: string[]; preset?: string }> {
+    const assigned = findInstance(this.#config, session.botId, session.chatId);
+    if (assigned && assigned.path !== session.instancePath) throw new Error('Managed session forum assignment changed');
+    const name = assigned?.instance.chats.find(chat => chat.botId === session.botId && chat.chatId === session.chatId)?.default_model_preset;
+    if (name === undefined) return { overlay: {}, args: this.#config.omp.args };
+    const presets = await this.#nativeSetting(session.instancePath, 'modelPresets');
+    if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
+    const preset = Object.hasOwn(presets, name) ? presets[name] : undefined;
+    if (preset === undefined || preset === null) {
+      const names = Object.keys(presets).filter(key => presets[key] !== null && presets[key] !== undefined).sort((a, b) => a.localeCompare(b));
+      throw new Error(`Unknown model preset: ${name}. Available presets: ${names.join(', ') || '(none)'}`);
+    }
+    if (!record(preset) || !record(preset.modelRoles)) throw new Error(`Invalid model preset "${name}": modelRoles must be a mapping`);
+    for (const [role, selector] of Object.entries(preset.modelRoles)) {
+      if (typeof selector !== 'string' || !selector.trim()) throw new Error(`Invalid model preset "${name}": role "${role}" is not a model selector`);
+    }
+    const defaultThinking = await this.#nativeSetting(session.instancePath, 'defaultThinkingLevel');
+    const currentRoles = await this.#nativeSetting(session.instancePath, 'modelRoles');
+    if (!record(currentRoles)) throw new Error('OMP config get modelRoles returned an invalid role mapping');
+    const modelRoles = Object.fromEntries([
+      ...Object.keys(currentRoles).map(role => [role, null]),
+      ...Object.entries(preset.modelRoles),
+    ]);
+    const args = ompArguments(this.#config.omp.args).filter(arg => !Object.hasOwn(PRESET_MODEL_ARGS, arg.flag)).flatMap(arg => arg.args);
+    if (args.includes('--')) throw new Error('OMP -- conflicts with managed model preset launch arguments');
+    return { overlay: { modelRoles, defaultThinkingLevel: defaultThinking }, args, preset: name };
+  }
+
+  async #presetReady(dir: string, pin: DurableBinding, pid?: number): Promise<boolean> {
+    let status: unknown;
+    try { status = JSON.parse(await readFile(path.join(dir, 'startup-preset.json'), 'utf8')); }
+    catch (error) { if (errno(error, 'ENOENT')) return true; throw error; }
+    if (!record(status) || status.sessionId !== pin.sessionId || typeof status.preset !== 'string') {
+      throw new Error('Invalid managed OMP startup preset status');
+    }
+    if (status.pid === undefined) return false;
+    if (!Number.isSafeInteger(status.pid) || (pid !== undefined && status.pid !== pid)) throw new Error('Managed OMP startup preset host identity changed');
+    if (typeof status.error === 'string') throw new Error(status.error);
+    return status.ready === true;
+  }
+
+  async modelPresets(session: TopicSession, name?: string): Promise<string> {
+    if (session.runtime.kind !== 'managed') {
+      throw new Error('Model preset control is unavailable for attached OMP hosts. Use a managed topic session or run /modelpreset in the attached host.');
+    }
+    const release = this.retain(session.id);
+    try {
+      const binding = await this.ensure(session);
+      const deadline = Date.now() + 15000;
+      const lifecycle = await this.#lifecycle(session.id);
+      if (!lifecycle || lifecycle.modelPresets !== 1) {
+        throw new Error('OMP host does not support model preset control. Retire this managed host and rejoin to load the updated lifecycle extension.');
+      }
+      const validate = async () => {
+        if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+        const current = (await this.#list(deadline)).find(host => host.instanceId === binding.instanceId);
+        const descriptor = await this.#lifecycle(session.id);
+        if (!current || current.sessionId !== binding.sessionId || current.generation !== binding.generation ||
+            current.pid !== lifecycle.pid || current.cwd !== session.instancePath ||
+            descriptor?.pid !== lifecycle.pid || descriptor.sessionId !== binding.sessionId ||
+            descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 1) {
+          throw new Error('OMP host identity changed during model preset control');
+        }
+        if (descriptor.retiring || this.#managed.get(session.id)?.retiring) throw new Error('Session is retiring; rejoin after it settles');
+      };
+      if (lifecycle.sessionId !== binding.sessionId ||
+          path.dirname(lifecycle.socketPath) !== tmpdir() ||
+          !/^omp-tg-[a-f0-9]{24}\.sock$/.test(path.basename(lifecycle.socketPath))) {
+        throw new Error('Invalid OMP model preset control descriptor');
+      }
+      for (const filename of [path.join(this.#config.dataDir, 'sessions', session.id, 'lifecycle.json'), lifecycle.socketPath]) {
+        const stat = await lstat(filename);
+        if (stat.isSymbolicLink() || (filename === lifecycle.socketPath ? !stat.isSocket() : !stat.isFile()) ||
+            (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+          throw new Error('OMP model preset control must use private owner-only files');
+        }
+      }
+      await validate();
+      const requestId = randomUUID();
+      const request = `${JSON.stringify({ type: 'model_presets', requestId, sessionId: binding.sessionId, name, deadline })}\n`;
+      if (Buffer.byteLength(request) > 16384) throw new Error('Model preset request is too large');
+      const { promise, resolve, reject } = Promise.withResolvers<string>();
+      const socket = createConnection(lifecycle.socketPath);
+      let input = '';
+      let size = 0;
+      let settled = false;
+      const done = (error?: Error, value?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        if (error) reject(error); else resolve(value!);
+      };
+      const timer = setTimeout(() => done(new Error('OMP model preset control timed out; check the host before retrying a switch')), Math.max(1, deadline - Date.now()));
+      socket.setEncoding('utf8');
+      socket.once('connect', () => socket.write(request));
+      socket.once('error', error => done(error));
+      socket.once('end', () => done(new Error('OMP model preset control closed without a response')));
+      socket.once('close', () => done(new Error('OMP model preset control disconnected without a response')));
+      socket.on('data', part => {
+        size += Buffer.byteLength(part);
+        if (size > 262144) { done(new Error('OMP model preset response is too large')); return; }
+        input += part;
+        if (!input.includes('\n')) return;
+        try {
+          const response = JSON.parse(input.trim()) as Record<string, unknown>;
+          if (response.requestId !== requestId || response.sessionId !== binding.sessionId || response.pid !== lifecycle.pid) {
+            throw new Error('OMP model preset response identity changed');
+          }
+          if (typeof response.error === 'string') { done(new Error(response.error)); return; }
+          if (typeof response.text !== 'string') throw new Error('Invalid OMP model preset response');
+          done(undefined, response.text);
+        } catch (error) {
+          done(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+      const text = await promise;
+      await validate();
+      return text;
+    } finally {
+      release();
+    }
+  }
+
+  async attach(instanceId: string, instancePath: string): Promise<HostBinding> {
     if (this.#closed) throw new Error('OMP runtime is stopping');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(instanceId)) throw new Error('Invalid OMP instance identifier');
     await this.#acquire();
@@ -178,6 +543,7 @@ export class OmpRuntime {
     const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
     const host = (await this.#list(deadline)).find(candidate => candidate.instanceId === instanceId);
     if (!host) throw new Error('OMP host is not available');
+    if (await realpath(instancePath) !== instancePath || await realpath(host.cwd) !== instancePath) throw new Error('Attached host does not belong to this instance path');
     const binding = await this.#resolve(host, deadline);
     if (this.#closed) throw new Error('OMP runtime is stopping');
     return binding;
@@ -189,27 +555,58 @@ export class OmpRuntime {
     const operation = (async () => {
       await this.#pending.get(id)?.catch(() => undefined);
       const host = this.#managed.get(id);
-      if (host) await this.#shutdown(host);
-      this.#managed.delete(id);
-    })().finally(() => this.#stopping.delete(id));
+      if (host) await this.#shutdown(id,host);
+    })().finally(() => {
+      if (this.#stopping.get(id) === operation) this.#stopping.delete(id);
+    });
     this.#stopping.set(id, operation);
+    return operation;
+  }
+
+  kill(session: TopicSession): Promise<void> {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
+    if (this.#closed) return Promise.reject(new Error('OMP runtime is stopping'));
+    const pending = this.#killing.get(session.id);
+    if (pending) return pending;
+    const ids = new Set([session.id]);
+    const sessionId = session.runtime.kind === 'attached' ? session.runtime.sessionId : this.#managed.get(session.id)?.sessionId;
+    if (sessionId) {
+      for (const [id, host] of this.#managed) {
+        if (host?.sessionId === sessionId) ids.add(id);
+      }
+    }
+    const operation = Promise.resolve().then(async () => {
+      await Promise.allSettled([...ids].map(id => this.#pending.get(id)));
+      await this.#acquire();
+      await this.#killSession(session);
+    }).finally(() => {
+      for (const id of ids) {
+        if (this.#killing.get(id) === operation) this.#killing.delete(id);
+        if (this.#stopping.get(id) === operation) this.#stopping.delete(id);
+      }
+    });
+    for (const id of ids) {
+      this.#killing.set(id, operation);
+      this.#stopping.set(id, operation);
+    }
     return operation;
   }
 
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
+    clearInterval(this.#idleTimer);
     this.#closing = (async () => {
       await Promise.allSettled(this.#pending.values());
+      await Promise.allSettled(this.#killing.values());
       await this.#acquiring?.catch(() => undefined);
-      const results = await Promise.allSettled([...this.#managed.keys()].map(id => this.stop(id)));
-      const failure = results.find(result => result.status === 'rejected');
-      if (failure?.status === 'rejected') throw failure.reason;
+      await this.retireIdle(0);
       this.#lock?.close();
       this.#lock = undefined;
     })();
     return this.#closing;
   }
+  acquire(): Promise<void> { return this.#acquire(); }
 
   #acquire(): Promise<void> {
     if (this.#acquiring) return this.#acquiring;
@@ -233,13 +630,14 @@ export class OmpRuntime {
     return this.#acquiring;
   }
 
-  async #prepare(id: string): Promise<{ dir: string; pin: DurableBinding }> {
-    const dir = path.resolve(this.#config.dataDir, 'sessions', id);
+  async #prepare(session: TopicSession): Promise<{ dir: string; pin: DurableBinding }> {
+    const dir = path.resolve(this.#config.dataDir, 'sessions', session.id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const stat = await lstat(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Managed session directory is invalid');
     await chmod(dir, 0o700);
-    const cwd = await realpath(this.#config.omp.cwd);
+    const cwd = await realpath(session.instancePath);
+    if (cwd !== session.instancePath) throw new Error('Instance path identity changed');
     const sessionFile = path.join(dir, 'history.jsonl');
     let pin: DurableBinding | undefined;
     try {
@@ -271,97 +669,101 @@ export class OmpRuntime {
     const header = await readHeader(pin.sessionFile);
     if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new Error('Managed OMP history identity changed');
     await chmod(pin.sessionFile, 0o600);
-    const overlay = {
-      collab: { autoStart: 'control', ...(this.#config.omp.relayUrl ? { relayUrl: this.#config.omp.relayUrl } : {}) },
-      startup: { checkUpdate: false, setupWizard: false },
-    };
-    await privateFile(path.join(dir, 'runtime.yml'), JSON.stringify(overlay));
     return { dir, pin };
   }
 
-  async #ensureManaged(id: string): Promise<HostBinding> {
+  async #ensureManaged(session: TopicSession): Promise<HostBinding> {
+    const id = session.id;
     let owned = this.#managed.get(id);
     const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
+    let prepared: { dir: string; pin: DurableBinding };
+    try { prepared = await this.#prepare(session); }
+    catch (error) {
+      if (!owned) this.#managed.delete(id);
+      throw error;
+    }
     try {
       await this.#acquire();
-      const { dir, pin } = await this.#prepare(id);
+      const { dir, pin } = prepared;
       if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
-      if (owned?.exited) {
-        await this.#shutdown(owned);
-        owned = undefined;
-        this.#managed.set(id, null);
-      }
       let hosts = await this.#list(deadline);
-      if (owned?.binding) {
-        const instanceId = owned.binding.instanceId;
-        const previous = hosts.find(host => host.instanceId === instanceId);
-        if (previous && previous.sessionId !== pin.sessionId) throw new Error('Managed OMP process switched its pinned session');
-      }
-      if (!owned?.terminal) {
-        const matches = hosts.filter(host => host.sessionId === pin.sessionId);
-        if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
-        if (matches.length === 1) {
-          const host = matches[0]!;
-          if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
-          const binding = await this.#resolve(host, deadline);
-          this.#managed.set(id, { binding, exited: false, exit: Promise.resolve(), group: false });
-          return binding;
+      const matches = hosts.filter(host => host.sessionId === pin.sessionId);
+      if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
+      if (matches.length === 1) {
+        const host = matches[0]!;
+        if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
+        while (!await this.#presetReady(dir, pin, host.pid)) {
+          if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
+          if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
+          await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
-        const terminal = pty.spawn(this.#config.omp.executable, [
-          ...this.#config.omp.args,
-          '--cwd', pin.cwd,
-          '--config', path.join(dir, 'runtime.yml'),
-          '--session-dir', dir,
-          '--resume', pin.sessionFile,
-          '--no-title',
-        ], {
-          cwd: pin.cwd,
-          env: { ...process.env, TERM: 'xterm-256color' },
-          name: 'xterm-256color',
-          cols: 120,
-          rows: 40,
-        });
-        let exit!: () => void;
-        owned = { terminal, exited: false, exit: new Promise<void>(resolve => { exit = resolve; }), group: process.platform !== 'win32' };
-        this.#managed.set(id, owned);
-        const record = owned;
-        terminal.onData(() => undefined);
-        const emitter = terminal as pty.IPty & { on?: (event: string, listener: () => void) => void };
-        emitter.on?.('error', () => {
-          record.failure = 'Managed OMP terminal failed';
-          void this.#shutdown(record).catch(() => undefined);
-        });
-        terminal.onExit(() => {
-          record.exited = true;
-          exit();
-          void this.#shutdown(record).then(() => {
-            if (this.#managed.get(id) === record) this.#managed.delete(id);
-          }).catch(() => undefined);
-        });
-        const identity = await procIdentity(terminal.pid);
-        if (identity) owned.group = identity.group === terminal.pid;
+        const binding = await this.#resolve(host,deadline);
+        const lifecycle = await this.#lifecycle(id);
+        owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
+        owned.binding = binding;
+        owned.retiring = lifecycle?.retiring === true;
+        this.#managed.set(id,owned);
+        return binding;
       }
+      if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
+      const launch = await this.#presetLaunch(session);
+      const overlay = {
+        collab: { autoStart: 'control', ...(this.#config.omp.relayUrl ? { relayUrl: this.#config.omp.relayUrl } : {}) },
+        startup: { checkUpdate: false, setupWizard: false },
+        ...launch.overlay,
+      };
+      await privateFile(path.join(dir, 'runtime.yml'), JSON.stringify(overlay));
+      const startupFile = path.join(dir, 'startup-preset.json');
+      if (launch.preset !== undefined) {
+        await privateFile(startupFile, JSON.stringify({ sessionId: pin.sessionId, preset: launch.preset }));
+      } else {
+        await unlink(startupFile).catch(error => { if (!errno(error, 'ENOENT')) throw error; });
+      }
+      const child = spawn(process.execPath, [
+        fileURLToPath(new URL('./host-supervisor.mjs',import.meta.url)),
+        this.#config.omp.executable,
+        ...launch.args,
+        '--cwd',pin.cwd,
+        '--config',path.join(dir,'runtime.yml'),
+        '--session-dir',dir,
+        '--resume',pin.sessionFile,
+        '--no-title',
+        '--extension',fileURLToPath(new URL('./host-lifecycle.mjs',import.meta.url)),
+      ], {
+        cwd: pin.cwd,
+        env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      owned = { process: child, sessionId: pin.sessionId, exited: false, retiring: false };
+      this.#managed.set(id,owned);
+      const record = owned;
+      child.once('error',error => { record.failure = error.message; record.exited = true; });
+      child.once('exit',() => {
+        record.exited = true;
+        if (this.#managed.get(id) === record) this.#managed.delete(id);
+      });
       while (Date.now() < deadline) {
         if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
-        if (owned.failure) throw new Error(owned.failure);
-        if (owned.exited) throw new Error('Managed OMP process exited before its host was available');
-        const terminal = owned.terminal!;
+        if (record.failure) throw new Error(record.failure);
+        if (launch.preset !== undefined) await this.#presetReady(dir, pin);
+        if (record.exited || !child.pid) throw new Error('Managed OMP process exited before its host was available');
         for (const host of hosts) {
-          if (!await belongsTo(host.pid, terminal.pid)) continue;
-          if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) {
-            throw new Error('Managed OMP process switched its pinned session');
-          }
-          const binding = await this.#resolve(host, deadline);
-          owned.binding = binding;
+          if (!await belongsTo(host.pid,child.pid)) continue;
+          if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new Error('Managed OMP process switched its pinned session');
+          if (!await this.#presetReady(dir, pin, host.pid)) continue;
+          const binding = await this.#resolve(host,deadline);
+          record.binding = binding;
           return binding;
         }
-        await delay(Math.min(200, Math.max(1, deadline - Date.now())));
+        await delay(Math.min(200,Math.max(1,deadline-Date.now())));
         hosts = await this.#list(deadline);
       }
       throw new Error('Managed OMP startup timed out');
     } catch (error) {
-      if (owned?.terminal) await this.#shutdown(owned);
-      this.#managed.delete(id);
+      if (owned && !owned.exited && !this.#killing.has(id)) await this.#shutdown(id,owned);
+      if (!owned || owned.exited) this.#managed.delete(id);
       throw error;
     }
   }
@@ -371,13 +773,13 @@ export class OmpRuntime {
     if (remaining <= 0) throw new Error('OMP discovery timed out');
     const output = await new Promise<string>((resolve, reject) => {
       execFile(this.#config.omp.executable, args, {
-        cwd: this.#config.omp.cwd,
+        cwd: this.#config.dataDir,
         env: process.env,
         timeout: Math.min(remaining, 5_000),
         killSignal: 'SIGKILL',
         maxBuffer: 2 * 1024 * 1024,
         encoding: 'utf8',
-      }, (error, stdout) => error ? reject(new Error('OMP discovery command failed')) : resolve(stdout));
+      }, (error, stdout) => error ? reject(error) : resolve(stdout));
     });
     try {
       const value: unknown = JSON.parse(output);
@@ -414,23 +816,201 @@ export class OmpRuntime {
     return { instanceId: host.instanceId, sessionId: host.sessionId, generation: host.generation, url: link.url };
   }
 
-  #shutdown(host: ManagedHost): Promise<void> {
-    if (host.shutdown) return host.shutdown;
-    host.shutdown = (async () => {
-      const terminal = host.terminal;
-      if (!terminal) return;
-      if (!host.exited) signal(terminal.pid, 'SIGTERM');
-      await Promise.race([host.exit, delay(2_000)]);
-      if (host.group) {
-        signal(-terminal.pid, 'SIGTERM');
-        await delay(250);
-        signal(-terminal.pid, 'SIGKILL');
-      } else if (!host.exited) {
-        terminal.kill('SIGKILL');
+  async #lifecycle(id: string): Promise<HostLifecycle | undefined> {
+    try {
+      const value = JSON.parse(await readFile(path.join(this.#config.dataDir,'sessions',id,'lifecycle.json'),'utf8')) as HostLifecycle;
+      if (!Number.isSafeInteger(value.pid) || value.pid <= 1 || typeof value.socketPath !== 'string' || typeof value.sessionId !== 'string') return undefined;
+      return value;
+    } catch (error) {
+      if (errno(error,'ENOENT')) return undefined;
+      throw error;
+    }
+  }
+  async #executable(): Promise<string> {
+    const executable = this.#config.omp.executable;
+    if (executable.includes('/')) return realpath(path.resolve(executable));
+    for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+      try { return await realpath(path.resolve(directory || process.cwd(), executable)); }
+      catch (error) { if (!errno(error, 'ENOENT') && !errno(error, 'ENOTDIR')) throw error; }
+    }
+    throw new Error('Cannot identify the configured OMP executable');
+  }
+
+  async #killProcess(pid: number, cwd: string, executable: string, validate: () => Promise<void>): Promise<void> {
+    if (!Number.isSafeInteger(pid) || pid <= 1 || await belongsTo(process.pid, pid)) throw new Error('Refusing to kill an unrelated OMP process');
+    const identity = await procIdentity(pid);
+    if (!identity || identity.state === 'Z' || identity.state === 'X') return;
+    try {
+      if (await realpath(`/proc/${pid}/cwd`) !== cwd) throw new Error('OMP process working directory changed');
+      const actual = await realpath(`/proc/${pid}/exe`);
+      if (actual !== executable) {
+        const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0').filter(Boolean);
+        let matches = false;
+        for (const argument of argv.slice(0, 3)) {
+          if (!argument.startsWith('/')) continue;
+          try { if (await realpath(argument) === executable) matches = true; }
+          catch (error) { if (!errno(error, 'ENOENT') && !errno(error, 'ENOTDIR')) throw error; }
+        }
+        if (!matches) throw new Error('OMP process executable changed');
       }
-      await Promise.race([host.exit, delay(1_000)]);
-      if (!host.exited) throw new Error('Managed OMP process did not exit after shutdown escalation');
-    })();
-    return host.shutdown;
+      await validate();
+      const current = await procIdentity(pid);
+      if (!current || current.state === 'Z' || current.state === 'X') return;
+      if (current.start !== identity.start) throw new Error('OMP process identity changed before kill');
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      if (errno(error, 'ENOENT') || errno(error, 'ESRCH')) {
+        const current = await procIdentity(pid);
+        if (!current || current.start !== identity.start || current.state === 'Z' || current.state === 'X') return;
+      }
+      throw error;
+    }
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const current = await procIdentity(pid);
+      if (!current || current.start !== identity.start || current.state === 'Z' || current.state === 'X') return;
+      await delay(25);
+    }
+    throw new Error('OMP process did not exit after SIGKILL');
+  }
+
+  async #killSession(session: TopicSession): Promise<void> {
+    const id = session.id;
+    const owned = this.#managed.get(id);
+    let pin: DurableBinding | undefined;
+    if (session.runtime.kind === 'managed') {
+      const dir = path.resolve(this.#config.dataDir, 'sessions', id);
+      try {
+        pin = JSON.parse(await readFile(path.join(dir, 'binding.json'), 'utf8')) as DurableBinding;
+      } catch (error) {
+        if (!errno(error, 'ENOENT')) throw error;
+        if (owned) throw new Error('Managed OMP binding is missing');
+        this.#activity.delete(id);
+        return;
+      }
+      if (pin.version !== 1 || pin.sessionFile !== path.join(dir, 'history.jsonl') || pin.cwd !== session.instancePath) {
+        throw new Error('Managed OMP binding is incompatible with this configuration');
+      }
+      const header = await readHeader(pin.sessionFile);
+      if (header.id !== pin.sessionId || header.cwd !== pin.cwd || (owned && owned.sessionId !== pin.sessionId)) {
+        throw new Error('Managed OMP history identity changed');
+      }
+    }
+    const target = session.runtime;
+    const hosts = await this.#list(Date.now() + this.#config.omp.startupTimeoutMs);
+    const matches = hosts.filter(host => target.kind === 'attached'
+      ? host.instanceId === target.instanceId
+      : host.sessionId === pin!.sessionId);
+    if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
+    const host = matches[0];
+    const executable = host || owned?.process?.pid ? await this.#executable() : undefined;
+    const lifecycle = pin ? await this.#lifecycle(id) : undefined;
+    if (!host && lifecycle && !owned?.process) {
+      const identity = await procIdentity(lifecycle.pid);
+      if (identity && identity.state !== 'Z' && identity.state !== 'X') throw new Error('OMP host is not registered; cannot safely kill its process');
+    }
+    if (host) {
+      if (target.kind === 'attached' && host.sessionId !== target.sessionId) throw new Error('Attached OMP session identity changed');
+      const cwd = await realpath(host.cwd);
+      if (cwd !== session.instancePath) throw new Error('OMP host does not belong to this instance path');
+      if (pin && cwd !== pin.cwd) throw new Error('Managed host working directory changed');
+      if (owned?.binding && (owned.binding.instanceId !== host.instanceId || owned.binding.sessionId !== host.sessionId)) {
+        throw new Error('Managed OMP host identity changed');
+      }
+      if (lifecycle && (lifecycle.sessionId !== host.sessionId || lifecycle.pid !== host.pid ||
+          (owned?.process?.pid && lifecycle.supervisorPid !== owned.process.pid))) {
+        throw new Error('Managed OMP lifecycle identity changed');
+      }
+      await this.#killProcess(host.pid, cwd, executable!, async () => {
+        const current = (await this.#list(Date.now() + 5000)).find(value => value.instanceId === host.instanceId);
+        if (!current || current.pid !== host.pid || current.sessionId !== host.sessionId ||
+            current.generation !== host.generation || current.cwd !== host.cwd) {
+          throw new Error('OMP host identity changed before kill');
+        }
+        if (pin) {
+          const argv = (await readFile(`/proc/${host.pid}/cmdline`, 'utf8')).split('\0');
+          const resume = argv.indexOf('--resume');
+          if (resume < 0 || argv[resume + 1] !== pin.sessionFile) throw new Error('Managed OMP process history changed');
+        }
+        if (owned?.process?.pid && !await belongsTo(host.pid, owned.process.pid)) {
+          throw new Error('Managed OMP process ancestry changed');
+        }
+      });
+    }
+    // A startup can be cancelled before the host publishes its registry entry.
+    // Only inspect children of the supervisor this runtime actually spawned.
+    if (pin && owned?.process?.pid && !owned.exited) {
+      const supervisor = owned.process.pid;
+      let children = '';
+      try { children = await readFile(`/proc/${supervisor}/task/${supervisor}/children`, 'utf8'); }
+      catch (error) { if (!errno(error, 'ENOENT') && !errno(error, 'ESRCH')) throw error; }
+      for (const value of children.trim().split(/\s+/).filter(Boolean)) {
+        const pid = Number(value);
+        await this.#killProcess(pid, pin.cwd, executable!, async () => {
+          if (owned.exited || !await belongsTo(pid, supervisor)) throw new Error('Managed OMP startup process identity changed');
+        });
+      }
+      if (!owned.exited && owned.process.exitCode === null && owned.process.signalCode === null) {
+        try { owned.process.kill('SIGKILL'); }
+        catch (error) { if (!errno(error, 'ESRCH')) throw error; }
+      }
+    }
+    if (lifecycle) {
+      const current = await this.#lifecycle(id);
+      if (current?.pid === lifecycle.pid && current.sessionId === lifecycle.sessionId && current.socketPath === lifecycle.socketPath) {
+        await unlink(path.join(this.#config.dataDir, 'sessions', id, 'lifecycle.json')).catch(error => {
+          if (!errno(error, 'ENOENT')) throw error;
+        });
+        if (path.dirname(lifecycle.socketPath) === tmpdir() && /^omp-tg-[a-f0-9]{24}\.sock$/.test(path.basename(lifecycle.socketPath))) {
+          await unlink(lifecycle.socketPath).catch(error => { if (!errno(error, 'ENOENT')) throw error; });
+        }
+      }
+    }
+    if (owned) { owned.exited = true; owned.retiring = false; }
+    if (host) {
+      for (const [managedId, managed] of this.#managed) {
+        if (!managed || managed.sessionId !== host.sessionId || (managed.binding && managed.binding.instanceId !== host.instanceId)) continue;
+        managed.exited = true;
+        managed.retiring = false;
+        this.#managed.delete(managedId);
+        this.#activity.delete(managedId);
+      }
+    }
+    this.#managed.delete(id);
+    this.#activity.delete(id);
+  }
+
+  async #shutdown(id: string, host: ManagedHost): Promise<void> {
+    if (host.exited) return;
+    if (this.#killing.has(id)) return;
+    const lifecycle = await this.#lifecycle(id);
+    if (!lifecycle || lifecycle.sessionId !== host.sessionId) return;
+    if (this.#killing.has(id)) return;
+    if (host.process?.pid && lifecycle.supervisorPid !== host.process.pid) return;
+    const current = (await this.#list(Date.now()+5000)).find(value => value.pid === lifecycle.pid && value.sessionId === host.sessionId);
+    if (this.#killing.has(id)) return;
+    if (!current) { host.exited = true; this.#managed.delete(id); return; }
+    host.retiring = true;
+    const {promise,resolve} = Promise.withResolvers<boolean>();
+    const socket = createConnection(lifecycle.socketPath);
+    const done = (value: boolean) => { socket.destroy(); resolve(value); };
+    socket.setTimeout(2000,() => done(false));
+    socket.once('error',() => done(false));
+    socket.once('connect',() => socket.write('retire\n'));
+    socket.once('data',data => done(data.toString().trim() === 'requested'));
+    socket.once('end',() => done(false));
+    const requested = await promise;
+    if (!requested) { host.retiring = false; return; }
+    const deadline = Date.now()+7500;
+    while (Date.now() < deadline) {
+      if (!await procIdentity(lifecycle.pid)) {
+        host.exited = true;
+        this.#managed.delete(id);
+        this.#activity.delete(id);
+        return;
+      }
+      await delay(100);
+      if (this.#killing.has(id)) return;
+    }
   }
 }

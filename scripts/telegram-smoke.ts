@@ -30,7 +30,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean } = {}) {
   const messages: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
@@ -131,7 +131,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   });
   const telegramUrl = await listen(telegram);
   const directory = await mkdtemp(join(tmpdir(), 'omp-telegram-fixture-'));
-  const store = new Store(join(directory, 'telegram.sqlite'));
+  const store = new Store(options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:');
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'app' }],
     instances: { [directory]: { admins: [ownerUsername], chats: [{ botId, chatId }] } },

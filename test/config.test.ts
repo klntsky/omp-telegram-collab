@@ -1,105 +1,290 @@
 import assert from 'node:assert/strict';
-import { resolve } from 'node:path';
-import { test } from 'node:test';
-import { ConfigError, getBotToken, loadConfig } from '../src/config.js';
-import { botToken } from './telegram-data.js';
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { test, type TestContext } from 'node:test';
+import { stringify } from 'yaml';
+import type { AppConfig } from '../shared/contracts.js';
+import { canonicalPath, ConfigError, configWritable, defaultConfigPath, emptyConfig, findInstance, readConfig, validateStart, writeConfig } from '../src/config.js';
+import { botId, botToken, chatId } from './telegram-data.js';
 
-function environment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return {
-    TELEGRAM_BOT_TOKEN: botToken,
-    TELEGRAM_OWNER_USERNAMES: '@AliceOwner, BOB_OWNER, aliceowner',
-    PUBLIC_URL: 'https://collab.example.com/',
-    ...extra,
-  };
+function fixture(t: TestContext) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'omp-config-test-')));
+  t.after(() => { chmodSync(dir, 0o700); rmSync(dir, { recursive: true, force: true }); });
+  const path = join(dir, 'config.yaml');
+  return { dir, path };
 }
 
-function invalid(env: NodeJS.ProcessEnv, key: string) {
-  assert.throws(() => loadConfig(env), error => error instanceof ConfigError && error.keys.includes(key));
+function validConfig(path: string, directory: string) {
+  const config = emptyConfig(path);
+  config.bots = [{ id: botId, token: botToken, miniAppShortName: 'app' }];
+  config.instances[directory] = { admins: ['alice'], chats: [{ botId, chatId }] };
+  config.publicUrl = 'https://collab.example.com';
+  return config;
 }
 
-test('missing environment configuration reports all required keys without guessing an owner or URL', () => {
-  assert.throws(() => loadConfig({}), error => {
+function assertInvalid(path: string, action: () => unknown, key?: string) {
+  assert.throws(action, error => {
     assert.ok(error instanceof ConfigError);
-    for (const key of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_OWNER_USERNAMES', 'PUBLIC_URL']) assert.ok(error.keys.includes(key));
+    assert.ok(error.message.includes(path));
+    if (key) assert.ok(error.keys.includes(key));
     return true;
   });
-});
+}
 
-test('owner usernames accept @ and case variants without creating duplicate owners', () => {
-  const config = loadConfig(environment());
-  assert.deepEqual(config.bots[0]?.ownerUsernames, ['aliceowner', 'bob_owner']);
-  assert.equal(config.publicUrl, 'https://collab.example.com');
-});
-
-test('empty, numeric, malformed, and obsolete ID-only owner configuration cannot grant access', () => {
-  for (const owners of ['', ' ', '123456789', '@@aliceowner', 'alice owner', 'alice@example.com', 'aliceowner,', 'a'.repeat(33)]) {
-    invalid(environment({ TELEGRAM_OWNER_USERNAMES: owners }), 'TELEGRAM_OWNER_USERNAMES');
-  }
-  invalid(environment({ TELEGRAM_OWNER_USERNAMES: undefined, TELEGRAM_OWNER_IDS: '42' }), 'TELEGRAM_OWNER_USERNAMES');
-});
-
-test('blank optional values behave as unset rather than coercing numeric limits to zero', () => {
-  const unset = loadConfig(environment());
-  const blank = loadConfig(environment({ HOST: '', PORT: ' ', DATA_DIR: '', OMP_EXECUTABLE: '', OMP_CWD: '', OMP_MAX_SESSIONS: '', OMP_STARTUP_TIMEOUT_MS: '', OMP_RELAY_URL: '', TELEGRAM_MINI_APP_SHORT_NAME: '' }));
-  assert.deepEqual(blank, unset);
-  assert.ok(blank.port > 0);
-  assert.ok(blank.omp.maxSessions > 0);
-  assert.ok(blank.omp.startupTimeoutMs > 0);
-});
-
-test('numeric settings reject partial, fractional, negative, and out-of-range values', () => {
-  for (const value of ['3000oops', '2e3', '1.5', '-1', '65536']) invalid(environment({ PORT: value }), 'PORT');
-  for (const key of ['OMP_MAX_SESSIONS', 'OMP_STARTUP_TIMEOUT_MS']) {
-    for (const value of ['0', '-1', '2.5', 'nope', '9007199254740992']) invalid(environment({ [key]: value }), key);
-  }
-  assert.equal(loadConfig(environment({ PORT: '0' })).port, 0);
-});
-
-test('public URL requires an HTTPS origin without credentials, paths, queries, or fragments', () => {
-  for (const value of ['http://collab.example.com', 'https://user:password@collab.example.com', 'https://collab.example.com/app', 'https://collab.example.com/?query=1', 'https://collab.example.com/#secret']) {
-    invalid(environment({ PUBLIC_URL: value }), 'PUBLIC_URL');
+test('default config path honors XDG_CONFIG_HOME', () => {
+  const before = process.env.XDG_CONFIG_HOME;
+  try {
+    process.env.XDG_CONFIG_HOME = '/tmp/custom-config-home';
+    assert.equal(defaultConfigPath(), '/tmp/custom-config-home/omp-telegram/config.yaml');
+  } finally {
+    if (before === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = before;
   }
 });
 
-test('relative runtime paths resolve against the launch directory without splitting spaces', () => {
-  const cwd = resolve('/tmp', 'omp-env-config-test');
-  const config = loadConfig(environment({ DATA_DIR: 'private data', OMP_CWD: 'project repo' }), cwd);
-  assert.equal(config.dataDir, resolve(cwd, 'private data'));
-  assert.equal(config.omp.cwd, resolve(cwd, 'project repo'));
+test('draft YAML roundtrips without a serialized configPath and starts only once configured', t => {
+  const { path, dir } = fixture(t);
+  const config = emptyConfig(path);
+  writeConfig(config);
+  assert.deepEqual(readConfig(path), config);
+  assert.equal(readFileSync(path, 'utf8').includes('configPath:'), false);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assertInvalid(path, () => validateStart(config), 'bots');
+  const ready = validConfig(path, dir);
+  writeConfig(ready);
+  validateStart(readConfig(path));
 });
 
-test('numbered OMP arguments retain literal contents and numeric ordering', () => {
-  const literal = '  quoted "$HOME"; echo not-a-command  ';
-  const config = loadConfig(environment({ OMP_ARG_10: literal, OMP_ARG_2: 'model with spaces', OMP_ARG_1: '--model', OMP_ARG_3: '' }));
-  assert.deepEqual(config.omp.args, ['--model', 'model with spaces', literal]);
-  invalid(environment({ OMP_ARG_01: '--model' }), 'OMP_ARG_01');
+test('missing config is never an implicit empty draft', t => {
+  const { path } = fixture(t);
+  assertInvalid(path, () => readConfig(path));
+  assert.equal(existsSync(path), false);
 });
 
-test('named bots retain distinct tokens and owners without falling back to primary credentials', () => {
-  const secondToken = '987654321:second-fixture-token-not-valid-on-telegram';
-  const env = environment({
-    TELEGRAM_BOT_NAMES: 'work, Personal',
-    TELEGRAM_WORK_BOT_TOKEN: botToken,
-    TELEGRAM_WORK_OWNER_USERNAMES: '@WorkOwner',
-    TELEGRAM_PERSONAL_BOT_TOKEN: secondToken,
-    TELEGRAM_PERSONAL_OWNER_USERNAMES: 'PersonalOwner',
-  });
-  const config = loadConfig(env);
-  assert.deepEqual(config.bots.map(bot => [bot.tokenEnv, bot.ownerUsernames]), [
-    ['TELEGRAM_WORK_BOT_TOKEN', ['workowner']], ['TELEGRAM_PERSONAL_BOT_TOKEN', ['personalowner']],
+test('YAML supports normalized per-path admins, multiple bots and multiple chats', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
+  config.instances[dir]!.admins = ['@Alice', 'BOB_OWNER', 'alice'];
+  config.instances[dir]!.chats.push(
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true },
+    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false },
+  );
+  writeConfig(config);
+  const loaded = readConfig(path);
+  assert.deepEqual(loaded.instances[dir]!.admins, ['alice', 'bob_owner']);
+  assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
+  assert.equal(findInstance(loaded, botId, -999), undefined);
+  assert.deepEqual(loaded.instances[dir]!.chats, [
+    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false },
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true },
+    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false },
   ]);
-  assert.equal(getBotToken(config.bots[1]!, env), secondToken);
-  invalid({ ...env, TELEGRAM_PERSONAL_OWNER_USERNAMES: undefined }, 'TELEGRAM_PERSONAL_OWNER_USERNAMES');
-  invalid({ ...env, TELEGRAM_PERSONAL_BOT_TOKEN: undefined }, 'TELEGRAM_PERSONAL_BOT_TOKEN');
-  invalid({ ...env, TELEGRAM_BOT_NAMES: 'work,WORK' }, 'TELEGRAM_BOT_NAMES');
+  writeConfig(loaded);
+  assert.deepEqual(readConfig(path), loaded);
 });
 
-test('configuration diagnostics identify bad token keys without echoing their contents', () => {
-  const secret = 'do-not-echo-this-invalid-private-token';
-  assert.throws(() => loadConfig(environment({ TELEGRAM_BOT_TOKEN: secret })), error => {
-    assert.ok(error instanceof ConfigError);
-    assert.ok(error.keys.includes('TELEGRAM_BOT_TOKEN'));
-    assert.equal(error.message.includes(secret), false);
-    return true;
-  });
+test('forum model defaults roundtrip independently for each bot/chat assignment and remain optional', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
+  config.instances[dir]!.chats[0]!.default_model_preset = 'Fast';
+  config.instances[dir]!.chats.push(
+    { botId, chatId: -10042, default_model_preset: 'Slow' },
+    { botId: 987654321, chatId, default_model_preset: 'Fast_2-beta' },
+    { botId, chatId: -10043 },
+  );
+  writeConfig(config);
+  const loaded = readConfig(path);
+  assert.equal(findInstance(loaded, botId, chatId)?.instance.chats
+    .find(chat => chat.botId === botId && chat.chatId === chatId)?.default_model_preset, 'Fast');
+  assert.deepEqual(loaded.instances[dir]!.chats.map(({ botId, chatId, default_model_preset }) =>
+    ({ botId, chatId, default_model_preset })), [
+    { botId, chatId, default_model_preset: 'Fast' },
+    { botId, chatId: -10042, default_model_preset: 'Slow' },
+    { botId: 987654321, chatId, default_model_preset: 'Fast_2-beta' },
+    { botId, chatId: -10043, default_model_preset: undefined },
+  ]);
+  assert.equal('default_model_preset' in loaded.instances[dir]!.chats[3]!, false);
+  writeConfig(loaded);
+  assert.deepEqual(readConfig(path), loaded);
+});
+
+test('forum model defaults reject names outside the native preset-name grammar', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _configPath, ...config } = validConfig(path, dir);
+  for (const default_model_preset of ['', '1Fast', '../Fast', 'Fast/Slow', 'Fast Slow', 'Fast.Slow', true, 1, null, [], {}]) {
+    writeFileSync(path, stringify({
+      ...config,
+      instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, default_model_preset }] } },
+    }));
+    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_model_preset`);
+  }
+});
+
+test('YAML defaults prompt options independently and rejects nonboolean values', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _configPath, ...config } = validConfig(path, dir);
+  writeFileSync(path, stringify(config));
+  assert.equal(readConfig(path).instances[dir]!.chats[0]!.all_messages_are_prompts, true);
+  assert.equal(readConfig(path).instances[dir]!.chats[0]!.users_can_propose_prompts, false);
+  for (const option of ['all_messages_are_prompts', 'users_can_propose_prompts']) {
+    for (const mode of ['true', 'false', '', 0, 1, null, [], {}]) {
+      writeFileSync(path, stringify({
+        ...config,
+        instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, [option]: mode }] } },
+      }));
+      assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.${option}`);
+    }
+  }
+});
+
+test('explicit creation canonicalizes directories but reads never retarget stored identity', t => {
+  const { path, dir } = fixture(t);
+  const original = join(dir, 'original');
+  const other = join(dir, 'other');
+  const alias = join(dir, 'alias');
+  mkdirSync(original); mkdirSync(other); symlinkSync(original, alias);
+  assert.equal(canonicalPath(alias), original);
+  const config = validConfig(path, original);
+  writeConfig(config);
+  rmSync(original, { recursive: true });
+  assert.equal(Object.keys(readConfig(path).instances)[0], original);
+  config.instances[original]!.admins.push('bob');
+  writeConfig(config);
+  assert.deepEqual(readConfig(path).instances[original]!.admins, ['alice', 'bob']);
+  symlinkSync(other, original);
+  assert.equal(Object.keys(readConfig(path).instances)[0], original);
+});
+
+test('duplicate YAML path keys and normalized-path aliases are rejected', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  const { configPath: _configPath, ...value } = config;
+  const source = stringify(value);
+  writeFileSync(path, source.replace('instances:\n', `instances:\n  ${JSON.stringify(dir)}: {admins: [], chats: []}\n`));
+  assertInvalid(path, () => readConfig(path));
+  config.instances[`${dir}/../${dir.split('/').at(-1)}`] = { admins: [], chats: [] };
+  assertInvalid(path, () => writeConfig(config));
+});
+
+test('new stored paths reject symlink aliases and missing directories rather than inventing identities', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  const alias = join(dir, 'alias');
+  symlinkSync(dir, alias);
+  config.instances[alias] = { admins: [], chats: [] };
+  assertInvalid(path, () => writeConfig(config), 'instances');
+  delete config.instances[alias];
+  config.instances[join(dir, 'missing')] = { admins: [], chats: [] };
+  assertInvalid(path, () => writeConfig(config), 'instances');
+  assert.equal(existsSync(path), false);
+});
+
+test('duplicate bot IDs, tokens, chat assignments and missing referenced bots fail validation', t => {
+  const { path, dir } = fixture(t);
+  for (const change of [
+    (config: AppConfig) => { config.bots.push({ ...config.bots[0]! }); },
+    (config: AppConfig) => { config.bots.push({ ...config.bots[0]!, token: `${botId}:different-token` }); },
+    (config: AppConfig) => { config.bots[0]!.id = 42; },
+    (config: AppConfig) => { config.instances[join(dir, 'missing')] = { admins: [], chats: [{ botId, chatId }] }; },
+    (config: AppConfig) => { config.instances[dir]!.chats.push({ botId: 42, chatId: -42 }); },
+    (config: AppConfig) => { config.instances[dir]!.chats.push({ botId, chatId }); },
+  ]) {
+    const config = validConfig(path, dir);
+    change(config);
+    assertInvalid(path, () => writeConfig(config));
+  }
+});
+
+test('YAML validates public origins, usernames, runtime fields and literal arguments without exposing secrets', t => {
+  const { path, dir } = fixture(t);
+  for (const url of ['http://example.com', 'https://user:password@example.com', 'https://example.com/path', 'https://example.com/?q=1', 'https://example.com/#fragment']) {
+    const config = validConfig(path, dir); config.publicUrl = url;
+    assertInvalid(path, () => writeConfig(config));
+  }
+  for (const username of ['', '123456', '@@alice', 'alice owner', 'a'.repeat(33)]) {
+    const config = validConfig(path, dir); config.instances[dir]!.admins = [username];
+    assertInvalid(path, () => writeConfig(config));
+  }
+  for (const number of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const config = validConfig(path, dir); config.omp.maxSessions = number;
+    assertInvalid(path, () => writeConfig(config));
+    config.omp.maxSessions = 8; config.omp.startupTimeoutMs = number;
+    assertInvalid(path, () => writeConfig(config));
+  }
+  for (const arg of ['--cwd=/tmp', '--resume', '--from-branch=main', '\0']) {
+    const config = validConfig(path, dir); config.omp.args = [arg];
+    assertInvalid(path, () => writeConfig(config));
+  }
+  const config = validConfig(path, dir);
+  config.omp.args = ['--model', '  quoted "$HOME"; echo not-a-command  '];
+  writeConfig(config);
+  assert.deepEqual(readConfig(path).omp.args, config.omp.args);
+  const secret = 'never-echo-invalid-token';
+  config.bots[0]!.token = secret;
+  assert.throws(() => writeConfig(config), error => error instanceof ConfigError && !error.message.includes(secret));
+  writeFileSync(path, `bots: [${secret}\n`);
+  assert.throws(() => readConfig(path), error => error instanceof ConfigError && !error.message.includes(secret));
+});
+
+test('readonly file cannot be replaced through its writable parent, including privileged CLI', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  writeConfig(config);
+  const before = readFileSync(path);
+  chmodSync(path, 0o400);
+  assert.equal(configWritable(path), false);
+  assertInvalid(path, () => writeConfig(config));
+  assert.deepEqual(readFileSync(path), before);
+});
+
+test('readonly parent blocks replacement and new nested configs', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  writeConfig(config);
+  chmodSync(dir, 0o500);
+  try {
+    assert.equal(configWritable(path), false);
+    assertInvalid(path, () => writeConfig(config));
+    const nested = join(dir, 'not-created', 'config.yaml');
+    assert.equal(configWritable(nested), false);
+    assertInvalid(nested, () => writeConfig(emptyConfig(nested)));
+    assert.equal(existsSync(dirname(nested)), false);
+  } finally { chmodSync(dir, 0o700); }
+});
+
+test('atomic mutations preserve original mode and ownership', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  writeConfig(config);
+  chmodSync(path, 0o640);
+  if (process.getuid?.() === 0) chownSync(path, 65534, 65534);
+  const before = statSync(path);
+  config.port = 4000;
+  writeConfig(config);
+  const after = statSync(path);
+  assert.equal(after.mode & 0o7777, before.mode & 0o7777);
+  assert.equal(after.uid, before.uid);
+  assert.equal(after.gid, before.gid);
+  assert.notEqual(after.ino, before.ino);
+  assert.equal(readConfig(path).port, 4000);
+});
+
+test('symlink config and immediate symlink parent are never replaced', t => {
+  const { path, dir } = fixture(t);
+  const target = join(dir, 'target.yaml');
+  writeConfig(emptyConfig(target));
+  symlinkSync(target, path);
+  assert.equal(configWritable(path), false);
+  assertInvalid(path, () => readConfig(path));
+  assertInvalid(path, () => writeConfig(emptyConfig(path)));
+  assert.ok(lstatSync(path).isSymbolicLink());
+  const link = join(dir, 'linked'); symlinkSync(dir, link);
+  const other = join(link, 'other.yaml');
+  assert.equal(configWritable(other), false);
+  assertInvalid(other, () => writeConfig(emptyConfig(other)));
 });

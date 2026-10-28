@@ -47,7 +47,7 @@ const guestSchema = z.discriminatedUnion('t', [
 export function validateGuestFrame(value: unknown): Exclude<GuestFrame, {t:'hello'}> {
   return guestSchema.parse(value) as Exclude<GuestFrame, {t:'hello'}>;
 }
-export interface TicketIdentity { botId: number; sessionId: string; userId: number; displayName: string; authDate: number }
+export interface TicketIdentity { botId: number; sessionId: string; generation: number; userId: number; username?: string; displayName: string; authDate: number }
 export class TicketStore {
   private readonly tickets = new Map<string, { identity: TicketIdentity; expires: number }>();
   issue(identity: TicketIdentity, now = Date.now()): string {

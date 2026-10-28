@@ -1,6 +1,10 @@
-import { resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { accessSync, closeSync, constants, existsSync, fchmodSync, fchownSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
+import { parseDocument, stringify } from 'yaml';
 import { z } from 'zod';
-import type { AppConfig, BotConfig } from '../shared/contracts.js';
+import type { AppConfig, InstanceConfig } from '../shared/contracts.js';
 
 export class ConfigError extends Error {
   constructor(readonly keys: readonly string[], detail: string) {
@@ -9,94 +13,241 @@ export class ConfigError extends Error {
   }
 }
 
-const tokenPattern = /^\d+:[A-Za-z0-9_-]+$/;
+const tokenPattern = /^[1-9]\d*:[A-Za-z0-9_-]+$/;
 const usernameSchema = z.string().regex(/^@?[A-Za-z0-9_]{1,32}$/).regex(/[A-Za-z]/)
   .transform(username => username.replace(/^@/, '').toLowerCase());
-const namesSchema = z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/).transform(name => name.toUpperCase())).min(1)
-  .refine(names => new Set(names).size === names.length);
-const ownersSchema = z.array(usernameSchema).min(1);
-const shortNameSchema = z.string().regex(/^[A-Za-z0-9_]+$/);
-const publicUrlSchema = z.string().url().pipe(z.string().refine(value => {
+const literal = z.string().refine(value => !value.includes('\0'));
+const nonempty = literal.refine(value => value.trim().length > 0);
+const positiveInteger = z.number().int().safe().positive();
+const absolutePath = nonempty.refine(value => isAbsolute(value) && normalize(value) === value);
+const publicUrlSchema = z.string().refine(value => {
+  if (value === '') return true;
   if (!/^https:\/\/[^/?#\\@]+\/?$/i.test(value)) return false;
-  const url = new URL(value);
-  return url.protocol === 'https:' && url.pathname === '/' && !url.username && !url.password && !url.search && !url.hash;
-})).transform(value => new URL(value).origin);
-const relayUrlSchema = z.string().url().pipe(z.string().refine(value => {
-  const url = new URL(value);
-  return (url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))) && !url.username && !url.password && !value.includes('#');
-}));
-const integerSchema = z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().safe());
-const portSchema = integerSchema.pipe(z.number().min(0).max(65535));
-const positiveIntegerSchema = integerSchema.pipe(z.number().positive());
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.pathname === '/' && !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
+}).transform(value => value ? new URL(value).origin : '');
+const relayUrlSchema = z.string().refine(value => {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))) && !url.username && !url.password && !value.includes('#');
+  } catch { return false; }
+});
+const forbiddenArgs: Record<string, true> = {
+  '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
+  '--continue': true, '-c': true, '--no-session': true, '--restore': true, '--fork': true,
+  '--mode': true, '--print': true, '-p': true, '--goal': true, '--cwd': true,
+  '--help': true, '-h': true, '--version': true,
+};
+const argumentSchema = literal.refine(value => {
+  const flag = value.split('=', 1)[0]!;
+  return !Object.hasOwn(forbiddenArgs, flag) && !flag.startsWith('--from-');
+});
+const configSchema = z.object({
+  version: z.literal(1).optional(),
+  bots: z.array(z.object({
+    id: positiveInteger,
+    token: z.string().regex(tokenPattern),
+    miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/),
+  }).strict().refine(bot => Number(bot.token.split(':')[0]) === bot.id)),
+  instances: z.record(absolutePath, z.object({
+    admins: z.array(usernameSchema).transform(admins => [...new Set(admins)]),
+    chats: z.array(z.object({
+      botId: positiveInteger,
+      chatId: z.number().int().safe().refine(value => value !== 0),
+      all_messages_are_prompts: z.boolean().default(true),
+      users_can_propose_prompts: z.boolean().default(false),
+      default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
+    }).strict()),
+  }).strict()),
+  publicUrl: publicUrlSchema,
+  host: nonempty,
+  port: z.number().int().min(0).max(65535),
+  dataDir: absolutePath,
+  omp: z.object({
+    executable: nonempty.refine(value => !value.includes('/') || isAbsolute(value)),
+    args: z.array(argumentSchema),
+    maxSessions: positiveInteger,
+    startupTimeoutMs: positiveInteger,
+    relayUrl: relayUrlSchema.optional(),
+  }).strict(),
+}).strict();
 
-function parseEnvironment<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, value: unknown, detail: string): T {
-  const result = schema.safeParse(value);
-  if (!result.success) throw new ConfigError([key], detail);
-  return result.data;
+function errno(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code;
 }
 
-export function getBotToken(bot: BotConfig, environment: NodeJS.ProcessEnv = process.env): string {
-  const token = environment[bot.tokenEnv];
-  if (!token || !tokenPattern.test(token)) throw new ConfigError([bot.tokenEnv], 'Set a valid Telegram bot token.');
-  return token;
+function failure(path: string, keys: string[], detail: string): ConfigError {
+  return new ConfigError(keys, `${detail} Configuration file: ${path}`);
 }
 
-export function loadConfig(environment: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): AppConfig {
-  const optional = (key: string): string | undefined => environment[key]?.trim() || undefined;
-  const botNames = optional('TELEGRAM_BOT_NAMES');
-  const prefixes = botNames === undefined ? ['TELEGRAM'] : parseEnvironment(
-    'TELEGRAM_BOT_NAMES', namesSchema,
-    botNames.split(',').map(name => name.trim()),
-    'Use comma-separated ASCII identifiers starting with a letter, without duplicate names.',
-  ).map(name => `TELEGRAM_${name}`);
-  const requiredKeys = [...prefixes.flatMap(prefix => [`${prefix}_BOT_TOKEN`, `${prefix}_OWNER_USERNAMES`]), 'PUBLIC_URL'];
-  const missingKeys = requiredKeys.filter(key => optional(key) === undefined);
-  if (missingKeys.length) throw new ConfigError(missingKeys, 'Set these required environment variables before starting the service.');
-
-  const tokens = new Map<string, string>();
-  const bots = prefixes.map(prefix => {
-    const tokenEnv = `${prefix}_BOT_TOKEN`;
-    const ownersKey = `${prefix}_OWNER_USERNAMES`;
-    const shortNameKey = `${prefix}_MINI_APP_SHORT_NAME`;
-    const ownerUsernames = parseEnvironment(
-      ownersKey, ownersSchema,
-      optional(ownersKey)!.split(',').map(username => username.trim()),
-      'Use comma-separated Telegram usernames, optionally prefixed with @; each must contain a letter and use at most 32 ASCII letters, digits, or underscores.',
-    );
-    const bot: BotConfig = {
-      tokenEnv,
-      ownerUsernames: [...new Set(ownerUsernames)],
-      miniAppShortName: parseEnvironment(shortNameKey, shortNameSchema, optional(shortNameKey) ?? 'collab', 'Use only ASCII letters, digits, or underscores.'),
-    };
-    const token = getBotToken(bot, environment);
-    const duplicateKey = tokens.get(token);
-    if (duplicateKey) throw new ConfigError([duplicateKey, tokenEnv], 'Configure a distinct Telegram bot token for each bot.');
-    tokens.set(token, tokenEnv);
-    return bot;
-  });
-  const args: { index: bigint; value: string }[] = [];
-  for (const key of Object.keys(environment)) {
-    if (key !== 'OMP_ARG' && !key.startsWith('OMP_ARG_')) continue;
-    const suffix = key.slice('OMP_ARG_'.length);
-    if (!/^[1-9]\d*$/.test(suffix)) throw new ConfigError([key], 'Name literal OMP arguments OMP_ARG_1, OMP_ARG_2, and so on, without leading zeroes.');
-    const value = environment[key];
-    if (value !== undefined && value !== '') args.push({ index: BigInt(suffix), value });
+function validate(value: unknown, configPath: string): AppConfig {
+  const result = configSchema.safeParse(value);
+  if (!result.success) {
+    const keys = [...new Set(result.error.issues.map(issue => issue.path.join('.') || 'config'))];
+    throw failure(configPath, keys, 'Invalid configuration fields; check types, paths, bot credentials, URLs, and runtime settings.');
   }
-  args.sort((left, right) => left.index < right.index ? -1 : left.index > right.index ? 1 : 0);
-  const relayUrl = optional('OMP_RELAY_URL');
+  const { version: _version, ...config } = result.data;
+  const ids = new Set<number>();
+  const tokens = new Set<string>();
+  for (const bot of config.bots) {
+    if (ids.has(bot.id) || tokens.has(bot.token)) throw failure(configPath, ['bots'], 'Every bot must have a distinct ID and token.');
+    ids.add(bot.id);
+    tokens.add(bot.token);
+  }
+  const assignments = new Set<string>();
+  for (const instance of Object.values(config.instances)) {
+    for (const chat of instance.chats) {
+      const key = `${chat.botId}:${chat.chatId}`;
+      if (!ids.has(chat.botId)) throw failure(configPath, ['instances'], 'Every chat assignment must refer to a configured bot.');
+      if (assignments.has(key)) throw failure(configPath, ['instances'], 'Each bot/chat pair can be assigned only once.');
+      assignments.add(key);
+    }
+  }
+  return { ...config, configPath };
+}
+
+export function defaultConfigPath(): string {
+  return resolve(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'omp-telegram', 'config.yaml');
+}
+
+export function canonicalPath(input: string): string {
+  try {
+    const path = realpathSync(resolve(input));
+    if (!statSync(path).isDirectory()) throw new Error();
+    return path;
+  } catch { throw new ConfigError(['path'], 'Choose an existing accessible directory.'); }
+}
+
+export function emptyConfig(configPath: string): AppConfig {
+  const path = resolve(configPath);
   return {
-    bots,
-    publicUrl: parseEnvironment('PUBLIC_URL', publicUrlSchema, optional('PUBLIC_URL'), 'Set an HTTPS origin with no credentials, path, query, or fragment.'),
-    host: optional('HOST') ?? '127.0.0.1',
-    port: parseEnvironment('PORT', portSchema, optional('PORT') ?? '3000', 'Set an integer from 0 through 65535.'),
-    dataDir: resolve(cwd, optional('DATA_DIR') ?? '.omp-telegram'),
-    omp: {
-      executable: optional('OMP_EXECUTABLE') ?? 'omp',
-      cwd: resolve(cwd, optional('OMP_CWD') ?? '.'),
-      args: args.map(argument => argument.value),
-      maxSessions: parseEnvironment('OMP_MAX_SESSIONS', positiveIntegerSchema, optional('OMP_MAX_SESSIONS') ?? '8', 'Set a positive safe integer.'),
-      startupTimeoutMs: parseEnvironment('OMP_STARTUP_TIMEOUT_MS', positiveIntegerSchema, optional('OMP_STARTUP_TIMEOUT_MS') ?? '60000', 'Set a positive safe integer.'),
-      ...(relayUrl === undefined ? {} : { relayUrl: parseEnvironment('OMP_RELAY_URL', relayUrlSchema, relayUrl, 'Set a wss:// relay URL, or ws:// for localhost, without credentials or a fragment.') }),
-    },
+    bots: [], instances: {}, publicUrl: '', host: '127.0.0.1', port: 3000,
+    dataDir: join(dirname(path), 'data'), configPath: path,
+    omp: { executable: 'omp', args: [], maxSessions: 8, startupTimeoutMs: 60000 },
   };
+}
+
+export function readConfig(input: string): AppConfig {
+  const path = resolve(input);
+  try {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let source: string;
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error();
+      source = readFileSync(fd, 'utf8');
+    } finally { closeSync(fd); }
+    const document = parseDocument(source, { uniqueKeys: true });
+    if (document.errors.length) throw failure(path, ['config'], 'Invalid YAML (including duplicate mapping keys).');
+    return validate(document.toJS({ maxAliasCount: 100 }), path);
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw failure(path, ['config'], 'Cannot read a regular, non-symlink YAML configuration file.');
+  }
+}
+
+function modeAllows(stat: Stats, write: boolean): boolean {
+  const uid = process.geteuid?.();
+  const groups = process.getgroups?.() ?? [];
+  const bit = write ? 2 : 1;
+  if (uid === 0) return Boolean(stat.mode & (write ? 0o222 : 0o111));
+  const shift = uid === stat.uid ? 6 : (groups.includes(stat.gid) || process.getegid?.() === stat.gid) ? 3 : 0;
+  return Boolean(stat.mode & (bit << shift));
+}
+
+function writableState(path: string): { file?: Stats; parent: Stats; parentPath: string } {
+  let file: Stats | undefined;
+  try { file = lstatSync(path); } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+  if (file && (!file.isFile() || file.isSymbolicLink() || !modeAllows(file, true))) throw new Error();
+  if (file) accessSync(path, constants.W_OK);
+  let parentPath = dirname(path);
+  while (!existsSync(parentPath)) {
+    const ancestor = dirname(parentPath);
+    if (ancestor === parentPath) throw new Error();
+    parentPath = ancestor;
+  }
+  const parent = lstatSync(parentPath);
+  if (!parent.isDirectory() || parent.isSymbolicLink() || !modeAllows(parent, true) || !modeAllows(parent, false)) throw new Error();
+  accessSync(parentPath, constants.W_OK | constants.X_OK);
+  for (let ancestor = dirname(parentPath); ; ancestor = dirname(ancestor)) {
+    const stat = statSync(ancestor);
+    if (!stat.isDirectory() || !modeAllows(stat, false)) throw new Error();
+    accessSync(ancestor, constants.X_OK);
+    if (ancestor === dirname(ancestor)) break;
+  }
+  return { ...(file ? { file } : {}), parent, parentPath };
+}
+
+export function configWritable(input: string): boolean {
+  try { writableState(resolve(input)); return true; } catch { return false; }
+}
+
+function sameFile(left: Stats | undefined, right: Stats | undefined): boolean {
+  return left === undefined ? right === undefined : right !== undefined && left.ino === right.ino && left.dev === right.dev && left.mode === right.mode && left.uid === right.uid && left.gid === right.gid && left.mtimeMs === right.mtimeMs && left.size === right.size;
+}
+
+export function writeConfig(config: AppConfig): void {
+  const path = resolve(config.configPath);
+  const { configPath: _configPath, ...input } = config;
+  const checked = validate(input, path);
+  const { configPath: _checkedPath, ...document } = checked;
+  let temporary: string | undefined;
+  let fd: number | undefined;
+  try {
+    const initial = writableState(path);
+    const registered = initial.file ? readConfig(path).instances : {};
+    for (const directory of Object.keys(checked.instances)) {
+      if (Object.hasOwn(registered, directory)) continue;
+      try {
+        if (canonicalPath(directory) !== directory) throw new Error();
+      } catch { throw failure(path, ['instances'], 'New instance paths must be existing canonical directories.'); }
+    }
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const before = writableState(path);
+    if (!sameFile(initial.file, before.file)) throw new Error();
+    const parentPath = realpathSync(dirname(path));
+    temporary = join(dirname(path), `.${randomBytes(16).toString('hex')}.tmp`);
+    fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, stringify({ version: 1, ...document }), 'utf8');
+    if (before.file) {
+      const temp = fstatSync(fd);
+      if (temp.uid !== before.file.uid || temp.gid !== before.file.gid) fchownSync(fd, before.file.uid, before.file.gid);
+      fchmodSync(fd, before.file.mode & 0o7777);
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    const after = writableState(path);
+    if (!sameFile(before.file, after.file) || before.parent.dev !== after.parent.dev || before.parent.ino !== after.parent.ino || parentPath !== realpathSync(dirname(path))) throw new Error();
+    if (!before.file) {
+      linkSync(temporary, path);
+      unlinkSync(temporary);
+    } else renameSync(temporary, path);
+    temporary = undefined;
+    const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw failure(path, ['config'], 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    if (temporary !== undefined) {
+      try { unlinkSync(temporary); } catch (error) { if (!errno(error, 'ENOENT')) throw failure(path, ['config'], 'Cannot remove temporary configuration file.'); }
+    }
+  }
+}
+
+export function validateStart(config: AppConfig): void {
+  const { configPath, ...value } = config;
+  const checked = validate(value, configPath);
+  const missing = [!checked.bots.length ? 'bots' : '', !checked.publicUrl ? 'publicUrl' : ''].filter(Boolean);
+  if (missing.length) throw failure(configPath, missing, 'Configure at least one bot and an HTTPS public origin before starting.');
+}
+
+export function findInstance(config: AppConfig, botId: number, chatId: number): { path: string; instance: InstanceConfig } | undefined {
+  for (const [path, instance] of Object.entries(config.instances)) {
+    if (instance.chats.some(chat => chat.botId === botId && chat.chatId === chatId)) return { path, instance };
+  }
+  return undefined;
 }

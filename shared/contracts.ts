@@ -8,7 +8,7 @@ export interface BotConfig {
 
 export interface InstanceConfig {
   admins: string[];
-  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean }[];
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; default_model_preset?: string }[];
 }
 
 export interface AppConfig {
