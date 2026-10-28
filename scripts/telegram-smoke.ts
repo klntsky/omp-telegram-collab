@@ -297,6 +297,9 @@ export async function verifyTelegramFlow() {
     assert.equal(topicMessages[1]?.forwarded_message_id,7003);
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256', 'active turn did not get the running icon');
+    app.emit({t:'state',state:{cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]}});
+    await delay(50);
+    assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id,'5312016608254762256','idle streaming state cannot complete active work');
     app.emit({t:'event',event:{type:'agent_end'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968', 'live idle host did not get the completed icon');
     assert.ok(app.topicEdits.some(edit => edit.icon_custom_emoji_id === '5312016608254762256'), 'the admitted task must show a running icon');

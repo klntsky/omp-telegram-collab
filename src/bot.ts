@@ -41,6 +41,7 @@ interface Listener {
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
+  activeTurn?: boolean;
   activity: 'running' | 'completed';
   initial?: {
     text: string;
@@ -1302,6 +1303,7 @@ export class BotService {
     if (interruptedBy) {
       listener.pendingAnswers.clear();
       listener.queuedMessages = 0;
+      listener.activeTurn = false;
       listener.activity = 'completed';
       void this.setTopicStatus(session, listener.activity);
       void this.bot.telegram.sendMessage(session.chatId, `⛔️${interruptedBy} interrupted the chat`, {
@@ -1310,12 +1312,14 @@ export class BotService {
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity = frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
+      listener.activity = listener.activeTurn || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
+      listener.activeTurn = true;
       listener.activity = 'running';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
+      listener.activeTurn = false;
       listener.activity = listener.queuedMessages > 0 ? 'running' : 'completed';
       void this.setTopicStatus(session, listener.activity);
     }
