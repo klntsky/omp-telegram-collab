@@ -112,6 +112,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       result = true;
     }
     else if (method === 'sendMessage') {
+      if (params.message_thread_id === 1) {
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({ok:false,error_code:400,description:'Bad Request: message thread not found'}));
+        return;
+      }
       result = { ...params, message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: group, from: me };
       messages.push(result as Record<string, unknown>);
       events.emit('message');

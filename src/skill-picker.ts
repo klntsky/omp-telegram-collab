@@ -35,7 +35,7 @@ export class SkillPicker {
     await this.options.authorize(key.chatId, key.userId);
     if (clear) {
       this.options.store.clearPendingSkills(key);
-      await ctx.reply('Pending skills cleared.', {message_thread_id:key.threadId});
+      await ctx.reply('Pending skills cleared.', {message_thread_id:key.threadId === 1 ? undefined : key.threadId});
       return;
     }
     const instancePath = this.options.instancePath(key.chatId);
@@ -49,7 +49,7 @@ export class SkillPicker {
     this.pickers.set(token, { key, instancePath, skills, expires: Date.now() + 600000 });
     const pending = this.options.store.getPendingSkills(key);
     await ctx.reply(`${pending.length ? `Your next message will mention ${pending.map(name => `/skill:${name}`).join(', ')}.` : 'No skills selected.'}\nChoose skills for your next prompt. In General, send /p or /new followed by your task.${unsupported ? `\n${unsupported} skill name(s) cannot be represented as /skill:name because they contain whitespace or control/path characters.` : ''}`, {
-      message_thread_id: key.threadId,
+      message_thread_id: key.threadId === 1 ? undefined : key.threadId,
       reply_markup: { inline_keyboard: [
         [{ text: 'Search skills', switch_inline_query_current_chat: `skills ${token} ` }],
         ...skills.slice(0, 20).map((skill, index) => [{ text: `/skill:${skill.name}`, callback_data: `skills:add:${token}:${index}` }]),
@@ -137,7 +137,7 @@ export class SkillPicker {
     }
     const skills = this.options.store.getPendingSkills(key);
     await ctx.reply(skills.length ? `Your next message will mention ${skills.map(name => `/skill:${name}`).join(', ')}.` : 'Pending skills cleared.', {
-      message_thread_id: key.threadId,
+      message_thread_id: key.threadId === 1 ? undefined : key.threadId,
       reply_markup: { inline_keyboard: [[{ text: 'Add another skill', switch_inline_query_current_chat: `skills ${token} ` }],
         [{ text: 'Clear skills', callback_data: `skills:clear:${token}` }]] },
     });
