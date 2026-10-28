@@ -12,6 +12,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
+| `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/session` | Get the current topic's Mini App link. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
@@ -53,6 +54,20 @@ Non-command replies to this bot's own messages behave as `/p` in either mode: th
 Other commands, forwarded messages, and bot messages are not prompts. Non-admin `/new` requests follow the proposal setting too.
 
 Proposals show the submitted text for review and execute once after approval. They expire after ten minutes or a service restart. A changed assignment or prompt mode, archived topic, killed session, or departed proposer invalidates approval.
+
+`/skills` opens a picker bound to the requesting user and source topic, including General. Skill buttons work without Telegram inline mode; when inline mode is enabled, Search opens an inline search for that picker. The inline picker context expires after ten minutes; reopen `/skills` to search again. This does not expire the pending selection.
+
+Selections accumulate and persist across service restarts, separately for each bot, chat, topic, and user. A confirmation says “Your next message will mention /skill:name.” `/skills clear` removes that user's pending selection in the current topic. Picking a skill does not submit a prompt.
+
+Discovered skills also get `/skill_<alias>` shortcuts that select the same canonical skill. Aliases use the lowercase name, replace runs outside ASCII `a-z`, `0-9`, and `_` with `_`, trim edge underscores, and truncate the complete command to 32 characters. The first skill wins an alias collision; no hash suffix is added. Group command menus include at most 100 commands, including built-ins; `/skills` remains available for skills beyond that menu limit.
+
+Canonical `/skill:name` references preserve the skill name's exact case and punctuation, including namespaces. Names containing whitespace, control characters, or backslashes are unsupported and reported in the picker. Managed sessions validate against their live loaded skill catalog; older managed hosts without skill-lifecycle support reject selection with an instruction to restart the host. Attached-host discovery uses the assigned instance settings and cannot inspect terminal-private loaded skills. Discovering catalog changes does not automatically reload OMP.
+
+The next accepted prompt starts with the selected `/skill:name` references separated by spaces, followed by a blank line and the normalized prompt, including any existing reply quote. Supported image attachments and quoting behavior are unchanged. These mentions are prompt text; the service does not implement native skill-template expansion.
+
+Image albums are submitted as one prompt with all supported images, their captions in message order, and one pending-skill selection. An album's `/p` or `/new` caption follows the same topic and General routing as a single image. When it creates a topic, the quoted source and every album message are forwarded there.
+
+Pending skills are consumed when the prompt is accepted, or when a non-admin proposal is created. A proposal freezes the composed text for review and later approval; rejecting or expiring it does not restore the selection. Input ignored or rejected before submission retains pending skills, and a known host-starting rejection restores them. Ambiguous delivery errors do not restore selections because the prompt may already have been admitted. For `/new` or `/p` in General, the originating user's General selection accompanies the new topic's initial task and is consumed when that task is durably accepted, or when its proposal is created.
 
 Project admins are the Telegram usernames configured for the directory. They must also be current group members. Telegram group-administrator status alone does not grant project-admin permissions. Only enrollment of an unassigned group requires a Telegram group administrator.
 

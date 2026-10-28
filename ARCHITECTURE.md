@@ -16,11 +16,19 @@ Each bot adapter owns Telegram command handling, membership checks, prompt propo
 
 The bot adapter normalizes text and media captions before command dispatch. After prompt authorization, it resolves Telegram image files and attaches their bytes to the existing Collab prompt. Approval and initial-task admission own the entire prompt, including images; the session store preserves initial images with their task so recovery does not degrade to text-only delivery.
 
+The adapter groups image-album updates before prompt dispatch and keeps their place in the input queue, so a subsequent skill selection cannot alter an earlier album. The resulting prompt uses the same authorization, proposal, and image-admission boundaries as single-message input.
+
+The bot adapter owns the user/topic-bound skill picker and its temporary inline-search context. It composes selected `/skill:name` references into authorized prompt text without implementing native skill-template expansion. Prompt admission and proposal creation own consumption of the pending selection; proposals retain the composed text independently of later picker changes.
+
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 
 ## OMP execution and lifecycle
 
 The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.
+
+The runtime boundary owns skill-catalog discovery from OMP for the project and, when applicable, its session host. Bot adapters consume catalog names and descriptions through that boundary rather than inspecting OMP resources themselves.
+
+The runtime owns per-instance catalog caching, shared in-flight discovery, and failure cooldowns. Managed sessions remain authoritative for their live loaded catalog; older managed hosts without skill-lifecycle support reject discovery with a restart instruction rather than approximate their catalog. Attached-host discovery uses assigned instance settings and cannot inspect terminal-private loaded skills. Discovery neither reloads OMP nor automatically restarts active hosts. Bot adapters own canonical-name eligibility, Telegram-safe skill aliases, and group-scoped command-menu publication. The service scheduler requests menu refreshes; adapters publish only changed menus. Refresh failures preserve original diagnostics and existing menus without blocking bot startup; new groups retain built-in commands.
 
 OMP owns agent execution, conversation history, interactive questions, and live Collab state. The service connects as a Collab guest. It does not reconstruct an independent conversation from Telegram messages. Shared contracts describe communication between the service components and clients; they do not move execution authority into the browser.
 
@@ -28,7 +36,7 @@ The runtime uses OMP's guarded lifecycle boundary for idle retirement. Explicit 
 
 ## Durable and temporary state
 
-The configuration layer owns validated, atomic updates to the protected YAML file. The session store owns durable Telegram topic mappings, enrollment state, session generations, and recorded session metadata. OMP owns history files. Runtime bindings connect a Telegram session to its verified OMP identity and history rather than selecting whichever host happens to occupy a process identifier.
+The configuration layer owns validated, atomic updates to the protected YAML file. The session store owns durable Telegram topic mappings, enrollment state, session generations, recorded session metadata, and pending skill selections scoped by bot, chat, topic, and user. Pending selections survive service restarts and outlive the adapter's ten-minute inline picker context. OMP owns history files. Runtime bindings connect a Telegram session to its verified OMP identity and history rather than selecting whichever host happens to occupy a process identifier.
 
 Bot adapters own temporary proposals and pending Telegram interactions. The gateway owns temporary connection tickets. The browser owns its local draft and rendered transcript. None of those temporary states can replace durable authorization or process identity.
 

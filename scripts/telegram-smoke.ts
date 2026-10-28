@@ -38,6 +38,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const topicEdits: Record<string, unknown>[] = [];
   const deletedMessages: Record<string, unknown>[] = [];
   const commandMenus = new Map<string, { command: string; description: string }[]>();
+  const inlineAnswers: Record<string, unknown>[] = [];
   const accepted: GuestFrame[] = [];
   const events = new EventEmitter();
   const connections = new Set<CollabHandlers>();
@@ -126,6 +127,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       events.emit('reaction');
       result = true;
     } else if (method === 'answerCallbackQuery') result = true;
+    else if (method === 'answerInlineQuery') {
+      inlineAnswers.push(params);
+      result = true;
+    }
     else if (method === 'editMessageReplyMarkup' || method === 'editMessageText') {
       const message = messages.find(value => value.chat_id === params.chat_id && value.message_id === params.message_id);
       if (!message) throw new Error('Fixture message to edit was not found');
@@ -160,6 +165,12 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     async isRunning(session: TopicSession) { return session.runtime.kind === 'attached' || managedSessions.has(session.id); },
     async attach(instanceId: string, _instancePath: string) { return { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' }; },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
+    async listSkills(_instancePath: string, _session?: TopicSession) {
+      return [
+        { name: 'find-skills', description: 'Discover and install agent skills' },
+        { name: 'pdf-tools', description: 'Read and manipulate PDF documents' },
+      ];
+    },
     async modelPresets(_session: TopicSession, _name?: string): Promise<string> { throw new Error('No model preset host configured in the Telegram fixture'); },
     getSessionLimit() { return sessionLimit; },
     increaseSessionLimit(expectedLimit: number) {
@@ -233,8 +244,13 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       message: { date: Math.floor(Date.now() / 1000), chat: group, from: me, ...message, message_id: message.message_id },
     } } as Parameters<typeof bot.handleUpdate>[0]);
   }
+  async function inlineQuery(query: string, from = user) {
+    await bot.handleUpdate({ update_id: ++updateId, inline_query: {
+      id: String(updateId), from, query, offset: '', chat_type: 'supergroup',
+    } } as Parameters<typeof bot.handleUpdate>[0]);
+  }
   return {
-    url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback,
+    url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics,
     setMember(value: boolean) { member = value; },
     setCurrentMember(value: { username?: string; is_bot?: boolean; status?: 'administrator' | 'creator' | 'member' }) {
@@ -273,7 +289,7 @@ export async function verifyTelegramFlow() {
       for (const [index, scope] of menuScopes.entries()) {
         const menu = await app.bot.telegram.getMyCommands({ scope });
         const commands = new Set(menu.map(command => command.command));
-        for (const command of ['new', 'p', 'setup', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets']) {
+        for (const command of ['new', 'p', 'setup', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets', 'skills']) {
           assert.ok(commands.has(command), `${scope.type} must advertise /${command} in ${mode} mode`);
         }
         for (const command of previous?.[index] ?? []) {

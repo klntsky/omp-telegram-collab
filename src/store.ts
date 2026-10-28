@@ -6,6 +6,7 @@ import type { TopicKey, TopicSession } from '../shared/contracts.js';
 import type { ImageContent } from '@oh-my-pi/pi-wire';
 
 type Row = Record<string, string | number | null>;
+export type PendingSkillKey = TopicKey & { userId: number };
 export interface SetupRequest {
   code: string;
   botId: number;
@@ -40,12 +41,23 @@ export class Store {
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
+      CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       COMMIT;`);
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
   listGroups(botId: number): number[] { return this.db.prepare('SELECT chat_id FROM groups WHERE bot_id=? ORDER BY chat_id').all(botId).map(row => Number(row.chat_id)); }
+  getPendingSkills(key: PendingSkillKey): string[] {
+    return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.chatId, key.threadId, key.userId).map(row => String(row.name));
+  }
+  addPendingSkill(key: PendingSkillKey, name: string): string[] {
+    this.db.prepare('INSERT OR IGNORE INTO pending_skills VALUES (?,?,?,?,?)').run(key.botId, key.chatId, key.threadId, key.userId, name);
+    return this.getPendingSkills(key);
+  }
+  clearPendingSkills(key: PendingSkillKey): void {
+    this.db.prepare('DELETE FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=?').run(key.botId, key.chatId, key.threadId, key.userId);
+  }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
   getTopic(key: TopicKey): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.chatId, key.threadId) as Row | undefined); }
   createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[]): TopicSession {

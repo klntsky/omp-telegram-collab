@@ -14,6 +14,13 @@ export default async function hostLifecycle(pi) {
   let commandTail;
   let findScopedSettings;
   let settingsError;
+  let getActiveSkills;
+  let skillsError;
+  try {
+    ({ getActiveSkills } = await import('@oh-my-pi/pi-coding-agent/extensibility/skills'));
+  } catch (error) {
+    skillsError = error;
+  }
   // Native module exports depend on the installed OMP host and can be absent on older hosts.
   try {
     ({ findScopedSettings } = await import('@oh-my-pi/pi-coding-agent/config/settings'));
@@ -189,7 +196,7 @@ export default async function hostLifecycle(pi) {
           };
           try {
             request = JSON.parse(input.trim());
-            if (!request || request.type !== 'model_presets' || typeof request.requestId !== 'string' ||
+            if (!request || !['model_presets', 'list_skills'].includes(request.type) || typeof request.requestId !== 'string' ||
                 request.requestId.length > 128 || typeof request.sessionId !== 'string' ||
                 (request.name !== undefined && typeof request.name !== 'string') ||
                 !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000) {
@@ -205,6 +212,12 @@ export default async function hostLifecycle(pi) {
           socket.once('close', () => clearTimeout(commandTimeout));
           const operation = (commandTail ?? Promise.resolve()).then(() => {
             if (socket.destroyed) throw new Error('OMP model preset request disconnected before execution');
+            if (request.type === 'list_skills') {
+              assertAvailable(request);
+              if (skillsError) throw skillsError;
+              if (typeof getActiveSkills !== 'function') throw new Error('OMP host skill discovery is unavailable');
+              return JSON.stringify(getActiveSkills().map(skill => ({ name: skill.name, description: skill.description ?? '' })));
+            }
             return runPresets(request);
           });
           commandTail = operation.then(() => {}, () => {});
@@ -230,6 +243,7 @@ export default async function hostLifecycle(pi) {
         sessionId: context.sessionManager.getSessionId(),
         socketPath,
         modelPresets: 2,
+        skills: true,
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();

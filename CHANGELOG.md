@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `/skills` with accumulating, persisted per-bot/chat/topic/user selections, `/skills clear`, ordinary skill buttons, and optional topic-bound inline search with a ten-minute picker context. Prefix the next accepted prompt or frozen proposal with `/skill:name` text references, including General `/p` and `/new` initial tasks, while preserving supported images and reply quotes; native skill-template expansion is not implemented.
+- Register normalized `/skill_` aliases in group-scoped command menus, retaining exact canonical skill names in prompt references and `/skills` access for menu overflow or collisions. Refresh changed menus at startup and on the 60-second scheduler through cached, single-flight catalog discovery with failure cooldowns; preserve menus and original diagnostics on refresh failure without blocking startup. Validate managed sessions against their loaded catalogs, require an explicit safe restart for older unsupported hosts, and use assigned instance settings for attached-host discovery without reloading OMP.
+- Compose image albums into one authorized prompt or proposal with all supported images, ordered captions, and a single pending-skill selection; forward the full album when it creates a topic.
 - Capture managed OMP terminal output in private, bounded per-session rotating logs; retain original startup errors and include the diagnostic file location without exposing terminal session content in Telegram.
 - Add admin-only `/terminate` as a persisted service-wide safety break: kill all session agents, invalidate pending work and Mini App access, keep Telegram online, and resume only after the configuration flag is removed. Check configuration metadata before dispatch without reparsing unchanged YAML.
 - Forward the replied-to message into topics created by `/new` or `/p`, before the original task and after the pinned session entry, including media-only replies without duplicating OMP submission.

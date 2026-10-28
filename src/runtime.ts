@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createConnection } from 'node:net';
@@ -47,7 +47,7 @@ interface ManagedHost {
 }
 
 interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
-interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2 }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -182,6 +182,13 @@ export class OmpRuntime {
   readonly #managed = new Map<string, ManagedHost | null>();
   readonly #stopping = new Map<string, Promise<void>>();
   readonly #killing = new Map<string, Promise<void>>();
+  readonly #skillProcesses = new Set<ChildProcess>();
+  readonly #skillCatalogs = new Map<string, {
+    expiresAt: number;
+    catalog?: Array<{ name: string; description: string }>;
+    error?: unknown;
+  }>();
+  readonly #skillDiscovery = new Map<string, Promise<Array<{ name: string; description: string }>>>();
   #closed = false;
   #closing?: Promise<void>;
   #lock?: DatabaseSync;
@@ -425,6 +432,172 @@ export class OmpRuntime {
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
     return Object.keys(presets).filter(name => presets[name] !== null && presets[name] !== undefined).sort((a, b) => a.localeCompare(b));
   }
+  async listSkills(instancePath: string, session?: TopicSession): Promise<Array<{ name: string; description: string }>> {
+    this.#assertActive();
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
+    if (await realpath(instancePath) !== instancePath) throw new Error('Instance path identity changed');
+    if (session && session.instancePath !== instancePath) throw new Error('Session does not belong to this instance path');
+    let values: unknown;
+    if (session?.runtime.kind === 'managed' && await this.isRunning(session)) {
+      if (!(await this.#lifecycle(session.id))?.skills) {
+        throw new Error('OMP host does not support skill discovery. Kill this managed host and send a new prompt to load the updated lifecycle extension.');
+      }
+      values = JSON.parse(await this.#hostControl(session, undefined, 'list_skills'));
+    } else {
+      values = await this.#cachedSkills(instancePath);
+    }
+    if (!Array.isArray(values) || values.some(value => !record(value) || typeof value.name !== 'string' || !value.name || typeof value.description !== 'string')) {
+      throw new Error('OMP returned an invalid skill catalog');
+    }
+    this.#assertActive();
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
+    return (values as Array<{ name: string; description: string }>)
+      .map(value => ({ name: value.name, description: value.description }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async #cachedSkills(instancePath: string): Promise<Array<{ name: string; description: string }>> {
+    this.#assertActive();
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
+    const cached = this.#skillCatalogs.get(instancePath);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.#skillCatalogs.delete(instancePath);
+      this.#skillCatalogs.set(instancePath, cached);
+      if (cached.catalog) return cached.catalog;
+      throw cached.error;
+    }
+    const pending = this.#skillDiscovery.get(instancePath);
+    if (pending) return pending;
+    const discovery = this.#discoverSkills(instancePath).then(catalog => {
+      if (catalog.some(value => !value.name)) throw new Error('OMP returned an invalid skill catalog');
+      this.#rememberSkills(instancePath, { catalog, expiresAt: Date.now() + 5 * 60_000 });
+      return catalog;
+    }).catch((error: unknown) => {
+      this.#rememberSkills(instancePath, { error, expiresAt: Date.now() + 30_000 });
+      throw error;
+    }).finally(() => {
+      this.#skillDiscovery.delete(instancePath);
+    });
+    this.#skillDiscovery.set(instancePath, discovery);
+    return discovery;
+  }
+
+  #rememberSkills(instancePath: string, entry: {
+    expiresAt: number;
+    catalog?: Array<{ name: string; description: string }>;
+    error?: unknown;
+  }): void {
+    if (this.#closed || !Object.hasOwn(this.#config.instances, instancePath)) return;
+    this.#skillCatalogs.delete(instancePath);
+    this.#skillCatalogs.set(instancePath, entry);
+    while (this.#skillCatalogs.size > 128) {
+      this.#skillCatalogs.delete(this.#skillCatalogs.keys().next().value!);
+    }
+  }
+
+  async #discoverSkills(instancePath: string): Promise<Array<{ name: string; description: string }>> {
+    const args = ompArguments(this.#config.omp.args);
+    for (const arg of args) {
+      if (!arg.flag.startsWith('-') || ['--', '--alias', '--prewalk', '--prewalk-into', '--plan', '--plan-yolo', '--plan-yolo-into'].includes(arg.flag)) {
+        throw new Error(`OMP argument ${arg.flag} conflicts with turn-free skill discovery`);
+      }
+    }
+    const directory = await mkdtemp(path.join(tmpdir(), 'omp-tg-skills-'));
+    let child: ChildProcess | undefined;
+    let exited: Promise<void> | undefined;
+    try {
+      const config = path.join(directory, 'discovery.yml');
+      await privateFile(config, JSON.stringify({
+        collab: { autoStart: 'off' },
+        startup: { checkUpdate: false, setupWizard: false },
+        skills: { enableSkillCommands: true },
+      }));
+      this.#assertActive();
+      if (this.#closed) throw new Error('OMP runtime is stopping');
+      child = spawn(this.#config.omp.executable, [
+        ...this.#config.omp.args, '--cwd', instancePath, '--config', config,
+        '--mode', 'rpc', '--no-session', '--no-title',
+      ], { cwd: instancePath, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+      this.#skillProcesses.add(child);
+      const processHandle = child;
+      const closed = Promise.withResolvers<void>();
+      processHandle.once('close', () => closed.resolve());
+      exited = closed.promise;
+      const requestId = randomUUID();
+      const { promise, resolve, reject } = Promise.withResolvers<Array<{ name: string; description: string }>>();
+        let input = '';
+        let stderr = '';
+        let bytes = 0;
+        let settled = false;
+        const finish = (error?: Error, commands?: Array<{ name: string; description: string }>) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error) {
+            if (stderr) error.message += `\n${stderr}`;
+            reject(error);
+          } else resolve(commands!);
+        };
+        const timer = setTimeout(() => finish(new Error('OMP skill discovery timed out')), this.#config.omp.startupTimeoutMs);
+        processHandle.once('error', error => finish(error));
+        processHandle.once('close', (code, signal) => finish(new Error(`OMP skill discovery exited before responding (code ${code}, signal ${signal})`)));
+        processHandle.stderr!.setEncoding('utf8');
+        processHandle.stderr!.on('data', (part: string) => {
+          if (settled) return;
+          stderr += part;
+          if (Buffer.byteLength(stderr) > 2 * 1024 * 1024) finish(new Error('OMP skill discovery diagnostics are too large'));
+        });
+        processHandle.stdout!.setEncoding('utf8');
+        processHandle.stdout!.on('data', (part: string) => {
+          if (settled) return;
+          bytes += Buffer.byteLength(part);
+          if (bytes > 2 * 1024 * 1024) { finish(new Error('OMP skill discovery response is too large')); return; }
+          input += part;
+          let newline;
+          while ((newline = input.indexOf('\n')) !== -1) {
+            const line = input.slice(0, newline);
+            input = input.slice(newline + 1);
+            if (!line.trim()) continue;
+            try {
+              const response: unknown = JSON.parse(line);
+              if (!record(response) || response.id !== requestId) continue;
+              if (response.success !== true) throw new Error(typeof response.error === 'string' ? response.error : JSON.stringify(response));
+              if (!record(response.data) || !Array.isArray(response.data.commands)) throw new Error('Invalid OMP available commands response');
+              const commands = response.data.commands.filter((command: unknown) => record(command) && command.source === 'skill');
+              finish(undefined, commands.map((command: Record<string, unknown>) => {
+                if (typeof command.name !== 'string' || !command.name.startsWith('skill:')) throw new Error('Invalid OMP skill command name');
+                return { name: command.name.slice(6), description: typeof command.description === 'string' ? command.description : '' };
+              }));
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error(String(error)));
+            }
+          }
+        });
+        processHandle.stdin!.on('error', error => finish(error));
+        processHandle.stdin!.write(`${JSON.stringify({ id: requestId, type: 'get_available_commands' })}\n`);
+      return await promise;
+    } finally {
+      if (child) {
+        this.#killSkillProcess(child);
+        await exited;
+        this.#skillProcesses.delete(child);
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  #killSkillProcess(child: ChildProcess): void {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+    try {
+      if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
+      else child.kill('SIGKILL');
+    } catch (error) {
+      if (!errno(error, 'ESRCH')) throw error;
+    }
+  }
 
   async #presetLaunch(session: TopicSession): Promise<{ overlay: Record<string, unknown>; args: string[]; preset?: string }> {
     const assigned = findInstance(this.#config, session.botId, session.chatId);
@@ -468,6 +641,10 @@ export class OmpRuntime {
   }
 
   async modelPresets(session: TopicSession, name?: string): Promise<string> {
+    return this.#hostControl(session, name, 'model_presets');
+  }
+
+  async #hostControl(session: TopicSession, name: string | undefined, type: 'model_presets' | 'list_skills'): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') {
       throw new Error('Model preset control is unavailable for attached OMP hosts. Use a managed topic session or run /modelpreset in the attached host.');
@@ -507,7 +684,7 @@ export class OmpRuntime {
       }
       await validate();
       const requestId = randomUUID();
-      const request = `${JSON.stringify({ type: 'model_presets', requestId, sessionId: binding.sessionId, name, deadline })}\n`;
+      const request = `${JSON.stringify({ type, requestId, sessionId: binding.sessionId, name, deadline })}\n`;
       if (Buffer.byteLength(request) > 16384) throw new Error('Model preset request is too large');
       const { promise, resolve, reject } = Promise.withResolvers<string>();
       const socket = createConnection(lifecycle.socketPath);
@@ -623,6 +800,9 @@ export class OmpRuntime {
     this.#closed = true;
     clearInterval(this.#idleTimer);
     this.#closing = (async () => {
+      for (const child of this.#skillProcesses) this.#killSkillProcess(child);
+      await Promise.allSettled(this.#skillDiscovery.values());
+      this.#skillCatalogs.clear();
       await Promise.allSettled(this.#pending.values());
       await Promise.allSettled(this.#killing.values());
       await this.#acquiring?.catch(() => undefined);

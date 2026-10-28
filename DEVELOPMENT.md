@@ -24,6 +24,13 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
 
 4. Put the HTTP service behind an HTTPS reverse proxy. Forward WebSocket upgrades for `/api/socket`. Keep the loopback bind address if the proxy runs on the same machine. Telegram uses long polling, so no webhook is needed.
 5. In BotFather, use `/newapp` to create a direct-link Mini App. Match the short name configured above. Set its web URL to the per-bot URL printed at startup, such as `https://your-host.example/?bot=YOUR_NUMERIC_BOT_ID`.
+
+   Optionally enable inline mode for this bot with BotFather's `/setinline` to use Search in the `/skills` picker. Choose a search placeholder when prompted. Inline mode is not required: the picker's normal skill buttons remain available without it. Inline search is bound to the user and topic that opened the picker and expires after ten minutes; reopening `/skills` refreshes the search context without clearing persisted pending selections.
+
+   Skill aliases are registered in group-scoped command menus at startup and refreshed by a 60-second scheduler. Only changed menus are written. Catalog discovery is cached for five minutes per project instance, with concurrent requests sharing one discovery and a 30-second cooldown after failure. Refresh failures log the original diagnostics, preserve existing menus, and do not block bot startup; new groups retain built-in commands. Telegram's 100-command menu limit includes built-ins, so use `/skills` for overflow skills or alias collisions.
+
+   Managed sessions use their loaded skill catalogs; discovery does not reload them or restart active hosts automatically. Older managed hosts without skill-lifecycle support report that a host restart is required. Only when it is safe to interrupt the host, use `/kill`, then submit a prompt to start it again. Attached-host discovery uses the assigned instance settings, not terminal-private loaded skills.
+
 6. Create a Telegram supergroup with Topics enabled. Give the bot Manage Topics and Pin Messages permissions.
 7. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
 

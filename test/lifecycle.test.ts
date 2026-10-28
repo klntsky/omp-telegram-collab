@@ -54,6 +54,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     async isRunning() { return false; },
     async attach(): Promise<never> { throw new Error('No host attachment expected in lifecycle check'); },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
+    async listSkills() { return []; },
     async modelPresets(): Promise<never> { throw new Error('No model preset command expected in lifecycle check'); },
     getSessionLimit() { return 5; },
     increaseSessionLimit() { return false; },
