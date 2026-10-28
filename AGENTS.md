@@ -7,3 +7,9 @@
 - Keep test fixtures isolated per case. Prefer in-memory SQLite unless the scenario verifies disk persistence or restart behavior, and run test files with concurrency five.
 - Use straightforward numbered lists starting at 1 in user-facing responses. Use 1.1, 1.2, and similar numbering when grouping is necessary.
 - Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.
+- Do not add temporary scripts, verification artifacts, or scratch files to `.gitignore`. Keep them outside the checkout or delete them when finished.
+- Keep README.md focused on a brief product introduction and useful features. Link to the other documents instead of including setup instructions or detailed requirements.
+- Keep current observable behavior and user-facing requirements in PRODUCT.md. Use meaningful numbered sections and bullets. Remove superseded requirements when behavior changes.
+- Keep ARCHITECTURE.md focused on component responsibilities, state and side-effect ownership, dependency direction, and process and trust boundaries. Explain which boundary enforces each guarantee. Keep algorithms, schema versions, field layouts, constants, file inventories, and implementation steps in code.
+- Keep setup, configuration, local execution, credentials, build and test commands, debugging, and deployment operations in DEVELOPMENT.md. Keep test scenarios and coverage descriptions in test source, not Markdown.
+- Keep agent instructions and workflow rules in AGENTS.md. Do not duplicate product requirements in ARCHITECTURE.md or DEVELOPMENT.md; link to PRODUCT.md for context. Update the appropriate document whenever its contract changes, and remove obsolete text and references.

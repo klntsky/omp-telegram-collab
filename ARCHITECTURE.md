@@ -1,0 +1,45 @@
+# Architecture
+
+This document describes ownership and boundaries. User-visible requirements belong in [Product](PRODUCT.md). Setup and operational commands belong in [Development](DEVELOPMENT.md).
+
+## Service composition
+
+The CLI owns configuration management and starts the service. The running service composes Telegram bot adapters, persistent session storage, the OMP runtime manager, and the HTTP and WebSocket gateway. Bot adapters and the gateway share the runtime and session store, so Telegram and Mini App clients reach the same OMP conversation rather than maintaining independent agent state.
+
+Configuration is the authority for project directories, bot identities, chat assignments, admins, and service settings. Runtime storage cannot create authorization by overriding configuration. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
+
+## Telegram integration
+
+Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
+
+The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
+
+## OMP execution and lifecycle
+
+The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.
+
+OMP owns agent execution, conversation history, interactive questions, and live Collab state. The service connects as a Collab guest. It does not reconstruct an independent conversation from Telegram messages. Shared contracts describe communication between the service components and clients; they do not move execution authority into the browser.
+
+The runtime uses OMP's guarded lifecycle boundary for idle retirement. Explicit force termination has a different boundary: the runtime must verify the intended process identity before signaling it. A database lock excludes another service from managing the same runtime data concurrently.
+
+## Durable and temporary state
+
+The configuration layer owns validated, atomic updates to the protected YAML file. The session store owns durable Telegram topic mappings, enrollment state, session generations, and recorded session metadata. OMP owns history files. Runtime bindings connect a Telegram session to its verified OMP identity and history rather than selecting whichever host happens to occupy a process identifier.
+
+Bot adapters own temporary proposals and pending Telegram interactions. The gateway owns temporary connection tickets. The browser owns its local draft and rendered transcript. None of those temporary states can replace durable authorization or process identity.
+
+## Gateway and browser
+
+The HTTP gateway serves the Mini App and authenticates Telegram launch data. Its ticket boundary authorizes entry to the WebSocket transport. The WebSocket gateway separately checks session authorization and mediates Collab frames; loading the page alone does not grant host access.
+
+The gateway keeps upstream room credentials on the server. It checks current group membership and configuration assignments before admitting access and before forwarding output batches. Session generations connect persisted invalidation to ticket issuance, connection upgrades, and host admission. Rechecking after asynchronous authorization prevents an earlier decision from authorizing a session that changed while the request was pending.
+
+The Mini App owns presentation and client reconnection. It requests fresh authorization through the gateway rather than holding upstream host capabilities. Its transcript and draft are presentation state, not evidence that an instruction executed. The transport must not turn a reconnect into prompt replay.
+
+## Trust boundaries
+
+Telegram's signature establishes the caller's numeric identity and launch context. Current membership and configured usernames determine the permissions enforced by the bot and gateway. Those checks protect access through this service; they cannot revoke an independently distributed OMP Collab capability.
+
+The operating-system account is the filesystem and credential boundary. Project directories, chat assignments, and admin lists organize access inside the application but do not sandbox OMP processes. Isolation between mutually untrusted users requires an account or container boundary outside the application.
+
+The reverse proxy provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.
