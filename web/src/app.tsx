@@ -40,7 +40,10 @@ export function App(): ReactNode {
 			const authorized = await authorizeSession(launch, controller.signal);
 			if (attempt !== attemptRef.current) return;
 			const next = new GuestClient(
-				new GatewaySocket(authorized.ticket),
+				new GatewaySocket(authorized.ticket, async signal => {
+					const refreshed = await authorizeSession(launch, signal, authorized.generation);
+					return refreshed.ticket;
+				}),
 				authorized.displayName,
 				authorized.session.status === "closed",
 			);

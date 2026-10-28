@@ -6,3 +6,4 @@
 - This project is unpublished. Keep a single current schema and configuration format; collapse migrations and remove legacy compatibility paths rather than retaining shims or automatic imports.
 - Keep test fixtures isolated per case. Prefer in-memory SQLite unless the scenario verifies disk persistence or restart behavior, and run test files with concurrency five.
 - Use straightforward numbered lists starting at 1 in user-facing responses. Use 1.1, 1.2, and similar numbering when grouping is necessary.
+- Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.

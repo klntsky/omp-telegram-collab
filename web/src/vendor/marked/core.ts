@@ -5,8 +5,8 @@ import {
 	escapedAt,
 	InlineClosers,
 	PUNCTUATION,
-} from "./inline-closers";
-import { TextRun, TextStops } from "./inline-text";
+} from "./inline-closers.js";
+import { TextRun, TextStops } from "./inline-text.js";
 
 /** Token shapes emitted by the Markdown lexer. */
 export namespace Tokens {
@@ -1032,7 +1032,7 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			let raw = line;
 			let text = "";
 			i++;
-			const closer = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)$`);
+			const closer = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\r?\\n|$)$`);
 			while (i < lines.length) {
 				const next = lines[i++]!;
 				if (closer.test(next)) {

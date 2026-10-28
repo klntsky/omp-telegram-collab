@@ -7,3 +7,4 @@ web/dist/
 .omp-telegram/
 .data/
 *.log
+.menu-verify.ts

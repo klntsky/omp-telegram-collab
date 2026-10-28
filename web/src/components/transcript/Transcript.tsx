@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
+import type { AssistantMessage, SessionEntry, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -6,6 +6,7 @@ import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown, StreamingMarkdown } from "./Markdown";
+import { MessageContent, MetadataDisclosure } from "./MessageContent";
 import { ToolCard } from "./ToolCard";
 import "./transcript.css";
 
@@ -74,32 +75,6 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 			</button>
 			{open && <div className="tr-think-body">{redacted ? "(redacted by provider)" : text}</div>}
 		</div>
-	);
-}
-
-/** Markdown + image thumbnails for user / custom message content. */
-function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
-	if (typeof content === "string") return <Markdown text={content} />;
-	return (
-		<>
-			{content.map((block, i) => {
-				switch (block.type) {
-					case "text":
-						return <Markdown key={i} text={block.text} />;
-					case "image":
-						return (
-							<img
-								key={i}
-								className="tr-msg-img"
-								src={`data:${block.mimeType};base64,${block.data}`}
-								alt="attachment"
-							/>
-						);
-					default:
-						return null;
-				}
-			})}
-		</>
 	);
 }
 
@@ -192,7 +167,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 				case "user":
 					return (
 						<Row kind="user" gutter="host" title={entry.timestamp}>
-							<MsgContent content={msg.content} />
+							<MessageContent content={msg.content} />
 						</Row>
 					);
 				case "assistant":
@@ -207,6 +182,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 			}
 		}
 		case "custom_message": {
+			if (!entry.display) return null;
 			if (entry.customType === "collab-prompt") {
 				const details = entry.details;
 				const from =
@@ -217,17 +193,15 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 						: "guest";
 				return (
 					<Row kind="user" gutter={<span className="tr-badge">{from}</span>} title={entry.timestamp}>
-						<MsgContent content={entry.content} />
+						<MessageContent content={entry.content} />
 					</Row>
 				);
 			}
-			if (!entry.display) return null;
 			return (
 				<Row kind="custom" gutter="" title={entry.timestamp}>
-					<div className="tr-custom">
-						<span className="tr-chip">{entry.customType}</span>
-						<MsgContent content={entry.content} />
-					</div>
+					<MetadataDisclosure label={entry.customType}>
+						<MessageContent content={entry.content} collapseMetadata={false} />
+					</MetadataDisclosure>
 				</Row>
 			);
 		}

@@ -95,7 +95,7 @@ export const HeaderBar = memo(function HeaderBar({
 								className={p.role === "host" ? "sh-avatar sh-avatar-host" : "sh-avatar"}
 								title={`${p.name} · ${p.role}${p.readOnly ? " · view-only" : ""}`}
 							>
-								{(p.name[0] ?? "?").toUpperCase()}
+								{(p.name[p.name.startsWith("@") ? 1 : 0] ?? "?").toUpperCase()}
 							</span>
 						))}
 					</span>

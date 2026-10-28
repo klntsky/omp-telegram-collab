@@ -26,6 +26,7 @@ import type {
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
 import type { GuestTransport } from "./socket";
+import { miniAppInterruptionAuthor } from "../../../shared/interruption";
 
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
 
@@ -179,12 +180,7 @@ export class GuestClient {
 			this.#commit();
 		}
 		this.#socket.connect();
-		if (!this.#welcomed && this.#welcomeTimer === null) {
-			this.#welcomeTimer = setTimeout(() => {
-				this.#welcomeTimer = null;
-				if (!this.#welcomed) this.#end("timed out waiting for the host's welcome");
-			}, WELCOME_TIMEOUT_MS);
-		}
+		if (!this.#welcomed) this.#armWelcomeTimer();
 	}
 
 	close(): void {
@@ -256,15 +252,18 @@ export class GuestClient {
 	}
 
 	#handleOpen(): void {
-		this.#phase = "waiting";
+		this.#phase = this.#header ? "reconnecting" : "waiting";
+		this.#armWelcomeTimer();
 		this.#commit();
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
+		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
+			this.#welcomed = false;
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;
 			this.#commit();
@@ -290,6 +289,14 @@ export class GuestClient {
 		this.#socket.close();
 	}
 
+	#armWelcomeTimer(): void {
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(() => {
+			this.#welcomeTimer = null;
+			this.#socket.reconnect("Timed out waiting for the host. Reconnecting…");
+		}, WELCOME_TIMEOUT_MS);
+	}
+
 	#clearWelcomeTimer(): void {
 		if (this.#welcomeTimer !== null) {
 			clearTimeout(this.#welcomeTimer);
@@ -301,7 +308,7 @@ export class GuestClient {
 		this.#clearSnapshotProgressTimer();
 		this.#snapshotProgressTimer = setTimeout(() => {
 			this.#snapshotProgressTimer = null;
-			this.#end("timed out waiting for the host's session snapshot");
+			this.#socket.reconnect("Timed out waiting for the session snapshot. Reconnecting…");
 		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
 	}
 
@@ -564,6 +571,17 @@ export class GuestClient {
 				this.#working = false;
 				break;
 			case "notice":
+				if (miniAppInterruptionAuthor(event)) {
+					this.#working = false;
+					this.#activeTools = new Map();
+					if (this.#state) {
+						this.#state = { ...this.#state, isStreaming: false, isAborting: false, queuedMessageCount: 0 };
+					}
+					if (this.#stream && !this.#streamDone) {
+						this.#stream = { ...this.#stream, stopReason: "aborted" };
+						this.#streamDone = true;
+					}
+				}
 				this.#pushNotice(event.level, event.message);
 				break;
 			case "auto_retry_start":

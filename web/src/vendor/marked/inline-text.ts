@@ -2,7 +2,7 @@
  * The plain-text step of inline lexing over one inline source: where text can end ({@link TextStops}, which also
  * tells the bare-URL rule where it can match) and how it is appended ({@link TextRun}).
  */
-import type { Lexer, Token, TokenizerExtension, TokenizerStartFromFunction, Tokens } from "./core";
+import type { Lexer, Token, TokenizerExtension, TokenizerStartFromFunction, Tokens } from "./core.js";
 
 // Where plain text can end: the characters that start other inline tokens, and
 // the scheme alternatives of the bare-URL rule. Global so a search can resume

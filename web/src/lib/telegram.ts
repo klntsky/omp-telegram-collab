@@ -28,8 +28,11 @@ export interface TelegramLaunch {
 export interface AuthorizedSession {
 	session: { id: string; name: string; status: "open" | "closed" };
 	ticket: string;
+	generation: number;
 	displayName: string;
 }
+
+export class SessionAccessError extends Error {}
 
 export function readTelegramLaunch(): TelegramLaunch {
 	const app = window.Telegram?.WebApp;
@@ -48,7 +51,7 @@ export function readTelegramLaunch(): TelegramLaunch {
 	return { botId, sessionId: startParam.slice(2), initData: app.initData };
 }
 
-export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal): Promise<AuthorizedSession> {
+export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number): Promise<AuthorizedSession> {
 	let response: Response;
 	try {
 		response = await fetch("/api/session", {
@@ -56,17 +59,18 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 			headers: { "Content-Type": "application/json" },
 			credentials: "same-origin",
 			cache: "no-store",
-			body: JSON.stringify(launch),
+			body: JSON.stringify({ ...launch, generation }),
 			signal,
 		});
 	} catch {
 		throw new Error("Could not reach the session service. Check your connection and Retry.");
 	}
 	if (!response.ok) {
+		if (response.status === 409) throw new SessionAccessError("This session was killed. Select Rejoin or reopen the topic’s Open Session button to resume explicitly.");
 		if (response.status === 401 || response.status === 403) {
-			throw new Error("Telegram authentication expired or access was denied. Reopen the topic’s Open Session button and confirm you are still a group member.");
+			throw new SessionAccessError("Telegram authentication expired or access was denied. Reopen the topic’s Open Session button and confirm you are still a group member.");
 		}
-		if (response.status === 404) throw new Error("This topic’s session is unavailable. Reopen its Open Session button in Telegram.");
+		if (response.status === 404) throw new SessionAccessError("This topic’s session is unavailable. Reopen its Open Session button in Telegram.");
 		throw new Error("The session service is unavailable. Retry in a moment.");
 	}
 	let data: unknown;
@@ -81,6 +85,7 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		!result.session || result.session.id !== launch.sessionId || typeof result.session.name !== "string" ||
 		(result.session.status !== "open" && result.session.status !== "closed") ||
 		typeof result.ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(result.ticket) ||
+		typeof result.generation !== "number" || !Number.isSafeInteger(result.generation) || result.generation < 0 ||
 		typeof result.displayName !== "string" || !result.displayName
 	) {
 		throw new Error("Invalid session response. Retry in a moment.");
