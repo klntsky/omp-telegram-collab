@@ -41,7 +41,7 @@ Each bot/chat assignment has two settings.
 | `all_messages_are_prompts` | `true` | Session-topic text becomes a prompt. When `false`, only `/p <prompt>` submits text. Mentions and replies do not bypass this setting. |
 | `users_can_propose_prompts` | `false` | Non-admin prompts are ignored. When `true`, a project admin must approve them. Admin prompts run directly. |
 
-`/p` works in either prompt mode, including `/p@YourBot <prompt>`. When sent as a reply, it prepends the replied-to message's text or media caption with `> ` on each line, followed by a blank line and the supplied prompt. Bare `/p` with a text or caption reply submits just the quote. In General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
+`/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
 
 Other commands, forwarded messages, and bot messages are not prompts. Non-admin `/new` requests follow the proposal setting too.
 

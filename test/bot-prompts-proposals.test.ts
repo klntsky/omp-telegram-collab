@@ -95,18 +95,19 @@ test('prompt mode changes require current instance administration and writable c
 });
 
 for (const allMessagesArePrompts of [true, false]) {
-  test(`/p includes replied-to text and captions as greentext with all messages: ${allMessagesArePrompts}`, async () => {
+  for (const command of ['/p', '/new']) {
+  test(`${command} includes replied-to text and captions as greentext with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
       if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
-      await app.update({text:'/p',reply_to_message:{message_id:9000,caption:'Screenshot context\nsecond line'}});
+      await app.update({text:command,reply_to_message:{message_id:9000,caption:'Screenshot context\nsecond line'}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
         {t:'prompt',text:'> Screenshot context\n> second line'},
       ]);
       const session = app.store.listSessions(botId)[0]!;
-      await app.update({text:'/p@FixtureOmpBot Explain this',message_thread_id:session.threadId,
+      await app.update({text:`${command}@FixtureOmpBot Explain this`,message_thread_id:session.threadId,
         reply_to_message:{message_id:9001,text:'Original text\n\n  indented line'}});
       await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
@@ -115,6 +116,7 @@ for (const allMessagesArePrompts of [true, false]) {
       ]);
     } finally { await app.close(); }
   });
+  }
 }
 
 for (const allMessagesArePrompts of [true, false]) {

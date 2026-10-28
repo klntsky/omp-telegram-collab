@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Include replied-to text or captions as greentext context for `/p`, with optional instructions, in either prompt mode and in General.
+- Include replied-to text or captions as greentext context for `/p` and `/new`, with optional instructions, in either prompt mode and in General or topics.
 - Log original Telegram operation errors and include subprocess exit codes, signals, and killed status in failure reports without changing the original diagnostic.
 - Recognize slash commands in media captions without Telegram command entities through the shared text-command dispatch and receipt path; preserve bot targeting, authorization, and original-message forwarding without introducing image-specific handlers.
 - Forward the original new-topic task message below the pinned Open Session entry instead of reposting it with relay attribution; keep initial OMP submission single-shot.

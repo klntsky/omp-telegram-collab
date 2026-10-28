@@ -887,7 +887,7 @@ export class BotService {
       await this.authorize(ctx.chat.id, ctx.from.id);
       const action = command[1]!.toLowerCase();
       let arg = command[3]?.trim() ?? '';
-      if (action === 'p' && 'reply_to_message' in message && message.reply_to_message) {
+      if ((action === 'p' || action === 'new') && 'reply_to_message' in message && message.reply_to_message) {
         const reply = message.reply_to_message;
         const quoted = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
         if (quoted) {
