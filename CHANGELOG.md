@@ -4,6 +4,7 @@
 
 - Forward the original new-topic task message below the pinned Open Session entry instead of reposting it with relay attribution; keep initial OMP submission single-shot.
 - Keep the running topic icon latched from agent start through agent end so idle streaming state snapshots cannot prematurely show a completed checkmark during active work.
+- Create initial-task topics with the lightning icon directly, retain it during host startup, and avoid a stopped flag or idle checkmark before the initial task is admitted.
 - Collapse SQLite initialization into one transaction using the current non-null instance-path schema; remove environment migration, session-path backfill, and obsolete migration fixtures. Use fresh in-memory SQLite for ordinary behavior tests, retain explicit disk persistence coverage, split bot scenarios into seven independently scheduled groups, and cap test-file concurrency at five.
 - Add a per-bot/chat `default_model_preset` saved by instance admins with `/model_preset <name>` in General. List presets in General without starting a host; keep work-topic switches session-owned and reject both commands in conversation-only topics. Apply the current forum default before newly launched or resumed managed hosts accept instructions, overriding restored model/thinking while leaving already-running hosts unchanged.
 - Reject older managed-host preset controls that persist role settings, rather than letting a work-topic switch modify shared OMP configuration. Newly launched hosts expose session-only preset control.

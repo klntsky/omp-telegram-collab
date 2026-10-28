@@ -57,6 +57,7 @@ for (const [source, message] of [
       await app.update({ text: '/setup' });
       await app.update(message);
       const session = app.store.listSessions(botId)[0]!;
+      if (source === '/new') assert.equal(app.createdTopics[0]?.icon_custom_emoji_id,'5312016608254762256');
       if (source === 'manual topic') {
         assert.equal(pinsAtStartup.length,0,'creating an empty topic must not launch a host');
         await app.update({ message_thread_id: session.threadId, text: '@FixtureOmpBot Start coding', entities: [{ type: 'mention', offset: 0, length: 14 }] });

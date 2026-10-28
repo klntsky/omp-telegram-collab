@@ -506,9 +506,11 @@ export class BotService {
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
     const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
-    const topic = await this.bot.telegram.createForumTopic(ctx.chat!.id, title);
+    const initialIcon = task ? (await this.getIconIds()).running : undefined;
+    const topic = await this.bot.telegram.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached ? undefined : task, ctx.from!.id);
+    if (initialIcon) this.options.store.setTopicIcon(session.id,initialIcon);
     if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
     await ctx.reply(`Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
       ...('message_thread_id' in ctx.message! ? { message_thread_id: ctx.message.message_thread_id } : {}),
@@ -518,7 +520,7 @@ export class BotService {
     await this.announce(session);
     if (task && ctx.message) await this.bot.telegram.forwardMessage(
       session.chatId, ctx.chat!.id, ctx.message.message_id, { message_thread_id: session.threadId });
-    await this.setTopicStatus(session, 'stopped');
+    await this.setTopicStatus(session, task ? 'running' : 'stopped');
     await this.listen(session);
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     await this.sendInitial(session);
@@ -1312,7 +1314,7 @@ export class BotService {
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity = listener.activeTurn || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
+      listener.activity = listener.activeTurn || this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
       listener.activeTurn = true;

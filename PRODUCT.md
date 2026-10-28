@@ -65,6 +65,8 @@ Agent questions include the full text and numbered option buttons. Choose Other 
 
 Approval alone does not produce a receipt reaction. Failed or rejected instructions do not get one. A relay disconnect does not mean OMP stopped. The bot checks liveness every 30 seconds and preserves confirmed icons across restarts. Reactions and icon changes depend on Telegram permissions and rate limits.
 
+Topics created with an initial task start with the ⚡ icon directly and retain it during host startup and initial task admission. Empty topics start stopped.
+
 Telegram delivery uses a per-chat queue with at least 3.1 seconds between scheduled operations. Questions and receipts take priority over icon updates. A Telegram `429` pauses delivery for `retry_after`. Ambiguous network failures are not retried automatically.
 
 ### 1.4. Model presets

@@ -32,6 +32,7 @@ async function close(server: Server) {
 }
 export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean } = {}) {
   const messages: Record<string, unknown>[] = [];
+  const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
   const topicEdits: Record<string, unknown>[] = [];
@@ -91,7 +92,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       await delay(20);
       result = [];
     }
-    else if (method === 'createForumTopic') result = { message_thread_id: ++thread, name: params.name, icon_color: 7322096 };
+    else if (method === 'createForumTopic') {
+      createdTopics.push(params);
+      result = { message_thread_id: ++thread, name: params.name, icon_color: 7322096 };
+    }
     else if (method === 'getForumTopicIconStickers') result = [
       { emoji: '⚡️', custom_emoji_id: '5312016608254762256' },
       { emoji: '✅', custom_emoji_id: '5237699328843200968' },
@@ -230,6 +234,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   }
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback,
+    createdTopics,
     setMember(value: boolean) { member = value; },
     setCurrentMember(value: { username?: string; is_bot?: boolean; status?: 'administrator' | 'creator' | 'member' }) {
       currentUser = { ...user, username: value.username, is_bot: value.is_bot ?? false };
@@ -295,6 +300,7 @@ export async function verifyTelegramFlow() {
     assert.deepEqual(app.pins, [{ chat_id: chatId, message_id: button.message_id, disable_notification: true }], 'the Mini App entry is pinned inside its session topic');
     const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
     assert.equal(topicMessages[1]?.forwarded_message_id,7003);
+    assert.equal(app.createdTopics[0]?.icon_custom_emoji_id,'5312016608254762256','initial task topics start with lightning at creation');
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256', 'active turn did not get the running icon');
     app.emit({t:'state',state:{cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]}});
