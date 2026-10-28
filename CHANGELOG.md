@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a per-bot/chat `default_model_preset` saved by instance admins with `/model_preset <name>` in General. List presets in General without starting a host; keep work-topic switches session-owned and reject both commands in conversation-only topics. Apply the current forum default before newly launched or resumed managed hosts accept instructions, overriding restored model/thinking while leaving already-running hosts unchanged.
+- Strictly typecheck tests and TypeScript verification scripts. Verify group-wide and chat-specific command availability across prompt modes instead of pinning an obsolete two-command menu; run compiled CLI, Telegram, gateway, and real OMP smoke stages in isolated subprocesses with independent results and a failing aggregate exit status.
 - Add instance-admin-only `/detach` to persist a conversation-only topic, remove its custom activity icon, cancel session interactions, and invalidate Mini App joins without killing the host or deleting history. Prevent status checks, queued icon writes, reopening, and restarts from restoring activity icons; publish the command in group and chat-specific menus.
 - Treat `/p` in General as `/new` in either prompt mode, including bot-qualified commands and interactive task replies. Publish `/p` in the group and chat-specific menus while retaining existing prompt authorization and proposal approval.
 - Require PM2 `--no-treekill` so service deployment restarts preserve detached OMP hosts instead of aborting accepted tasks, including first prompts in newly created topics.
