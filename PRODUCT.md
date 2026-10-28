@@ -22,6 +22,8 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/setup` | Request enrollment or change an assigned forum's prompt settings. |
 | `/status`, `/help` | Show readiness and command help. |
 
+Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands. Only caption text is submitted to OMP; attached media is not downloaded or sent to the model. Non-command captions are ignored.
+
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
 New session topics get a pinned Open Session message before OMP starts. The bot returns a topic link when `/new` or `/attach` creates a topic. For `/new`, it also forwards the original task below the pin without submitting it twice.

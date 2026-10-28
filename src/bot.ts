@@ -95,6 +95,12 @@ const groupCommands = [
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
+function messageText(message: Context['message']): string | undefined {
+  if (!message) return undefined;
+  if ('text' in message) return message.text;
+  if ('caption' in message && message.caption?.startsWith('/')) return message.caption;
+  return undefined;
+}
 function optionMarker(index: number): string {
   const number = index+1;
   return number === 10 ? '🔟' : String(number).replace(/\d/g, digit => `${digit}\uFE0F\u20E3`);
@@ -167,14 +173,15 @@ export class BotService {
   }
   private async receiveMessage(ctx: Context, interaction = false): Promise<void> {
     const message = ctx.message;
+    const text = messageText(message);
     if (this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
-        !('text' in message) || 'forward_origin' in message || 'forward_date' in message) return;
+        !text || 'forward_origin' in message || 'forward_date' in message) return;
     if (this.receivedMessages.has(ctx)) return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
     if (this.options.store.getTopic({botId:this.id,chatId:ctx.chat.id,threadId:message.message_thread_id ?? 1})?.status === 'detached') return;
-    if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !message.text.startsWith('/')) return;
-    const promptInput = !message.text.startsWith('/') || /^\/(?:new|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(message.text);
+    if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
+    const promptInput = !text.startsWith('/') || /^\/(?:new|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
     if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.instanceAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.telegram.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
@@ -768,7 +775,7 @@ export class BotService {
     if (!message || !ctx.chat) return;
     const topicLifecycle = 'forum_topic_created' in message || 'forum_topic_edited' in message || 'forum_topic_closed' in message || 'forum_topic_reopened' in message;
     if ('forward_origin' in message || 'forward_date' in message || (ctx.from?.is_bot && !topicLifecycle)) return;
-    const text = 'text' in message ? message.text : undefined;
+    const text = messageText(message);
     if (text && !text.startsWith('/') && this.options.store.getTopic({
       botId:this.id,chatId:ctx.chat.id,threadId:message.message_thread_id ?? 1,
     })?.status === 'detached') {

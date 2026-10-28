@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Recognize slash commands in media captions without Telegram command entities through the shared text-command dispatch and receipt path; preserve bot targeting, authorization, and original-message forwarding without introducing image-specific handlers.
 - Forward the original new-topic task message below the pinned Open Session entry instead of reposting it with relay attribution; keep initial OMP submission single-shot.
 - Keep the running topic icon latched from agent start through agent end so idle streaming state snapshots cannot prematurely show a completed checkmark during active work.
 - Create initial-task topics with the lightning icon directly, retain it during host startup, and avoid a stopped flag or idle checkmark before the initial task is admitted.
