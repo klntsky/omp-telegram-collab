@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '../shared/contracts.js';
+import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime, SessionCapacityError } from '../src/runtime.js';
 import { connectCollab } from '../src/collab.js';
 import { startLocalRelay } from './local-relay.js';
@@ -112,7 +113,7 @@ try {
   try {
     await runtime.acquire();
     await runtime.validateSessionPaths(reopenedStore.listSessions());
-    const preserved = reopenedStore.getTopic(session)!;
+    const preserved = reopenedStore.getTopic({botId: session.botId, destination: topicDestination(session.chatId, session.threadId)})!;
     assert.deepEqual(preserved, session);
     assert.equal(reopenedStore.hasPendingInitialTask(session.id), true);
     assert.equal(reopenedStore.isEnrolled(session.botId, session.chatId), true);

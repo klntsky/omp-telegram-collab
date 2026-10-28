@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Separate General and session destinations with an explicit topic type. Centralize outgoing Telegram message routing in an adapter, keep durable-key encoding inside storage, and bind interactive task requests to their source destination.
 - Fix General-topic skill picker, selection confirmations, clearing, new-topic links, and prompt proposals by omitting Telegram's message thread parameter for General; retain explicit routing for session topics.
 - Add instance-admin-only `/set_default_new_topic_skill <exact-skill-name>` in General or session topics to save a per-bot/chat forum default or display it without arguments, and `/unset_default_new_topic_skill` to remove it. Validate exact canonical catalog names without normalization. Snapshot the default for future managed topics across restarts, prefix only their first accepted Telegram task or frozen proposal (including General `/p` and `/new` and any authorized user's first manual-topic task), and deduplicate explicit pending selections without changing existing topics, attached histories, or Mini App composition.
 - Prevent subagent and unstarted lifecycle-extension shutdown handlers from deleting the main host's control descriptor and breaking skill discovery or model-preset controls.

@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { AppConfig, BotConfig, InstanceConfig } from '../shared/contracts.js';
 import { canonicalPath, configWritable, emptyConfig, findInstance, readConfig, writeConfig } from './config.js';
 import { Store } from './store.js';
+import { sendVia } from './telegram-destination.js';
 
 export interface AdminTelegram {
   callApi(method: string, payload: Record<string, unknown>): Promise<unknown>;
@@ -262,7 +263,7 @@ class Administration {
         store.enrollGroup(bot.id, pending.chatId);
         store.consumeSetupRequest(code);
       });
-      await this.call(bot, 'sendMessage', {chat_id: pending.chatId, text: 'Setup approved. This forum is connected to OMP. Create a topic to start a coding session.'});
+      await sendVia(payload => this.call(bot, 'sendMessage', payload), {kind:'general',chatId:pending.chatId}, 'Setup approved. This forum is connected to OMP. Create a topic to start a coding session.');
       this.print(`Approved ${code}: ${path}`);
     } finally { store.close(); }
   }

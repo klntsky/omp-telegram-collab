@@ -160,7 +160,7 @@ for (const allMessagesArePrompts of [true, false]) {
         const session = app.store.listSessions(botId)[0]!;
         assert.notEqual(session.threadId,1);
         assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Create from General'}]);
-        assert.equal(app.store.getTopic({botId,chatId,threadId:1}),undefined);
+        assert.equal(app.store.getTopic({botId,destination:{kind:'general',chatId}}),undefined);
       } finally { await app.close(); }
     });
   }

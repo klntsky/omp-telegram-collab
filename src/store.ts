@@ -3,10 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { TopicKey, TopicSession } from '../shared/contracts.js';
+import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import type { ImageContent } from '@oh-my-pi/pi-wire';
 
 type Row = Record<string, string | number | null>;
-export type PendingSkillKey = TopicKey & { userId: number };
+export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
+function storedThreadId(destination: TopicDestination): number {
+  return destination.kind === 'general' ? 1 : destination.threadId;
+}
 export interface SetupRequest {
   code: string;
   botId: number;
@@ -50,23 +54,27 @@ export class Store {
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
   listGroups(botId: number): number[] { return this.db.prepare('SELECT chat_id FROM groups WHERE bot_id=? ORDER BY chat_id').all(botId).map(row => Number(row.chat_id)); }
   getPendingSkills(key: PendingSkillKey): string[] {
-    return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.chatId, key.threadId, key.userId).map(row => String(row.name));
+    return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId).map(row => String(row.name));
   }
   addPendingSkill(key: PendingSkillKey, name: string): string[] {
-    this.db.prepare('INSERT OR IGNORE INTO pending_skills VALUES (?,?,?,?,?)').run(key.botId, key.chatId, key.threadId, key.userId, name);
+    this.db.prepare('INSERT OR IGNORE INTO pending_skills VALUES (?,?,?,?,?)').run(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId, name);
     return this.getPendingSkills(key);
   }
   clearPendingSkills(key: PendingSkillKey): void {
-    this.db.prepare('DELETE FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=?').run(key.botId, key.chatId, key.threadId, key.userId);
+    this.db.prepare('DELETE FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=?').run(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId);
   }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
-  getTopic(key: TopicKey): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.chatId, key.threadId) as Row | undefined); }
+  getTopic(key: { botId: number; destination: TopicDestination }): TopicSession | undefined {
+    if (key.destination.kind === 'general') return undefined;
+    return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
+  }
   createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[]): TopicSession {
     if (!key.instancePath) throw new Error('A session requires its configured instance path');
+    if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask ?? null, initialTask ? 'pending' : null, key.instancePath);
-      const created = this.getTopic(key)!;
+      const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');
       if (Number(result.changes) && initialTask && initialUserId) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
@@ -149,12 +157,12 @@ export class Store {
   markSnapshot(id: string): void {
     this.db.prepare('INSERT OR IGNORE INTO snapshot_baselines VALUES (?)').run(id);
   }
-  addTaskRequest(botId: number, chatId: number, messageId: number, userId: number, threadId: number): void {
+  addTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): void {
     this.db.prepare('DELETE FROM task_requests WHERE created_at<?').run(Date.now() - 3600000);
-    this.db.prepare('INSERT OR REPLACE INTO task_requests VALUES (?,?,?,?,?,?)').run(botId, chatId, messageId, userId, threadId, Date.now());
+    this.db.prepare('INSERT OR REPLACE INTO task_requests VALUES (?,?,?,?,?,?)').run(botId, destination.chatId, messageId, userId, storedThreadId(destination), Date.now());
   }
-  takeTaskRequest(botId: number, chatId: number, messageId: number, userId: number): boolean {
-    return Number(this.db.prepare('DELETE FROM task_requests WHERE bot_id=? AND chat_id=? AND message_id=? AND user_id=? AND created_at>? RETURNING message_id').get(botId, chatId, messageId, userId, Date.now() - 3600000)?.message_id) === messageId;
+  takeTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): boolean {
+    return Number(this.db.prepare('DELETE FROM task_requests WHERE bot_id=? AND chat_id=? AND thread_id=? AND message_id=? AND user_id=? AND created_at>? RETURNING message_id').get(botId, destination.chatId, storedThreadId(destination), messageId, userId, Date.now() - 3600000)?.message_id) === messageId;
   }
   createSetupRequest(input: Omit<SetupRequest, 'code' | 'expiresAt'>): SetupRequest {
     const request: SetupRequest = { ...input, code: randomBytes(9).toString('base64url'), expiresAt: Date.now() + 600000 };

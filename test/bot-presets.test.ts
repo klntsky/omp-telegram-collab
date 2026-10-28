@@ -46,7 +46,7 @@ for (const command of ['/model_preset Fast','/list_model_presets']) {
       await app.update({text:command,message_thread_id:42});
       await app.update({message_thread_id:42,forum_topic_reopened:{}});
       await app.update({text:'/detach',message_thread_id:42});
-      assert.equal(app.store.getTopic({botId,chatId,threadId:42})?.status,'detached');
+      assert.equal(app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.status,'detached');
       await app.update({text:command,message_thread_id:42});
       assert.equal(app.config.instances[Object.keys(app.config.instances)[0]!]!.chats[0]!.default_model_preset,undefined);
       assert.equal(await app.runtime.isRunning(app.store.listSessions(botId)[0]!),false);

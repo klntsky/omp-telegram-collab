@@ -12,6 +12,7 @@ import { createBot, type BotService } from './bot.js';
 import { createServer, type GatewayServer } from './server.js';
 import { OmpRuntime } from './runtime.js';
 import { runAdmin, notifyReload } from './cli-admin.js';
+import { sendTo } from './telegram-destination.js';
 
 async function notifyGroups(config: AppConfig, bots: BotService[], store: Store, text: string): Promise<void> {
   await Promise.allSettled(bots.map(async bot => {
@@ -19,7 +20,7 @@ async function notifyGroups(config: AppConfig, bots: BotService[], store: Store,
       const controller = new TelegramAbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
       try {
-        await bot.bot.telegram.callApi('sendMessage', { chat_id: chatId, text }, { signal: controller.signal });
+        await sendTo(bot.bot.telegram, {kind:'general',chatId}, text, undefined, {signal:controller.signal});
       } finally { clearTimeout(timeout); }
     }));
   }));

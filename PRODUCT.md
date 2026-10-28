@@ -59,7 +59,7 @@ Proposals show the submitted text for review and execute once after approval. Th
 
 `/skills` opens a picker bound to the requesting user and source topic, including General. Skill buttons work without Telegram inline mode; when inline mode is enabled, Search opens an inline search for that picker. The inline picker context expires after ten minutes; reopen `/skills` to search again. This does not expire the pending selection.
 
-Skill picker replies and confirmations stay in their source topic. General replies omit Telegram's message thread parameter; its internal selection key is not an outbound thread ID.
+Bot messages, skill picker confirmations, and new-topic links stay in their intended destination. General messages do not target an ordinary forum thread; session messages remain in their session topic.
 
 Selections accumulate and persist across service restarts, separately for each bot, chat, topic, and user. A confirmation says “Your next message will mention /skill:name.” `/skills clear` removes that user's pending selection in the current topic. Picking a skill does not submit a prompt.
 

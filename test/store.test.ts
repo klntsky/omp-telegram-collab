@@ -5,10 +5,51 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { emptyConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
+import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
+
+test('General never becomes a session or changes topic history and pending selections', () => {
+  const store = new Store(':memory:');
+  const general = topicDestination(chatId);
+  const destination = topicDestination(chatId, topic.threadId);
+  try {
+    const created = store.createSession(topic, 'Actual topic');
+    store.addPendingSkill({botId,destination:general,userId:42}, 'general-skill');
+    store.addPendingSkill({botId,destination,userId:42}, 'topic-skill');
+    assert.equal(store.getTopic({botId,destination:general}), undefined);
+    assert.equal(store.getTopic({botId,destination})?.id, created.id);
+    assert.throws(() => store.createSession({...topic,threadId:1}, 'General'), /A session requires a non-General topic/);
+    assert.deepEqual(store.listSessions(botId).map(session => session.id), [created.id]);
+    store.clearPendingSkills({botId,destination:general,userId:42});
+    assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
+    assert.equal(store.getTopic({botId,destination})?.id, created.id);
+  } finally {
+    store.close();
+  }
+});
+
+test('task requests match destination, bot, and user before being consumed', () => {
+  const store = new Store(':memory:');
+  const general = topicDestination(chatId);
+  const destination = topicDestination(chatId, topic.threadId);
+  try {
+    store.addTaskRequest(botId, general, 10, 42);
+    assert.equal(store.db.prepare('SELECT thread_id FROM task_requests WHERE message_id=10').get()?.thread_id, 1);
+    assert.equal(store.takeTaskRequest(botId, destination, 10, 42), false);
+    assert.equal(store.takeTaskRequest(botId + 1, general, 10, 42), false);
+    assert.equal(store.takeTaskRequest(botId, general, 10, 43), false);
+    assert.equal(store.takeTaskRequest(botId, general, 10, 42), true);
+    assert.equal(store.takeTaskRequest(botId, general, 10, 42), false);
+    store.addTaskRequest(botId, destination, 11, 42);
+    assert.equal(store.takeTaskRequest(botId, general, 11, 42), false);
+    assert.equal(store.takeTaskRequest(botId, destination, 11, 42), true);
+  } finally {
+    store.close();
+  }
+});
 
 test('disk and in-memory stores reject missing instance paths and orphan reply targets', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-current-schema-'));
@@ -43,7 +84,7 @@ test('topic identity survives a service restart and closing preserves its histor
     const second = new Store(filename);
     try {
       assert.equal(second.isEnrolled(botId, chatId), true);
-      const restored = second.getTopic(topic);
+      const restored = second.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)});
       assert.equal(restored?.id, original.id);
       assert.equal(restored?.status, 'closed');
       assert.equal(restored?.name, 'Authentication complete');
@@ -79,7 +120,7 @@ test('initial images survive reopening storage with their pending task and stay 
     try {
       assert.equal(restored.hasPendingInitialTask(id),true);
       assert.deepEqual(restored.getInitialImages(id),images);
-      const unrelated = restored.getTopic({...topic,threadId:18})!;
+      const unrelated = restored.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, 18)})!;
       assert.equal(restored.getInitialImages(unrelated.id),undefined);
       assert.equal(restored.claimInitialTask(id),'Inspect this');
       assert.equal(restored.claimInitialTask(id),undefined);
@@ -98,9 +139,9 @@ test('one bot and topic tuple cannot acquire two session identities', () => {
     try {
       store.createSession(topic, 'Duplicate service update');
     } catch {
-      assert.equal(store.getTopic(topic)?.id, original.id);
+      assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
     }
-    assert.equal(store.getTopic(topic)?.id, original.id);
+    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
     assert.equal(store.listSessions(botId).length, 1);
     const otherBot = store.createSession({ ...topic, botId: botId + 1 }, 'Other bot');
     const otherChat = store.createSession({ ...topic, chatId: chatId - 1 }, 'Other group');
@@ -164,7 +205,7 @@ test('confirmed topic icons persist exactly across restart and clearing stays is
     store.close();
     store = new Store(filename);
     assert.equal(store.getTopicIcon(target.id), undefined);
-    assert.equal(store.getTopic(topic)?.id, target.id);
+    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, target.id);
     for (const other of others) assert.equal(store.getTopicIcon(other.id), otherIconId);
   } finally {
     store.close();
@@ -214,7 +255,7 @@ test('one path can bind several bots and chats without merging topic identities'
     assert.equal(new Set(sessions.map(session => session.id)).size, 4);
     assert.equal(sessions.filter(session => session.instancePath === '/work/a').length, 3);
     for (const original of sessions) {
-      assert.equal(store.getTopic(original)?.id, original.id);
+      assert.equal(store.getTopic({botId: original.botId, destination: topicDestination(original.chatId, original.threadId)})?.id, original.id);
       const otherPath = original.instancePath === '/work/a' ? '/work/b' : '/work/a';
       assert.throws(() => store.createSession({ ...original, instancePath: otherPath }, 'Retarget'), /history belongs/);
       assert.deepEqual(store.getSession(original.id), original);

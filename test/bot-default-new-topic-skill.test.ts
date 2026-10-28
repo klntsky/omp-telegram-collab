@@ -88,7 +88,7 @@ test('manual topics snapshot the default, deduplicate selections and restore it 
     await seed(app);
     await app.update({text:'/set_default_new_topic_skill find-skills'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Manual topic'}});
-    const manual = app.store.getTopic({botId,chatId,threadId:42})!;
+    const manual = app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})!;
     await app.update({text:'/set_default_new_topic_skill pdf-tools'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Duplicate update'}});
     assert.equal(app.store.getNewTopicSkill(manual.id),'find-skills');
@@ -124,7 +124,7 @@ for (const manual of [false,true]) {
       await app.update({text:'/set_default_new_topic_skill pdf-tools'});
       await app.callback(approve.callback_data,proposal);
       assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'/skill:find-skills\n\nProposed task'});
-      const topic = manual ? app.store.getTopic({botId,chatId,threadId:42})! : app.store.listSessions(botId).find(session=>session.name.includes('Proposed task'))!;
+      const topic = manual ? app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})! : app.store.listSessions(botId).find(session=>session.name.includes('Proposed task'))!;
       await app.update({text:'/p Follow up',message_thread_id:topic.threadId});
       assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'Follow up'});
     } finally { await app.close(); }

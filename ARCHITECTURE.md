@@ -14,6 +14,8 @@ The configuration layer owns the persistent service-termination switch. Telegram
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
 
+Topic destinations distinguish General from ordinary forum topics before business logic or storage access. The inbound Telegram boundary parses message and callback destinations; callers pass that identity rather than a database key. Storage alone encodes destinations into durable lookup keys. The outbound message adapter owns Telegram chat and thread routing for replies, sends, forwards, and service notices; its options exclude routing fields so callers cannot override the destination. Topic-management operations remain separate and require an actual session topic.
+
 The bot adapter normalizes text and media captions before command dispatch. After prompt authorization, it resolves Telegram image files and attaches their bytes to the existing Collab prompt. Approval and initial-task admission own the entire prompt, including images; the session store preserves initial images with their task so recovery does not degrade to text-only delivery.
 
 The adapter groups image-album updates before prompt dispatch and keeps their place in the input queue, so a subsequent skill selection cannot alter an earlier album. The resulting prompt uses the same authorization, proposal, and image-admission boundaries as single-message input.

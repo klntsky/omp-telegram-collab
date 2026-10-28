@@ -5,13 +5,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store, type PendingSkillKey } from '../src/store.js';
 
-const key: PendingSkillKey = { botId: 1, chatId: -100, threadId: 0, userId: 42 };
+const key: PendingSkillKey = { botId: 1, destination: { kind: 'general', chatId: -100 }, userId: 42 };
 
 test('pending skills deduplicate in selection order without requiring a session', () => {
   const store = new Store(':memory:');
   try {
     assert.deepEqual(store.getPendingSkills(key), []);
     assert.deepEqual(store.addPendingSkill(key, 'zebra'), ['zebra']);
+    assert.equal(store.db.prepare('SELECT thread_id FROM pending_skills').get()?.thread_id, 1);
     assert.deepEqual(store.addPendingSkill(key, 'alpha'), ['zebra', 'alpha']);
     assert.deepEqual(store.addPendingSkill(key, 'zebra'), ['zebra', 'alpha']);
     const skills = store.getPendingSkills(key);
@@ -30,8 +31,8 @@ test('pending skills isolate every identity field including General and clear on
   const store = new Store(':memory:');
   const others: PendingSkillKey[] = [
     { ...key, botId: 2 },
-    { ...key, chatId: -200 },
-    { ...key, threadId: 17 },
+    { ...key, destination: { kind: 'general', chatId: -200 } },
+    { ...key, destination: { kind: 'topic', chatId: -100, threadId: 17 } },
     { ...key, userId: 43 },
   ];
   try {
@@ -67,7 +68,7 @@ test('pending skill order and clearing persist across store restarts independent
     try {
       assert.deepEqual(second.getPendingSkills(key), ['zebra', 'alpha']);
       assert.equal(second.getTopic(key), undefined);
-      const session = second.createSession({ ...key, instancePath: '/work/project' }, 'Session');
+      const session = second.createSession({ botId:key.botId, chatId:key.destination.chatId, threadId:17, instancePath:'/work/project' }, 'Session');
       second.updateSession(session.id, { status: 'closed' });
       assert.deepEqual(second.getPendingSkills(key), ['zebra', 'alpha']);
       second.clearPendingSkills(key);

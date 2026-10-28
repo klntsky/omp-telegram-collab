@@ -266,7 +266,7 @@ test('a readable protected configuration starts normally and preserves writable 
   await bot.bot.handleUpdate({ update_id: 99, message: { message_id: 99, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'supergroup', title: 'Lifecycle forum', is_forum: true }, from: { id: 42, is_bot: false, first_name: 'Ada', username: ownerUsername }, message_thread_id: 42, forum_topic_created: { name: 'Protected config topic', icon_color: 7322096 } } });
   const stored = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
   try {
-    assert.equal(stored.getTopic({ botId, chatId, threadId: 42 })?.instancePath, fixture.config.dataDir);
+    assert.equal(stored.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.instancePath, fixture.config.dataDir);
     assert.equal(stored.getSession(fixture.session.id)?.id, fixture.session.id);
   } finally { stored.close(); }
   await assert.rejects(runAdmin(['admin', 'add', fixture.config.dataDir, 'DeniedAdmin'], fixture.config.configPath), /read-only/);

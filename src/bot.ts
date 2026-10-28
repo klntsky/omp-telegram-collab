@@ -13,6 +13,8 @@ import { configWritable, findInstance, readConfig, writeConfig, refreshTerminati
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
+import { topicDestination, sameTopicDestination } from '../shared/topic-destination.js';
+import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 
 export interface RuntimeLike {
@@ -203,7 +205,7 @@ export class BotService {
       : [];
     const prefix = `The operation could not be completed. Check the local service and try again.\n\n${diagnostics.length ? diagnostics.join('\n') + '\n\n' : ''}`;
     const details = error instanceof Error ? error.message : String(error);
-    await ctx.reply(prefix + details, {
+    await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
     }).catch(() => undefined);
   }
@@ -213,7 +215,7 @@ export class BotService {
         !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
         'forward_origin' in message || 'forward_date' in message ||
         !('photo' in message || ('document' in message && message.document.mime_type?.startsWith('image/')))) return false;
-    const key = `${ctx.chat.id}:${message.message_thread_id ?? 1}:${ctx.from.id}:${message.media_group_id}`;
+    const key = `${JSON.stringify(contextDestination(ctx))}:${ctx.from.id}:${message.media_group_id}`;
     let album = this.albums.get(key);
     if (!album) {
       this.queuedUpdates++;
@@ -246,7 +248,7 @@ export class BotService {
     if (this.receivedMessages.has(ctx)) return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
-    if (this.options.store.getTopic({botId:this.id,chatId:ctx.chat.id,threadId:message.message_thread_id ?? 1})?.status === 'detached') return;
+    if (this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)})?.status === 'detached') return;
     if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
     const promptInput = !text.startsWith('/') || /^\/(?:new|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
     if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.instanceAdmin(ctx))) return;
@@ -330,7 +332,7 @@ export class BotService {
       let end = Math.min(offset+4000,message.length);
       if (end < message.length && message.charCodeAt(end-1) >= 0xD800 && message.charCodeAt(end-1) <= 0xDBFF) end--;
       this.requireSessionAssignment(session);
-      await this.bot.telegram.sendMessage(session.chatId,message.slice(offset,end),{message_thread_id:session.threadId});
+      await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),message.slice(offset,end));
       offset = end;
     }
   }
@@ -624,7 +626,7 @@ export class BotService {
   }
   private async announce(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
-    const message = await this.bot.telegram.sendMessage(session.chatId, `Open Session to view this topic. ${this.promptHelp(session.chatId)}`, { message_thread_id: session.threadId, reply_markup: { inline_keyboard: [[{ text: 'Open Session', url: this.link(session) }]] } });
+    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `Open Session to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'Open Session', url: this.link(session) }]] } });
     this.requireSessionAssignment(session);
     await this.bot.telegram.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
@@ -640,8 +642,7 @@ export class BotService {
     accepted?.();
     if (initialIcon) this.options.store.setTopicIcon(session.id,initialIcon);
     if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
-    await ctx.reply(`Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
-      ...('message_thread_id' in ctx.message! ? { message_thread_id: ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id } : {}),
+    await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
       reply_parameters: { message_id: ctx.message!.message_id, allow_sending_without_reply: true },
       link_preview_options: { is_disabled: true },
     });
@@ -650,12 +651,12 @@ export class BotService {
     if (task && source && 'reply_to_message' in source && source.reply_to_message &&
         (/^\/(?:new|p)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
           this.directedReplies.has(ctx))) {
-      await this.bot.telegram.forwardMessage(
-        session.chatId, ctx.chat!.id, source.reply_to_message.message_id, { message_thread_id: session.threadId });
+      await forwardTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+        ctx.chat!.id, source.reply_to_message.message_id);
     }
     if (task) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-      if (original.message) await this.bot.telegram.forwardMessage(
-        session.chatId, ctx.chat!.id, original.message.message_id, {message_thread_id:session.threadId});
+      if (original.message) await forwardTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+        ctx.chat!.id, original.message.message_id);
     }
     await this.setTopicStatus(session, task ? 'running' : 'stopped');
     await this.listen(session);
@@ -666,40 +667,40 @@ export class BotService {
     if (!(await this.instanceAdmin(ctx)) && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const name = ctx.from!.first_name;
-    const message = await ctx.reply(`${name}, what should we work on? Reply to this message with the initial task.`, {
+    const message = await replyTo(ctx, contextDestination(ctx), `${name}, what should we work on? Reply to this message with the initial task.`, {
       entities: [{type:'text_mention',offset:0,length:name.length,user:ctx.from!}],
       reply_markup: {force_reply:true,selective:true,input_field_placeholder:'Describe the coding task'},
     });
-    this.options.store.addTaskRequest(this.id, ctx.chat!.id, message.message_id, ctx.from!.id, ctx.message && 'message_thread_id' in ctx.message ? ctx.message.message_thread_id ?? 1 : 1);
+    this.options.store.addTaskRequest(this.id, contextDestination(ctx), message.message_id, ctx.from!.id);
   }
   private async setup(ctx: Context, setting?: 'all_messages_are_prompts' | 'users_can_propose_prompts', value?: boolean): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
     const member = await this.bot.telegram.getChatMember(ctx.chat.id, ctx.from.id);
     if (!isActiveMember(member) || member.user.is_bot) return;
     if (!(await this.ready(ctx.chat.id))) {
-      await ctx.reply('Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.', { reply_markup: { inline_keyboard: [[{text:'Check Again',callback_data:'setup:check'}]] } }); return;
+      await replyTo(ctx, contextDestination(ctx), 'Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.', { reply_markup: { inline_keyboard: [[{text:'Check Again',callback_data:'setup:check'}]] } }); return;
     }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned) {
-      if (!isAdministrator(member)) { await ctx.reply('Only a current group administrator can request setup for an unassigned forum.'); return; }
+      if (!isAdministrator(member)) { await replyTo(ctx, contextDestination(ctx), 'Only a current group administrator can request setup for an unassigned forum.'); return; }
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
       const quotedPath = "'" + this.options.config.configPath.replaceAll("'", "'\\''") + "'";
       const command = `omp-telegram --config ${quotedPath} approve ${request.code}`;
-      await ctx.reply(`Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
+      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
       return;
     }
-    if (!this.isInstanceAdmin(ctx.chat.id, member.user)) { await ctx.reply('Only a configured instance admin can enroll this group.'); return; }
+    if (!this.isInstanceAdmin(ctx.chat.id, member.user)) { await replyTo(ctx, contextDestination(ctx), 'Only a configured instance admin can enroll this group.'); return; }
     this.assignedPath(ctx.chat.id);
     if (setting !== undefined && value !== undefined) {
       if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-        await ctx.reply(`Configuration is read-only. Ask the local operator to set ${setting} for this bot/chat assignment.`);
+        await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. Ask the local operator to set ${setting} for this bot/chat assignment.`);
         return;
       }
       const persisted = readConfig(this.options.config.configPath);
       const current = findInstance(persisted, this.id, ctx.chat.id);
       if (!current || current.path !== assigned.path || !member.user.username ||
           !current.instance.admins.includes(member.user.username.toLowerCase())) {
-        await ctx.reply('The configured instance assignment or administrator access changed. Run /setup again.');
+        await replyTo(ctx, contextDestination(ctx), 'The configured instance assignment or administrator access changed. Run /setup again.');
         return;
       }
       const chat = current.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
@@ -709,7 +710,7 @@ export class BotService {
       await this.syncCommandMenus();
     }
     this.options.store.enrollGroup(this.id, ctx.chat.id);
-    await ctx.reply(`Ready. Every new topic becomes an OMP session.\n${this.promptHelp(ctx.chat.id)}\nChoose prompt settings:`, { reply_markup: { inline_keyboard: [
+    await replyTo(ctx, contextDestination(ctx), `Ready. Every new topic becomes an OMP session.\n${this.promptHelp(ctx.chat.id)}\nChoose prompt settings:`, { reply_markup: { inline_keyboard: [
       [{text:'All messages',callback_data:'setup:prompts:true'},{text:'Only /p',callback_data:'setup:prompts:false'}],
       [{text:'Allow user proposals',callback_data:'setup:proposals:true'},{text:'Ignore non-admin prompts',callback_data:'setup:proposals:false'}],
       [{text:'New Session',callback_data:'session:new'}],[{text:'Check Again',callback_data:'setup:check'}],
@@ -719,7 +720,7 @@ export class BotService {
     if (!this.sessionAssigned(session)) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
       const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
-      await this.bot.telegram.sendMessage(session.chatId, `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`, { message_thread_id: session.threadId });
+      await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
     const now = Date.now();
@@ -728,9 +729,9 @@ export class BotService {
       else if (request.sessionId === session.id) return;
     }
     const token = randomBytes(16).toString('base64url');
-    const message = await this.bot.telegram.sendMessage(session.chatId,
+    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
       `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by an instance admin is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
-      { message_thread_id: session.threadId, reply_markup: { inline_keyboard: [[
+      { reply_markup: { inline_keyboard: [[
         { text: `Confirm ${limit} → ${limit * 2}`, callback_data: `capacity:approve:${token}` },
         { text: 'Cancel', callback_data: `capacity:cancel:${token}` },
       ]] } });
@@ -746,24 +747,24 @@ export class BotService {
         'forward_origin' in message || 'forward_date' in message) return;
     if (request.expires <= Date.now()) {
       this.capacityRequests.delete(token);
-      await ctx.reply('This capacity request expired. Send a prompt in the topic to request another confirmation.');
+      await replyTo(ctx, contextDestination(ctx), 'This capacity request expired. Send a prompt in the topic to request another confirmation.');
       return;
     }
     if (!(await this.instanceAdmin(ctx))) {
-      await ctx.reply('Only a configured instance admin can confirm or cancel a capacity increase.');
+      await replyTo(ctx, contextDestination(ctx), 'Only a configured instance admin can confirm or cancel a capacity increase.');
       return;
     }
     await this.authorize(request.chatId,ctx.from!.id);
     this.capacityRequests.delete(token);
     if (action === 'cancel') {
-      await ctx.reply('Capacity increase cancelled. The session limit is unchanged.');
+      await replyTo(ctx, contextDestination(ctx), 'Capacity increase cancelled. The session limit is unchanged.');
       return;
     }
     const session = this.options.store.getSession(request.sessionId);
     if (!session || !this.sessionAssigned(session) || session.status !== 'open' || session.chatId !== request.chatId || session.threadId !== request.threadId) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
       const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
-      await ctx.reply(`Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
+      await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
     const member = await this.bot.telegram.getChatMember(request.chatId, ctx.from!.id);
@@ -771,17 +772,17 @@ export class BotService {
     const assigned = findInstance(persisted, this.id, request.chatId);
     if (!isActiveMember(member) || member.user.is_bot || !member.user.username || !assigned ||
         assigned.path !== session.instancePath || !assigned.instance.admins.includes(member.user.username.toLowerCase())) {
-      await ctx.reply('The configured instance assignment or administrator access changed. The session limit is unchanged.');
+      await replyTo(ctx, contextDestination(ctx), 'The configured instance assignment or administrator access changed. The session limit is unchanged.');
       return;
     }
     if (this.options.runtime.getSessionLimit() !== request.limit || persisted.omp.maxSessions !== request.limit) {
-      await ctx.reply('The session limit changed. This confirmation is stale; send a prompt to request another confirmation if needed.');
+      await replyTo(ctx, contextDestination(ctx), 'The session limit changed. This confirmation is stale; send a prompt to request another confirmation if needed.');
       return;
     }
     writeConfig({ ...persisted, omp: { ...persisted.omp, maxSessions: request.limit * 2 } });
     this.options.config.omp.maxSessions = request.limit * 2;
     this.options.runtime.increaseSessionLimit(request.limit);
-    await ctx.reply(`Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`).catch(() => undefined);
+    await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`).catch(() => undefined);
     await this.listen(session);
     await this.sendInitial(session);
   }
@@ -808,16 +809,16 @@ export class BotService {
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
   private async configureNewTopicSkill(ctx: Context, name: string | undefined): Promise<void> {
-    if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Setting the new-topic skill default requires a configured instance admin.'); return; }
+    if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Setting the new-topic skill default requires a configured instance admin.'); return; }
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (name === '') {
       const current = this.defaultNewTopicSkill(ctx.chat!.id);
-      await ctx.reply(`Default new-topic skill: ${current ? `/skill:${current}` : '(not set)'}.`);
+      await replyTo(ctx, contextDestination(ctx), `Default new-topic skill: ${current ? `/skill:${current}` : '(not set)'}.`);
       return;
     }
     if (name !== undefined) {
       if (!isMentionableSkillName(name)) {
-        await ctx.reply('Usage: /set_default_new_topic_skill <exact-skill-name>. Use the canonical name from /skills, without /skill:. To remove the default, use /unset_default_new_topic_skill.');
+        await replyTo(ctx, contextDestination(ctx), 'Usage: /set_default_new_topic_skill <exact-skill-name>. Use the canonical name from /skills, without /skill:. To remove the default, use /unset_default_new_topic_skill.');
         return;
       }
       const available = await this.options.runtime.listSkills(instancePath);
@@ -840,7 +841,7 @@ export class BotService {
       .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
     if (name === undefined) delete active.default_new_topic_skill;
     else active.default_new_topic_skill = name;
-    await ctx.reply(name === undefined
+    await replyTo(ctx, contextDestination(ctx), name === undefined
       ? 'Default new-topic skill cleared. Existing topics are unchanged.'
       : `Default new-topic skill: /skill:${name}. It will mention this skill in the first prompt of future topics. Existing topics are unchanged.`);
   }
@@ -851,7 +852,7 @@ export class BotService {
     await this.receiveMessage(ctx,true);
     if (session) {
       this.requireSessionAssignment(session);
-      if (session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before sending instructions.'); return; }
+      if (session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
     }
     const instancePath = this.assignedPath(ctx.chat!.id);
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
@@ -885,13 +886,11 @@ export class BotService {
       let end = Math.min(offset+4000,body.length);
       if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
       if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-      await ctx.reply(body.slice(offset,end), {
-        ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id} : {}),
+      await replyTo(ctx, contextDestination(ctx), body.slice(offset,end), {
       });
       offset = end;
     }
-    const message = await ctx.reply('Prompt proposed. An instance admin must approve it before it runs. Approval expires in 10 minutes.', {
-      ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id} : {}),
+    const message = await replyTo(ctx, contextDestination(ctx), 'Prompt proposed. An instance admin must approve it before it runs. Approval expires in 10 minutes.', {
       reply_parameters:{message_id:ctx.message!.message_id,allow_sending_without_reply:true},
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
@@ -908,10 +907,9 @@ export class BotService {
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
     if (!proposal || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
         ctx.chat.id !== proposal.source.chat!.id || message.message_id !== proposal.messageId ||
-        ('message_thread_id' in message ? message.message_thread_id ?? 1 : 1) !==
-          (proposal.source.message && 'message_thread_id' in proposal.source.message ? proposal.source.message.message_thread_id ?? 1 : 1) ||
+        !sameTopicDestination(contextDestination(ctx), contextDestination(proposal.source)) ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
-    if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Only an instance admin can approve prompts.'); return; }
+    if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Only an instance admin can approve prompts.'); return; }
     await this.authorize(ctx.chat.id, ctx.from!.id);
     const session = proposal.sessionId ? this.options.store.getSession(proposal.sessionId) : undefined;
     if (proposal.expires <= Date.now() || !this.usersCanProposePrompts(ctx.chat.id) ||
@@ -940,7 +938,7 @@ export class BotService {
     await this.listen(session);
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     if (this.listeners.get(session.id)?.initial) {
-      await ctx.reply('The initial task is still being admitted. Wait for the host to start before sending another instruction.');
+      await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
     const previousTarget = this.options.store.getReplyTarget(session.id);
@@ -972,7 +970,7 @@ export class BotService {
     if (refreshTermination(this.options.config)) {
       try { await this.applyTermination(); }
       finally {
-        if (ctx.chat && (ctx.callbackQuery || messageText(ctx.message))) await ctx.reply(terminationMessage);
+        if (ctx.chat && (ctx.callbackQuery || messageText(ctx.message))) await replyTo(ctx, contextDestination(ctx), terminationMessage);
       }
       return;
     }
@@ -983,8 +981,7 @@ export class BotService {
       if (ctx.callbackQuery.data.startsWith('skills:')) {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id)) return;
-        const session = this.options.store.getTopic({botId:this.id,chatId:ctx.chat.id,
-          threadId:message && 'message_thread_id' in message ? message.message_thread_id ?? 1 : 1});
+        const session = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
         if (session?.status === 'detached') return;
         await this.skills.callback(ctx, ctx.callbackQuery.data, session);
         return;
@@ -1007,7 +1004,7 @@ export class BotService {
       return;
     }
     if (ctx.myChatMember) {
-      if (ctx.chat && ['administrator','member'].includes(ctx.myChatMember.new_chat_member.status)) await ctx.reply('A current group administrator can run /setup to request instance assignment from the local operator.');
+      if (ctx.chat && ['administrator','member'].includes(ctx.myChatMember.new_chat_member.status)) await replyTo(ctx, contextDestination(ctx), 'A current group administrator can run /setup to request instance assignment from the local operator.');
       return;
     }
     const message = ctx.message;
@@ -1016,10 +1013,10 @@ export class BotService {
     if ('forward_origin' in message || 'forward_date' in message || (ctx.from?.is_bot && !topicLifecycle)) return;
     const text = this.albumPrompts.get(ctx)?.text ?? messageText(message);
     if (text && !text.startsWith('/') && this.options.store.getTopic({
-      botId:this.id,chatId:ctx.chat.id,threadId:message.message_thread_id ?? 1,
+      botId:this.id,destination:contextDestination(ctx),
     })?.status === 'detached') {
       if (ctx.from && 'reply_to_message' in message && message.reply_to_message &&
-          this.options.store.takeTaskRequest(this.id,ctx.chat.id,message.reply_to_message.message_id,ctx.from.id)) {
+          this.options.store.takeTaskRequest(this.id,contextDestination(ctx),message.reply_to_message.message_id,ctx.from.id)) {
         await this.routePrompt(ctx,text);
       }
       return;
@@ -1035,17 +1032,17 @@ export class BotService {
           () => !this.stopped && this.questions.get(token) === pending);
         await this.receiveMessage(ctx, true);
         if (pending.request.kind === 'editor') this.submitAnswer(token,text,undefined,message.message_id);
-        else await ctx.reply('Use the numbered answer buttons on the question.');
+        else await replyTo(ctx, contextDestination(ctx), 'Use the numbered answer buttons on the question.');
         return;
       }
       if (this.endedQuestionReplies.has(`${ctx.chat.id}:${replyId}`)) {
         await this.authorize(ctx.chat.id, ctx.from.id);
-        await ctx.reply('This question is no longer active. Answer the latest question instead.');
+        await replyTo(ctx, contextDestination(ctx), 'This question is no longer active. Answer the latest question instead.');
         return;
       }
     }
     if (ctx.from && text && !text.startsWith('/') && 'reply_to_message' in message && message.reply_to_message &&
-        this.options.store.takeTaskRequest(this.id,ctx.chat.id,message.reply_to_message.message_id,ctx.from.id)) {
+        this.options.store.takeTaskRequest(this.id,contextDestination(ctx),message.reply_to_message.message_id,ctx.from.id)) {
       await this.routePrompt(ctx,text);
       return;
     }
@@ -1054,45 +1051,44 @@ export class BotService {
     const command = (directedReply ? `/p ${text}` : text)?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
     if (command?.[2] && command[2].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
     if (command?.[1]?.toLowerCase() === 'terminate') {
-      if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Termination requires a configured instance admin.'); return; }
+      if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Termination requires a configured instance admin.'); return; }
       const persisted = readConfig(this.options.config.configPath);
       const assigned = findInstance(persisted, this.id, ctx.chat.id);
       if (!ctx.from?.username || !assigned?.instance.admins.includes(ctx.from.username.toLowerCase())) {
-        await ctx.reply('Termination requires a configured instance admin.');
+        await replyTo(ctx, contextDestination(ctx), 'Termination requires a configured instance admin.');
         return;
       }
       persisted.terminated = true;
       writeConfig(persisted);
       this.options.config.terminated = true;
       try { await this.applyTermination(); }
-      finally { await ctx.reply(terminationMessage); }
+      finally { await replyTo(ctx, contextDestination(ctx), terminationMessage); }
       return;
     }
     if (ctx.chat.type === 'private') {
       const instances = Object.values(this.options.config.instances).filter(instance => instance.chats.some(chat => chat.botId === this.id));
       const allowed = ctx.from?.username && instances.some(instance => instance.admins.includes(ctx.from!.username!.toLowerCase()));
-      if (instances.length && !allowed) { await ctx.reply('This bot is managed by its configured instance admins. Ask the local operator for access.'); return; }
-      await ctx.reply('Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup. Configure the Mini App URL in BotFather for this bot.', {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
+      if (instances.length && !allowed) { await replyTo(ctx, contextDestination(ctx), 'This bot is managed by its configured instance admins. Ask the local operator for access.'); return; }
+      await replyTo(ctx, contextDestination(ctx), 'Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup. Configure the Mini App URL in BotFather for this bot.', {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
     }
     if (command?.[1]?.toLowerCase() === 'setup') { await this.setup(ctx); return; }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
       if (command?.[1]?.toLowerCase() === 'status') {
-        await ctx.reply(`${await this.ready(ctx.chat.id) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
+        await replyTo(ctx, contextDestination(ctx), `${await this.ready(ctx.chat.id) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
       } else if (command?.[1]?.toLowerCase() === 'help') {
-        await ctx.reply(`${help}\n${defaultSkillHelp}\n${this.promptHelp(ctx.chat.id)}`);
+        await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
     }
-    const threadId = 'message_thread_id' in message ? message.message_thread_id ?? 1 : 1;
-    const key = {botId:this.id,chatId:ctx.chat.id,threadId,instancePath:this.assignedPath(ctx.chat.id)};
-    let session = this.options.store.getTopic(key);
+    const destination = contextDestination(ctx);
+    let session = this.options.store.getTopic({botId:this.id,destination});
     const detached = session?.status === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
     if (detached && topicLifecycle && !('forum_topic_edited' in message)) return;
-    if ('forum_topic_created' in message && threadId !== 1) {
+    if ('forum_topic_created' in message && destination.kind === 'topic') {
       if (!session) {
-        session = this.options.store.createSession(key, message.forum_topic_created.name);
+        session = this.options.store.createSession({botId:this.id,chatId:destination.chatId,threadId:destination.threadId,instancePath:this.assignedPath(ctx.chat.id)}, message.forum_topic_created.name);
         const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
         if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
         await this.announce(session);
@@ -1146,20 +1142,20 @@ export class BotService {
       let arg = command[3]?.trim() ?? '';
       if (action === 'set_default_new_topic_skill') { await this.configureNewTopicSkill(ctx,arg); return; }
       if (action === 'unset_default_new_topic_skill') {
-        if (arg) { await ctx.reply('Usage: /unset_default_new_topic_skill'); return; }
+        if (arg) { await replyTo(ctx, contextDestination(ctx), 'Usage: /unset_default_new_topic_skill'); return; }
         await this.configureNewTopicSkill(ctx,undefined);
         return;
       }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
       if (skillAlias) {
-        if (detached) { await ctx.reply('This topic is conversation-only. Select skills in General or a session topic.'); return; }
-        if (arg) { await ctx.reply(`Use /${action} without arguments to select this skill, then send your prompt.`); return; }
+        if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Select skills in General or a session topic.'); return; }
+        if (arg) { await replyTo(ctx, contextDestination(ctx), `Use /${action} without arguments to select this skill, then send your prompt.`); return; }
         await this.skills.choose(ctx, skillAlias.name, session);
         return;
       }
       if (action === 'skills') {
-        if (detached) { await ctx.reply('This topic is conversation-only. Use /skills in General or a session topic.'); return; }
-        if (arg && arg !== 'clear') { await ctx.reply('Usage: /skills or /skills clear'); return; }
+        if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /skills in General or a session topic.'); return; }
+        if (arg && arg !== 'clear') { await replyTo(ctx, contextDestination(ctx), 'Usage: /skills or /skills clear'); return; }
         await this.skills.open(ctx, session, arg === 'clear');
         return;
       }
@@ -1172,45 +1168,45 @@ export class BotService {
         }
       }
       if (action === 'detach') {
-        if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Detaching requires a configured instance admin.'); return; }
-        if (threadId === 1 || !session) { await ctx.reply('Use /detach inside a session topic, not General or an unrelated chat.'); return; }
+        if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a configured instance admin.'); return; }
+        if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a session topic, not General or an unrelated chat.'); return; }
         await this.detachSession(session);
-        await ctx.reply('This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
+        await replyTo(ctx, contextDestination(ctx), 'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
         return;
       }
       if (detached && !['new','attach','help','start'].includes(action)) {
-        await ctx.reply('This topic is conversation-only. Use /new to create a separate session topic.');
+        await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /new to create a separate session topic.');
         return;
       }
       if ((action === 'new' || action === 'p') && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.instanceAdmin(ctx))) return;
-      if (action === 'new' || (action === 'p' && threadId === 1)) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
+      if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
       if (action === 'attach') {
-        if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Attaching requires a configured instance admin.'); return; }
+        if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Attaching requires a configured instance admin.'); return; }
         const match = arg.match(/^([A-Za-z0-9_-]+)(?:\s+(.+))?$/);
-        if (!match) { await ctx.reply('Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.'); return; }
+        if (!match) { await replyTo(ctx, contextDestination(ctx), 'Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.'); return; }
         const instancePath = this.assignedPath(ctx.chat.id);
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
-      if (action === 'help' || action === 'start') { await ctx.reply(`${help}\n${defaultSkillHelp}\n/skills — select or clear skills for your next prompt; /skill_* shortcuts select skills too\n${this.promptHelp(ctx.chat.id)}`); return; }
-      if (action === 'status') { await ctx.reply(`${await this.ready(ctx.chat.id) ? 'Forum ready.' : 'Forum permissions need attention.'}${session ? `\nSession: ${session.name} (${session.status})` : '\nUse /new task to create a session.'}`); return; }
+      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n/skills — select or clear skills for your next prompt; /skill_* shortcuts select skills too\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'status') { await replyTo(ctx, contextDestination(ctx), `${await this.ready(ctx.chat.id) ? 'Forum ready.' : 'Forum permissions need attention.'}${session ? `\nSession: ${session.name} (${session.status})` : '\nUse /new task to create a session.'}`); return; }
       if (action === 'session') {
-        if (!session) { await ctx.reply('No session in this topic. Use /new task or create a topic.'); return; }
-        await ctx.reply(`${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'Open Session',url:this.link(session)}]]}}); return;
+        if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }
+        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'Open Session',url:this.link(session)}]]}}); return;
       }
       if (action === 'model_preset' || action === 'list_model_presets') {
-        if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Model preset commands require a configured instance admin.'); return; }
-        if (threadId !== 1 && !session) { await ctx.reply(`Use /${action} in General or a session topic.`); return; }
-        if (session && session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before using model preset commands.'); return; }
+        if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a configured instance admin.'); return; }
+        if (destination.kind === 'topic' && !session) { await replyTo(ctx, contextDestination(ctx), `Use /${action} in General or a session topic.`); return; }
+        if (session && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before using model preset commands.'); return; }
         if (action === 'model_preset' ? !/^[A-Za-z][\w-]*$/.test(arg) : Boolean(arg)) {
-          await ctx.reply(action === 'model_preset' ? 'Usage: /model_preset <name> (a letter, then letters, digits, - or _)' : 'Usage: /list_model_presets');
+          await replyTo(ctx, contextDestination(ctx), action === 'model_preset' ? 'Usage: /model_preset <name> (a letter, then letters, digits, - or _)' : 'Usage: /list_model_presets');
           return;
         }
-        if (threadId === 1) {
+        if (destination.kind === 'general') {
           const instancePath = assigned.path;
           const names = await this.options.runtime.availableModelPresets(instancePath);
           await this.authorize(ctx.chat.id,ctx.from.id);
-          if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Model preset commands require a configured instance admin.'); return; }
+          if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a configured instance admin.'); return; }
           if (this.assignedPath(ctx.chat.id) !== instancePath) throw new Error('The group instance assignment changed');
           if (action === 'model_preset') {
             if (!names.includes(arg)) throw new Error(`Unknown model preset: ${arg}. Available presets: ${names.join(', ') || '(none)'}`);
@@ -1227,12 +1223,12 @@ export class BotService {
             const active = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
               .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
             active.default_model_preset = arg;
-            await ctx.reply(`Default model preset: ${arg}. Managed sessions will use it when their host starts. Running hosts are unchanged.`);
+            await replyTo(ctx, contextDestination(ctx), `Default model preset: ${arg}. Managed sessions will use it when their host starts. Running hosts are unchanged.`);
           } else {
             const preset = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
               .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)?.default_model_preset;
             const text = `${names.length ? `Model presets: ${names.join(', ')}` : 'No model presets saved. Use /modelpreset save <name> to create one.'}\nDefault model preset: ${preset ?? '(not set)'}`;
-            for (let offset = 0; offset < text.length; offset += 4000) await ctx.reply(text.slice(offset,offset+4000));
+            for (let offset = 0; offset < text.length; offset += 4000) await replyTo(ctx, contextDestination(ctx), text.slice(offset,offset+4000));
           }
           return;
         }
@@ -1242,7 +1238,7 @@ export class BotService {
         try {
           await this.options.runtime.ensure(session);
           await this.authorize(ctx.chat.id,ctx.from.id);
-          if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Model preset commands require a configured instance admin.'); return; }
+          if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a configured instance admin.'); return; }
           this.requireSessionAssignment(session);
           if (this.options.store.getSessionGeneration(session.id) !== generation ||
               this.options.store.getSession(session.id)?.status !== 'open') throw new Error('The session changed before the model preset command could run');
@@ -1255,16 +1251,16 @@ export class BotService {
           for (let offset = 0; offset < text.length;) {
             let end = Math.min(offset+4000,text.length);
             if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-            await ctx.reply(text.slice(offset,end));
+            await replyTo(ctx, contextDestination(ctx), text.slice(offset,end));
             offset = end;
           }
         } finally { release(); }
         return;
       }
       if (action === 'stop' || action === 'kill') {
-        if (threadId === 1 || !session) { await ctx.reply(`Use /${action} inside a session topic, not General or an unrelated chat.`); return; }
+        if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), `Use /${action} inside a session topic, not General or an unrelated chat.`); return; }
         this.requireSessionAssignment(session);
-        if (action === 'stop' && session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before sending instructions.'); return; }
+        if (action === 'stop' && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
         this.options.store.cancelInitialTask(session.id);
         const listener = this.listeners.get(session.id);
         clearTimeout(listener?.initial?.timer);
@@ -1279,13 +1275,13 @@ export class BotService {
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session,message.message_id);
           await this.setTopicStatus(session, 'stopped');
-          await ctx.reply('Session process killed. History is preserved; a managed session can restart on your next instruction or Open Session visit.');
+          await replyTo(ctx, contextDestination(ctx), 'Session process killed. History is preserved; a managed session can restart on your next instruction or Open Session visit.');
           return;
         }
         if (!(await this.options.runtime.isRunning(session))) {
           this.dropListener(session.id);
           await this.setTopicStatus(session, 'stopped');
-          await ctx.reply('Session is not running.');
+          await replyTo(ctx, contextDestination(ctx), 'Session is not running.');
           return;
         }
         const connection = await this.listen(session);
@@ -1301,12 +1297,12 @@ export class BotService {
           if (index !== -1) activeListener.pendingStops.splice(index,1);
           throw error;
         }
-        await ctx.reply('Abort requested. The session process is still running.');
+        await replyTo(ctx, contextDestination(ctx), 'Abort requested. The session process is still running.');
         return;
       }
       if (action !== 'p') return;
-      if (!session) { await ctx.reply('Use /p inside a session topic, or in General to create a new session.'); return; }
-      if (!arg) { await ctx.reply('Usage: /p <prompt>'); return; }
+      if (!session) { await replyTo(ctx, contextDestination(ctx), 'Use /p inside a session topic, or in General to create a new session.'); return; }
+      if (!arg) { await replyTo(ctx, contextDestination(ctx), 'Usage: /p <prompt>'); return; }
       prompt = arg;
     } else {
       if (!allMessagesArePrompts || !session) return;
@@ -1327,7 +1323,7 @@ export class BotService {
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
-      void this.bot.telegram.sendMessage(session.chatId, `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`, { message_thread_id: session.threadId }).catch(() => undefined);
+      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
@@ -1458,8 +1454,8 @@ export class BotService {
               () => !this.stopped && this.sessionAssigned(question.session));
           } else {
             await this.delivery.run(question.session.chatId,
-              () => this.bot.telegram.sendMessage(question.session.chatId,text,{
-                message_thread_id:question.session.threadId,
+              () => sendTo(this.bot.telegram, topicDestination(question.session.chatId, question.session.threadId),text,{
+                
                 ...(receiptId === undefined ? {} : {reply_parameters:{message_id:receiptId,allow_sending_without_reply:true}}),
               }), () => !this.stopped && this.sessionAssigned(question.session));
           }
@@ -1531,7 +1527,7 @@ export class BotService {
         let end = Math.min(offset+4000, body.length);
         if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
         const message = await this.delivery.run(session.chatId,
-          () => this.bot.telegram.sendMessage(session.chatId,body.slice(offset,end),{message_thread_id:session.threadId}),active);
+          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),body.slice(offset,end)),active);
         if (!message) return;
         question.messageIds.push(message.message_id);
         offset = end;
@@ -1546,9 +1542,9 @@ export class BotService {
         }
         if (offset+80 >= buttons.length) keyboard.push([{text:'Cancel',callback_data:`ask:${token}:cancel`}]);
         const message = await this.delivery.run(session.chatId,
-          () => this.bot.telegram.sendMessage(session.chatId,
+          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
             request.kind === 'editor' ? 'You can type a custom answer below, or cancel here.' : 'Choose an answer by number:', {
-              message_thread_id:session.threadId,
+              
               reply_markup:{inline_keyboard:keyboard},
             }), active);
         if (!message) return;
@@ -1562,8 +1558,8 @@ export class BotService {
       }
       if (request.kind === 'editor' && active()) {
         const message = await this.delivery.run(session.chatId,
-          () => this.bot.telegram.sendMessage(session.chatId,'Reply here with your answer. Multiline text is supported.',{
-            message_thread_id:session.threadId,
+          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
+            
             reply_markup:{force_reply:true,input_field_placeholder:'Type your custom answer'},
           }), active);
         if (!message) return;
@@ -1605,8 +1601,8 @@ export class BotService {
       listener.activeTurn = false;
       listener.activity = 'completed';
       void this.setTopicStatus(session, listener.activity);
-      void this.bot.telegram.sendMessage(session.chatId, `⛔️${interruptedBy} interrupted the chat`, {
-        message_thread_id: session.threadId,
+      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
+        
       }).catch(() => undefined);
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
@@ -1633,7 +1629,7 @@ export class BotService {
       const delay = Math.min(1000,250 * ++initial.retries);
       if (Date.now()+delay >= initial.deadline) {
         listener.initial = undefined;
-        void this.bot.telegram.sendMessage(session.chatId,`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`,{message_thread_id:session.threadId}).catch(() => undefined);
+        void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
       } else {
         initial.timer = setTimeout(() => {
           void this.authorize(session.chatId,initial.userId).then(() => {
@@ -1690,7 +1686,7 @@ export class BotService {
       const text = isStartupRejection(frame)
         ? 'The host is still starting. Your instruction was not accepted. Resend it after startup.'
         : 'OMP rejected an instruction. Open Session for details before resending.';
-      void this.bot.telegram.sendMessage(session.chatId, text, { message_thread_id: session.threadId }).catch(() => undefined);
+      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), text).catch(() => undefined);
       return;
     }
     if (frame.t === 'snapshot-chunk') {
@@ -1715,9 +1711,9 @@ export class BotService {
       for (const text of renderTelegramMarkdown(result.text)) {
         if (!this.sessionAssigned(current)) return;
         await this.delivery.run(session.chatId,
-          () => this.bot.telegram.sendMessage(session.chatId,text,{
+          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),text,{
             parse_mode:'HTML',
-            message_thread_id:session.threadId,
+            
             ...(replyTarget === undefined ? {} : {reply_parameters:{message_id:replyTarget,allow_sending_without_reply:true}}),
           }), () => !this.stopped && this.sessionAssigned(current) && this.listeners.get(session.id) === listener);
       }
