@@ -8,9 +8,13 @@ The CLI owns configuration management and starts the service. The running servic
 
 Configuration is the authority for project directories, bot identities, chat assignments, admins, and service settings. Runtime storage cannot create authorization by overriding configuration. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
 
+The configuration layer owns the persistent service-termination switch. Telegram dispatch, gateway access and frame forwarding, and runtime admission recheck that switch at their respective boundaries, preventing a client or reconnect from bypassing suspension. Bot adapters invalidate pending interactions and invoke the runtime's identity-checked kill boundary; the service and Telegram polling stay alive.
+
 ## Telegram integration
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
+
+The bot adapter normalizes text and media captions before command dispatch. After prompt authorization, it resolves Telegram image files and attaches their bytes to the existing Collab prompt. Approval and initial-task admission own the entire prompt, including images; the session store preserves initial images with their task so recovery does not degrade to text-only delivery.
 
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 

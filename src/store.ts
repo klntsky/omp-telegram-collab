@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { TopicKey, TopicSession } from '../shared/contracts.js';
+import type { ImageContent } from '@oh-my-pi/pi-wire';
 
 type Row = Record<string, string | number | null>;
 export interface SetupRequest {
@@ -34,6 +35,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
@@ -46,7 +48,7 @@ export class Store {
   listGroups(botId: number): number[] { return this.db.prepare('SELECT chat_id FROM groups WHERE bot_id=? ORDER BY chat_id').all(botId).map(row => Number(row.chat_id)); }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
   getTopic(key: TopicKey): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.chatId, key.threadId) as Row | undefined); }
-  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number): TopicSession {
+  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[]): TopicSession {
     if (!key.instancePath) throw new Error('A session requires its configured instance path');
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -55,6 +57,7 @@ export class Store {
       if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');
       if (Number(result.changes) && initialTask && initialUserId) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
+        if (images?.length) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(images));
       }
       this.db.exec('COMMIT');
       return created;
@@ -88,6 +91,10 @@ export class Store {
   }
   cancelInitialTask(id: string): void {
     this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
+  }
+  getInitialImages(id: string): ImageContent[] | undefined {
+    const row = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);
+    return row ? JSON.parse(String(row.images)) as ImageContent[] : undefined;
   }
   getInitialUser(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);

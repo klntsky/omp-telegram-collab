@@ -62,6 +62,35 @@ test('topic identity survives a service restart and closing preserves its histor
   }
 });
 
+test('initial images survive reopening storage with their pending task and stay session-scoped', async () => {
+  const directory = await mkdtemp(join(tmpdir(),'omp-image-task-'));
+  const filename = join(directory,'topics.sqlite');
+  const images = [{type:'image' as const,data:'aW1hZ2U=',mimeType:'image/png'}];
+  try {
+    const first = new Store(filename);
+    let id: string;
+    try {
+      id = first.createSession(topic,'Image task',{kind:'managed'},'Inspect this',42,images).id;
+      first.createSession({...topic,threadId:18},'Unrelated',{kind:'managed'},'Other task',42);
+    } finally {
+      first.close();
+    }
+    const restored = new Store(filename);
+    try {
+      assert.equal(restored.hasPendingInitialTask(id),true);
+      assert.deepEqual(restored.getInitialImages(id),images);
+      const unrelated = restored.getTopic({...topic,threadId:18})!;
+      assert.equal(restored.getInitialImages(unrelated.id),undefined);
+      assert.equal(restored.claimInitialTask(id),'Inspect this');
+      assert.equal(restored.claimInitialTask(id),undefined);
+    } finally {
+      restored.close();
+    }
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
 test('one bot and topic tuple cannot acquire two session identities', () => {
   const store = new Store(':memory:');
   try {

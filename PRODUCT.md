@@ -15,6 +15,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/session` | Get the current topic's Mini App link. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
+| `/terminate` | Project-admin-only service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
 | `/detach` | Make the topic permanently conversation-only. Requires a project admin. |
 | `/attach INSTANCE_ID` | Connect a running OMP host to a new topic. Requires a project admin. |
 | `/list_model_presets` | List project presets and the current selection. Requires a project admin. |
@@ -34,13 +35,15 @@ Rename a topic to change its stored display name. Close it to archive instructio
 
 `/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh Open Session visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
 
+While terminated, commands, prompts, callbacks, and Mini App agent access are blocked. Every command receives “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
+
 ### 1.2. Prompts and permissions
 
 Each bot/chat assignment has two settings.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `all_messages_are_prompts` | `true` | Session-topic text becomes a prompt. When `false`, only `/p <prompt>` submits text. Mentions and replies do not bypass this setting. |
+| `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, only `/p <prompt>` submits them. Mentions and replies do not bypass this setting. |
 | `users_can_propose_prompts` | `false` | Non-admin prompts are ignored. When `true`, a project admin must approve them. Admin prompts run directly. |
 
 `/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
@@ -98,6 +101,8 @@ A kill advances a persistent session generation before notification or terminati
 Separately shared OMP Collab links bypass this Telegram gateway. Telegram membership changes cannot revoke those capabilities. Do not distribute them if membership is your intended access boundary.
 
 Keep the YAML and runtime data private. They contain bot tokens, topic mappings, and OMP histories. Service shutdown does not delete history.
+
+Each successful startup notifies enrolled groups in General: “OMP bot service is back online (restarting took N.NN seconds).” The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice.
 
 
 ## 3. Capacity and reconnection

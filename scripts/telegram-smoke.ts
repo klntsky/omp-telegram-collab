@@ -212,6 +212,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     };
   };
   const bot = new Telegraf(botToken, { telegram: { apiRoot: telegramUrl } });
+  writeConfig(config);
   const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot,telegramIntervalMs:0});
   await service.initialize();
   const reservation = createHttpServer();

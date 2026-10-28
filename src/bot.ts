@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { Telegraf, TelegramError, type Context } from 'telegraf';
 import { AbortController as TelegramAbortController } from 'abort-controller';
-import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
+import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection } from '../shared/contracts.js';
 import { Store } from './store.js';
 import { isActiveMember, isAdministrator } from './auth.js';
@@ -45,6 +45,7 @@ interface Listener {
   activity: 'running' | 'completed';
   initial?: {
     text: string;
+    images?: ImageContent[];
     userId: number;
     messageId?: number;
     deadline: number;
@@ -72,6 +73,7 @@ interface CapacityRequest {
 interface PromptProposal {
   source: Context;
   text: string;
+  images?: ImageContent[];
   instancePath: string;
   sessionId?: string;
   generation?: number;
@@ -98,7 +100,8 @@ const groupCommands = [
 function messageText(message: Context['message']): string | undefined {
   if (!message) return undefined;
   if ('text' in message) return message.text;
-  if ('caption' in message && message.caption?.startsWith('/')) return message.caption;
+  if ('caption' in message && message.caption !== undefined) return message.caption;
+  if ('photo' in message || ('document' in message && message.document.mime_type?.startsWith('image/'))) return 'Describe this image.';
   return undefined;
 }
 function optionMarker(index: number): string {
@@ -515,7 +518,7 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.bot.telegram.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
-  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string): Promise<void> {
+  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[]): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
@@ -523,7 +526,7 @@ export class BotService {
     const initialIcon = task ? (await this.getIconIds()).running : undefined;
     const topic = await this.bot.telegram.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached ? undefined : task, ctx.from!.id);
+    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached ? undefined : task, ctx.from!.id, images);
     if (initialIcon) this.options.store.setTopicIcon(session.id,initialIcon);
     if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
     await ctx.reply(`Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
@@ -678,14 +681,14 @@ export class BotService {
       if (session.status !== 'open') { await ctx.reply('This session is archived. Reopen the topic before sending instructions.'); return; }
     }
     if (admin) {
-      if (session) await this.submitSessionPrompt(ctx, session, text);
-      else await this.newSession(ctx, text);
+      if (session) await this.submitSessionPrompt(ctx, session, text, images);
+      else await this.newSession(ctx, text, undefined, undefined, images);
       return;
     }
     const now = Date.now();
     for (const [token, proposal] of this.promptProposals) if (proposal.expires <= now) this.promptProposals.delete(token);
     const token = randomBytes(16).toString('base64url');
-    const instancePath = this.assignedPath(ctx.chat!.id);
+    await this.authorize(ctx.chat!.id,ctx.from!.id);
     const author = ctx.from!.username ? `@${ctx.from!.username}` : `${ctx.from!.first_name} (user ID ${ctx.from!.id})`;
     const body = `${author} proposed a prompt:\n${text}`;
     for (let offset = 0; offset < body.length;) {
@@ -694,6 +697,19 @@ export class BotService {
       if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
       await ctx.reply(body.slice(offset,end), {
         ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id} : {}),
+  private async promptImages(ctx: Context): Promise<ImageContent[] | undefined> {
+    const message = ctx.message;
+    if (!message) return undefined;
+    const photo = 'photo' in message && message.photo.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
+    const document = 'document' in message && message.document.mime_type?.startsWith('image/') ? message.document : undefined;
+    if (!photo && !document) return undefined;
+    const mimeType = photo ? 'image/jpeg' : document!.mime_type!;
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
+    const url = await this.bot.telegram.getFileLink((photo ?? document)!.file_id);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
+    return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
+  }
       });
       offset = end;
     }
@@ -703,7 +719,13 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-      source:ctx,text,instancePath,
+    const instancePath = this.assignedPath(ctx.chat!.id);
+    const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    const images = await this.promptImages(ctx);
+    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
+    if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
+        this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
+      source:ctx,text,images,instancePath,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
@@ -732,14 +754,14 @@ export class BotService {
     this.promptProposals.delete(token);
     await ctx.editMessageReplyMarkup({inline_keyboard:[]});
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text))) {
+      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text,proposal.images))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.newSession(proposal.source,proposal.text);
+    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
-  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string): Promise<boolean> {
+  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[]): Promise<boolean> {
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     this.requireSessionAssignment(session);
     await this.listen(session);
@@ -752,7 +774,7 @@ export class BotService {
     const messageId = ctx.message!.message_id;
     this.options.store.setReplyTarget(session.id,messageId);
     try {
-      this.sendPrompt(this.listeners.get(session.id)!,prompt,messageId);
+      this.sendPrompt(this.listeners.get(session.id)!,prompt,messageId,images);
     } catch (error) {
       this.options.store.setReplyTarget(session.id,previousTarget);
       throw error;
@@ -1123,7 +1145,7 @@ export class BotService {
     });
     return listener.promise;
   }
-  private sendPrompt(listener: Listener, text: string, messageId?: number): void {
+  private sendPrompt(listener: Listener, text: string, messageId?: number, images?: ImageContent[]): void {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
@@ -1131,7 +1153,7 @@ export class BotService {
     listener.pendingPrompts.push(pending);
     try {
       this.options.runtime.markPrompt(listener.sessionId);
-      listener.connection!.send({t:'prompt',text});
+      listener.connection!.send({t:'prompt',text,...(images?.length ? {images} : {})});
     } catch (error) {
       const index = listener.pendingPrompts.indexOf(pending);
       if (index !== -1) listener.pendingPrompts.splice(index,1);
@@ -1151,10 +1173,11 @@ export class BotService {
     if (!task) return;
     const listener = this.listeners.get(session.id)!;
     const messageId = this.options.store.getReplyTarget(session.id);
-    listener.initial = {text:task,userId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
+    const images = this.options.store.getInitialImages(session.id);
+    listener.initial = {text:task,images,userId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.options.config.omp.startupTimeoutMs);
     listener.initial.timer.unref();
-    this.sendPrompt(listener,task,messageId);
+    this.sendPrompt(listener,task,messageId,images);
   }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.delivery.run(session.chatId,
@@ -1374,7 +1397,7 @@ export class BotService {
             initial.timer = setTimeout(() => { listener.initial = undefined; },initial.deadline-Date.now());
             initial.timer.unref();
             initial.phase = 'sent';
-            this.sendPrompt(listener,initial.text,initial.messageId);
+            this.sendPrompt(listener,initial.text,initial.messageId,initial.images);
           }).catch(() => {
             clearTimeout(initial.timer);
             if (listener.initial === initial) listener.initial = undefined;
