@@ -146,6 +146,7 @@ export class BotService {
   private termination?: Promise<void>;
   private readonly promptProposals = new Map<string, PromptProposal>();
   private readonly receivedMessages = new WeakSet<Context>();
+  private readonly directedReplies = new WeakSet<Context>();
   private iconIds?: Promise<Record<TopicActivity, string>>;
   private statusTimer?: NodeJS.Timeout;
   private checkingStatuses = false;
@@ -392,7 +393,7 @@ export class BotService {
   private promptHelp(chatId: number): string {
     const input = this.allMessagesArePrompts(chatId)
       ? 'Text messages in a session topic are treated as prompts.'
-      : 'Use /p <prompt> in a session topic. Ordinary messages, mentions, and replies are ignored.';
+      : 'Use /p <prompt> or reply to my messages in a session topic. Ordinary messages and mentions are ignored.';
     return `${input}\nIn General, /p works like /new (with a task or an interactive reply).\n${this.usersCanProposePrompts(chatId)
       ? 'Non-admin prompts require approval by an instance admin.'
       : 'Only instance admins can send prompts. Other members’ messages are ignored.'}`;
@@ -566,8 +567,9 @@ export class BotService {
     });
     await this.announce(session);
     const source = ctx.message;
-    if (task && source && /^\/(?:new|p)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') &&
-        'reply_to_message' in source && source.reply_to_message) {
+    if (task && source && 'reply_to_message' in source && source.reply_to_message &&
+        (/^\/(?:new|p)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
+          this.directedReplies.has(ctx))) {
       await this.bot.telegram.forwardMessage(
         session.chatId, ctx.chat!.id, source.reply_to_message.message_id, { message_thread_id: session.threadId });
     }
@@ -878,7 +880,14 @@ export class BotService {
         return;
       }
     }
-    const command = text?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
+    if (ctx.from && text && !text.startsWith('/') && 'reply_to_message' in message && message.reply_to_message &&
+        this.options.store.takeTaskRequest(this.id,ctx.chat.id,message.reply_to_message.message_id,ctx.from.id)) {
+      await this.routePrompt(ctx,text);
+      return;
+    }
+    const directedReply = text && !text.startsWith('/') && 'reply_to_message' in message && message.reply_to_message?.from?.id === this.id;
+    if (directedReply) this.directedReplies.add(ctx);
+    const command = (directedReply ? `/p ${text}` : text)?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
     if (command?.[2] && command[2].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
     if (command?.[1]?.toLowerCase() === 'terminate') {
       if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Termination requires a configured instance admin.'); return; }
@@ -1114,10 +1123,6 @@ export class BotService {
       if (!arg) { await ctx.reply('Usage: /p <prompt>'); return; }
       prompt = arg;
     } else {
-      if ('reply_to_message' in message && message.reply_to_message && this.options.store.takeTaskRequest(this.id,ctx.chat.id,message.reply_to_message.message_id,ctx.from.id)) {
-        await this.routePrompt(ctx,text);
-        return;
-      }
       if (!allMessagesArePrompts || !session) return;
       const entities = 'entities' in message ? message.entities ?? [] : [];
       const mentions = entities.filter(entity =>

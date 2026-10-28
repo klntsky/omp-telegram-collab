@@ -25,7 +25,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 
 Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands.
 
-Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command. The largest photo size is used; image documents retain their original bytes. Each message is handled individually, not combined into an album. Model image support is required.
+Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command unless they reply to this bot. The largest photo size is used; image documents retain their original bytes. Each message is handled individually, not combined into an album. Model image support is required.
 
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
@@ -43,10 +43,12 @@ Each bot/chat assignment has two settings.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, only `/p <prompt>` submits them. Mentions and replies do not bypass this setting. |
+| `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
 | `users_can_propose_prompts` | `false` | Non-admin prompts are ignored. When `true`, a project admin must approve them. Admin prompts run directly. |
 
 `/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
+
+Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Interactive task-request replies and active or expired agent-question replies retain their dedicated handling; detached topics remain conversation-only.
 
 Other commands, forwarded messages, and bot messages are not prompts. Non-admin `/new` requests follow the proposal setting too.
 

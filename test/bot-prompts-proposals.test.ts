@@ -30,7 +30,7 @@ test('default mode starts a session host from ordinary text without a mention', 
   } finally { await app.close(); }
 });
 
-test('explicit mode ignores discussion, mentions and bot replies, and admits only scoped /p prompts', async () => {
+test('explicit mode ignores discussion and mentions, and admits scoped /p prompts', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -41,7 +41,7 @@ test('explicit mode ignores discussion, mentions and bot replies, and admits onl
     const reactions = app.reactions.length;
     await app.update({text:'Ordinary discussion',message_thread_id:42});
     await app.update({text:'@FixtureOmpBot Still discussion',message_thread_id:42,entities:[{type:'mention',offset:0,length:14}]});
-    await app.update({text:'A reply is not a prompt',message_thread_id:42,reply_to_message:{message_id:9000,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+    await app.update({text:'A reply to someone else',message_thread_id:42,reply_to_message:{message_id:9000,from:{id:botId+1,is_bot:true,first_name:'Other'}}});
     assert.equal(app.connectionCount,0);
     assert.equal(app.reactions.length,reactions);
     await app.update({text:'/p',message_thread_id:42});
@@ -93,6 +93,31 @@ test('prompt mode changes require current instance administration and writable c
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
   } finally { await app.close(); }
 });
+
+for (const allMessagesArePrompts of [true,false]) {
+  test(`bot-directed replies quote context and create sessions from General with all messages: ${allMessagesArePrompts}`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+      const from = {id:botId,is_bot:true,first_name:'OMP'};
+      await app.update({message_id:7200,text:'Explain this',reply_to_message:{message_id:9100,from,caption:'Original\ncontext'}});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      const session = app.store.listSessions(botId)[0]!;
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
+        {t:'prompt',text:'> Original\n> context\n\nExplain this'},
+      ]);
+      assert.deepEqual(app.messages.filter(message => message.message_thread_id === session.threadId && message.forwarded_message_id)
+        .map(message => message.forwarded_message_id),[9100,7200]);
+      await app.update({message_id:7201,text:'Continue',message_thread_id:session.threadId,
+        reply_to_message:{message_id:9101,from,text:'Next answer'}});
+      await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt')[1],
+        {t:'prompt',text:'> Next answer\n\nContinue'});
+      assert.equal(app.store.getReplyTarget(session.id),7201);
+    } finally { await app.close(); }
+  });
+}
 
 for (const allMessagesArePrompts of [true, false]) {
   for (const command of ['/p', '/new']) {
