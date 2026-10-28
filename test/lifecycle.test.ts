@@ -196,7 +196,7 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
   assert.equal(fixture.ready.size, 2);
   const targets = fixture.groups.map(([id, chat]) => `${id}:${chat}`).sort();
   const assertNotices = (notices: typeof fixture.notices, text: unknown) => {
-    assert.ok(typeof text === 'string' && text.trim().length > 0, 'each lifecycle phase sends a nonempty notification');
+    assert.equal(typeof text, 'string');
     assert.deepEqual(notices.map(notice => `${notice.botId}:${notice.payload.chat_id}`).sort(), targets);
     for (const { payload } of notices) {
       assert.deepEqual(Object.keys(payload).sort(), ['chat_id', 'text'], 'General is targeted without message_thread_id=1 or a session reply target');
@@ -204,6 +204,7 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
     }
   };
   const onlineText = fixture.notices[0]?.payload.text;
+  assert.match(String(onlineText), /^OMP bot service is back online \(restarting took \d+\.\d{2} seconds\)\.$/);
   assertNotices(fixture.notices, onlineText);
   const closing = service.close();
   assert.equal(service.close(), closing, 'duplicate shutdown calls share the same close operation');
@@ -216,6 +217,13 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
   assertNotices(windingDown, windingDownText);
   assert.equal(fixture.runtimeCloses, 1);
   assert.equal(fixture.storeCloses, 1);
+  await delay(100);
+  const restarted = await fixture.start();
+  const resumedText = String(fixture.notices[6]?.payload.text);
+  const elapsed = /restarting took (\d+\.\d{2}) seconds/.exec(resumedText);
+  assert.ok(elapsed, resumedText);
+  assert.ok(Number(elapsed[1]) >= 0.1, 'restart timing includes the gap between service generations');
+  await restarted.close();
 });
 
 test('failed lifecycle notifications neither fail startup nor prevent shutdown', { timeout: 30_000 }, async t => {

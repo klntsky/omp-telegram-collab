@@ -2,7 +2,7 @@ import { stdout, stderr } from 'node:process';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { watchFile, unwatchFile, existsSync } from 'node:fs';
-import { chmod, unlink } from 'node:fs/promises';
+import { chmod, unlink, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createControlServer, type Server } from 'node:http';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { readConfig, defaultConfigPath, validateStart, findInstance } from './config.js';
@@ -34,6 +34,8 @@ interface Generation {
 }
 
 async function launch(config: AppConfig, onPollingFailure: () => void): Promise<Generation> {
+  const startupAt = Date.now();
+  const restartMarker = join(config.dataDir, 'restart-started-at');
   validateStart(config);
   const runtime = new OmpRuntime(config);
   let store: Store | undefined;
@@ -43,7 +45,10 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
   let started = false;
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
-      if (started && store) await notifyGroups(config, bots, store, 'OMP bot service is winding down. Sessions will be unavailable until it is back online.');
+      if (started && store) {
+        await writeFile(restartMarker, String(Date.now()), { mode: 0o600 });
+        await notifyGroups(config, bots, store, 'OMP bot service is winding down. Sessions will be unavailable until it is back online.');
+      }
       if (server) {
         await server.closeConnections();
         if (server.listening) {
@@ -69,6 +74,7 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
       if (bot.id !== botConfig.id) throw new Error(`Telegram bot identity does not match configured bot ${botConfig.id}`);
       stdout.write(`Verified @${bot.bot.botInfo!.username} (bot ${bot.id}). Set the BotFather Mini App web URL to ${new URL(`/?bot=${bot.id}`, config.publicUrl).href}\n`);
     }
+    if (config.terminated) await Promise.all(bots.map(bot => bot.applyTermination()));
     server = createServer({ config, bots, store, runtime });
     const listening = Promise.withResolvers<void>();
     server.once('error', listening.reject);
@@ -90,7 +96,14 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
       return promise;
     }));
     started = true;
-    await notifyGroups(config, bots, store, 'OMP bot service is back online.');
+    const restartAt = await readFile(restartMarker, 'utf8').then(Number).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return startupAt;
+    });
+    await notifyGroups(config, bots, store, `OMP bot service is back online (restarting took ${((Date.now() - restartAt) / 1000).toFixed(2)} seconds).`);
+    await unlink(restartMarker).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    });
     stdout.write(`OMP Telegram listening on ${config.host}:${config.port}. Configuration: ${config.configPath}\n`);
     return { config, store, runtime, bots, close };
   } catch (error) {
@@ -122,8 +135,10 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       if (JSON.stringify(next) === applied) return;
       await generation.runtime.validateSessionPaths(generation.store.listSessions(), next);
       if (serviceSettings(next) === serviceSettings(generation.config)) {
+        if (next.terminated === undefined) delete generation.config.terminated;
         Object.assign(generation.config, next);
         generation.runtime.setSessionLimit(next.omp.maxSessions);
+        if (generation.config.terminated) await Promise.all(generation.bots.map(bot => bot.applyTermination()));
         await Promise.all(generation.bots.map(bot => bot.reconcileConfiguration()));
       } else {
         const previous = generation.config;
