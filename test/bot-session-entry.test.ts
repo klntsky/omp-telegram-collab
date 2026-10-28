@@ -195,3 +195,26 @@ for (const interactive of [false,true]) {
     }
   });
 }
+
+for (const command of ['/new', '/p@FixtureOmpBot']) {
+  for (const reply of [{text:'Original context'}, {caption:'Image context'}, {}]) {
+    test(`${command} forwards replied-to ${Object.keys(reply)[0] ?? 'media'} before its initial task`, async () => {
+      const app = await createSmokeApp();
+      try {
+        await app.update({text:'/setup'});
+        await app.update({message_id:7002,text:`${command} Explain this`,
+          reply_to_message:{message_id:7001,...reply}});
+        const session = app.store.listSessions(botId)[0]!;
+        const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
+        assert.ok(topicMessages[0]?.reply_markup);
+        assert.deepEqual(topicMessages.filter(message => message.forwarded_message_id).map(message =>
+          [message.from_chat_id,message.forwarded_message_id]),[[chatId,7001],[chatId,7002]]);
+        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+        const context = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
+        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
+          {t:'prompt',text:context ? `> ${context}\n\nExplain this` : 'Explain this'},
+        ]);
+      } finally { await app.close(); }
+    });
+  }
+}

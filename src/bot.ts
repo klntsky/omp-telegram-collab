@@ -532,6 +532,12 @@ export class BotService {
       link_preview_options: { is_disabled: true },
     });
     await this.announce(session);
+    const source = ctx.message;
+    if (task && source && /^\/(?:new|p)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') &&
+        'reply_to_message' in source && source.reply_to_message) {
+      await this.bot.telegram.forwardMessage(
+        session.chatId, ctx.chat!.id, source.reply_to_message.message_id, { message_thread_id: session.threadId });
+    }
     if (task && ctx.message) await this.bot.telegram.forwardMessage(
       session.chatId, ctx.chat!.id, ctx.message.message_id, { message_thread_id: session.threadId });
     await this.setTopicStatus(session, task ? 'running' : 'stopped');

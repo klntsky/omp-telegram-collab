@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Forward the replied-to message into topics created by `/new` or `/p`, before the original task and after the pinned session entry, including media-only replies without duplicating OMP submission.
+- Deliver Telegram photos and supported image documents as native OMP prompt images through the shared authorization, proposal approval, initial-task persistence, and startup-retry lifecycle; support ordinary image captions in all-message mode and caption commands in explicit mode.
 - Include replied-to text or captions as greentext context for `/p` and `/new`, with optional instructions, in either prompt mode and in General or topics.
 - Log original Telegram operation errors and include subprocess exit codes, signals, and killed status in failure reports without changing the original diagnostic.
 - Recognize slash commands in media captions without Telegram command entities through the shared text-command dispatch and receipt path; preserve bot targeting, authorization, and original-message forwarding without introducing image-specific handlers.

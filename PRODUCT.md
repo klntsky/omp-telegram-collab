@@ -22,11 +22,13 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/setup` | Request enrollment or change an assigned forum's prompt settings. |
 | `/status`, `/help` | Show readiness and command help. |
 
-Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands. Only caption text is submitted to OMP; attached media is not downloaded or sent to the model. Non-command captions are ignored.
+Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands.
+
+Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command. The largest photo size is used; image documents retain their original bytes. Each message is handled individually, not combined into an album. Model image support is required.
 
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
-New session topics get a pinned Open Session message before OMP starts. The bot returns a topic link when `/new` or `/attach` creates a topic. For `/new`, it also forwards the original task below the pin without submitting it twice.
+New session topics get a pinned Open Session message before OMP starts. The bot returns a topic link when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
 
 Rename a topic to change its stored display name. Close it to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
