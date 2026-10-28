@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add instance-admin-only `/detach` to persist a conversation-only topic, remove its custom activity icon, cancel session interactions, and invalidate Mini App joins without killing the host or deleting history. Prevent status checks, queued icon writes, reopening, and restarts from restoring activity icons; publish the command in group and chat-specific menus.
 - Treat `/p` in General as `/new` in either prompt mode, including bot-qualified commands and interactive task replies. Publish `/p` in the group and chat-specific menus while retaining existing prompt authorization and proposal approval.
 - Require PM2 `--no-treekill` so service deployment restarts preserve detached OMP hosts instead of aborting accepted tasks, including first prompts in newly created topics.
 - Add instance-admin-only `/model_preset <name>` and `/list_model_presets` for open managed-session topics. Execute OMP's native preset operations over a private host-control socket without model prompts, preserve native diagnostics and role precedence, recheck current admin access after startup, and reject archived topics, busy switches, and unsupported attached/older hosts.

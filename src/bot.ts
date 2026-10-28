@@ -769,7 +769,13 @@ export class BotService {
     const text = 'text' in message ? message.text : undefined;
     if (text && !text.startsWith('/') && this.options.store.getTopic({
       botId:this.id,chatId:ctx.chat.id,threadId:message.message_thread_id ?? 1,
-    })?.status === 'detached') return;
+    })?.status === 'detached') {
+      if (ctx.from && 'reply_to_message' in message && message.reply_to_message &&
+          this.options.store.takeTaskRequest(this.id,ctx.chat.id,message.reply_to_message.message_id,ctx.from.id)) {
+        await this.routePrompt(ctx,text);
+      }
+      return;
+    }
     if (ctx.from && !ctx.from.is_bot && text && 'reply_to_message' in message && message.reply_to_message?.from?.id === this.id) {
       const replyId = message.reply_to_message.message_id;
       const question = [...this.questions.entries()].find(([, pending]) =>
@@ -813,7 +819,7 @@ export class BotService {
     let session = this.options.store.getTopic(key);
     const detached = session?.status === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
-    if (detached && topicLifecycle) return;
+    if (detached && topicLifecycle && !('forum_topic_edited' in message)) return;
     if ('forum_topic_created' in message && threadId !== 1) {
       if (!session) {
         session = this.options.store.createSession(key, message.forum_topic_created.name);
@@ -835,7 +841,10 @@ export class BotService {
       if (ctx.from?.id === this.id && edited.icon_custom_emoji_id !== undefined && edited.name === undefined) {
         await this.delivery.run(ctx.chat.id,
           () => this.bot.telegram.deleteMessage(ctx.chat!.id,message.message_id),
-          () => !this.stopped && this.sessionAssigned(session)).catch(() => {
+          () => !this.stopped && (detached
+            ? this.options.store.getSession(session.id)?.status === 'detached' &&
+              findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath
+            : this.sessionAssigned(session))).catch(() => {
           console.warn(`Could not delete topic icon notice (${session.id}, ${message.message_id}).`);
         });
       }

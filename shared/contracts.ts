@@ -1,20 +1,26 @@
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
 
 export interface BotConfig {
-  tokenEnv: string;
-  ownerUsernames: string[];
+  id: number;
+  token: string;
   miniAppShortName: string;
+}
+
+export interface InstanceConfig {
+  admins: string[];
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean }[];
 }
 
 export interface AppConfig {
   bots: BotConfig[];
+  instances: Record<string, InstanceConfig>;
   publicUrl: string;
   host: string;
   port: number;
   dataDir: string;
+  configPath: string;
   omp: {
     executable: string;
-    cwd: string;
     args: string[];
     maxSessions: number;
     startupTimeoutMs: number;
@@ -30,8 +36,9 @@ export interface TopicKey {
 
 export interface TopicSession extends TopicKey {
   id: string;
+  instancePath: string;
   name: string;
-  status: 'open' | 'closed';
+  status: 'open' | 'closed' | 'detached';
   runtime: { kind: 'managed' } | { kind: 'attached'; instanceId: string; sessionId: string };
   createdAt: number;
 }
