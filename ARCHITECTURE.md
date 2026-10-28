@@ -6,7 +6,11 @@ This document describes ownership and boundaries. User-visible requirements belo
 
 The CLI owns configuration management and starts the service. The running service composes Telegram bot adapters, persistent session storage, the OMP runtime manager, and the HTTP and WebSocket gateway. Bot adapters and the gateway share the runtime and session store, so Telegram and Mini App clients reach the same OMP conversation rather than maintaining independent agent state.
 
-Configuration is the authority for project directories, bot identities, chat assignments, admins, and service settings. Runtime storage cannot create authorization by overriding configuration. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
+Configuration is the authority for project directories, bot identities, chat assignments, instance roots, bot-wide admins, and service settings. Runtime storage holds scoped topic grants but cannot override those configured assignments or roots. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
+
+The bot adapter enforces application-admin scope independently of Telegram group roles. Configuration owns instance roots and bot-wide grants; SQLite owns topic-local grants across restarts. Promotion rechecks current human membership and assignment authority before writing through the owning persistence boundary. Topic authority cannot grant access outside its topic. See [Product](PRODUCT.md#12-prompts-and-permissions) for command behavior.
+
+Admin listings share the current-member authorization boundary. The adapter combines configured global authority with topic grants from storage, limits the result to the current forum or topic, and reconciles stored identities for display. Listing a stored grant does not establish the recipient's current membership; access-use checks remain authoritative.
 
 The configuration layer owns the persistent service-termination switch. Telegram dispatch, gateway access and frame forwarding, and runtime admission recheck that switch at their respective boundaries, preventing a client or reconnect from bypassing suspension. Bot adapters invalidate pending interactions and invoke the runtime's identity-checked kill boundary; the service and Telegram polling stay alive.
 
@@ -18,11 +22,13 @@ Topic destinations distinguish General from ordinary forum topics before busines
 
 The bot adapter normalizes text and media captions before command dispatch. After prompt authorization, it resolves Telegram image files and attaches their bytes to the existing Collab prompt. Approval and initial-task admission own the entire prompt, including images; the session store preserves initial images with their task so recovery does not degrade to text-only delivery.
 
+The inbound bot adapter distinguishes intentional replies from Telegram's implicit reply to a forum topic's creation message. Topic-root metadata establishes routing context, not user intent, even when the bot created the topic. This classification happens before reply-to-prompt conversion so metadata cannot bypass the configured prompt mode. The runtime receives only prompts admitted by that boundary.
+
 The adapter groups image-album updates before prompt dispatch and keeps their place in the input queue, so a subsequent skill selection cannot alter an earlier album. The resulting prompt uses the same authorization, proposal, and image-admission boundaries as single-message input.
 
 The bot adapter owns the user/topic-bound skill picker and its temporary inline-search context. It composes selected `/skill:name` references into authorized prompt text without implementing native skill-template expansion. Prompt admission and proposal creation own consumption of the pending selection; proposals retain the composed text independently of later picker changes.
 
-The bot adapter owns the instance-admin-only controls that set and unset the per-bot/chat forum skill default. The configuration boundary validates canonical mentionable names without normalization; the adapter additionally checks catalog existence and current administrator membership before saving.
+The bot adapter owns the instance-root and bot-admin controls that set and unset the per-bot/chat forum skill default; topic grants do not authorize these forum-wide settings. The configuration boundary validates canonical mentionable names without normalization; the adapter additionally checks catalog existence and current administrator membership before saving.
 
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 

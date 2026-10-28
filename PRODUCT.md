@@ -13,16 +13,18 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
-| `/set_default_new_topic_skill <exact-skill-name>` | Set this forum's default skill for future managed topics. Requires a project admin; no argument shows it. |
-| `/unset_default_new_topic_skill` | Remove this forum's default skill for future topics. Requires a project admin. |
+| `/set_default_new_topic_skill <exact-skill-name>` | Set this forum's default skill for future managed topics. Requires an instance root or bot admin; no argument shows it. |
+| `/unset_default_new_topic_skill` | Remove this forum's default skill for future topics. Requires an instance root or bot admin. |
 | `/session` | Get the current topic's Mini App link. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
-| `/terminate` | Project-admin-only service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
-| `/detach` | Make the topic permanently conversation-only. Requires a project admin. |
-| `/attach INSTANCE_ID` | Connect a running OMP host to a new topic. Requires a project admin. |
-| `/list_model_presets` | List project presets and the current selection. Requires a project admin. |
-| `/model_preset <name>` | Set the forum default in General, or switch an idle topic's session. Requires a project admin. |
+| `/terminate` | Instance-root or bot-admin service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
+| `/detach` | Make the topic permanently conversation-only. Requires an instance root, bot admin, or this topic's admin. |
+| `/attach INSTANCE_ID` | Connect a running OMP host to a new topic. Requires an instance root or bot admin. |
+| `/list_model_presets` | List project presets and the current selection. Requires an instance root or bot admin, or this topic's admin outside General. |
+| `/model_preset <name>` | Set the forum default in General (instance root or bot admin), or switch an idle topic's session (also available to that topic's admins). |
+| `/make_admin [@username]` | Promote by username (optional `@`), or reply without arguments. Numeric ID arguments are rejected. General grants bot-wide access; other topics grant topic-only access. |
+| `/list_admins` | List this forum's global admins and topic grants. General includes all topics; another topic includes only itself. Available to current group members; accepts no arguments. |
 | `/setup` | Request enrollment or change an assigned forum's prompt settings. |
 | `/status`, `/help` | Show readiness and command help. |
 
@@ -47,13 +49,17 @@ Each bot/chat assignment has two settings.
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
-| `users_can_propose_prompts` | `false` | Non-admin prompts are ignored. When `true`, a project admin must approve them. Admin prompts run directly. |
+| `users_can_propose_prompts` | `false` | Prompts without sufficient administrator scope are ignored. When `true`, an authorized admin must approve them. Authorized admin prompts run directly. |
 
 `/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
 
 Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Interactive task-request replies and active or expired agent-question replies retain their dedicated handling; detached topics remain conversation-only.
 
+Telegram's implicit reply to a topic's creation message is topic-routing metadata, not an intentional reply to the bot. Ordinary messages with that metadata remain ignored when `all_messages_are_prompts` is `false`, including topics created by this bot.
+
 Other commands, forwarded messages, and bot messages are not prompts. Non-admin `/new` requests follow the proposal setting too.
+
+Instance roots and bot admins can submit `/new`, `/p` in General, and existing-topic prompts directly. Topic admins can submit `/p` and ordinary prompts directly only within their own topic, and approve proposals for that existing topic. Creating a session through `/new` or General `/p`, or approving a new-topic proposal, requires an instance root or bot admin; topic admins follow the ordinary proposal setting for those requests. Topic admins cannot directly `/attach`, change global/forum settings, approve capacity increases, or `/terminate`.
 
 Proposals show the submitted text for review and execute once after approval. They expire after ten minutes or a service restart. A changed assignment or prompt mode, archived topic, killed session, or departed proposer invalidates approval.
 
@@ -75,11 +81,17 @@ Image albums are submitted as one prompt with all supported images, their captio
 
 Pending skills are consumed when the prompt is accepted, or when a non-admin proposal is created. A proposal freezes the composed text for review and later approval; rejecting or expiring it does not restore the selection. Input ignored or rejected before submission retains pending skills, and a known host-starting rejection restores them. Ambiguous delivery errors do not restore selections because the prompt may already have been admitted. For `/new` or `/p` in General, the originating user's General selection accompanies the new topic's initial task and is consumed when that task is durably accepted, or when its proposal is created.
 
-`/set_default_new_topic_skill <exact-skill-name>` updates the per-bot/chat forum default from General or a session topic; it does not change the current session. Only instance admins who are current group members can use it. The exact canonical name must exist in the assigned project's skill catalog and contain no whitespace, control characters, or backslashes; case, punctuation, and namespaces are preserved without normalization. No argument displays the current default. `/unset_default_new_topic_skill` removes it and accepts no arguments. The set command has no clearing argument; `clear` remains an ordinary exact skill name.
+`/set_default_new_topic_skill <exact-skill-name>` updates the per-bot/chat forum default from General or a session topic; it does not change the current session. Only instance roots and bot admins who are current group members can use it. The exact canonical name must exist in the assigned project's skill catalog and contain no whitespace, control characters, or backslashes; case, punctuation, and namespaces are preserved without normalization. No argument displays the current default. `/unset_default_new_topic_skill` removes it and accepts no arguments. The set command has no clearing argument; `clear` remains an ordinary exact skill name.
 
 Future managed topics snapshot that setting when created. The snapshot persists across bot restarts and adds `/skill:exact-name` only to the first accepted Telegram prompt or frozen proposal, together with explicit pending skill selections and without duplicate mentions. For General `/p` and `/new`, the initial task includes the default and proposals freeze that composed text for approval. For a manually created topic, the first accepted Telegram task can come from any authorized user, not just the topic creator. Later forum-default changes do not alter existing topics, their snapshots, or attached histories. This is a Telegram composition default; Mini App submissions do not apply or consume it.
 
-Project admins are the Telegram usernames configured for the directory. They must also be current group members. Telegram group-administrator status alone does not grant project-admin permissions. Only enrollment of an unassigned group requires a Telegram group administrator.
+Configured instance admins remain root administrators identified by their Telegram usernames. `/make_admin @username` (or `/make_admin username`) grants access by username; alternatively, reply to a member's message with `/make_admin` and no arguments to grant access by stable numeric Telegram ID. Numeric ID arguments are rejected. Usernames are normalized by removing an optional `@` and lowercasing with the existing configured username grammar. Telegram cannot resolve arbitrary handles, so username promotion does not look up the target; active human membership is checked when the recipient uses permissions. Reply targets must already be active human group members; bots, departed members, and anonymous/channel senders cannot be reply targets. The caller must also be an active human group member.
+
+In General, promotion grants bot-wide administrator access across the chats assigned to that bot. In any other forum topic, promotion grants access only in that topic of that bot/chat assignment. Instance roots and bot-wide admins can promote in either scope; topic admins can promote other members only within their own topic and cannot grant General or bot-wide access. These grants do not make anyone a Telegram group administrator or grant access through other bots. Telegram group-administrator status alone does not grant application-admin permissions; only enrollment of an unassigned group requires it.
+
+Bot-wide grants persist in configuration (`bots[].admins`); topic grants persist in the SQLite runtime database, not configuration. Both survive restarts and store either normalized username strings or numeric Telegram IDs from replies. Username grants follow the current handle; reply grants remain tied to the user ID despite username changes. Existing instance username roots remain unchanged. There is no Telegram demotion command; remove bot-wide grants locally from configuration or topic grants locally from the database to revoke access.
+
+`/list_admins` accepts no arguments and is available to every active human member of the current assigned forum, not only admins. It shows separate global and topic-admin sections. Global admins are the union of the assigned instance's username roots and the current bot's `bots[].admins` grants. In General, the topic section includes grants from all topics in this bot/chat; elsewhere it includes only the current topic. It never lists grants from another chat or bot. Topic entries already represented globally are omitted by normalized username or numeric-ID aliases. Numeric grants display a current `@username` when Telegram's `getChatMember` lookup provides one, otherwise `User ID: <id>`. Listed username grants are not proof that a handle was verified or its owner is still a member: current human membership is required whenever access is used.
 
 Ordinary group members retain Mini App access, `/stop`, and `/kill`. Prompt restrictions are not access restrictions for the Mini App. See [Projects and access](#2-projects-and-access) before inviting members.
 
@@ -138,7 +150,7 @@ Each successful startup notifies enrolled groups in General: “OMP bot service 
 
 Retirement waits for OMP's guarded shutdown and never escalates to signals. This path was verified with OMP 18.13.1. Older hosts without that support are not forcibly retired. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
 
-If retirement cannot free capacity, a project admin can approve a prompt to double the shared limit. Approval saves the new limit and retries the pending initial task once. Other prompts must be resent. Protected configuration requires an administrator CLI update instead. Expired or replayed confirmations cannot increase capacity.
+If retirement cannot free capacity, an instance root or bot admin can approve a prompt to double the shared limit. Topic admins cannot approve capacity increases. Approval saves the new limit and retries the pending initial task once. Other prompts must be resent. Protected configuration requires an administrator CLI update instead. Expired or replayed confirmations cannot increase capacity.
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
@@ -148,6 +160,6 @@ The Mini App retains its transcript and draft during transient failures. Reconne
 
 ## 4. Attached sessions and transcript
 
-Project admins can attach a control-shared OMP host whose working directory matches the assigned project. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
+Instance roots and bot admins can attach a control-shared OMP host whose working directory matches the assigned project; topic admins cannot. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
 
 The Mini App collapses IRC traffic, system notices, reminders, task-result envelopes, and displayed custom notices. Disclosures reveal their contents. Ordinary prose, attachments, code examples, unknown tags, and incomplete envelopes stay visible. Hidden custom entries remain hidden.

@@ -87,6 +87,30 @@ test('YAML supports normalized per-path admins, multiple bots and multiple chats
   assert.deepEqual(readConfig(path), loaded);
 });
 
+test('username and numeric bot administrators normalize, roundtrip, deduplicate, and remain optional', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  config.bots[0]!.admins = [123, Number.MAX_SAFE_INTEGER, 123, '@Alice', 'ALICE', 'bob_2'];
+  config.instances[dir]!.chats.push({ botId, chatId: -10042 });
+  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
+  writeConfig(config);
+  const loaded = readConfig(path);
+  assert.deepEqual(loaded.bots[0]!.admins, [123, Number.MAX_SAFE_INTEGER, 'alice', 'bob_2']);
+  assert.equal('admins' in loaded.bots[1]!, false);
+  writeConfig(loaded);
+  assert.deepEqual(readConfig(path), loaded);
+});
+
+test('administrator grants reject invalid values', t => {
+  const { path, dir } = fixture(t);
+  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '123', '', '@', '@123', 'bad-name', 'two names', ' alice', 'alice ', '@@alice', 'a'.repeat(33), null]) {
+    const config = validConfig(path, dir);
+    const { configPath: _, ...input } = config;
+    writeFileSync(path, stringify({ ...input, bots: [{ ...config.bots[0], admins: [id] }] }));
+    assertInvalid(path, () => readConfig(path), 'bots.0.admins.0');
+  }
+});
+
 test('forum model defaults roundtrip independently for each bot/chat assignment and remain optional', t => {
   const { path, dir } = fixture(t);
   const config = validConfig(path, dir);

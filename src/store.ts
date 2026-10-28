@@ -48,11 +48,29 @@ export class Store {
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
+      CREATE TABLE IF NOT EXISTS topic_admins (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),identity TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,identity));
       COMMIT;`);
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
   listGroups(botId: number): number[] { return this.db.prepare('SELECT chat_id FROM groups WHERE bot_id=? ORDER BY chat_id').all(botId).map(row => Number(row.chat_id)); }
+  addTopicAdmin(botId: number, destination: TopicDestination, identity: string | number): void {
+    if (destination.kind !== 'topic') throw new Error('Topic administrator grants require a non-General topic');
+    this.db.prepare('INSERT OR IGNORE INTO topic_admins VALUES (?,?,?,?)')
+      .run(botId, destination.chatId, destination.threadId, String(identity));
+  }
+  isTopicAdmin(botId: number, destination: TopicDestination, userId: number, username?: string): boolean {
+    if (destination.kind !== 'topic') return false;
+    return Boolean(this.db.prepare('SELECT 1 FROM topic_admins WHERE bot_id=? AND chat_id=? AND thread_id=? AND (identity=? OR identity=?)')
+      .get(botId, destination.chatId, destination.threadId, String(userId), username?.toLowerCase() ?? ''));
+  }
+  listTopicAdmins(botId: number, chatId: number): { threadId: number; identity: string | number }[] {
+    return this.db.prepare('SELECT thread_id,identity FROM topic_admins WHERE bot_id=? AND chat_id=? ORDER BY thread_id,identity')
+      .all(botId, chatId).map(row => ({
+        threadId: Number(row.thread_id),
+        identity: /^\d+$/.test(String(row.identity)) ? Number(row.identity) : String(row.identity),
+      }));
+  }
   getPendingSkills(key: PendingSkillKey): string[] {
     return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId).map(row => String(row.name));
   }

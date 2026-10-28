@@ -4,6 +4,7 @@ export interface BotConfig {
   id: number;
   token: string;
   miniAppShortName: string;
+  admins?: (string | number)[];
 }
 
 export interface InstanceConfig {

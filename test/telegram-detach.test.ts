@@ -19,7 +19,6 @@ test('/detach requires an instance admin and a session topic', async () => {
     const icon = app.topicEdits.at(-1)?.icon_custom_emoji_id;
     app.setCurrentMember({username:'not_an_instance_admin'});
     await app.update({text:'/detach',message_thread_id:42});
-    assert.match(String(app.messages.at(-1)?.text),/configured instance admin/);
     assert.equal(app.store.getSession(session.id)?.status,'open');
     assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id,icon);
   } finally { await app.close(); }

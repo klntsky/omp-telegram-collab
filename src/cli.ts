@@ -115,7 +115,7 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
 
 function serviceSettings(config: AppConfig): string {
   const { maxSessions: _, ...omp } = config.omp;
-  return JSON.stringify({ bots: config.bots, publicUrl: config.publicUrl, host: config.host, port: config.port, dataDir: config.dataDir, omp });
+  return JSON.stringify({ bots: config.bots.map(({ admins: _, ...bot }) => bot), publicUrl: config.publicUrl, host: config.host, port: config.port, dataDir: config.dataDir, omp });
 }
 
 export async function startService(configPath = defaultConfigPath()): Promise<{ close(): Promise<void>; reload(): Promise<void> }> {

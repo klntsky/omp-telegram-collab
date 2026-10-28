@@ -42,6 +42,17 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
     await app.update({text:'Ordinary discussion',message_thread_id:42});
     await app.update({text:'@FixtureOmpBot Still discussion',message_thread_id:42,entities:[{type:'mention',offset:0,length:14}]});
     await app.update({text:'A reply to someone else',message_thread_id:42,reply_to_message:{message_id:9000,from:{id:botId+1,is_bot:true,first_name:'Other'}}});
+    await app.update({
+      text:'Ordinary discussion with implicit topic-root metadata',message_thread_id:42,is_topic_message:true,
+      reply_to_message:{
+        message_id:42,from:{id:botId,is_bot:true,first_name:'OMP'},
+        forum_topic_created:{name:'Explicit prompts',icon_color:0},
+      },
+    });
+    await app.update({
+      text:'Ordinary discussion with a partial topic-root message',message_thread_id:42,is_topic_message:true,
+      reply_to_message:{message_id:42,from:{id:botId,is_bot:true,first_name:'OMP'}},
+    });
     assert.equal(app.connectionCount,0);
     assert.equal(app.reactions.length,reactions);
     await app.update({text:'/p',message_thread_id:42});
