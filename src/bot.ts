@@ -641,7 +641,7 @@ export class BotService {
     if (initialIcon) this.options.store.setTopicIcon(session.id,initialIcon);
     if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
     await ctx.reply(`Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
-      ...('message_thread_id' in ctx.message! ? { message_thread_id: ctx.message.message_thread_id } : {}),
+      ...('message_thread_id' in ctx.message! ? { message_thread_id: ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id } : {}),
       reply_parameters: { message_id: ctx.message!.message_id, allow_sending_without_reply: true },
       link_preview_options: { is_disabled: true },
     });
@@ -886,12 +886,12 @@ export class BotService {
       if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
       if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
       await ctx.reply(body.slice(offset,end), {
-        ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id} : {}),
+        ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id} : {}),
       });
       offset = end;
     }
     const message = await ctx.reply('Prompt proposed. An instance admin must approve it before it runs. Approval expires in 10 minutes.', {
-      ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id} : {}),
+      ...('message_thread_id' in ctx.message! ? {message_thread_id:ctx.message.message_thread_id === 1 ? undefined : ctx.message.message_thread_id} : {}),
       reply_parameters:{message_id:ctx.message!.message_id,allow_sending_without_reply:true},
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
