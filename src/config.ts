@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import { parseDocument, stringify } from 'yaml';
 import { z } from 'zod';
 import type { AppConfig, InstanceConfig } from '../shared/contracts.js';
+import { isMentionableSkillName } from './skill-commands.js';
 
 export class ConfigError extends Error {
   constructor(readonly keys: readonly string[], detail: string) {
@@ -60,6 +61,7 @@ const configSchema = z.object({
       all_messages_are_prompts: z.boolean().default(true),
       users_can_propose_prompts: z.boolean().default(false),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
+      default_new_topic_skill: z.string().refine(isMentionableSkillName).optional(),
     }).strict()),
   }).strict()),
   publicUrl: publicUrlSchema,

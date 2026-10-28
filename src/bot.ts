@@ -13,7 +13,7 @@ import { configWritable, findInstance, readConfig, writeConfig, refreshTerminati
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
-import { skillCommandAliases } from './skill-commands.js';
+import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 
 export interface RuntimeLike {
   ensure(session: TopicSession): Promise<HostBinding>;
@@ -85,11 +85,13 @@ interface PromptProposal {
   expires: number;
 }
 const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — set the forum default in General, or switch this session (instance admin)\n/list_model_presets — list presets and the forum default (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (instance admin)';
+const defaultSkillHelp = '/set_default_new_topic_skill <exact-name> — set the forum default for new topics (instance admin); no argument shows it, --clear removes it';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
+  { command: 'set_default_new_topic_skill', description: 'Set, show or clear the new-topic skill default (admin)' },
   { command: 'setup', description: 'Enroll this forum or change prompt settings' },
   { command: 'attach', description: 'Attach a local OMP host (instance admin)' },
   { command: 'detach', description: 'Make this topic conversation-only (instance admin)' },
@@ -800,6 +802,47 @@ export class BotService {
     if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
     return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
   }
+  private defaultNewTopicSkill(chatId: number): string | undefined {
+    return findInstance(this.options.config,this.id,chatId)?.instance.chats
+      .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
+  }
+  private async configureNewTopicSkill(ctx: Context, name: string): Promise<void> {
+    if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Setting the new-topic skill default requires a configured instance admin.'); return; }
+    const instancePath = this.assignedPath(ctx.chat!.id);
+    if (!name) {
+      const current = this.defaultNewTopicSkill(ctx.chat!.id);
+      await ctx.reply(`Default new-topic skill: ${current ? `/skill:${current}` : '(not set)'}.`);
+      return;
+    }
+    if (name !== '--clear') {
+      if (!isMentionableSkillName(name)) {
+        await ctx.reply('Usage: /set_default_new_topic_skill <exact-skill-name> or --clear. Use the canonical name from /skills, without /skill:.');
+        return;
+      }
+      const available = await this.options.runtime.listSkills(instancePath);
+      if (!available.some(skill => skill.name === name)) throw new Error(`Unknown skill: ${name}. Use the exact canonical name from /skills, without /skill:.`);
+    }
+    await this.authorize(ctx.chat!.id,ctx.from!.id);
+    const member = await this.bot.telegram.getChatMember(ctx.chat!.id,ctx.from!.id);
+    const persisted = readConfig(this.options.config.configPath);
+    const current = findInstance(persisted,this.id,ctx.chat!.id);
+    if (this.assignedPath(ctx.chat!.id) !== instancePath || !current || current.path !== instancePath ||
+        !isActiveMember(member) || member.user.is_bot || !member.user.username ||
+        !current.instance.admins.includes(member.user.username.toLowerCase())) {
+      throw new Error('The configured instance assignment or administrator access changed. The new-topic skill default is unchanged.');
+    }
+    const chat = current.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
+    if (name === '--clear') delete chat.default_new_topic_skill;
+    else chat.default_new_topic_skill = name;
+    writeConfig(persisted);
+    const active = findInstance(this.options.config,this.id,ctx.chat!.id)!.instance.chats
+      .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
+    if (name === '--clear') delete active.default_new_topic_skill;
+    else active.default_new_topic_skill = name;
+    await ctx.reply(name === '--clear'
+      ? 'Default new-topic skill cleared. Existing topics are unchanged.'
+      : `Default new-topic skill: /skill:${name}. It will mention this skill in the first prompt of future topics. Existing topics are unchanged.`);
+  }
   private async routePrompt(ctx: Context, text: string, session?: TopicSession): Promise<void> {
     const admin = await this.instanceAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
@@ -813,11 +856,13 @@ export class BotService {
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
     const skillKey = this.skills.key(ctx);
     const pendingSkills = this.options.store.getPendingSkills(skillKey);
-    if (pendingSkills.length) {
+    const topicSkill = session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
+    const mentionedSkills = [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills])];
+    if (mentionedSkills.length) {
       const available = await this.options.runtime.listSkills(instancePath, session);
-      const missing = pendingSkills.filter(name => !available.some(skill => skill.name === name));
-      if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear to clear the selection.`);
-      text = `${pendingSkills.map(name => `/skill:${name}`).join(' ')}\n\n${text}`;
+      const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
+      if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
+      text = `${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${text}`;
     }
     const images = await this.promptImages(ctx);
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
@@ -825,7 +870,7 @@ export class BotService {
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (admin) {
       if (session) {
-        await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills});
+        await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills,topicSkill});
       } else await this.newSession(ctx, text, undefined, undefined, images, () => this.options.store.clearPendingSkills(skillKey));
       return;
     }
@@ -855,6 +900,7 @@ export class BotService {
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
     this.options.store.clearPendingSkills(skillKey);
+    if (session && topicSkill) this.options.store.clearNewTopicSkill(session.id);
   }
   private async approvePrompt(ctx: Context, token: string): Promise<void> {
     const proposal = this.promptProposals.get(token);
@@ -887,7 +933,7 @@ export class BotService {
     } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
-  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[]}): Promise<boolean> {
+  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}): Promise<boolean> {
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     this.requireSessionAssignment(session);
     await this.listen(session);
@@ -899,12 +945,18 @@ export class BotService {
     const previousTarget = this.options.store.getReplyTarget(session.id);
     const messageId = ctx.message!.message_id;
     this.options.store.setReplyTarget(session.id,messageId);
-    const restore = selected?.names.length ? () => {
-      const current = this.options.store.getPendingSkills(selected.key);
-      this.options.store.clearPendingSkills(selected.key);
-      for (const name of [...selected.names, ...current]) this.options.store.addPendingSkill(selected.key, name);
+    const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
+      if (selected.names.length) {
+        const current = this.options.store.getPendingSkills(selected.key);
+        this.options.store.clearPendingSkills(selected.key);
+        for (const name of [...selected.names, ...current]) this.options.store.addPendingSkill(selected.key, name);
+      }
+      if (selected.topicSkill) this.options.store.setNewTopicSkill(session.id,selected.topicSkill);
     } : undefined;
-    if (selected) this.options.store.clearPendingSkills(selected.key);
+    if (selected) {
+      this.options.store.clearPendingSkills(selected.key);
+      if (selected.topicSkill) this.options.store.clearNewTopicSkill(session.id);
+    }
     try {
       this.sendPrompt(this.listeners.get(session.id)!,prompt,messageId,images,restore);
     } catch (error) {
@@ -1027,7 +1079,7 @@ export class BotService {
       if (command?.[1]?.toLowerCase() === 'status') {
         await ctx.reply(`${await this.ready(ctx.chat.id) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
       } else if (command?.[1]?.toLowerCase() === 'help') {
-        await ctx.reply(`${help}\n${this.promptHelp(ctx.chat.id)}`);
+        await ctx.reply(`${help}\n${defaultSkillHelp}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
     }
@@ -1040,6 +1092,8 @@ export class BotService {
     if ('forum_topic_created' in message && threadId !== 1) {
       if (!session) {
         session = this.options.store.createSession(key, message.forum_topic_created.name);
+        const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
+        if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
         await this.announce(session);
         await this.setTopicStatus(session, 'stopped');
       }
@@ -1089,6 +1143,7 @@ export class BotService {
       await this.authorize(ctx.chat.id, ctx.from.id);
       const action = command[1]!.toLowerCase();
       let arg = command[3]?.trim() ?? '';
+      if (action === 'set_default_new_topic_skill') { await this.configureNewTopicSkill(ctx,arg); return; }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
       if (skillAlias) {
         if (detached) { await ctx.reply('This topic is conversation-only. Select skills in General or a session topic.'); return; }
@@ -1131,7 +1186,7 @@ export class BotService {
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
-      if (action === 'help' || action === 'start') { await ctx.reply(`${help}\n/skills — select or clear skills for your next prompt; /skill_* shortcuts select skills too\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'help' || action === 'start') { await ctx.reply(`${help}\n${defaultSkillHelp}\n/skills — select or clear skills for your next prompt; /skill_* shortcuts select skills too\n${this.promptHelp(ctx.chat.id)}`); return; }
       if (action === 'status') { await ctx.reply(`${await this.ready(ctx.chat.id) ? 'Forum ready.' : 'Forum permissions need attention.'}${session ? `\nSession: ${session.name} (${session.status})` : '\nUse /new task to create a session.'}`); return; }
       if (action === 'session') {
         if (!session) { await ctx.reply('No session in this topic. Use /new task or create a topic.'); return; }

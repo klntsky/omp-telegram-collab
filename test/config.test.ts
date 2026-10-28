@@ -125,6 +125,42 @@ test('forum model defaults reject names outside the native preset-name grammar',
   }
 });
 
+test('new-topic skill defaults preserve canonical names independently per bot/chat and remain optional', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
+  config.instances[dir]!.chats[0]!.default_new_topic_skill = 'Team:Review/Exact.Name-v2';
+  config.instances[dir]!.chats.push(
+    { botId, chatId: -10042, default_new_topic_skill: 'review' },
+    { botId: 987654321, chatId, default_new_topic_skill: 'Review' },
+    { botId, chatId: -10043 },
+  );
+  writeConfig(config);
+  const loaded = readConfig(path);
+  assert.deepEqual(loaded.instances[dir]!.chats.map(chat => chat.default_new_topic_skill),
+    ['Team:Review/Exact.Name-v2', 'review', 'Review', undefined]);
+  assert.equal('default_new_topic_skill' in loaded.instances[dir]!.chats[3]!, false);
+  writeConfig(loaded);
+  assert.deepEqual(readConfig(path), loaded);
+  delete loaded.instances[dir]!.chats[0]!.default_new_topic_skill;
+  writeConfig(loaded);
+  assert.equal('default_new_topic_skill' in readConfig(path).instances[dir]!.chats[0]!, false);
+});
+
+test('new-topic skill defaults reject whitespace, controls, backslashes, and nonstrings without normalization', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _configPath, ...config } = validConfig(path, dir);
+  for (const default_new_topic_skill of ['', ' Review', 'Review ', 'Two Names', 'Two\tNames', 'Two\nNames',
+    'Two\u00a0Names', 'Two\u0000Names', 'Two\u001fNames', 'Two\u007fNames', 'Two\u0085Names',
+    'Team\\Review', true, 1, null, [], {}]) {
+    writeFileSync(path, stringify({
+      ...config,
+      instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, default_new_topic_skill }] } },
+    }));
+    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_new_topic_skill`);
+  }
+});
+
 test('YAML defaults prompt options independently and rejects nonboolean values', t => {
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);

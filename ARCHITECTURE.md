@@ -20,6 +20,8 @@ The adapter groups image-album updates before prompt dispatch and keeps their pl
 
 The bot adapter owns the user/topic-bound skill picker and its temporary inline-search context. It composes selected `/skill:name` references into authorized prompt text without implementing native skill-template expansion. Prompt admission and proposal creation own consumption of the pending selection; proposals retain the composed text independently of later picker changes.
 
+The adapter's instance-admin-only `/set_default_new_topic_skill` control updates the per-bot/chat forum default from General or session topics. The configuration boundary validates `default_new_topic_skill` with the shared canonical mentionable-name predicate, preserving exact names; the adapter additionally checks catalog existence. No argument reads the setting and `--clear` removes it; bare `clear` remains an exact skill name.
+
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 
 ## OMP execution and lifecycle
@@ -37,6 +39,8 @@ The runtime uses OMP's guarded lifecycle boundary for idle retirement. Explicit 
 ## Durable and temporary state
 
 The configuration layer owns validated, atomic updates to the protected YAML file. The session store owns durable Telegram topic mappings, enrollment state, session generations, recorded session metadata, and pending skill selections scoped by bot, chat, topic, and user. Pending selections survive service restarts and outlive the adapter's ten-minute inline picker context. OMP owns history files. Runtime bindings connect a Telegram session to its verified OMP identity and history rather than selecting whichever host happens to occupy a process identifier.
+
+New managed-topic creation snapshots the forum skill default into durable session state, independent of the creator and surviving bot restarts. Telegram prompt admission applies the snapshot only to the first accepted Telegram prompt or proposal and deduplicates it against explicit pending selections. General `/p` and `/new` compose it into their initial task before proposal freezing; manual topics use the first authorized user's accepted Telegram task. Later configuration changes do not rewrite existing topic snapshots or attached histories. The Mini App submission boundary does not apply or consume this Telegram composition state.
 
 Bot adapters own temporary proposals and pending Telegram interactions. The gateway owns temporary connection tickets. The browser owns its local draft and rendered transcript. None of those temporary states can replace durable authorization or process identity.
 

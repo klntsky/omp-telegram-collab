@@ -40,6 +40,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
@@ -93,6 +94,16 @@ export class Store {
   }
   advanceSessionGeneration(id: string): void {
     this.db.prepare('INSERT INTO session_generations VALUES (?,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1').run(id);
+  }
+  setNewTopicSkill(sessionId: string, name: string): void {
+    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name').run(sessionId, name);
+  }
+  getNewTopicSkill(sessionId: string): string | undefined {
+    const row = this.db.prepare('SELECT name FROM new_topic_skills WHERE session_id=?').get(sessionId);
+    return row ? String(row.name) : undefined;
+  }
+  clearNewTopicSkill(sessionId: string): void {
+    this.db.prepare('DELETE FROM new_topic_skills WHERE session_id=?').run(sessionId);
   }
   hasPendingInitialTask(id: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND initial_state='pending'").get(id));

@@ -83,6 +83,10 @@ pnpm cli show /srv/projects/backend --config /etc/omp-telegram/config.yaml
 
 Configuration contains bot tokens, project paths, admins, chat assignments, and service settings. The CLI creates private files and validates updates before replacing them atomically. It preserves ownership and mode. Invalid or unreadable configuration causes an error, not an empty configuration.
 
+Each bot/chat assignment may contain an optional `default_new_topic_skill` string. Configuration validation uses the canonical mentionable-name grammar without trimming, case folding, or alias conversion; catalog existence is checked by `/set_default_new_topic_skill <exact-skill-name>`. Instance admins can run that command from General or a session topic to update the forum default, omit the argument to display it, or use `--clear` to remove it. Bare `clear` remains a valid exact skill name when present in the catalog.
+
+New managed topics persist a snapshot across service restarts and apply it only to their first accepted Telegram prompt or proposal, deduplicated against explicit pending skill selections. General `/p` and `/new` include it in the initial task and freeze it in proposals. Manually created topics apply their snapshot to the first authorized user's accepted Telegram task. Existing topics and attached histories remain unchanged when the forum default changes. Mini App submissions are outside this Telegram composition setting.
+
 Both the file and its parent directory must be writable to change configuration. A service with readable but protected configuration can still run sessions. Protect both against the service account if it must not change them; an administrator can run the CLI under another account.
 
 Runtime data lives separately in `dataDir`, which defaults to a `data` directory beside the YAML. Back up both. Changing `dataDir` selects different state; it does not migrate histories. Startup does not import `.env` files or old configuration formats.
