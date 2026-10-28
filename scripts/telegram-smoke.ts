@@ -110,6 +110,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       result = { ...params, message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: group, from: me };
       messages.push(result as Record<string, unknown>);
       events.emit('message');
+    } else if (method === 'forwardMessage') {
+      result = { ...params, forwarded_message_id: params.message_id, message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: group, from: me };
+      messages.push(result as Record<string, unknown>);
+      events.emit('message');
     } else if (method === 'pinChatMessage') {
       pins.push(params);
       result = true;
@@ -278,7 +282,7 @@ export async function verifyTelegramFlow() {
     await app.update({ text: '/setup' });
     assert.equal(app.store.isEnrolled(botId, chatId), true);
     const allMessageMenus = await verifyMenus('all-message');
-    await app.update({ text: '/new Implement login' });
+    await app.update({ message_id:7003, text: '/new Implement login' });
     const session = app.store.listSessions(botId)[0]!;
     assert.equal(session.threadId, 21);
     await waitUntil(() => app.accepted.some(frame => frame.t === 'prompt'), 'initial task was not delivered after explicit startup rejection');
@@ -290,7 +294,7 @@ export async function verifyTelegramFlow() {
     assert.equal(button.message_thread_id, session.threadId);
     assert.deepEqual(app.pins, [{ chat_id: chatId, message_id: button.message_id, disable_notification: true }], 'the Mini App entry is pinned inside its session topic');
     const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
-    assert.equal(topicMessages[1]?.text, `@${ownerUsername} posted a prompt: Implement login`);
+    assert.equal(topicMessages[1]?.forwarded_message_id,7003);
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256', 'active turn did not get the running icon');
     app.emit({t:'event',event:{type:'agent_end'}});

@@ -515,10 +515,8 @@ export class BotService {
       link_preview_options: { is_disabled: true },
     });
     await this.announce(session);
-    if (task) await this.relayPrompt(session, {
-      userId: ctx.from!.id, username: ctx.from!.username,
-      displayName: [ctx.from!.first_name, ctx.from!.last_name].filter(Boolean).join(' '),
-    }, task);
+    if (task && ctx.message) await this.bot.telegram.forwardMessage(
+      session.chatId, ctx.chat!.id, ctx.message.message_id, { message_thread_id: session.threadId });
     await this.setTopicStatus(session, 'stopped');
     await this.listen(session);
     await this.authorize(ctx.chat!.id, ctx.from!.id);

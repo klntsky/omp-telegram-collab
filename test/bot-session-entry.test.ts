@@ -162,7 +162,7 @@ test('retirement admission rejection preserves an unsent initial task for the ne
 });
 
 for (const interactive of [false,true]) {
-  test(`${interactive ? 'interactive /new' : '/new task'} copies the original task after the topic entry with relay attribution`, async () => {
+  test(`${interactive ? 'interactive /new' : '/new task'} forwards the original message below the session entry exactly once`, async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
@@ -170,17 +170,18 @@ for (const interactive of [false,true]) {
       if (interactive) {
         await app.update({text:'/new'});
         const request = app.messages.at(-1)!;
-        await app.update({text:task,reply_to_message:{message_id:request.message_id}},{
+        await app.update({message_id:7002,text:task,reply_to_message:{message_id:request.message_id}},{
           id:ownerId,first_name:'No',last_name:'Username',is_bot:false,
         });
       } else {
-        await app.update({text:`/new ${task}`});
+        await app.update({message_id:7002,text:`/new ${task}`});
       }
       const session = app.store.listSessions(botId)[0]!;
       const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
       assert.ok(topicMessages[0]?.reply_markup,'the session entry remains first');
-      assert.equal(topicMessages[1]?.text,`${interactive ? `No Username (user ID ${ownerId})` : `@${ownerUsername}`} posted a prompt: ${task}`);
-      assert.equal(topicMessages[1]?.parse_mode,undefined,'the task is literal text, just like Mini App prompts');
+      assert.equal(topicMessages[1]?.from_chat_id,chatId);
+      assert.equal(topicMessages[1]?.forwarded_message_id,7002);
+      assert.equal(topicMessages[1]?.text,undefined,'the original message is forwarded, not rewritten with attribution');
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:task}],'the visible copy is not a second submission');
     } finally {
