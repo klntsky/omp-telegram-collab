@@ -1,14 +1,34 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
 import { emptyConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
+import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
+
+test('disk and in-memory stores reject missing instance paths and orphan reply targets', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-current-schema-'));
+  const disk = new Store(join(directory, 'topics.sqlite'));
+  const memory = new Store(':memory:');
+  try {
+    for (const store of [disk, memory]) {
+      assert.throws(() => store.setReplyTarget('unknown-session', 7), /FOREIGN KEY constraint failed/);
+      assert.throws(() => store.createSession({ ...topic, instancePath: '' }, 'Missing path'));
+      const created = store.createSession(topic, 'Current schema');
+      assert.equal(created.instancePath, topic.instancePath);
+      assert.throws(() => store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(created.id), /NOT NULL constraint failed/);
+      assert.equal(store.getSession(created.id)?.instancePath, topic.instancePath);
+    }
+  } finally {
+    disk.close();
+    memory.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('topic identity survives a service restart and closing preserves its history binding', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-store-'));
@@ -123,41 +143,31 @@ test('confirmed topic icons persist exactly across restart and clearing stays is
   }
 });
 
-test('legacy backfill preserves session identity, history, initial state and generations transactionally', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-legacy-path-'));
+test('current sessions retain pending tasks and delivery metadata across a disk reopen', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-current-path-'));
   const filename = join(directory, 'telegram.sqlite');
-  const legacy = new DatabaseSync(filename);
-  legacy.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));`);
-  legacy.prepare('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?)').run('preserved-id', botId, chatId, 17, 'Legacy task', 'closed', JSON.stringify({ kind: 'attached', instanceId: 'old-host', sessionId: 'old-history' }), 123, 'Pending task', 'pending');
-  legacy.close();
-  const store = new Store(filename);
+  let store = new Store(filename);
   try {
-    store.markSnapshot('preserved-id');
-    store.rememberReply('preserved-id', 'old-reply');
-    store.advanceSessionGeneration('preserved-id');
-    store.setReplyTarget('preserved-id', 77);
-    assert.equal(store.getTopicIcon('preserved-id'), undefined);
-    store.setTopicIcon('preserved-id', '5368324170671202286');
-    const before = store.getSession('preserved-id')!;
-    assert.equal(before.instancePath, '');
-    const config = emptyConfig(join(directory, 'config.yaml'));
-    config.instances = { [topic.instancePath]: { admins: ['ada'], chats: [{ botId, chatId }] } };
-    store.assignSessionPaths(config);
-    store.assignSessionPaths(config);
-    assert.deepEqual(store.getSession('preserved-id'), { ...before, instancePath: topic.instancePath });
-    assert.equal(store.getSessionGeneration('preserved-id'), 1);
-    assert.equal(store.hasPendingInitialTask('preserved-id'), true);
-    assert.equal(store.hasSnapshot('preserved-id'), true);
-    assert.equal(store.rememberReply('preserved-id', 'old-reply'), false);
-    assert.equal(store.getReplyTarget('preserved-id'), 77);
-    assert.equal(store.getTopicIcon('preserved-id'), '5368324170671202286');
-    config.instances = {};
-    assert.doesNotThrow(() => store.assignSessionPaths(config), 'removing assignments must preserve disconnected histories');
-    config.instances = { '/work/other': { admins: ['grace'], chats: [{ botId, chatId }] } };
-    assert.throws(() => store.assignSessionPaths(config), /history pinned/);
-    assert.equal(store.getSession('preserved-id')?.instancePath, topic.instancePath);
+    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, 'Pending instruction', 123);
+    store.markSnapshot(original.id);
+    store.rememberReply(original.id, 'saved-reply');
+    store.advanceSessionGeneration(original.id);
+    store.setReplyTarget(original.id, 77);
+    store.setTopicIcon(original.id, '5368324170671202286');
+    store.close();
+    store = new Store(filename);
+    assert.deepEqual(store.getSession(original.id), original);
+    assert.equal(store.getSessionGeneration(original.id), 1);
+    assert.equal(store.hasPendingInitialTask(original.id), true);
+    assert.equal(store.getInitialUser(original.id), 123);
+    assert.equal(store.hasSnapshot(original.id), true);
+    assert.equal(store.rememberReply(original.id, 'saved-reply'), false);
+    assert.equal(store.getReplyTarget(original.id), 77);
+    assert.equal(store.getTopicIcon(original.id), '5368324170671202286');
     assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
-    assert.equal(store.claimInitialTask('preserved-id'), 'Pending task');
+    assert.deepEqual(store.getSession(original.id), original);
+    assert.equal(store.claimInitialTask(original.id), 'Pending instruction');
+    assert.equal(store.claimInitialTask(original.id), undefined);
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -167,23 +177,75 @@ test('legacy backfill preserves session identity, history, initial state and gen
 test('one path can bind several bots and chats without merging topic identities', () => {
   const store = new Store(':memory:');
   try {
-    const config = emptyConfig('/work/config.yaml');
-    config.instances = {
-      '/work/a': { admins: ['ada'], chats: [{ botId, chatId }, { botId: botId + 1, chatId }, { botId, chatId: chatId - 1 }] },
-      '/work/b': { admins: ['grace'], chats: [{ botId: botId + 1, chatId: chatId - 1 }] },
+    const instances = {
+      '/work/a': { chats: [{ botId, chatId }, { botId: botId + 1, chatId }, { botId, chatId: chatId - 1 }] },
+      '/work/b': { chats: [{ botId: botId + 1, chatId: chatId - 1 }] },
     };
-    const sessions = Object.entries(config.instances).flatMap(([instancePath, instance]) => instance.chats.map(chat => store.createSession({ ...chat, threadId: 17, instancePath }, instancePath)));
-    store.assignSessionPaths(config);
+    const sessions = Object.entries(instances).flatMap(([instancePath, instance]) => instance.chats.map(chat => store.createSession({ ...chat, threadId: 17, instancePath }, instancePath)));
     assert.equal(new Set(sessions.map(session => session.id)).size, 4);
     assert.equal(sessions.filter(session => session.instancePath === '/work/a').length, 3);
-    store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(sessions[0]!.id);
-    config.instances['/work/b']!.chats.push({ botId: botId + 2, chatId });
-    const unknown = store.createSession({ botId: botId + 2, chatId, threadId: 18, instancePath: '/work/unrecognized' }, 'Unknown history');
-    assert.throws(() => store.assignSessionPaths(config), /history pinned/);
-    assert.equal(store.getSession(sessions[0]!.id)?.instancePath, '', 'a later mismatch rolls back earlier NULL backfills');
-    assert.equal(store.getSession(unknown.id)?.instancePath, '/work/unrecognized');
+    for (const original of sessions) {
+      assert.equal(store.getTopic(original)?.id, original.id);
+      const otherPath = original.instancePath === '/work/a' ? '/work/b' : '/work/a';
+      assert.throws(() => store.createSession({ ...original, instancePath: otherPath }, 'Retarget'), /history belongs/);
+      assert.deepEqual(store.getSession(original.id), original);
+    }
   } finally {
     store.close();
+  }
+});
+
+test('current path validation rejects retargeted assignments and mismatched history identities without rewriting files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-validate-path-'));
+  const originalPath = join(directory, 'original');
+  const otherPath = join(directory, 'other');
+  await mkdir(originalPath);
+  await mkdir(otherPath);
+  const config = emptyConfig(join(directory, 'config.yaml'));
+  config.dataDir = directory;
+  config.instances = { [originalPath]: { admins: ['ada'], chats: [{ botId, chatId }] } };
+  const store = new Store(':memory:');
+  const runtime = new OmpRuntime(config);
+  try {
+    const managed = store.createSession({ ...topic, instancePath: originalPath }, 'Managed');
+    const attached = store.createSession({ ...topic, threadId: 18, instancePath: originalPath }, 'Attached', { kind: 'attached', instanceId: 'host', sessionId: 'history' });
+    await runtime.validateSessionPaths(store.listSessions());
+    const retargeted = { ...config, instances: { [otherPath]: { admins: ['ada'], chats: [{ botId, chatId }] } } };
+    for (const session of [managed, attached]) {
+      await assert.rejects(runtime.validateSessionPaths([session], retargeted), /history pinned to another instance path/);
+    }
+    await runtime.validateSessionPaths(store.listSessions(), { ...config, instances: {} });
+    const sessionDirectory = join(directory, 'sessions', managed.id);
+    await mkdir(sessionDirectory, { recursive: true });
+    const history = join(sessionDirectory, 'history.jsonl');
+    const binding = join(sessionDirectory, 'binding.json');
+    const pin = { version: 1, sessionId: 'saved-history', sessionFile: history, cwd: originalPath };
+    const header = { type: 'session', version: 3, id: pin.sessionId, cwd: originalPath };
+    const historyBytes = `${JSON.stringify(header)}\n`;
+    await writeFile(history, historyBytes);
+    await writeFile(binding, JSON.stringify(pin));
+    await runtime.validateSessionPaths(store.listSessions());
+    assert.equal(await readFile(history, 'utf8'), historyBytes);
+    await writeFile(binding, JSON.stringify({ ...pin, cwd: otherPath }));
+    await assert.rejects(runtime.validateSessionPaths([managed]), /Saved session .* conflicts with instance path/);
+    await writeFile(binding, JSON.stringify(pin));
+    for (const changed of [{ ...header, id: 'different-history' }, { ...header, cwd: otherPath }]) {
+      const changedBytes = `${JSON.stringify(changed)}\n`;
+      await writeFile(history, changedBytes);
+      await assert.rejects(runtime.validateSessionPaths([managed]), /Saved history .* conflicts with instance path/);
+      assert.equal(await readFile(history, 'utf8'), changedBytes);
+      assert.equal(await readFile(binding, 'utf8'), JSON.stringify(pin));
+    }
+    await rm(history);
+    await assert.rejects(runtime.validateSessionPaths([managed]), { code: 'ENOENT' });
+    await rm(originalPath, { recursive: true });
+    await symlink(otherPath, originalPath);
+    await assert.rejects(runtime.validateSessionPaths([attached]), /Instance path identity changed/);
+    assert.equal(store.getSession(managed.id)?.instancePath, originalPath);
+  } finally {
+    await runtime.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

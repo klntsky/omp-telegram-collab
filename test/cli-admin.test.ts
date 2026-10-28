@@ -289,16 +289,6 @@ test('removed assignments retain histories and cannot be rebound to another dire
   retained.close();
 });
 
-test('unknown legacy history is not silently assigned to a new directory', async t => {
-  const f = fixture(t);
-  f.seed();
-  const store = f.store();
-  const session = store.createSession({botId: 123456789, chatId: -1001, threadId: 11, instancePath: canonicalPath(f.project)}, 'unknown legacy history');
-  store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(session.id);
-  store.close();
-  await assert.rejects(f.run(['chat', 'add', f.project, '--chat', '-1001']), /unknown directory/);
-});
-
 test('approval verifies live identities, authorizes requester, enrolls, confirms, then consumes', async t => {
   const f = fixture(t);
   f.seed();

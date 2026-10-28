@@ -92,21 +92,7 @@ Changes notify the selected running service over a local control socket and awai
 
 For scripts, `configure` accepts `--public-url`, `--host`, `--port`, `--data-dir`, `--omp-executable`, repeated `--omp-arg`, `--clear-omp-args`, `--max-sessions`, `--startup-timeout-ms`, and `--relay-url` (`-` clears the relay). OMP arguments are literal strings, never shell-evaluated. Defaults are loopback, port 3000, executable `omp`, eight resident managed hosts, and a 60000 ms startup deadline. The public URL must be an HTTPS origin without credentials, path, query, or fragment.
 
-## Migrate an existing deployment
-
-Stop the old service through its normal supervisor before starting the upgraded service. Keep its `.env`, data directory, and histories in place. From the same launch directory, run:
-
-```sh
-pnpm cli migrate
-pnpm cli list
-pnpm start
-```
-
-Use `--config PATH` on all three commands when selecting a nondefault configuration. Migration reads `.env` with exported environment values taking precedence, imports single-bot or named-bot credentials/settings, and registers the canonical legacy `OMP_CWD`. The old bot owner lists merge into that path's admin list. Existing configured bots' chat assignments are imported from SQLite.
-
-Migration never overwrites an existing YAML file or rewrites histories, bindings, session IDs, pending tasks, reply targets, or generation counters. Startup backfills only missing session paths after checking saved history/binding identities. Conflicting active-session paths or unknown history formats fail rather than silently starting new conversations. Historical data for unconfigured bots remains untouched and unavailable until those bots are restored.
-
-For legacy pnpm deployments only, starting with no default YAML and existing bot environment variables also performs this import automatically. Explicitly selecting a missing file with `--config` never falls back to environment configuration; run `migrate` or `configure` first. After migration, YAML is authoritative and environment settings no longer override it. `.env.example` is retained only as a legacy-import reference.
+This unpublished project supports only the current CLI-managed YAML configuration and SQLite schema. Create configuration with `pnpm cli configure`; startup does not import `.env` files or infer missing session paths. Session histories remain pinned to their configured canonical instance directory.
 
 ## Run under PM2
 
@@ -208,6 +194,8 @@ pnpm smoke
 
 `pnpm check` strictly typechecks application code, the Mini App, all tests, and TypeScript scripts through `tsconfig.verification.json`.
 
+`pnpm test` runs test files in isolated processes with concurrency five. Bot integration cases are grouped by presets, session entry, relay/receipts, capacity, topic status, controls, and prompts/proposals; run a focused group with, for example, `pnpm exec tsx --test test/bot-presets.test.ts`. Each case owns a fresh fixture, including an in-memory SQLite store by default. Disk-reopen and persistence cases explicitly retain disk-backed stores; YAML mutation and permission checks still use real temporary files.
+
 `pnpm smoke` runs four isolated subprocess stages: compiled CLI, Telegram behavior, gateway authorization, and real OMP runtime. Every selected stage runs even if an earlier stage fails. Original subprocess diagnostics remain visible; the final result names each stage and exits nonzero if any failed.
 
 Run a stage independently with `pnpm smoke:cli`, `pnpm smoke:telegram`, `pnpm smoke:gateway`, or `pnpm smoke:runtime`. Select an ordered subset with, for example, `pnpm smoke telegram gateway`. The CLI stage requires a current `pnpm build`; the runtime stage requires the OMP executable and credentials described below. Telegram and gateway stages use disposable local fixtures and need no live Telegram credentials.
@@ -218,4 +206,4 @@ For lifecycle-only regression coverage, run `pnpm exec tsx --test test/lifecycle
 
 For focused real-process kill verification, run `pnpm exec tsx scripts/runtime-kill-smoke.ts`. It starts disposable OMP hosts on a local relay and checks busy attached-host termination, recovered managed-host termination, exact-history resumption, identity-mismatch refusal, unrelated-host survival, startup cancellation, and concurrent retirement without a model prompt or live Telegram request.
 
-The smoke command exercises the compiled CLI's legacy migration, alternate configuration paths, per-path administrators, protected-file reads and mutation refusal; launches actual OMP in multiple instance directories; and migrates a legacy database while verifying unchanged real history bytes, topic identity, pending tasks, and recovery of the same live host. It also uses a local Telegram API fixture for bot and gateway behavior. No model request or live Telegram call is made. Browser acceptance should additionally verify automatic reconnect with a fresh ticket, retained transcript/draft, explicit Leave, unauthenticated denial, and archived read-only mode. Real OMP startup requires the executable, configured credentials, and enough resources to start within its deadline.
+The smoke command exercises compiled CLI YAML creation, alternate configuration paths, per-path administrators, protected-file reads and mutation refusal; launches actual OMP in multiple instance directories; and reopens the current database/configuration while verifying unchanged real history bytes, topic identity, pending tasks, and recovery of the same live host. It also uses a local Telegram API fixture for bot and gateway behavior. No model request or live Telegram call is made. Browser acceptance should additionally verify automatic reconnect with a fresh ticket, retained transcript/draft, explicit Leave, unauthenticated denial, and archived read-only mode. Real OMP startup requires the executable, configured credentials, and enough resources to start within its deadline.

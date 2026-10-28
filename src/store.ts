@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AppConfig, TopicKey, TopicSession } from '../shared/contracts.js';
+import type { TopicKey, TopicSession } from '../shared/contracts.js';
 
 type Row = Record<string, string | number | null>;
 export interface SetupRequest {
@@ -19,7 +19,7 @@ function setupRequest(row: Row): SetupRequest {
 }
 function session(row: Row | undefined): TopicSession | undefined {
   if (!row) return undefined;
-  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instancePath: row.instance_path == null ? '' : String(row.instance_path), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
+  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instancePath: String(row.instance_path), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
 }
 export class Store {
   readonly db: DatabaseSync;
@@ -28,8 +28,9 @@ export class Store {
     this.db = new DatabaseSync(filename);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
-      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
+      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_path TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
       CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
@@ -37,9 +38,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
-      CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));`);
-    const columns = this.db.prepare('PRAGMA table_info(sessions)').all();
-    if (!columns.some(column => column.name === 'instance_path')) this.db.exec('ALTER TABLE sessions ADD COLUMN instance_path TEXT');
+      CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
+      COMMIT;`);
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
@@ -125,25 +125,6 @@ export class Store {
   }
   takeTaskRequest(botId: number, chatId: number, messageId: number, userId: number): boolean {
     return Number(this.db.prepare('DELETE FROM task_requests WHERE bot_id=? AND chat_id=? AND message_id=? AND user_id=? AND created_at>? RETURNING message_id').get(botId, chatId, messageId, userId, Date.now() - 3600000)?.message_id) === messageId;
-  }
-  assignSessionPaths(config: AppConfig): void {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const update = this.db.prepare('UPDATE sessions SET instance_path=? WHERE id=? AND instance_path IS NULL');
-      for (const [path, instance] of Object.entries(config.instances)) {
-        for (const chat of instance.chats) {
-          const rows = this.db.prepare('SELECT id,instance_path FROM sessions WHERE bot_id=? AND chat_id=?').all(chat.botId, chat.chatId);
-          for (const row of rows) {
-            if (row.instance_path !== null && row.instance_path !== path) throw new Error(`Chat ${chat.chatId} has history pinned to another instance path`);
-            update.run(path, String(row.id));
-          }
-        }
-      }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
   }
   createSetupRequest(input: Omit<SetupRequest, 'code' | 'expiresAt'>): SetupRequest {
     const request: SetupRequest = { ...input, code: randomBytes(9).toString('base64url'), expiresAt: Date.now() + 600000 };

@@ -178,7 +178,7 @@ class Administration {
     if (current && current.path !== path) throw new Error(`This bot/chat is already assigned to ${current.path}. Remove that assignment first.`);
     for (const session of store.listSessions(botId)) {
       if (session.chatId !== chatId) continue;
-      if (session.instancePath ? session.instancePath !== path : current?.path !== path) throw new Error('This bot/chat has histories pinned to a different or unknown directory. It cannot be reassigned safely.');
+      if (session.instancePath !== path || canonicalPath(session.instancePath) !== session.instancePath) throw new Error('This bot/chat has histories pinned to a different or unknown directory. It cannot be reassigned safely.');
     }
   }
   async create(input: string, admins: string[]): Promise<void> {
