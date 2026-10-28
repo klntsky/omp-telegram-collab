@@ -767,6 +767,9 @@ export class OmpRuntime {
     } catch (error) {
       if (owned && !owned.exited && !this.#killing.has(id)) await this.#shutdown(id,owned);
       if (!owned || owned.exited) this.#managed.delete(id);
+      if (owned?.process && error instanceof Error) {
+        error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(this.#config.dataDir, 'sessions', id, 'terminal.log')} (previous output: terminal.log.1)`;
+      }
       throw error;
     }
   }

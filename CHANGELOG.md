@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Capture managed OMP terminal output in private, bounded per-session rotating logs; retain original startup errors and include the diagnostic file location without exposing terminal session content in Telegram.
 - Add admin-only `/terminate` as a persisted service-wide safety break: kill all session agents, invalidate pending work and Mini App access, keep Telegram online, and resume only after the configuration flag is removed. Check configuration metadata before dispatch without reparsing unchanged YAML.
 - Forward the replied-to message into topics created by `/new` or `/p`, before the original task and after the pinned session entry, including media-only replies without duplicating OMP submission.
 - Deliver Telegram photos and supported image documents as native OMP prompt images through the shared authorization, proposal approval, initial-task persistence, and startup-retry lifecycle; support ordinary image captions in all-message mode and caption commands in explicit mode.
