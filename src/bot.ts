@@ -649,7 +649,7 @@ export class BotService {
     await this.announce(session);
     const source = ctx.message;
     if (task && source && 'reply_to_message' in source && source.reply_to_message &&
-        (/^\/(?:new|p)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
+        (/^\/(?:new|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
           this.directedReplies.has(ctx))) {
       await forwardTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
@@ -845,7 +845,7 @@ export class BotService {
       ? 'Default new-topic skill cleared. Existing topics are unchanged.'
       : `Default new-topic skill: /skill:${name}. It will mention this skill in the first prompt of future topics. Existing topics are unchanged.`);
   }
-  private async routePrompt(ctx: Context, text: string, session?: TopicSession): Promise<void> {
+  private async routePrompt(ctx: Context, text: string, session?: TopicSession, immediateSkill?: string): Promise<void> {
     const admin = await this.instanceAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
@@ -859,7 +859,7 @@ export class BotService {
     const skillKey = this.skills.key(ctx);
     const pendingSkills = this.options.store.getPendingSkills(skillKey);
     const topicSkill = session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
-    const mentionedSkills = [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills])];
+    const mentionedSkills = [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...(immediateSkill ? [immediateSkill] : [])])];
     if (mentionedSkills.length) {
       const available = await this.options.runtime.listSkills(instancePath, session);
       const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
@@ -1149,9 +1149,10 @@ export class BotService {
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
       if (skillAlias) {
         if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Select skills in General or a session topic.'); return; }
-        if (arg) { await replyTo(ctx, contextDestination(ctx), `Use /${action} without arguments to select this skill, then send your prompt.`); return; }
-        await this.skills.choose(ctx, skillAlias.name, session);
-        return;
+        if (!arg) {
+          await this.skills.choose(ctx, skillAlias.name, session);
+          return;
+        }
       }
       if (action === 'skills') {
         if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /skills in General or a session topic.'); return; }
@@ -1159,13 +1160,21 @@ export class BotService {
         await this.skills.open(ctx, session, arg === 'clear');
         return;
       }
-      if ((action === 'p' || action === 'new') && 'reply_to_message' in message && message.reply_to_message) {
+      if ((action === 'p' || action === 'new' || skillAlias) && 'reply_to_message' in message && message.reply_to_message) {
         const reply = message.reply_to_message;
         const quoted = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
         if (quoted) {
           const quote = quoted.split(/\r?\n/).map(line => `> ${line}`).join('\n');
           arg = arg ? `${quote}\n\n${arg}` : quote;
         }
+      }
+      if (skillAlias) {
+        if (destination.kind !== 'general' && !session) {
+          await replyTo(ctx, destination, 'No session in this topic. Use /new to create one.');
+          return;
+        }
+        await this.routePrompt(ctx,arg,destination.kind === 'general' ? undefined : session,skillAlias.name);
+        return;
       }
       if (action === 'detach') {
         if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a configured instance admin.'); return; }
@@ -1188,7 +1197,7 @@ export class BotService {
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
-      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n/skills — select or clear skills for your next prompt; /skill_* shortcuts select skills too\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
       if (action === 'status') { await replyTo(ctx, contextDestination(ctx), `${await this.ready(ctx.chat.id) ? 'Forum ready.' : 'Forum permissions need attention.'}${session ? `\nSession: ${session.name} (${session.status})` : '\nUse /new task to create a session.'}`); return; }
       if (action === 'session') {
         if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }
