@@ -159,8 +159,15 @@ export class BotService {
       const task = this.updateTail.then(async () => { await received; await this.handle(ctx); });
       this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) {
+        console.error('Telegram operation failed.', error);
         if (ctx.chat && !(error instanceof SessionCapacityError)) {
-          const prefix = 'The operation could not be completed. Check the local service and try again.\n\n';
+          const diagnostics = error instanceof Error
+            ? ['code','signal','killed'].flatMap(key => {
+                const value = Reflect.get(error,key);
+                return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
+              })
+            : [];
+          const prefix = `The operation could not be completed. Check the local service and try again.\n\n${diagnostics.length ? diagnostics.join('\n') + '\n\n' : ''}`;
           const details = error instanceof Error ? error.message : String(error);
           await ctx.reply(prefix + details, {
             entities: [{ type: 'pre', offset: prefix.length, length: details.length }],
@@ -878,7 +885,16 @@ export class BotService {
     let prompt = '';
     if (command) {
       await this.authorize(ctx.chat.id, ctx.from.id);
-      const action = command[1]!.toLowerCase(), arg = command[3]?.trim() ?? '';
+      const action = command[1]!.toLowerCase();
+      let arg = command[3]?.trim() ?? '';
+      if (action === 'p' && 'reply_to_message' in message && message.reply_to_message) {
+        const reply = message.reply_to_message;
+        const quoted = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
+        if (quoted) {
+          const quote = quoted.split(/\r?\n/).map(line => `> ${line}`).join('\n');
+          arg = arg ? `${quote}\n\n${arg}` : quote;
+        }
+      }
       if (action === 'detach') {
         if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Detaching requires a configured instance admin.'); return; }
         if (threadId === 1 || !session) { await ctx.reply('Use /detach inside a session topic, not General or an unrelated chat.'); return; }
@@ -1012,7 +1028,7 @@ export class BotService {
         await ctx.reply('Abort requested. The session process is still running.');
         return;
       }
-      if (action !== 'p' || allMessagesArePrompts) return;
+      if (action !== 'p') return;
       if (!session) { await ctx.reply('Use /p inside a session topic, or in General to create a new session.'); return; }
       if (!arg) { await ctx.reply('Usage: /p <prompt>'); return; }
       prompt = arg;

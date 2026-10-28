@@ -80,6 +80,7 @@ for (const [source, message] of [
 
 for (const failure of [
   new Error('Host 🚫 could not start: <socket> & `token`\nECONNREFUSED 127.0.0.1:3000'),
+  Object.assign(new Error('Command failed: omp collab list --json\n'), {code:null,signal:'SIGKILL',killed:true}),
   'Local service unavailable',
 ]) {
   test(`operation failures expose literal code-block details for ${typeof failure} rejections`, async () => {
@@ -93,6 +94,10 @@ for (const failure of [
       const text = String(reply.text);
       const entities = reply.entities as { type: string; offset: number; length: number }[];
       assert.ok(text.endsWith(details));
+      if (failure instanceof Error && 'signal' in failure) {
+        assert.ok(text.includes('signal: SIGKILL'));
+        assert.ok(text.includes('killed: true'));
+      }
       assert.equal(reply.parse_mode, undefined);
       assert.deepEqual(entities, [{ type: 'pre', offset: text.length - details.length, length: details.length }]);
       assert.equal(text.slice(entities[0]!.offset, entities[0]!.offset + entities[0]!.length), details);
