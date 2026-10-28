@@ -85,13 +85,14 @@ interface PromptProposal {
   expires: number;
 }
 const help = '/setup — request or enroll this forum (instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (instance admin)\n/detach — make this topic conversation-only (instance admin)\n/model_preset <name> — set the forum default in General, or switch this session (instance admin)\n/list_model_presets — list presets and the forum default (instance admin)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (instance admin)';
-const defaultSkillHelp = '/set_default_new_topic_skill <exact-name> — set the forum default for new topics (instance admin); no argument shows it, --clear removes it';
+const defaultSkillHelp = '/set_default_new_topic_skill <exact-name> — set the forum default for new topics; no argument shows it (instance admin)\n/unset_default_new_topic_skill — remove the forum default for future topics (instance admin)';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
-  { command: 'set_default_new_topic_skill', description: 'Set, show or clear the new-topic skill default (admin)' },
+  { command: 'set_default_new_topic_skill', description: 'Set or show the new-topic skill default (admin)' },
+  { command: 'unset_default_new_topic_skill', description: 'Remove the new-topic skill default (admin)' },
   { command: 'setup', description: 'Enroll this forum or change prompt settings' },
   { command: 'attach', description: 'Attach a local OMP host (instance admin)' },
   { command: 'detach', description: 'Make this topic conversation-only (instance admin)' },
@@ -806,17 +807,17 @@ export class BotService {
     return findInstance(this.options.config,this.id,chatId)?.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
-  private async configureNewTopicSkill(ctx: Context, name: string): Promise<void> {
+  private async configureNewTopicSkill(ctx: Context, name: string | undefined): Promise<void> {
     if (!(await this.instanceAdmin(ctx))) { await ctx.reply('Setting the new-topic skill default requires a configured instance admin.'); return; }
     const instancePath = this.assignedPath(ctx.chat!.id);
-    if (!name) {
+    if (name === '') {
       const current = this.defaultNewTopicSkill(ctx.chat!.id);
       await ctx.reply(`Default new-topic skill: ${current ? `/skill:${current}` : '(not set)'}.`);
       return;
     }
-    if (name !== '--clear') {
+    if (name !== undefined) {
       if (!isMentionableSkillName(name)) {
-        await ctx.reply('Usage: /set_default_new_topic_skill <exact-skill-name> or --clear. Use the canonical name from /skills, without /skill:.');
+        await ctx.reply('Usage: /set_default_new_topic_skill <exact-skill-name>. Use the canonical name from /skills, without /skill:. To remove the default, use /unset_default_new_topic_skill.');
         return;
       }
       const available = await this.options.runtime.listSkills(instancePath);
@@ -832,14 +833,14 @@ export class BotService {
       throw new Error('The configured instance assignment or administrator access changed. The new-topic skill default is unchanged.');
     }
     const chat = current.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
-    if (name === '--clear') delete chat.default_new_topic_skill;
+    if (name === undefined) delete chat.default_new_topic_skill;
     else chat.default_new_topic_skill = name;
     writeConfig(persisted);
     const active = findInstance(this.options.config,this.id,ctx.chat!.id)!.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
-    if (name === '--clear') delete active.default_new_topic_skill;
+    if (name === undefined) delete active.default_new_topic_skill;
     else active.default_new_topic_skill = name;
-    await ctx.reply(name === '--clear'
+    await ctx.reply(name === undefined
       ? 'Default new-topic skill cleared. Existing topics are unchanged.'
       : `Default new-topic skill: /skill:${name}. It will mention this skill in the first prompt of future topics. Existing topics are unchanged.`);
   }
@@ -1144,6 +1145,11 @@ export class BotService {
       const action = command[1]!.toLowerCase();
       let arg = command[3]?.trim() ?? '';
       if (action === 'set_default_new_topic_skill') { await this.configureNewTopicSkill(ctx,arg); return; }
+      if (action === 'unset_default_new_topic_skill') {
+        if (arg) { await ctx.reply('Usage: /unset_default_new_topic_skill'); return; }
+        await this.configureNewTopicSkill(ctx,undefined);
+        return;
+      }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
       if (skillAlias) {
         if (detached) { await ctx.reply('This topic is conversation-only. Select skills in General or a session topic.'); return; }

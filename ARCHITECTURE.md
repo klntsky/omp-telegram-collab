@@ -20,7 +20,7 @@ The adapter groups image-album updates before prompt dispatch and keeps their pl
 
 The bot adapter owns the user/topic-bound skill picker and its temporary inline-search context. It composes selected `/skill:name` references into authorized prompt text without implementing native skill-template expansion. Prompt admission and proposal creation own consumption of the pending selection; proposals retain the composed text independently of later picker changes.
 
-The adapter's instance-admin-only `/set_default_new_topic_skill` control updates the per-bot/chat forum default from General or session topics. The configuration boundary validates `default_new_topic_skill` with the shared canonical mentionable-name predicate, preserving exact names; the adapter additionally checks catalog existence. No argument reads the setting and `--clear` removes it; bare `clear` remains an exact skill name.
+The bot adapter owns the instance-admin-only controls that set and unset the per-bot/chat forum skill default. The configuration boundary validates canonical mentionable names without normalization; the adapter additionally checks catalog existence and current administrator membership before saving.
 
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 
@@ -35,6 +35,8 @@ The runtime owns per-instance catalog caching, shared in-flight discovery, and f
 OMP owns agent execution, conversation history, interactive questions, and live Collab state. The service connects as a Collab guest. It does not reconstruct an independent conversation from Telegram messages. Shared contracts describe communication between the service components and clients; they do not move execution authority into the browser.
 
 The runtime uses OMP's guarded lifecycle boundary for idle retirement. Explicit force termination has a different boundary: the runtime must verify the intended process identity before signaling it. A database lock excludes another service from managing the same runtime data concurrently.
+
+The lifecycle extension instance that creates a host's control server owns its descriptor and socket cleanup. Subagent and unstarted extension instances have no authority to remove the main host's control metadata.
 
 ## Durable and temporary state
 

@@ -32,6 +32,7 @@ test('default-skill command registers in both menus, preserves exact names and r
     await app.update({text:'/setup'});
     for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
       assert.ok((await app.bot.telegram.getMyCommands({scope})).some(command=>command.command==='set_default_new_topic_skill'));
+      assert.ok((await app.bot.telegram.getMyCommands({scope})).some(command=>command.command==='unset_default_new_topic_skill'));
     }
     t.mock.method(app.runtime,'listSkills',async () => [
       {name:'Case/Exact-Name',description:'Exact canonical identity'},
@@ -41,17 +42,19 @@ test('default-skill command registers in both menus, preserves exact names and r
     assert.equal(savedDefault(app),'Case/Exact-Name');
     await app.update({text:'/set_default_new_topic_skill'});
     assert.ok(String(app.messages.at(-1)!.text).includes('/skill:Case/Exact-Name'));
-    for (const invalid of ['case/exact-name','Case_Exact_Name','/skill:Case/Exact-Name','Case Exact-Name']) {
+    for (const invalid of ['case/exact-name','Case_Exact_Name','/skill:Case/Exact-Name','Case Exact-Name','--clear']) {
       await app.update({text:`/set_default_new_topic_skill ${invalid}`});
       assert.equal(savedDefault(app),'Case/Exact-Name');
     }
     app.setCurrentMember({username:'participant',status:'administrator'});
-    await app.update({text:'/set_default_new_topic_skill --clear'},participant);
+    await app.update({text:'/unset_default_new_topic_skill'},participant);
     assert.equal(savedDefault(app),'Case/Exact-Name');
     app.setCurrentMember({username:ownerUsername,status:'member'});
     await app.update({text:'/set_default_new_topic_skill clear'});
     assert.equal(savedDefault(app),'clear');
-    await app.update({text:'/set_default_new_topic_skill --clear'});
+    await app.update({text:'/unset_default_new_topic_skill unexpected'});
+    assert.equal(savedDefault(app),'clear');
+    await app.update({text:'/unset_default_new_topic_skill'});
     assert.equal(savedDefault(app),undefined);
   } finally { await app.close(); }
 });

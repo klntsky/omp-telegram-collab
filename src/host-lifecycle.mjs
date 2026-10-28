@@ -250,7 +250,8 @@ export default async function hostLifecycle(pi) {
     });
   });
   pi.on('session_shutdown', () => {
-    server?.close();
+    if (!server) return;
+    server.close();
     for (const filename of [socketPath, join(directory, 'lifecycle.json')]) {
       if (!filename) continue;
       try { unlinkSync(filename); } catch (error) { if (error.code !== 'ENOENT') throw error; }
