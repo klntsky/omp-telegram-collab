@@ -580,9 +580,6 @@ export class BotService {
       const username = typeof identity === 'number' ? users.get(identity)?.username : undefined;
       if (username) globalIdentities.add(username);
     }
-    const sections: { title: string; admins: Set<string> }[] = [
-      { title: 'Global admins', admins: new Set(globals.map(identity => users.get(identity)!.label)) },
-    ];
     const topicGroups = new Map<number, Set<string>>();
     if (destination.kind === 'topic') topicGroups.set(destination.threadId, new Set());
     for (const grant of topics) {
@@ -592,20 +589,31 @@ export class BotService {
       if (!admins) { admins = new Set(); topicGroups.set(grant.threadId, admins); }
       admins.add(users.get(grant.identity)!.label);
     }
-    for (const [threadId, admins] of topicGroups) sections.push({ title: `Topic ${threadId} admins`, admins });
-    if (destination.kind === 'general' && !topicGroups.size) sections.push({ title: 'Topic admins', admins: new Set() });
-    const lines = sections.flatMap(section => [
-      `${section.title}:`,
-      ...(section.admins.size ? [...section.admins] : ['(none)']),
-      '',
-    ]);
-    lines.push('Only current human group members can exercise these grants.');
+    const globalAdmins = [...new Set(globals.map(identity => users.get(identity)!.label))];
+    const topicAdmins: string[] = [];
+    const topicBase = `https://t.me/c/${String(destination.chatId).replace(/^-100/, '')}/`;
+    for (const [threadId, admins] of topicGroups) {
+      if (destination.kind === 'topic') { topicAdmins.push(...admins); continue; }
+      const session = this.options.store.getTopic({
+        botId: this.id, destination: topicDestination(destination.chatId, threadId),
+      });
+      const name = (session?.name ?? 'Topic').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      for (const admin of admins) topicAdmins.push(`${admin} · <a href="${topicBase}${threadId}">${name}</a>`);
+    }
+    const lines = [
+      'Global admins:', ...globalAdmins, '',
+      destination.kind === 'topic' ? `<a href="${topicBase}${destination.threadId}">Topic admins</a>:` : 'Topic admins:',
+      ...topicAdmins,
+    ];
     let chunk = '';
     for (const line of lines) {
-      if (chunk.length + line.length + 1 > 3800) { await replyTo(ctx, destination, chunk); chunk = ''; }
+      if (chunk.length + line.length + 1 > 3800) {
+        await replyTo(ctx, destination, chunk, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+        chunk = '';
+      }
       chunk += `${chunk ? '\n' : ''}${line}`;
     }
-    if (chunk) await replyTo(ctx, destination, chunk);
+    if (chunk) await replyTo(ctx, destination, chunk, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
   }
   private async instanceAdmin(ctx: Context): Promise<boolean> {
     if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;

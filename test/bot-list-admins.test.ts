@@ -60,8 +60,8 @@ for (const threadId of [undefined, 1]) {
         assert.ok(text.includes(`@${username}`), username);
         assert.equal(text.split(`@${username}`).length - 1, 1, `${username} is not repeated as a topic admin`);
       }
-      assert.match(text, /Topic 42 admins/);
-      assert.match(text, /Topic 43 admins/);
+      assert.ok(text.includes(`https://t.me/c/${String(chatId).replace(/^-100/, '')}/42`));
+      assert.ok(text.includes(`https://t.me/c/${String(chatId).replace(/^-100/, '')}/43`));
       assert.ok(text.includes(`User ID: ${unnamedAdmin.id}`));
       assert.doesNotMatch(text, /other_chat_admin|other_bot_admin/);
     } finally { await app.close(); }
@@ -76,7 +76,7 @@ test('an ordinary active member can list separate global and current-topic admin
     await app.update({ text: '/setup' });
     const text = await list(app, 42);
     const globalStart = text.indexOf('Global admins');
-    const topicStart = text.indexOf('Topic 42 admins');
+    const topicStart = text.indexOf('Topic admins');
     assert.ok(globalStart >= 0 && topicStart > globalStart);
     const global = text.slice(globalStart, topicStart);
     const local = text.slice(topicStart);
@@ -86,7 +86,7 @@ test('an ordinary active member can list separate global and current-topic admin
     }
     assert.match(local, /@local_alpha/);
     assert.ok(local.includes(`User ID: ${unnamedAdmin.id}`));
-    assert.doesNotMatch(text, /local_beta|other_chat_admin|other_bot_admin|Topic 43 admins/);
+    assert.doesNotMatch(text, /local_beta|other_chat_admin|other_bot_admin/);
     const commands = await app.bot.telegram.getMyCommands({ scope: { type: 'chat', chat_id: chatId } });
     assert.ok(commands.some(command => command.command === 'list_admins'));
   } finally { await app.close(); }
