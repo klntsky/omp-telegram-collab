@@ -133,7 +133,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       deletedMessages.push(params);
       result = true;
     }
-    else if (method === 'sendMessage') {
+    else if (method === 'sendMessage' || method === 'sendRichMessage') {
       if (params.message_thread_id === 1) {
         response.setHeader('Content-Type', 'application/json');
         response.end(JSON.stringify({ok:false,error_code:400,description:'Bad Request: message thread not found'}));

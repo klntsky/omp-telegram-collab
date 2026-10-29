@@ -42,7 +42,7 @@ The bot adapter owns the user/topic-bound skill picker and its temporary inline-
 
 The bot adapter owns the instance-root and bot-admin controls that set and unset the per-bot/chat forum skill default; topic grants do not authorize these forum-wide settings. The configuration boundary validates canonical mentionable names without normalization; the adapter additionally checks catalog existence and current administrator membership before saving.
 
-The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
+The delivery queue owns scheduling of Telegram output and rate-limit delays. The bot adapter sends agent output through Telegram's rich-message Markdown interface; Telegram owns parsing and presentation of native rich content. The adapter owns long-reply partitioning and topic and reply-target routing. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
 
 The bot adapter owns topic activity projection. Collab host snapshots reconcile lifecycle-event observations; the runtime's process-liveness boundary distinguishes an idle host from a stopped one. The delivery queue owns only when that projection reaches Telegram, not the underlying activity state.
 

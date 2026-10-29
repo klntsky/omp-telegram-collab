@@ -67,7 +67,7 @@ test('a relay disconnect restores mirroring without replaying the admitted promp
     } });
     await eventually(() => app.connectionCount > before);
     await delivered;
-    assert.equal(app.messages.at(-1)?.text, 'Recovered output');
+    assert.deepEqual(app.messages.at(-1)?.rich_message, {markdown:'Recovered output'});
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{ t: 'prompt', text: 'Finish the task' }]);
   } finally {
     await app.close();
@@ -89,34 +89,31 @@ test('agent replies retain their triggering Telegram message across chunks and l
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const session = app.store.listSessions(botId)[0]!;
     answer(1, 'Initial answer');
-    await eventually(() => app.messages.some(message => message.text === 'Initial answer'));
+    await eventually(() => app.messages.some(message => JSON.stringify(message.rich_message) === JSON.stringify({markdown:'Initial answer'})));
     assert.deepEqual(app.messages.at(-1)?.reply_parameters, { message_id: 2001, allow_sending_without_reply: true });
 
     await app.update({ message_id: 2002, message_thread_id: session.threadId, text: '@FixtureOmpBot First follow-up', entities: [{ type: 'mention', offset: 0, length: 14 }] });
     const before = app.messages.length;
-    answer(2, 'a'.repeat(8001));
+    answer(2, 'a'.repeat(65537));
     await app.update({ message_id: 2003, message_thread_id: session.threadId, text: '@FixtureOmpBot Second follow-up', entities: [{ type: 'mention', offset: 0, length: 14 }] });
     await eventually(() => app.messages.length >= before + 3);
     const chunks = app.messages.slice(before);
-    assert.deepEqual(chunks.map(message => message.text), ['a'.repeat(4000), 'a'.repeat(4000), 'a']);
+    assert.deepEqual(chunks.map(message => message.rich_message), [{markdown:'a'.repeat(32768)}, {markdown:'a'.repeat(32768)}, {markdown:'a'}]);
     assert.ok(chunks.every(message => message.message_thread_id === session.threadId));
     assert.deepEqual(chunks.map(message => message.reply_parameters), Array.from({ length: 3 }, () => ({ message_id: 2002, allow_sending_without_reply: true })));
 
     const formattedStart = app.messages.length;
-    answer(5, `**${'😀<&'.repeat(2001)}**`);
-    await eventually(() => app.messages.length >= formattedStart + 3);
+    const markdown = '# Report\n\n| Component | Status |\n| --- | --- |\n| **Gateway** | Ready |\n\n$x^2$';
+    answer(5, markdown);
+    await eventually(() => app.messages.length >= formattedStart + 1);
     const formatted = app.messages.slice(formattedStart);
-    assert.deepEqual(formatted.map(message => message.text), [
-      `<b>${'😀&lt;&amp;'.repeat(1000)}</b>`,
-      `<b>${'😀&lt;&amp;'.repeat(1000)}</b>`,
-      '<b>😀&lt;&amp;</b>',
-    ]);
-    assert.ok(formatted.every(message => message.parse_mode === 'HTML' && message.message_thread_id === session.threadId));
-    assert.deepEqual(formatted.map(message => message.reply_parameters), Array.from({ length: 3 }, () => ({ message_id: 2003, allow_sending_without_reply: true })));
+    assert.deepEqual(formatted.map(message => message.rich_message), [{markdown}]);
+    assert.ok(formatted.every(message => message.parse_mode === undefined && message.message_thread_id === session.threadId));
+    assert.deepEqual(formatted.map(message => message.reply_parameters), [{ message_id: 2003, allow_sending_without_reply: true }]);
 
     await app.update({ message_id: 2004, message_thread_id: session.threadId, text: 'Plain-text follow-up' });
     answer(3, 'Plain-text follow-up answer');
-    await eventually(() => app.messages.some(message => message.text === 'Plain-text follow-up answer'));
+    await eventually(() => app.messages.some(message => JSON.stringify(message.rich_message) === JSON.stringify({markdown:'Plain-text follow-up answer'})));
     assert.deepEqual(app.messages.at(-1)?.reply_parameters, { message_id: 2004, allow_sending_without_reply: true });
 
     app.emit({ t: 'entry', entry: {
@@ -124,7 +121,7 @@ test('agent replies retain their triggering Telegram message across chunks and l
       customType: 'collab-prompt', content: 'Instruction from the Mini App', details: { from: 'Web participant' }, display: true,
     } });
     answer(4, 'Mini App answer');
-    await eventually(() => app.messages.some(message => message.text === 'Mini App answer'));
+    await eventually(() => app.messages.some(message => JSON.stringify(message.rich_message) === JSON.stringify({markdown:'Mini App answer'})));
     assert.equal(app.messages.at(-1)?.reply_parameters, undefined);
   } finally {
     await app.close();
@@ -286,7 +283,7 @@ test('opening a lazy topic can establish Telegram mirroring without submitting i
       role:'assistant',content:[{type:'text',text:'Mirrored Mini App answer'}],model:'fixture',timestamp:Date.now(),
       stopReason:'stop',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},
     }}});
-    await eventually(() => app.messages.some(message => message.text === 'Mirrored Mini App answer'));
+    await eventually(() => app.messages.some(message => JSON.stringify(message.rich_message) === JSON.stringify({markdown:'Mirrored Mini App answer'})));
     assert.equal(app.messages.at(-1)?.message_thread_id,session.threadId);
     assert.deepEqual(app.accepted,[]);
   } finally {

@@ -116,7 +116,7 @@ Ordinary group members retain watch-only Mini App access and the Telegram `/stop
 
 ### 1.3. Replies, questions, and activity
 
-The bot mirrors agent replies into the topic using standard Telegram text messages with HTML parse mode. It renders supported Markdown, shows model-provided HTML literally, and leaves unsafe or relative links unlinked. Tables become aligned preformatted text with a header separator; inline cell formatting becomes plain text. Images become text. Telegram does not support native table entities. Long replies split without breaking formatting or Unicode and retain their native reply target across service restarts. Telegram failure replies include the underlying operation error as a literal code block.
+The bot mirrors agent replies into the topic using Telegram rich messages with native rich Markdown, including headings, lists, tables, formulas, and media supported by Telegram. Agent Markdown is sent directly, not converted into ordinary-message HTML or flattened preformatted tables. Long replies split at Markdown block boundaries where possible within the rich-message text limit; oversized code blocks remain fenced and Unicode characters are not split. A single oversized non-code block may span messages. Replies retain their native reply target across service restarts. Telegram failure replies include the underlying operation error as a literal code block.
 
 Mini App prompts also appear in the topic with the sender's Telegram username, or their display name and numeric ID if they have no username.
 

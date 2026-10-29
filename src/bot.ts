@@ -2065,9 +2065,8 @@ export class BotService {
       for (const text of renderTelegramMarkdown(result.text)) {
         if (!this.sessionAssigned(current)) return;
         await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),text,{
-            parse_mode:'HTML',
-            
+          () => this.bot.api.sendRichMessage(session.chatId, {markdown:text},{
+            message_thread_id: session.threadId === 1 ? undefined : session.threadId,
             ...(replyTarget === undefined ? {} : {reply_parameters:{message_id:replyTarget,allow_sending_without_reply:true}}),
           }), () => !this.stopped && this.sessionAssigned(current) && this.listeners.get(session.id) === listener);
       }
