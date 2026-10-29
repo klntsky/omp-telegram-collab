@@ -26,7 +26,8 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/make_admin [@username]` | Promote by username (optional `@`), or reply without arguments. Numeric ID arguments are rejected. General grants bot-wide access; other topics grant topic-only access. |
 | `/list_admins` | List this forum's global admins and topic grants. General includes all topics; another topic includes only itself. Available to current group members; accepts no arguments. |
 | `/setup` | Request enrollment or change an assigned forum's prompt settings. |
-| `/status`, `/help` | Show readiness and command help. |
+| `/status` | Show forum, host, mirroring, task-admission, recovery, skill-cache and failure diagnostics. Current members can inspect assigned forums, including during service termination. Accepts no arguments. |
+| `/help` | Show commands and prompt settings. |
 
 Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands.
 
@@ -40,11 +41,15 @@ The service becomes ready after mandatory runtime/history checks, bot identity a
 
 Online notices are sent after readiness; slow notice delivery does not hold startup open. An orderly shutdown cancels unfinished background refreshes and online notices, drains input acknowledgements, and attempts winding-down notices while teardown proceeds. Restart notices retain the end-to-end downtime measurement; readiness does not imply that every session has already reconnected. Assignment removal disables access immediately and listener cleanup and configuration acknowledgement do not wait for skill discovery.
 
+`/status` is read-only: it does not start hosts, reconnect sessions, retry tasks, or discover skills. General shows forum and project-catalog state without listing other topics. A session topic also shows observed host liveness, mirror connectivity, the latest observed Telegram task's admission state, and scheduled or active recovery. Failed host inspection reports unknown, not stopped; losing mirroring does not imply that the host or task stopped. Unconfirmed admission becomes unknown on disconnection, and an admission receipt is not proof of task completion.
+
+Status retains the latest relevant session and project-catalog failures with operation, observation timestamp, and exact original diagnostics, including multiline messages and available subprocess fields. These observations are scoped to the current bot, assignment and topic and reset on bot restart; historical failures may remain visible after recovery. Skill catalogs persist, but a saved catalog's original discovery timestamp may be unknown. The successful-check timestamp describes this process's catalog check and may use the runtime discovery cache. No additional progress or failure notifications are sent.
+
 Rename a topic to change its stored display name. Close it to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
 `/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
 
-While terminated, commands, prompts, callbacks, and Mini App agent access are blocked. Every command receives “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
+While terminated, prompts, callbacks, Mini App agent access, and commands other than read-only `/status` are blocked. Blocked commands receive “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Current human members may still inspect status for an assigned, enrolled forum; status does not resume the service or query suspended hosts. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
 
 ### 1.2. Prompts and permissions
 
@@ -125,7 +130,7 @@ Approval alone does not produce a receipt reaction. Failed or rejected instructi
 
 Topics created with an initial task start with the ⚡ icon directly and retain it during host startup and initial task admission. Empty topics start stopped.
 
-The running icon remains latched until the agent turn ends, even if intermediate streaming snapshots look idle. The bot removes its own icon-change service notices, not human icon edits or rename notices. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
+Host state snapshots reconcile the activity icon: no streaming or queued work clears a stale running indication even if an agent-end event was missed. Agent lifecycle events update the icon promptly between snapshots; pending initial tasks retain the startup indication. The bot removes its own icon-change service notices, not human icon edits or rename notices. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
 
 Telegram delivery uses a per-chat queue with at least 3.1 seconds between scheduled operations. Questions and receipts take priority over icon updates. A Telegram `429` pauses delivery for `retry_after`. Ambiguous network failures are not retried automatically.
 

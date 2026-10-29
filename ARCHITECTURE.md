@@ -22,6 +22,10 @@ The configuration layer owns the persistent service-termination switch. Telegram
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
 
+The adapter owns process-local diagnostic observations for each session and project catalog. Prompt writes establish an unconfirmed observation; matching Collab receipts establish admission, not successful completion. Disconnect invalidates unconfirmed admission without inferring host exit. Runtime inspection remains read-only and reports failures as unknown state. Status reads those observations and the persisted catalog without invoking execution or recovery.
+
+The status authorization boundary retains current-human membership, enrollment and assignment checks while allowing inspection during service suspension or degraded bot permissions. It rechecks membership and assignment before delivering diagnostic chunks and exposes only the current topic's session and assigned project's catalog. The normal action-authorization boundary remains unchanged and continues to enforce termination and bot permissions.
+
 Interactive question answers cross the Collab UI-response boundary, not the prompt-submission boundary. Pending requests remain bound to their source destination and host lifecycle. Telegram delivery or a local button click is not evidence of host acceptance: completion receipts depend on the corresponding Collab confirmation, while force-termination completion depends on the runtime verifying process exit.
 
 Topic destinations distinguish General from ordinary forum topics before business logic or storage access. The inbound Telegram boundary parses message and callback destinations; callers pass that identity rather than a database key. Storage alone encodes destinations into durable lookup keys. The outbound message adapter owns Telegram chat and thread routing for replies, sends, forwards, and service notices; its options exclude routing fields so callers cannot override the destination. Topic-management operations remain separate and require an actual session topic.
@@ -37,6 +41,8 @@ The bot adapter owns the user/topic-bound skill picker and its temporary inline-
 The bot adapter owns the instance-root and bot-admin controls that set and unset the per-bot/chat forum skill default; topic grants do not authorize these forum-wide settings. The configuration boundary validates canonical mentionable names without normalization; the adapter additionally checks catalog existence and current administrator membership before saving.
 
 The delivery queue owns scheduling of Telegram output and rate-limit delays. Transcript rendering converts agent output into Telegram-supported formatting before delivery. Keeping delivery separate from session execution prevents Telegram scheduling from becoming the authority for whether OMP accepted a task.
+
+The bot adapter owns topic activity projection. Collab host snapshots reconcile lifecycle-event observations; the runtime's process-liveness boundary distinguishes an idle host from a stopped one. The delivery queue owns only when that projection reaches Telegram, not the underlying activity state.
 
 ## OMP execution and lifecycle
 

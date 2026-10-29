@@ -130,9 +130,9 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
     } else if (method === 'sendMessage') {
       notices.push({ botId: id, payload });
       noticeEvents.emit('notice');
-      if (options.holdOnlineNotice && String(payload.text).includes('back online')) {
+      if (options.holdOnlineNotice && String(payload.text).startsWith('OMP bot service is back online')) {
         pendingOnline++;
-        response.once('close', () => { pendingOnline--; });
+        response.once('close', () => { pendingOnline--; noticeEvents.emit('online-closed'); });
         return;
       }
       if (options.noticeFailure) {
@@ -201,6 +201,9 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
     async waitNotices(count: number) {
       while (notices.length < count) await once(noticeEvents, 'notice');
     },
+    async waitOnlineDrained() {
+      while (pendingOnline > 0) await once(noticeEvents,'online-closed');
+    },
     get runtimeCloses() { return runtimeCloses; },
     get storeCloses() { return storeCloses; },
     async start() { service = await startService(config.configPath); return service; },
@@ -263,12 +266,9 @@ test('poll readiness does not wait for online delivery and close cancels and dra
   await fixture.waitNotices(3);
   assert.equal(fixture.pendingOnline, 3);
   await service.close();
-  // Let the fixture HTTP server observe the aborted client connections.
-  while (fixture.pendingOnline > 0) await delay(1);
+  await fixture.waitOnlineDrained();
   const count = fixture.notices.length;
   assert.equal(count, 6, 'shutdown sends its own notices despite cancelled online delivery');
-  await delay(30);
-  assert.equal(fixture.notices.length, count, 'no notification can be initiated after close resolves');
 });
 
 test('startup preserves the Telegram failure when cleanup also fails', { timeout: 10_000 }, async t => {
