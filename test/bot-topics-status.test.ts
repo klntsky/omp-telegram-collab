@@ -71,9 +71,9 @@ test('topic icons distinguish active work, idle live hosts, and process exit wit
     app.emit({t:'event',event:{type:'agent_start'}});
     await eventually(() => icon() === running);
     app.emit({t:'state',state});
-    await delay(50);
-    assert.equal(icon(),running,'an idle streaming snapshot must not complete an active agent turn');
+    await eventually(() => icon() === completed);
     app.emit({t:'state',state:{...state,queuedMessageCount:1}});
+    await eventually(() => icon() === running);
     app.emit({t:'event',event:{type:'agent_end'}});
     await delay(50);
     assert.equal(icon(),running,'queued work keeps the topic running between turns');

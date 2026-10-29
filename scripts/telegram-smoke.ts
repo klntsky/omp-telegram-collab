@@ -328,8 +328,7 @@ export async function verifyTelegramFlow() {
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => (app.topicEdits.at(-1)?.icon_custom_emoji_id ?? app.createdTopics[0]?.icon_custom_emoji_id) === '5312016608254762256', 'active turn did not get the running icon');
     app.emit({t:'state',state:{cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]}});
-    await delay(50);
-    assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id ?? app.createdTopics[0]?.icon_custom_emoji_id,'5312016608254762256','idle streaming state cannot complete active work');
+    await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968', 'idle host state did not clear the running icon without an agent_end event');
     app.emit({t:'event',event:{type:'agent_end'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968', 'live idle host did not get the completed icon');
     assert.equal(await app.runtime.isRunning(session), true, 'the completed icon does not mean the process stopped');
