@@ -8,6 +8,7 @@
 - Keep test fixtures isolated per case. Prefer in-memory SQLite unless the scenario verifies disk persistence or restart behavior, and run test files with concurrency five.
 - Use straightforward numbered lists starting at 1 only in the AI coding agent's own chat responses. Use 1.1, 1.2, and similar numbering when grouping is necessary. This rule does not apply to product UI, Telegram bot messages, documentation, or other generated content; use the formatting appropriate to each surface.
 - Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.
+- When referring to a GitHub branch in user-facing responses, link its full GitHub branch URL rather than mentioning only its name.
 - Do not add temporary scripts, verification artifacts, or scratch files to `.gitignore`. Keep them outside the checkout or delete them when finished.
 - Keep README.md focused on a brief product introduction and useful features. Link to the other documents instead of including setup instructions or detailed requirements.
 - Keep current observable behavior and user-facing requirements in PRODUCT.md. Use meaningful numbered sections and bullets. Remove superseded requirements when behavior changes.
