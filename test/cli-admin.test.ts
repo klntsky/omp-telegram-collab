@@ -22,23 +22,37 @@ function fixture(t: TestContext) {
   mkdirSync(other);
   const output: string[] = [];
   const calls: {method: string; payload: Record<string, unknown>; botId: number}[] = [];
-  const state = {forum: true, manageTopics: true, pinMessages: true, requesterStatus: 'administrator', requesterUsername: 'CurrentAdmin', fail: ''};
+  const state = {forum: true, manageTopics: true, pinMessages: true, requesterStatus: 'administrator', requesterUsername: 'CurrentAdmin', fail: '', failure: new Error('Telegram transport unavailable\nOriginal socket diagnostic')};
   const deps: AdminDependencies = {
     interactive: false,
     output: text => output.push(text),
-    telegram: selectedToken => ({
-      async callApi(method, payload) {
-        const botId = Number(selectedToken.split(':')[0]);
+    telegram: selectedToken => {
+      const botId = Number(selectedToken.split(':')[0]);
+      const record = (method: string, payload: Record<string, unknown>) => {
         calls.push({method, payload, botId});
-        if (state.fail === method) throw new Error(`A transport error containing ${selectedToken}`);
-        if (method === 'getMe') return {id: botId, is_bot: true, username: `bot_${botId}`};
-        if (method === 'getChat') return {id: payload.chat_id, type: 'supergroup', is_forum: state.forum, title: 'Current verified forum; $(never execute)'};
-        if (method === 'getChatMember' && payload.user_id === botId) return {status: 'administrator', can_manage_topics: state.manageTopics, can_pin_messages: state.pinMessages};
-        if (method === 'getChatMember') return {status: state.requesterStatus, user: {id: payload.user_id, is_bot: false, username: state.requesterUsername}};
-        if (method === 'sendMessage') return {message_id: 1};
-        throw new Error(`Unexpected Telegram method ${method}`);
-      },
-    }),
+        if (state.fail === method) throw state.failure;
+      };
+      return {
+        async getMe() {
+          record('getMe', {});
+          return {id: botId, is_bot: true, username: `bot_${botId}`};
+        },
+        async getChat(chatId) {
+          record('getChat', {chat_id: chatId});
+          return {id: chatId, type: 'supergroup', is_forum: state.forum, title: 'Current verified forum; $(never execute)'};
+        },
+        async getChatMember(chatId, userId) {
+          record('getChatMember', {chat_id: chatId, user_id: userId});
+          return userId === botId
+            ? {status: 'administrator', can_manage_topics: state.manageTopics, can_pin_messages: state.pinMessages}
+            : {status: state.requesterStatus, user: {id: userId, is_bot: false, username: state.requesterUsername}};
+        },
+        async sendMessage(chatId, text) {
+          record('sendMessage', {chat_id: chatId, text});
+          return {message_id: 1};
+        },
+      };
+    },
     environment: {BOT_TOKEN: token, SECOND_TOKEN: secondToken},
   };
   const run = (args: string[], overrides: AdminDependencies = {}) => runAdmin(args, configPath, {...deps, ...overrides});
@@ -117,13 +131,12 @@ test('bot addition verifies identity without polling, supports stdin and env, ne
   assert.equal(readConfig(f.configPath).bots.length, 1);
 });
 
-test('Telegram transport errors never leak credentials or create a partial config', async t => {
+test('Telegram transport errors preserve original multiline diagnostics without a partial config', async t => {
   const f = fixture(t);
   f.state.fail = 'getMe';
   await assert.rejects(f.run(['bot', 'add', '--token-env', 'BOT_TOKEN']), error => {
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /Telegram getMe failed/);
-    assert.equal(error.message.includes(token), false);
+    assert.equal(error, f.state.failure);
+    assert.equal((error as Error).message, 'Telegram transport unavailable\nOriginal socket diagnostic');
     return true;
   });
   assert.equal(existsSync(f.configPath), false);

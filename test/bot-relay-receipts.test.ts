@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
-import { botId } from './telegram-data.js';
+import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 
 test('Telegram rate limits recover without shutting down the bot service', async () => {
@@ -14,6 +14,38 @@ test('Telegram rate limits recover without shutting down the bot service', async
   try {
     const outcome = await Promise.race([polled.then(() => 'recovered'), running.then(() => 'stopped', () => 'failed')]);
     assert.equal(outcome, 'recovered');
+  } finally {
+    await app.close();
+    await running.catch(() => undefined);
+  }
+});
+
+test('native transport failure retries polling and shutdown acknowledges handled updates without replay', { timeout: 15_000 }, async () => {
+  const app = await createSmokeApp({ pollingTransientFailure: 'transport' });
+  app.store.enrollGroup(botId, chatId);
+  app.queueUpdates({
+    update_id: 700,
+    message: {
+      message_id: 700, date: 0,
+      chat: { id: chatId, type: 'supergroup', title: 'Fixture project', is_forum: true },
+      from: { id: ownerId, first_name: 'Ada', username: ownerUsername, is_bot: false },
+      text: '/help',
+    },
+  });
+  const polled = once(app.events, 'poll');
+  const running = app.service.start();
+  try {
+    const outcome = await Promise.race([polled.then(() => 'recovered'), running.then(() => 'stopped', () => 'failed')]);
+    assert.equal(outcome, 'recovered');
+    await eventually(() => app.pollRequests.some(request => request.offset === 701));
+    assert.equal(app.messages.filter(message => String(message.text).includes('/skills')).length, 1, 'the recovered update is handled exactly once');
+    await app.service.close();
+    await running;
+    const acknowledgement = app.pollRequests.at(-1)!;
+    assert.deepEqual(acknowledgement, { offset: 701, limit: 1, timeout: 0 });
+    const polls = app.pollRequests.length;
+    await delay(50);
+    assert.equal(app.pollRequests.length, polls, 'shutdown cannot leave a polling retry behind');
   } finally {
     await app.close();
     await running.catch(() => undefined);

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { test } from 'node:test';
+import { HttpError } from 'grammy';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import type { TopicSession } from '../shared/contracts.js';
-import { botId, ownerId } from './telegram-data.js';
+import { botId, botToken, ownerId } from './telegram-data.js';
 
 interface App {
   messages: Record<string, unknown>[];
@@ -158,6 +159,33 @@ test('/status isolates session runtime failures and continues reporting other st
     assert.doesNotMatch(isolated, /Broken observation|process table unavailable|Original runtime diagnostic/);
     assert.doesNotMatch(await status(app), /Broken observation|Separate session|Original runtime diagnostic/);
     assert.equal(app.connectionCount, 0);
+  } finally { await app.close(); }
+});
+
+test('transport failures retain native diagnostics without exposing credential-bearing URLs in replies or status', async t => {
+  const app = await createSmokeApp({ fileTransportFailure: true });
+  const logged: unknown[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(...args); });
+  try {
+    await app.update({ text: '/setup' });
+    await topic(app, 42, 'Transport diagnostics');
+    await app.update({
+      message_thread_id: 42, caption: '/p Inspect this image',
+      photo: [{ file_id: 'broken-photo', file_unique_id: 'broken-photo', width: 100, height: 100 }],
+    });
+    const operation = String(app.messages.at(-1)?.text);
+    const failure = logged.find((value): value is HttpError => value instanceof HttpError);
+    assert.ok(failure);
+    assert.ok(failure.error instanceof Error);
+    assert.ok(failure.error.message.includes(botToken), 'the private transport error contains the credential-bearing URL');
+    const observed = await status(app, 42);
+    for (const text of [operation, observed]) {
+      assert.ok(text.includes(failure.message), 'the original native HttpError diagnostic is retained');
+      assert.ok(!text.includes(botToken), 'Telegram output cannot disclose the bot credential');
+      assert.ok(!text.includes(failure.error.message), 'private transport URLs remain in server diagnostics');
+      assert.ok(text.includes('code: ECONNRESET'));
+    }
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), []);
   } finally { await app.close(); }
 });
 

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { Telegraf, TelegramError, type Context } from 'telegraf';
+import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection } from '../shared/contracts.js';
@@ -34,7 +34,7 @@ export interface RuntimeLike {
   retain(sessionId: string): () => void;
   close(): Promise<void>;
 }
-export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Telegraf<Context>; configWritable?: () => boolean; telegramIntervalMs?: number }
+export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Bot<Context>; configWritable?: () => boolean; telegramIntervalMs?: number }
 type TopicActivity = 'running' | 'completed' | 'stopped';
 interface StatusFailure { operation: string; at: number; error: unknown }
 interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
@@ -118,7 +118,7 @@ function messageText(message: Context['message']): string | undefined {
   if (!message) return undefined;
   if ('text' in message) return message.text;
   if ('caption' in message && message.caption !== undefined) return message.caption;
-  if ('photo' in message || ('document' in message && message.document.mime_type?.startsWith('image/'))) return 'Describe this image.';
+  if (message.photo || message.document?.mime_type?.startsWith('image/')) return 'Describe this image.';
   return undefined;
 }
 function optionMarker(index: number): string {
@@ -146,7 +146,7 @@ function retryDelay(ms: number, signal: TelegramAbortController['signal']): Prom
   return promise;
 }
 export class BotService {
-  readonly bot: Telegraf<Context>;
+  readonly bot: Bot<Context>;
   readonly config: BotConfig;
   readonly token: string;
   private readonly listeners = new Map<string, Listener>();
@@ -164,7 +164,7 @@ export class BotService {
   private catalogRefresh = new AbortController();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly catalogTasks = new Map<string, Promise<void>>();
-  private readonly menuAbort = new TelegramAbortController();
+  private readonly apiAbort = new TelegramAbortController();
   private backgroundStarted = false;
   private readonly restoring = new Set<string>();
   private readonly sessionObservations = new Map<string, SessionObservation>();
@@ -187,7 +187,7 @@ export class BotService {
   private stopped = false;
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   constructor(private readonly options: BotOptions) {
-    this.bot = options.bot ?? new Telegraf(options.token);
+    this.bot = options.bot ?? new Bot(options.token);
     this.delivery = new TelegramDelivery(options.telegramIntervalMs);
     this.config = options.botConfig;
     this.token = options.token;
@@ -198,7 +198,7 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      if (ctx.callbackQuery) await ctx.answerCbQuery().catch(() => undefined);
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => undefined);
       const urgent = /^\/terminate(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(messageText(ctx.message) ?? '');
       if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
       if (!urgent && this.collectAlbum(ctx)) { this.queuedUpdates--; return; }
@@ -209,7 +209,6 @@ export class BotService {
       try { await task; } catch (error) { await this.reportError(ctx,error); }
       finally { this.queuedUpdates--; }
     });
-    this.bot.catch(() => undefined);
   }
   private async reportError(ctx: Context, error: unknown): Promise<void> {
     console.error('Telegram operation failed.', error);
@@ -218,9 +217,10 @@ export class BotService {
       if (session && this.sessionAssigned(session)) this.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
     }
     if (!ctx.chat || error instanceof SessionCapacityError) return;
-    const diagnostics = error instanceof Error
+    const diagnostic = error instanceof HttpError && error.error instanceof Error ? error.error : error;
+    const diagnostics = diagnostic instanceof Error
       ? ['code','signal','killed'].flatMap(key => {
-          const value = Reflect.get(error,key);
+          const value = Reflect.get(diagnostic,key);
           return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
         })
       : [];
@@ -235,7 +235,7 @@ export class BotService {
     if (!message || !('media_group_id' in message) || !message.media_group_id ||
         !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
         'forward_origin' in message || 'forward_date' in message ||
-        !('photo' in message || ('document' in message && message.document.mime_type?.startsWith('image/')))) return false;
+        !(message.photo || message.document?.mime_type?.startsWith('image/'))) return false;
     const key = `${JSON.stringify(contextDestination(ctx))}:${ctx.from.id}:${message.media_group_id}`;
     let album = this.albums.get(key);
     if (!album) {
@@ -274,7 +274,7 @@ export class BotService {
     const promptInput = !text.startsWith('/') || /^\/(?:new|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
     if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.topicAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
-      () => this.bot.telegram.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
+      () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.path === assigned.path).catch(() => undefined);
     this.receivedMessages.add(ctx);
   }
@@ -296,22 +296,23 @@ export class BotService {
     })().catch(error => { this.termination = undefined; throw error; });
     await this.termination;
   }
-  get id(): number { return this.bot.botInfo?.id ?? 0; }
+  get id(): number { return this.bot.isInited() ? this.bot.botInfo.id : 0; }
   initialize(): Promise<void> {
     return this.initialization ??= this.initializeOnce();
   }
   private async initializeOnce(): Promise<void> {
-    this.bot.botInfo ??= await this.bot.telegram.getMe();
-    await this.bot.telegram.setMyCommands(
+    if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
+    await this.bot.api.setMyCommands(
       groupCommands,
       { scope: { type: 'all_group_chats' } },
+      this.apiAbort.signal,
     );
     await this.syncCommandMenus();
     if (refreshTermination(this.options.config)) await this.applyTermination();
   }
   startBackground(): void {
     if (this.stopped || this.backgroundStarted) return;
-    if (!this.bot.botInfo) throw new Error('Bot identity must be initialized before background maintenance');
+    if (!this.bot.isInited()) throw new Error('Bot identity must be initialized before background maintenance');
     this.backgroundStarted = true;
     this.restoreSessions();
     this.statusTimer ??= setInterval(() => {
@@ -417,7 +418,7 @@ export class BotService {
       let end = Math.min(offset+4000,message.length);
       if (end < message.length && message.charCodeAt(end-1) >= 0xD800 && message.charCodeAt(end-1) <= 0xDBFF) end--;
       this.requireSessionAssignment(session);
-      await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),message.slice(offset,end));
+      await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),message.slice(offset,end));
       offset = end;
     }
   }
@@ -437,12 +438,12 @@ export class BotService {
       while (!controller.signal.aborted) {
         try {
           if (!webhookRemoved) {
-            await this.bot.telegram.callApi('deleteWebhook', { drop_pending_updates: false }, { signal: controller.signal });
+            await this.bot.api.deleteWebhook({ drop_pending_updates: false }, controller.signal);
             webhookRemoved = true;
           }
-          const updates = await this.bot.telegram.callApi('getUpdates', {
+          const updates = await this.bot.api.getUpdates({
             offset, timeout: onReady ? 0 : 30, allowed_updates: ['message', 'callback_query', 'my_chat_member', 'inline_query'],
-          }, { signal: controller.signal });
+          }, controller.signal);
           if (controller.signal.aborted) break;
           onReady?.();
           onReady = undefined;
@@ -453,9 +454,9 @@ export class BotService {
           }
         } catch (error) {
           if (controller.signal.aborted) break;
-          const temporary = error instanceof TelegramError && (error.code === 429 || error.code >= 500);
-          if (!temporary && !(error instanceof Error && error.name === 'FetchError')) throw error;
-          const seconds = error instanceof TelegramError ? error.parameters?.retry_after ?? 5 : 5;
+          const temporary = error instanceof GrammyError && (error.error_code === 429 || error.error_code >= 500);
+          if (!temporary && !(error instanceof HttpError)) throw error;
+          const seconds = error instanceof GrammyError ? error.parameters.retry_after ?? 5 : 5;
           await retryDelay(Math.max(0, seconds) * 1000, controller.signal);
         }
       }
@@ -464,9 +465,7 @@ export class BotService {
         const acknowledgement = new TelegramAbortController();
         const timeout = setTimeout(() => acknowledgement.abort(), 5000);
         try {
-          await this.bot.telegram.callApi('getUpdates', { offset, limit: 1, timeout: 0 }, {
-            signal: acknowledgement.signal,
-          }).catch(() => undefined);
+          await this.bot.api.getUpdates({ offset, limit: 1, timeout: 0 }, acknowledgement.signal).catch(() => undefined);
         } finally {
           clearTimeout(timeout);
         }
@@ -477,7 +476,7 @@ export class BotService {
     this.stopped = true;
     this.background.abort(new Error('Bot background maintenance stopped'));
     this.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
-    this.menuAbort.abort();
+    this.apiAbort.abort();
     this.delivery.close();
     clearInterval(this.statusTimer);
     clearInterval(this.menuTimer);
@@ -560,12 +559,13 @@ export class BotService {
     lines.push(`Last successful skill check: ${catalogObservation?.refreshedAt ? new Date(catalogObservation.refreshedAt).toISOString() : 'unknown'} (runtime discovery cache may apply)`);
     if (catalogObservation?.failure) failures.push(catalogObservation.failure);
     for (const failure of failures) {
-      const error = failure.error;
+      const error = failure.error instanceof HttpError && failure.error.error instanceof Error ? failure.error.error : failure.error;
       const fields = error instanceof Error ? ['code','signal','killed'].flatMap(key => {
         const value = Reflect.get(error,key);
         return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
       }) : [];
-      lines.push(`Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n${error instanceof Error ? error.message : String(error)}${fields.length ? '\n'+fields.join('\n') : ''}`);
+      const details = failure.error instanceof Error ? failure.error.message : String(failure.error);
+      lines.push(`Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n${details}${fields.length ? '\n'+fields.join('\n') : ''}`);
     }
     const text = lines.join('\n');
     for (let offset = 0; offset < text.length;) {
@@ -582,13 +582,13 @@ export class BotService {
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
-    const [chat, user, bot] = await Promise.all([this.bot.telegram.getChat(chatId), this.bot.telegram.getChatMember(chatId, userId), this.bot.telegram.getChatMember(chatId, this.id)]);
+    const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)]);
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
     if (chat.type !== 'supergroup' || !isActiveMember(user) || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
   }
   private async ready(chatId: number): Promise<boolean> {
-    const [chat, member] = await Promise.all([this.bot.telegram.getChat(chatId), this.bot.telegram.getChatMember(chatId, this.id)]);
+    const [chat, member] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, this.id)]);
     return chat.type === 'supergroup' && chat.is_forum === true && member.status === 'administrator' && member.can_manage_topics === true && member.can_pin_messages === true;
   }
   private assignedPath(chatId: number): string {
@@ -653,7 +653,7 @@ export class BotService {
           this.skillAliases.set(chat.chatId, aliases);
           continue;
         }
-        await this.bot.telegram.callApi('setMyCommands', {commands,scope:{type:'chat',chat_id:chat.chatId}}, {signal:this.menuAbort.signal});
+        await this.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.apiAbort.signal);
         if (this.stopped || !this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         this.commandMenus.set(chat.chatId, fingerprint);
         this.skillAliases.set(chat.chatId, aliases);
@@ -661,7 +661,7 @@ export class BotService {
     }
     for (const chatId of this.commandMenus.keys()) {
       if (current.has(chatId)) continue;
-      await this.bot.telegram.callApi('deleteMyCommands', {scope:{type:'chat',chat_id:chatId}}, {signal:this.menuAbort.signal});
+      await this.bot.api.deleteMyCommands({scope:{type:'chat',chat_id:chatId}}, this.apiAbort.signal);
       this.commandMenus.delete(chatId);
       this.skillAliases.delete(chatId);
     }
@@ -682,7 +682,7 @@ export class BotService {
   }
   private async topicAdmin(ctx: Context): Promise<boolean> {
     if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;
-    const member = await this.bot.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
     return isActiveMember(member) && this.isTopicAdmin(ctx, member.user);
   }
   private async makeAdmin(ctx: Context, arg: string): Promise<void> {
@@ -700,14 +700,14 @@ export class BotService {
     const instancePath = this.assignedPath(ctx.chat!.id);
     let target: string | number = username;
     if (!arg) {
-      const member = await this.bot.telegram.getChatMember(ctx.chat!.id, reply!.from!.id);
+      const member = await this.bot.api.getChatMember(ctx.chat!.id, reply!.from!.id);
       if (!isActiveMember(member) || member.user.is_bot) {
         await replyTo(ctx, contextDestination(ctx), 'Only a current human member of this forum can be promoted.');
         return;
       }
       target = member.user.id;
     }
-    const member = await this.bot.telegram.getChatMember(ctx.chat!.id, ctx.from!.id);
+    const member = await this.bot.api.getChatMember(ctx.chat!.id, ctx.from!.id);
     const persisted = readConfig(this.options.config.configPath);
     const assigned = findInstance(persisted, this.id, ctx.chat!.id);
     if (!assigned || assigned.path !== instancePath || this.assignedPath(ctx.chat!.id) !== instancePath ||
@@ -735,7 +735,7 @@ export class BotService {
     const users = new Map<string | number, { label: string; username?: string }>();
     for (const identity of new Set([...globals, ...topics.map(grant => grant.identity)])) {
       if (typeof identity === 'string') { users.set(identity, { label: `@${identity}`, username: identity }); continue; }
-      const member = await this.bot.telegram.getChatMember(destination.chatId, identity);
+      const member = await this.bot.api.getChatMember(destination.chatId, identity);
       users.set(identity, {
         label: member.user.username ? `@${member.user.username.toLowerCase()}` : `User ID: ${identity}`,
         username: member.user.username?.toLowerCase(),
@@ -783,7 +783,7 @@ export class BotService {
   }
   private async instanceAdmin(ctx: Context): Promise<boolean> {
     if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;
-    const member = await this.bot.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
     return this.isInstanceAdmin(ctx.chat.id, member.user) && isActiveMember(member);
   }
   async reconcileConfiguration(): Promise<void> {
@@ -816,7 +816,7 @@ export class BotService {
       if (this.stopped) abort();
       const timeout = setTimeout(() => controller.abort(), 5000);
       try {
-        const stickers = await this.bot.telegram.callApi('getForumTopicIconStickers', {}, { signal: controller.signal });
+        const stickers = await this.bot.api.getForumTopicIconStickers(controller.signal);
         const find = (emoji: string) => {
           const id = stickers.find(sticker => sticker.emoji?.replace(/\uFE0F/g, '') === emoji)?.custom_emoji_id;
           if (!id) throw new Error(`Telegram topic icon unavailable: ${emoji}`);
@@ -852,9 +852,8 @@ export class BotService {
         if (this.stopped) abort();
         const timeout = setTimeout(() => controller.abort(), 5000);
         try {
-          return await this.bot.telegram.callApi('editForumTopic', {
-            chat_id:session.chatId, message_thread_id:session.threadId, icon_custom_emoji_id:id,
-          }, {signal:controller.signal});
+          return await this.bot.api.editForumTopic(
+            session.chatId, session.threadId, {icon_custom_emoji_id:id}, controller.signal);
         } finally {
           clearTimeout(timeout);
           this.background.signal.removeEventListener('abort', abort);
@@ -862,7 +861,7 @@ export class BotService {
       }, () => !this.stopped && this.sessionAssigned(session) && current.status === status, true);
       if (applied !== undefined) this.options.store.setTopicIcon(session.id,id);
     }).catch(async error => {
-      if (!this.stopped && error instanceof TelegramError && error.description.includes('TOPIC_NOT_MODIFIED')) {
+      if (!this.stopped && error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')) {
         this.options.store.setTopicIcon(session.id,(await this.getIconIds())[status]);
         return;
       }
@@ -904,21 +903,21 @@ export class BotService {
     await icon?.tail;
     this.topicIcons.delete(session.id);
     try {
-      const applied = await this.delivery.run(session.chatId, () => this.bot.telegram.editForumTopic(
+      const applied = await this.delivery.run(session.chatId, () => this.bot.api.editForumTopic(
         session.chatId,session.threadId,{icon_custom_emoji_id:''}), () => !this.stopped &&
           this.options.store.getSession(session.id)?.status === 'detached' &&
           findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath);
       if (applied !== undefined) this.options.store.setTopicIcon(session.id,'');
     } catch (error) {
-      if (!(error instanceof TelegramError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
+      if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
       this.options.store.setTopicIcon(session.id,'');
     }
   }
   private async announce(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
-    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `OPEN AGENT to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
+    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OPEN AGENT to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
     this.requireSessionAssignment(session);
-    await this.bot.telegram.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
+    await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
   private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
@@ -926,7 +925,7 @@ export class BotService {
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
     const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
     const initialIcon = task ? (await this.getIconIds()).running : undefined;
-    const topic = await this.bot.telegram.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
+    const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached ? undefined : task, ctx.from!.id, images);
     accepted?.();
@@ -941,11 +940,11 @@ export class BotService {
     if (task && source && 'reply_to_message' in source && source.reply_to_message &&
         (/^\/(?:new|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
           this.directedReplies.has(ctx))) {
-      await forwardTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+      await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
     }
     if (task) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-      if (original.message) await forwardTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+      if (original.message) await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, original.message.message_id);
     }
     await this.setTopicStatus(session, task ? 'running' : 'stopped');
@@ -965,7 +964,7 @@ export class BotService {
   }
   private async setup(ctx: Context, setting?: 'all_messages_are_prompts' | 'users_can_propose_prompts', value?: boolean): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
-    const member = await this.bot.telegram.getChatMember(ctx.chat.id, ctx.from.id);
+    const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
     if (!isActiveMember(member) || member.user.is_bot) return;
     if (!(await this.ready(ctx.chat.id))) {
       await replyTo(ctx, contextDestination(ctx), 'Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.', { reply_markup: { inline_keyboard: [[{text:'Check Again',callback_data:'setup:check'}]] } }); return;
@@ -1009,7 +1008,7 @@ export class BotService {
     if (!this.sessionAssigned(session)) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
       const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
-      await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
+      await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
     const now = Date.now();
@@ -1018,7 +1017,7 @@ export class BotService {
       else if (request.sessionId === session.id) return;
     }
     const token = randomBytes(16).toString('base64url');
-    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),
       `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by an instance admin is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
       { reply_markup: { inline_keyboard: [[
         { text: `Confirm ${limit} → ${limit * 2}`, callback_data: `capacity:approve:${token}` },
@@ -1056,7 +1055,7 @@ export class BotService {
       await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
-    const member = await this.bot.telegram.getChatMember(request.chatId, ctx.from!.id);
+    const member = await this.bot.api.getChatMember(request.chatId, ctx.from!.id);
     const persisted = readConfig(this.options.config.configPath);
     const assigned = findInstance(persisted, this.id, request.chatId);
     if (!isActiveMember(member) || !assigned ||
@@ -1083,13 +1082,14 @@ export class BotService {
     }
     const message = ctx.message;
     if (!message) return undefined;
-    const photo = 'photo' in message && message.photo.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
-    const document = 'document' in message && message.document.mime_type?.startsWith('image/') ? message.document : undefined;
+    const photo = message.photo?.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
+    const document = message.document?.mime_type?.startsWith('image/') ? message.document : undefined;
     if (!photo && !document) return undefined;
     const mimeType = photo ? 'image/jpeg' : document!.mime_type!;
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
-    const url = await this.bot.telegram.getFileLink((photo ?? document)!.file_id);
-    const response = await fetch(url);
+    const file = await this.bot.api.getFile((photo ?? document)!.file_id);
+    if (!file.file_path) throw new Error('Telegram image file path is unavailable');
+    const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
     if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
     return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
   }
@@ -1114,7 +1114,7 @@ export class BotService {
       if (!available.some(skill => skill.name === name)) throw new Error(`Unknown skill: ${name}. Use the exact canonical name from /skills, without /skill:.`);
     }
     await this.authorize(ctx.chat!.id,ctx.from!.id);
-    const member = await this.bot.telegram.getChatMember(ctx.chat!.id,ctx.from!.id);
+    const member = await this.bot.api.getChatMember(ctx.chat!.id,ctx.from!.id);
     const persisted = readConfig(this.options.config.configPath);
     const current = findInstance(persisted,this.id,ctx.chat!.id);
     if (this.assignedPath(ctx.chat!.id) !== instancePath || !current || current.path !== instancePath ||
@@ -1214,7 +1214,7 @@ export class BotService {
     }
     await this.authorize(ctx.chat.id, proposal.source.from!.id);
     this.promptProposals.delete(token);
-    await ctx.editMessageReplyMarkup({inline_keyboard:[]});
+    await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
     if (session) {
       if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text,proposal.images))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
@@ -1276,7 +1276,7 @@ export class BotService {
     this.termination = undefined;
     if (ctx.inlineQuery) { await this.skills.inline(ctx); return; }
     if (ctx.callbackQuery) {
-      if (!('data' in ctx.callbackQuery) || !ctx.chat || !ctx.from || ctx.from.is_bot) return;
+      if (ctx.callbackQuery.data === undefined || !ctx.chat || !ctx.from || ctx.from.is_bot) return;
       if (ctx.callbackQuery.data.startsWith('skills:')) {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id)) return;
@@ -1386,7 +1386,7 @@ export class BotService {
     const detached = session?.status === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
     if (detached && topicLifecycle && !('forum_topic_edited' in message)) return;
-    if ('forum_topic_created' in message && destination.kind === 'topic') {
+    if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
         session = this.options.store.createSession({botId:this.id,chatId:destination.chatId,threadId:destination.threadId,instancePath:this.assignedPath(ctx.chat.id)}, message.forum_topic_created.name);
         const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
@@ -1396,7 +1396,7 @@ export class BotService {
       }
       return;
     }
-    if (session && 'forum_topic_edited' in message) {
+    if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
       if (edited.name) this.options.store.updateSession(session.id, {name:edited.name});
       if (edited.icon_custom_emoji_id !== undefined) {
@@ -1408,7 +1408,7 @@ export class BotService {
       }
       if (ctx.from?.id === this.id && edited.icon_custom_emoji_id !== undefined && edited.name === undefined) {
         await this.delivery.run(ctx.chat.id,
-          () => this.bot.telegram.deleteMessage(ctx.chat!.id,message.message_id),
+          () => this.bot.api.deleteMessage(ctx.chat!.id,message.message_id),
           () => !this.stopped && (detached
             ? this.options.store.getSession(session.id)?.status === 'detached' &&
               findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath
@@ -1525,7 +1525,7 @@ export class BotService {
           if (this.assignedPath(ctx.chat.id) !== instancePath) throw new Error('The group instance assignment changed');
           if (action === 'model_preset') {
             if (!names.includes(arg)) throw new Error(`Unknown model preset: ${arg}. Available presets: ${names.join(', ') || '(none)'}`);
-            const member = await this.bot.telegram.getChatMember(ctx.chat.id,ctx.from.id);
+            const member = await this.bot.api.getChatMember(ctx.chat.id,ctx.from.id);
             const persisted = readConfig(this.options.config.configPath);
             const current = findInstance(persisted,this.id,ctx.chat.id);
             if (!current || current.path !== instancePath || !isActiveMember(member) || member.user.is_bot ||
@@ -1638,7 +1638,7 @@ export class BotService {
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
-      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
+      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
@@ -1752,7 +1752,7 @@ export class BotService {
   }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.delivery.run(session.chatId,
-      () => this.bot.telegram.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
+      () => this.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.stopped && this.sessionAssigned(session) && (listener === undefined || this.listeners.get(session.id) === listener)).catch(() => undefined);
   }
   private endQuestion(token: string): void {
@@ -1768,7 +1768,7 @@ export class BotService {
     for (const messageId of question.buttonIds) {
       if (messageId !== receiptId) {
         void this.delivery.run(question.session.chatId,
-          () => this.bot.telegram.editMessageReplyMarkup(question.session.chatId,messageId,undefined,{inline_keyboard:[]}),
+          () => this.bot.api.editMessageReplyMarkup(question.session.chatId,messageId,{reply_markup:{inline_keyboard:[]}}),
           () => !this.stopped && this.sessionAssigned(question.session)).catch(() => undefined);
       }
     }
@@ -1781,11 +1781,11 @@ export class BotService {
           const text = answer.slice(offset,end);
           if (offset === 0 && receiptId !== undefined) {
             await this.delivery.run(question.session.chatId,
-              () => this.bot.telegram.editMessageText(question.session.chatId,receiptId,undefined,text,{reply_markup:{inline_keyboard:[]}}),
+              () => this.bot.api.editMessageText(question.session.chatId,receiptId,text,{reply_markup:{inline_keyboard:[]}}),
               () => !this.stopped && this.sessionAssigned(question.session));
           } else {
             await this.delivery.run(question.session.chatId,
-              () => sendTo(this.bot.telegram, topicDestination(question.session.chatId, question.session.threadId),text,{
+              () => sendTo(this.bot.api, topicDestination(question.session.chatId, question.session.threadId),text,{
                 
                 ...(receiptId === undefined ? {} : {reply_parameters:{message_id:receiptId,allow_sending_without_reply:true}}),
               }), () => !this.stopped && this.sessionAssigned(question.session));
@@ -1818,7 +1818,7 @@ export class BotService {
         ctx.chat.id !== question.session.chatId || !question.buttonIds.includes(message.message_id) ||
         !('message_thread_id' in message) || message.message_thread_id !== question.session.threadId ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) {
-      await ctx.answerCbQuery('This question is no longer active.');
+      await ctx.answerCallbackQuery('This question is no longer active.');
       return;
     }
     await this.delivery.run(ctx.chat.id, () => this.authorize(ctx.chat!.id,ctx.from!.id),
@@ -1830,7 +1830,7 @@ export class BotService {
       const value = typeof option === 'string' ? option : option.label;
       this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`);
     }
-    await ctx.answerCbQuery();
+    await ctx.answerCallbackQuery();
   }
   private relayQuestion(session: TopicSession, listener: Listener, request: CollabUiRequest): void {
     if ([...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
@@ -1858,7 +1858,7 @@ export class BotService {
         let end = Math.min(offset+4000, body.length);
         if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
         const message = await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),body.slice(offset,end)),active);
+          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),body.slice(offset,end)),active);
         if (!message) return;
         question.messageIds.push(message.message_id);
         offset = end;
@@ -1873,7 +1873,7 @@ export class BotService {
         }
         if (offset+80 >= buttons.length) keyboard.push([{text:'Cancel',callback_data:`ask:${token}:cancel`}]);
         const message = await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),
+          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),
             request.kind === 'editor' ? 'You can type a custom answer below, or cancel here.' : 'Choose an answer by number:', {
               
               reply_markup:{inline_keyboard:keyboard},
@@ -1883,13 +1883,13 @@ export class BotService {
         question.buttonIds.push(message.message_id);
         if (!active()) {
           void this.delivery.run(session.chatId,
-            () => this.bot.telegram.editMessageReplyMarkup(session.chatId,message.message_id,undefined,{inline_keyboard:[]}),
+            () => this.bot.api.editMessageReplyMarkup(session.chatId,message.message_id,{reply_markup:{inline_keyboard:[]}}),
             () => !this.stopped && this.sessionAssigned(session)).catch(() => undefined);
         }
       }
       if (request.kind === 'editor' && active()) {
         const message = await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
+          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
             
             reply_markup:{force_reply:true,input_field_placeholder:'Type your custom answer'},
           }), active);
@@ -1934,7 +1934,7 @@ export class BotService {
       listener.queuedMessages = 0;
       listener.activity = 'completed';
       void this.setTopicStatus(session, listener.activity);
-      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
+      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
         
       }).catch(() => undefined);
     }
@@ -1962,7 +1962,7 @@ export class BotService {
       const delay = Math.min(1000,250 * ++initial.retries);
       if (Date.now()+delay >= initial.deadline) {
         listener.initial = undefined;
-        void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
+        void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
       } else {
         initial.timer = setTimeout(() => {
           void this.authorize(session.chatId,initial.userId).then(() => {
@@ -2020,7 +2020,7 @@ export class BotService {
       const text = isStartupRejection(frame)
         ? 'The host is still starting. Your instruction was not accepted. Resend it after startup.'
         : 'OMP rejected an instruction. OPEN AGENT for details before resending.';
-      void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), text).catch(() => undefined);
+      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text).catch(() => undefined);
       return;
     }
     if (frame.t === 'snapshot-chunk') {
@@ -2045,7 +2045,7 @@ export class BotService {
       for (const text of renderTelegramMarkdown(result.text)) {
         if (!this.sessionAssigned(current)) return;
         await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId),text,{
+          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),text,{
             parse_mode:'HTML',
             
             ...(replyTarget === undefined ? {} : {reply_parameters:{message_id:replyTarget,allow_sending_without_reply:true}}),

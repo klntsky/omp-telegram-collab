@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { test } from 'node:test';
-import { Telegraf } from 'telegraf';
+import { Bot } from 'grammy';
 import WebSocket from 'ws';
 import { createBot, type BotService } from '../src/bot.js';
 import { Store } from '../src/store.js';
@@ -70,7 +70,7 @@ test('/detach disables prompts and session access and leaves its icon alone acro
     await app.service.close();
     reopenedStore = new Store(`${app.config.dataDir}/telegram.sqlite`);
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:reopenedStore,runtime:app.runtime,
-      bot:new Telegraf(botToken,{telegram:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
     await restarted.initialize();
     restarted.startBackground();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;

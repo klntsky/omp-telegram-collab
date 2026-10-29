@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Context } from 'telegraf';
+import type { Context } from 'grammy';
 import type { GuestFrame } from '@oh-my-pi/pi-wire';
 import type { Store } from '../src/store.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
@@ -86,7 +86,7 @@ for (const command of ['/p', '/new']) {
 test('skill composition preserves normalized caption, reply quote and downloaded image', async t => {
   const app = await createSmokeApp();
   const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
-  t.mock.method(app.bot.telegram, 'getFileLink', async () => new URL(`data:image/jpeg;base64,${imageData}`));
+  app.mockFiles(t, imageData);
   try {
     const session = await seed(app);
     await select(app, 'pdf-tools', session.threadId);
@@ -159,7 +159,7 @@ test('skill aliases appear in group menus and select the canonical skill without
   try {
     const session = await seed(app);
     for (const scope of [{ type: 'chat' as const, chat_id: session.chatId }]) {
-      const commands = await app.bot.telegram.getMyCommands({ scope });
+      const commands = await app.bot.api.getMyCommands({ scope });
       assert.ok(commands.some(command => command.command === 'skill_find_skills'));
       assert.ok(commands.some(command => command.command === 'skill_pdf_tools'));
     }

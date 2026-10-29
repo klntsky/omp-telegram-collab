@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
-import type { Telegraf } from 'telegraf';
+import type { Bot } from 'grammy';
 import type { AppConfig } from '../shared/contracts.js';
 import type { Store } from '../src/store.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
@@ -9,7 +9,7 @@ import { topicDestination } from '../shared/topic-destination.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 
 interface SmokeApp {
-  bot: Telegraf;
+  bot: Bot;
   config: AppConfig;
   store: Store;
   messages: Record<string, unknown>[];
@@ -20,8 +20,8 @@ const numericAdmin = { id: ownerId + 21, first_name: 'Alan', username: 'alan', i
 const unnamedAdmin = { id: ownerId + 22, first_name: 'Anonymous', is_bot: false };
 
 function mockMembers(t: TestContext, app: SmokeApp) {
-  const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-  t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+  const original = app.bot.api.getChatMember.bind(app.bot.api);
+  t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
     const user = [member, numericAdmin, unnamedAdmin].find(candidate => candidate.id === args[1]);
     return user ? { status: 'member' as const, user } : original(...args);
   });
@@ -87,7 +87,7 @@ test('an ordinary active member can list separate global and current-topic admin
     assert.match(local, /@local_alpha/);
     assert.ok(local.includes(`User ID: ${unnamedAdmin.id}`));
     assert.doesNotMatch(text, /local_beta|other_chat_admin|other_bot_admin/);
-    const commands = await app.bot.telegram.getMyCommands({ scope: { type: 'chat', chat_id: chatId } });
+    const commands = await app.bot.api.getMyCommands({ scope: { type: 'chat', chat_id: chatId } });
     assert.ok(commands.some(command => command.command === 'list_admins'));
   } finally { await app.close(); }
 });
@@ -98,8 +98,8 @@ test('a numeric reply grant resolving to a global root username is omitted from 
     mockMembers(t, app);
     await app.update({ text: '/setup' });
     const rootAlias = { id: ownerId + 100, first_name: 'Root alias', username: ownerUsername, is_bot: false };
-    const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-    t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+    const original = app.bot.api.getChatMember.bind(app.bot.api);
+    t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
       return args[1] === rootAlias.id ? { status: 'member' as const, user: rootAlias } : original(...args);
     });
     await app.update({ text: '/make_admin', message_thread_id: 42, reply_to_message: {
@@ -133,8 +133,8 @@ for (const status of ['left', 'kicked'] as const) {
     try {
       mockMembers(t, app);
       await app.update({ text: '/setup' });
-      const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-      t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+      const original = app.bot.api.getChatMember.bind(app.bot.api);
+      t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
         return args[1] === member.id ? { status, user: member, until_date: 0 } : original(...args);
       });
       for (const threadId of [undefined, 42]) {

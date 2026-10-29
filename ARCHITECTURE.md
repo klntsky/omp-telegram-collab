@@ -22,6 +22,8 @@ The configuration layer owns the persistent service-termination switch. Telegram
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
 
+grammY owns Telegram contexts and API transport. The bot adapter retains polling readiness, input ordering, cancellation, and shutdown acknowledgements rather than delegating those guarantees to framework-managed polling. The administration CLI uses grammY's API client without starting a poller.
+
 The adapter owns process-local diagnostic observations for each session and project catalog. Prompt writes establish an unconfirmed observation; matching Collab receipts establish admission, not successful completion. Disconnect invalidates unconfirmed admission without inferring host exit. Runtime inspection remains read-only and reports failures as unknown state. Status reads those observations and the persisted catalog without invoking execution or recovery.
 
 The status authorization boundary retains current-human membership, enrollment and assignment checks while allowing inspection during service suspension or degraded bot permissions. It rechecks membership and assignment before delivering diagnostic chunks and exposes only the current topic's session and assigned project's catalog. The normal action-authorization boundary remains unchanged and continues to enforce termination and bot permissions.

@@ -27,11 +27,11 @@
     "@lydell/node-pty": "1.2.0-beta.18",
     "@oh-my-pi/pi-wire": "16.3.6",
     "abort-controller": "^3.0.0",
+    "grammy": "^1.46.0",
     "katex": "^0.16.22",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "telegraf": "^4.16.3",
     "ws": "^8.18.0",
     "yaml": "^2.9.1",
     "zod": "^3.24.0"

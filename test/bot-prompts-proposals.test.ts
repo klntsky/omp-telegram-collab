@@ -283,8 +283,8 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
         const now = Date.now();
         t.mock.method(Date,'now',() => now+600001);
       } else {
-        const getMember = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-        t.mock.method(app.bot.telegram,'getChatMember',async (...args: Parameters<typeof getMember>) => {
+        const getMember = app.bot.api.getChatMember.bind(app.bot.api);
+        t.mock.method(app.bot.api,'getChatMember',async (...args: Parameters<typeof getMember>) => {
           const member = await getMember(...args);
           return args[1] === ownerId ? {...member,status:'left' as const} : member;
         });

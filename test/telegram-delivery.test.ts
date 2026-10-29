@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { setImmediate as settle } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { TelegramError } from 'telegraf';
+import { GrammyError, HttpError } from 'grammy';
 import { TelegramDelivery } from '../src/telegram-delivery.js';
 
 function clock(t: TestContext) {
@@ -13,11 +13,12 @@ function clock(t: TestContext) {
 }
 
 function limited(seconds?: number) {
-  return new TelegramError({
+  return new GrammyError('Rate limited', {
+    ok: false,
     error_code: 429,
     description: 'Too Many Requests',
     parameters: seconds === undefined ? undefined : { retry_after: seconds },
-  });
+  }, 'sendMessage', {});
 }
 
 test('delivery serializes each chat and spaces starts without blocking other chats', async t => {
@@ -188,10 +189,10 @@ test('default pacing is 3100 milliseconds and a missing retry_after waits five s
 test('non-429 Telegram errors and uncertain network failures reject once without poisoning the queue', async t => {
   const advance = clock(t);
   const failures = [
-    new TelegramError({ error_code: 400, description: 'Bad Request' }),
-    new TelegramError({ error_code: 500, description: 'Internal Server Error' }),
-    new Error('Connection reset after sending the request'),
-    Object.assign(new Error('Not an explicit Telegram response'), { code: 429, parameters: { retry_after: 1 } }),
+    new GrammyError('Bad request', { ok: false, error_code: 400, description: 'Bad Request' }, 'sendMessage', {}),
+    new GrammyError('Server error', { ok: false, error_code: 500, description: 'Internal Server Error' }, 'sendMessage', {}),
+    new HttpError('Connection reset after sending the request', new Error('ECONNRESET')),
+    Object.assign(new Error('Not an explicit Telegram response'), { error_code: 429, parameters: { retry_after: 1 } }),
   ];
   for (const failure of failures) {
     const delivery = new TelegramDelivery(1000);

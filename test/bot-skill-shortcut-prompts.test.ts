@@ -22,7 +22,7 @@ async function seed(app: SeedApp) {
 test('shortcut text immediately submits in explicit mode with pending skills, quote and image', async t => {
   const app = await createSmokeApp();
   const data = Buffer.from('shortcut-image').toString('base64');
-  t.mock.method(app.bot.telegram,'getFileLink',async () => new URL(`data:image/jpeg;base64,${data}`));
+  app.mockFiles(t, data);
   try {
     const session = await seed(app);
     await app.update({text:'/setup'});

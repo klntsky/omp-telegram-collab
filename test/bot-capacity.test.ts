@@ -148,7 +148,7 @@ test('a failed current group authorization leaves the request and capacity uncha
   const app = await waitingForCapacity();
   try {
     const request = capacityRequest(app);
-    const lookup = t.mock.method(app.bot.telegram,'getChat',async () => { throw new Error('Membership lookup unavailable'); });
+    const lookup = t.mock.method(app.bot.api,'getChat',async () => { throw new Error('Membership lookup unavailable'); });
     await app.callback(request.approve,request.message);
     assert.equal(app.runtime.getSessionLimit(),1);
     assert.equal(app.connectionCount,1);

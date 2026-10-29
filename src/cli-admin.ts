@@ -3,15 +3,17 @@ import { join, resolve } from 'node:path';
 import { createInterface, type Interface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { request } from 'node:http';
-import { Telegram } from 'telegraf';
+import { Api } from 'grammy';
 import { z } from 'zod';
 import type { AppConfig, BotConfig, InstanceConfig } from '../shared/contracts.js';
 import { canonicalPath, configWritable, emptyConfig, findInstance, readConfig, writeConfig } from './config.js';
 import { Store } from './store.js';
-import { sendVia } from './telegram-destination.js';
 
 export interface AdminTelegram {
-  callApi(method: string, payload: Record<string, unknown>): Promise<unknown>;
+  getMe(): Promise<unknown>;
+  getChat(chatId: number): Promise<unknown>;
+  getChatMember(chatId: number, userId: number): Promise<unknown>;
+  sendMessage(chatId: number, text: string): Promise<unknown>;
 }
 export interface AdminDependencies {
   interactive?: boolean;
@@ -116,13 +118,7 @@ class Administration {
   }
   api(bot: BotConfig): AdminTelegram {
     if (this.deps.telegram) return this.deps.telegram(bot.token);
-    // Telegraf's method-name generic is narrower than the injectable boundary.
-    const telegram = new Telegram(bot.token) as unknown as AdminTelegram;
-    return telegram;
-  }
-  async call(bot: BotConfig, method: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
-    try { return record(await this.api(bot).callApi(method, payload)); }
-    catch { throw new Error(`Telegram ${method} failed for bot ${bot.id}. Verify the bot token, network access, group membership and administrator permissions.`); }
+    return new Api(bot.token);
   }
   instance(config: AppConfig, input: string): {path: string; instance: InstanceConfig} {
     const literal = resolve(input);
@@ -159,16 +155,16 @@ class Administration {
     return answer === '' ? fallback : promptMode(answer, 'users-can-propose-prompts');
   }
   async verifyForum(bot: BotConfig, chatId: number): Promise<{chat: Record<string, unknown>; me: Record<string, unknown>}> {
-    const me = await this.call(bot, 'getMe');
+    const me = record(await this.api(bot).getMe());
     if (me.id !== bot.id || me.is_bot !== true) throw new Error(`Configured token does not belong to bot ${bot.id}.`);
-    const chat = await this.call(bot, 'getChat', {chat_id: chatId});
+    const chat = record(await this.api(bot).getChat(chatId));
     if (chat.id !== chatId || chat.type !== 'supergroup' || chat.is_forum !== true) throw new Error('The chat must be a supergroup with Topics enabled.');
-    const member = await this.call(bot, 'getChatMember', {chat_id: chatId, user_id: bot.id});
+    const member = record(await this.api(bot).getChatMember(chatId, bot.id));
     if (member.status !== 'administrator' || member.can_manage_topics !== true || member.can_pin_messages !== true) throw new Error('Promote the bot to administrator with Manage Topics and Pin Messages permissions.');
     return {chat, me};
   }
   async requesterAdmin(bot: BotConfig, chatId: number, userId: number): Promise<string> {
-    const member = await this.call(bot, 'getChatMember', {chat_id: chatId, user_id: userId});
+    const member = record(await this.api(bot).getChatMember(chatId, userId));
     const user = record(member.user);
     if (user.id !== userId || user.is_bot === true || !['creator', 'administrator'].includes(String(member.status))) throw new Error('The requester is no longer a current group administrator. Request preserved.');
     if (typeof user.username !== 'string') throw new Error('The requester needs a Telegram username before approval. Request preserved.');
@@ -263,7 +259,7 @@ class Administration {
         store.enrollGroup(bot.id, pending.chatId);
         store.consumeSetupRequest(code);
       });
-      await sendVia(payload => this.call(bot, 'sendMessage', payload), {kind:'general',chatId:pending.chatId}, 'Setup approved. This forum is connected to OMP. Create a topic to start a coding session.');
+      await this.api(bot).sendMessage(pending.chatId, 'Setup approved. This forum is connected to OMP. Create a topic to start a coding session.');
       this.print(`Approved ${code}: ${path}`);
     } finally { store.close(); }
   }
@@ -287,7 +283,7 @@ class Administration {
     const candidate: BotConfig = {id: integer(token.split(':')[0]!, 'Bot ID'), token, miniAppShortName: one(options, 'mini-app-short-name') ?? (this.interactive ? (await this.ask('BotFather Mini App short name [app]: ')).trim() || 'app' : 'app')};
     if (!/^[A-Za-z0-9_]+$/.test(candidate.miniAppShortName)) throw new Error('Mini App short name must use only letters, numbers, or underscores.');
     if (config.bots.some(bot => bot.id === candidate.id)) throw new Error(`Bot ${candidate.id} is already configured. Remove it before replacing its credentials.`);
-    const me = await this.call(candidate, 'getMe');
+    const me = record(await this.api(candidate).getMe());
     if (me.id !== candidate.id || me.is_bot !== true) throw new Error('Telegram token identity did not match the bot ID.');
     config.bots.push(candidate);
     await this.save(config);

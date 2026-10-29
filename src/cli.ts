@@ -36,7 +36,7 @@ async function notifyGroups(config: AppConfig, bots: BotService[], store: Store,
       signal?.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(abort, 5000);
       try {
-        await sendTo(bot.bot.telegram, {kind:'general',chatId}, text, undefined, {signal:controller.signal});
+        await sendTo(bot.bot.api, {kind:'general',chatId}, text, undefined, controller.signal);
       } finally {
         clearTimeout(timeout);
         signal?.removeEventListener('abort', abort);

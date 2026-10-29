@@ -9,7 +9,7 @@ const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/
 
 test('caption commands submit downloaded images through initial startup rejection and retry', async t => {
   const app = await createSmokeApp();
-  t.mock.method(app.bot.telegram, 'getFileLink', async () => new URL(`data:image/jpeg;base64,${imageData}`));
+  app.mockFiles(t, imageData);
   try {
     await app.update({ photo, caption: '/setup' });
     await app.update({ message_id: 7001, photo, caption: '/new@FixtureOmpBot Inspect this image' });
@@ -38,11 +38,8 @@ test('caption commands retain bot targeting and forwarded-message exclusions', a
 
 test('session media follows prompt mode and preserves image document bytes', async t => {
   const app = await createSmokeApp();
-  const downloads: string[] = [];
-  t.mock.method(app.bot.telegram, 'getFileLink', async (fileId: string) => {
-    downloads.push(fileId);
-    return new URL(`data:image/png;base64,${imageData}`);
-  });
+  app.mockFiles(t, imageData, 'image/png');
+  const downloads = app.fileRequests;
   try {
     await app.update({text:'/setup'});
     await app.update({text:'/new Start'});
@@ -68,7 +65,7 @@ test('session media follows prompt mode and preserves image document bytes', asy
 
 test('unapproved image proposals cannot reach the model', async t => {
   const app = await createSmokeApp();
-  t.mock.method(app.bot.telegram,'getFileLink',async () => new URL(`data:image/jpeg;base64,${imageData}`));
+  app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
     await app.callback('setup:proposals:true',app.messages.at(-1)!);
@@ -91,7 +88,7 @@ test('unapproved image proposals cannot reach the model', async t => {
 
 test('host admission failure retains image bytes for later reconciliation', async t => {
   const app = await createSmokeApp();
-  t.mock.method(app.bot.telegram,'getFileLink',async () => new URL(`data:image/jpeg;base64,${imageData}`));
+  app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
     const startup = t.mock.method(app.runtime,'ensure',async () => { throw new Error('Host temporarily unavailable'); });
@@ -112,7 +109,7 @@ test('host admission failure retains image bytes for later reconciliation', asyn
 test('failed downloads preserve diagnostics and never submit a text-only task', async t => {
   const app = await createSmokeApp();
   const failure = new Error('Telegram file unavailable\nFILE_ID_INVALID');
-  t.mock.method(app.bot.telegram,'getFileLink',async () => { throw failure; });
+  t.mock.method(app.bot.api,'getFile',async () => { throw failure; });
   try {
     await app.update({text:'/setup'});
     await app.update({photo,caption:'/new Inspect this'});
@@ -124,12 +121,35 @@ test('failed downloads preserve diagnostics and never submit a text-only task', 
   }
 });
 
+test('missing native file metadata cannot submit a text-only image task', async t => {
+  const app = await createSmokeApp();
+  t.mock.method(app.bot.api, 'getFile', async () => ({ file_id: 'photo', file_unique_id: 'photo' }));
+  try {
+    await app.update({ text: '/setup' });
+    await app.update({ photo, caption: '/new Inspect this' });
+    assert.ok(String(app.messages.at(-1)?.text).endsWith('Telegram image file path is unavailable'));
+    assert.deepEqual(app.store.listSessions(botId), []);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), []);
+  } finally { await app.close(); }
+});
+
+test('native file HTTP failures retain response diagnostics and never submit a text-only image task', async t => {
+  const app = await createSmokeApp();
+  const diagnostic = 'Telegram file unavailable\nOriginal storage diagnostic';
+  app.mockFiles(t, Buffer.from(diagnostic).toString('base64'), 'text/plain', 503);
+  try {
+    await app.update({ text: '/setup' });
+    await app.update({ photo, caption: '/new Inspect this' });
+    assert.ok(String(app.messages.at(-1)?.text).endsWith(`Telegram image download failed: 503 Service Unavailable\n${diagnostic}`));
+    assert.deepEqual(app.fileRequests, ['photo']);
+    assert.deepEqual(app.store.listSessions(botId), []);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), []);
+  } finally { await app.close(); }
+});
+
 test('captionless photos use the largest size in all-message sessions', async t => {
   const app = await createSmokeApp();
-  t.mock.method(app.bot.telegram,'getFileLink',async (fileId: string) => {
-    assert.equal(fileId,'largest');
-    return new URL(`data:image/jpeg;base64,${imageData}`);
-  });
+  app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
     await app.update({text:'/new Start'});
@@ -141,6 +161,7 @@ test('captionless photos use the largest size in all-message sessions', async t 
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{
       t:'prompt',text:'Describe this image.',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
     });
+    assert.deepEqual(app.fileRequests, ['largest']);
   } finally {
     await app.close();
   }

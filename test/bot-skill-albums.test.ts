@@ -8,11 +8,8 @@ for (const general of [false,true]) {
   test(`image albums consume skills once and preserve all images in ${general ? 'General initial tasks' : 'session prompts'}`, {timeout:15000}, async t => {
     const app = await createSmokeApp();
     const bytes = Buffer.from('album-image').toString('base64');
-    const downloads: string[] = [];
-    t.mock.method(app.bot.telegram,'getFileLink',async (fileId: string) => {
-      downloads.push(fileId);
-      return new URL(`data:image/jpeg;base64,${bytes}`);
-    });
+    app.mockFiles(t, bytes);
+    const downloads = app.fileRequests;
     try {
       await app.update({text:'/setup'});
       const seed = once(app.events,'accepted');

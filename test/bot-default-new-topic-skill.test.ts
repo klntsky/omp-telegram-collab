@@ -31,8 +31,8 @@ test('default-skill command registers in both menus, preserves exact names and r
   try {
     await app.update({text:'/setup'});
     for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
-      assert.ok((await app.bot.telegram.getMyCommands({scope})).some(command=>command.command==='set_default_new_topic_skill'));
-      assert.ok((await app.bot.telegram.getMyCommands({scope})).some(command=>command.command==='unset_default_new_topic_skill'));
+      assert.ok((await app.bot.api.getMyCommands({scope})).some(command=>command.command==='set_default_new_topic_skill'));
+      assert.ok((await app.bot.api.getMyCommands({scope})).some(command=>command.command==='unset_default_new_topic_skill'));
     }
     t.mock.method(app.runtime,'listSkills',async () => [
       {name:'Case/Exact-Name',description:'Exact canonical identity'},
@@ -63,7 +63,7 @@ for (const command of ['/new','/p']) {
   test(`General ${command} merges the default with explicit skills once and preserves quoted images`, async t => {
     const app = await createSmokeApp();
     const data = Buffer.from('image').toString('base64');
-    t.mock.method(app.bot.telegram,'getFileLink',async () => new URL(`data:image/jpeg;base64,${data}`));
+    app.mockFiles(t, data);
     try {
       const existing = await seed(app);
       await app.update({text:'/set_default_new_topic_skill find-skills'});

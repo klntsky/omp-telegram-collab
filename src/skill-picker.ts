@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { Context } from 'telegraf';
+import type { Context } from 'grammy';
 import type { TopicSession } from '../shared/contracts.js';
 import type { Store, PendingSkillKey } from './store.js';
 import { sameTopicDestination } from '../shared/topic-destination.js';

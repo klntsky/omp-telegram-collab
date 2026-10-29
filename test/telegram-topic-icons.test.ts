@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Telegraf } from 'telegraf';
+import { Bot } from 'grammy';
 import { createBot, type BotService } from '../src/bot.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, botToken, chatId, ownerId, ownerUsername } from './telegram-data.js';
@@ -18,7 +18,7 @@ test('restart skips a confirmed unchanged icon and observes a later human icon c
     await app.service.close();
     const before = app.topicEdits.length;
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
-      bot:new Telegraf(botToken,{telegram:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
     await restarted.initialize();
     restarted.startBackground();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;

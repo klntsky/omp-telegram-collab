@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId } from './telegram-data.js';
-import { Telegraf } from 'telegraf';
+import { Bot } from 'grammy';
 import { createBot, type BotService } from '../src/bot.js';
 
 async function setup() {
@@ -139,7 +139,7 @@ for (const source of ['startup','mirror retry']) {
         restarted = createBot({
           config:app.config,botConfig:app.config.bots[0]!,token:app.service.token,
           store:app.store,runtime:app.runtime,
-          bot:new Telegraf(app.service.token,{telegram:{apiRoot:app.telegramUrl}}),
+          bot:new Bot(app.service.token,{client:{apiRoot:app.telegramUrl}}),
           telegramIntervalMs:0,
         });
         await restarted.initialize();

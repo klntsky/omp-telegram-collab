@@ -6,7 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Telegraf, type Context } from 'telegraf';
+import { Bot, type Context } from 'grammy';
+import type { TestContext } from 'node:test';
 import { z } from 'zod';
 import type { HostFrame, GuestFrame, AssistantMessage, SessionEntry } from '@oh-my-pi/pi-wire';
 import type { AppConfig, CollabHandlers, TopicSession } from '../shared/contracts.js';
@@ -30,7 +31,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean } = {}) {
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
@@ -43,6 +44,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const events = new EventEmitter();
   const connections = new Set<CollabHandlers>();
   const rateLimits = new Map<string, number[]>();
+  const fileRequests: string[] = [];
+  let file: { data: string; mimeType: string; status: number } | undefined;
+  const pollRequests: Record<string, unknown>[] = [];
+  const pendingUpdates: Parameters<Bot['handleUpdate']>[0][] = [];
   let member = true;
   let memberStatus: 'administrator' | 'creator' | 'member' = 'administrator';
   let thread = 20;
@@ -56,6 +61,13 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const me = { id: botId, first_name: 'OMP', username: 'FixtureOmpBot', is_bot: true, can_join_groups: true, can_read_all_group_messages: true, supports_inline_queries: false };
   const group = { id: chatId, type: 'supergroup' as const, title: 'Fixture project', is_forum: true };
   const telegram = createHttpServer(async (request, response) => {
+    if (request.url === '/fixture-image') {
+      assert.ok(file, 'image fixture must be configured before download');
+      response.statusCode = file.status;
+      response.setHeader('Content-Type', file.mimeType);
+      response.end(Buffer.from(file.data, 'base64'));
+      return;
+    }
     let body = '';
     for await (const chunk of request) body += chunk;
     const params = body ? JSON.parse(body) : {};
@@ -71,6 +83,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     let result: unknown;
     if (method === 'getMe') result = me;
     else if (method === 'getChat') result = group;
+    else if (method === 'getFile') {
+      fileRequests.push(params.file_id);
+      if (options.fileTransportFailure) { request.socket.destroy(); return; }
+      result = { file_id: params.file_id, file_unique_id: params.file_id, file_path: 'fixture-image' };
+    }
     else if (method === 'getChatMember') result = Number(params.user_id) === botId
       ? { user: me, status: 'administrator', can_manage_topics: true, can_pin_messages: options.botCanPinMessages ?? true }
       : { user: { ...currentUser, id: Number(params.user_id) }, status: member ? memberStatus : 'left' };
@@ -84,14 +101,19 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       result = true;
     }
     else if (method === 'getUpdates') {
+      pollRequests.push(params);
       if (transientFailures-- > 0) {
+        if (options.pollingTransientFailure === 'transport') {
+          request.socket.destroy();
+          return;
+        }
         response.setHeader('Content-Type', 'application/json');
         response.end(JSON.stringify({ ok: false, error_code: 429, description: 'Fixture rate limit', parameters: { retry_after: 0 } }));
         return;
       }
       events.emit('poll');
       await delay(20);
-      result = [];
+      result = pendingUpdates.splice(0);
     }
     else if (method === 'createForumTopic') {
       createdTopics.push(params);
@@ -227,7 +249,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       close() { connections.delete(handlers); },
     };
   };
-  const bot = new Telegraf(botToken, { telegram: { apiRoot: telegramUrl } });
+  const bot = new Bot(botToken, { client: { apiRoot: telegramUrl } });
   writeConfig(config);
   const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot,telegramIntervalMs:0});
   await service.initialize();
@@ -259,6 +281,16 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics,
+    fileRequests,
+    pollRequests,
+    queueUpdates(...updates: Parameters<Bot['handleUpdate']>[0][]) { pendingUpdates.push(...updates); },
+    mockFiles(t: TestContext, data: string, mimeType = 'image/jpeg', status = 200) {
+      file = { data, mimeType, status };
+      const originalFetch = globalThis.fetch;
+      const fileUrl = `https://api.telegram.org/file/bot${botToken}/fixture-image`;
+      t.mock.method(globalThis, 'fetch', (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+        originalFetch(input === fileUrl ? `${telegramUrl}/fixture-image` : input, init));
+    },
     setMember(value: boolean) { member = value; },
     setCurrentMember(value: { username?: string; is_bot?: boolean; status?: 'administrator' | 'creator' | 'member' }) {
       currentUser = { ...user, username: value.username, is_bot: value.is_bot ?? false };
@@ -294,7 +326,7 @@ export async function verifyTelegramFlow() {
     async function verifyMenus(mode: string, previous?: ReadonlySet<string>[]) {
       const menus: Set<string>[] = [];
       for (const [index, scope] of menuScopes.entries()) {
-        const menu = await app.bot.telegram.getMyCommands({ scope });
+        const menu = await app.bot.api.getMyCommands({ scope });
         const commands = new Set(menu.map(command => command.command));
         for (const command of ['new', 'p', 'setup', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets', 'skills']) {
           assert.ok(commands.has(command), `${scope.type} must advertise /${command} in ${mode} mode`);

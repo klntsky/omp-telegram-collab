@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { TelegramError } from 'telegraf';
+import { GrammyError } from 'grammy';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { readConfig, writeConfig } from '../src/config.js';
 import { botId, chatId, ownerId } from './telegram-data.js';
@@ -17,8 +17,8 @@ const alan = { id: ownerId + 21, first_name: 'Alan', username: 'alan', is_bot: f
 const otherChat = { id: chatId - 1, type: 'supergroup', title: 'Other project', is_forum: true };
 
 function mockMembers(t: TestContext, app: SmokeApp) {
-  const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-  t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+  const original = app.bot.api.getChatMember.bind(app.bot.api);
+  t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
     const member = await original(...args);
     const user = [grace, alan].find(candidate => candidate.id === args[1]);
     return user ? { status: 'member' as const, user } : member;
@@ -125,8 +125,8 @@ for (const target of ['left', 'kicked', 'restricted-inactive', 'bot'] as const) 
   test(`promotion refuses a ${target} target without changing persisted privileges`, async t => {
     const app = await createSmokeApp();
     try {
-      const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-      t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+      const original = app.bot.api.getChatMember.bind(app.bot.api);
+      t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
         if (args[1] !== grace.id) return original(...args);
         const user = { ...grace, is_bot: target === 'bot' };
         if (target === 'restricted-inactive') {
@@ -165,9 +165,9 @@ test('a Telegram membership lookup failure retains the original error details', 
   try {
     await app.update({ text: '/setup' });
     const before = readConfig(app.config.configPath);
-    const failure = new TelegramError({ error_code: 400, description: 'Bad Request: original promotion member lookup failure' });
-    const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-    t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+    const failure = new GrammyError('Member lookup failed', { ok: false, error_code: 400, description: 'Bad Request: original promotion member lookup failure' }, 'getChatMember', { chat_id: chatId, user_id: grace.id });
+    const original = app.bot.api.getChatMember.bind(app.bot.api);
+    t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
       if (args[1] === grace.id) throw failure;
       return original(...args);
     });
@@ -175,7 +175,7 @@ test('a Telegram membership lookup failure retains the original error details', 
     t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
     await app.update({ text: '/make_admin', reply_to_message: replyTarget() });
     assert.deepEqual(readConfig(app.config.configPath), before);
-    assert.ok(errors.some(args => args.includes(failure)), 'the original TelegramError reaches error reporting');
+    assert.ok(errors.some(args => args.includes(failure)), 'the original GrammyError reaches error reporting');
     assert.ok(app.messages.some(message => String(message.text).includes(failure.description)), 'the Telegram description reaches the user unchanged');
   } finally { await app.close(); }
 });
@@ -219,8 +219,8 @@ for (const status of ['left', 'kicked'] as const) {
       await app.update({ text: '/make_admin grace' });
       await app.update({ text: '/make_admin grace', message_thread_id: 42 });
       const before = readConfig(app.config.configPath);
-      const original = app.bot.telegram.getChatMember.bind(app.bot.telegram);
-      t.mock.method(app.bot.telegram, 'getChatMember', async (...args: Parameters<typeof original>) => {
+      const original = app.bot.api.getChatMember.bind(app.bot.api);
+      t.mock.method(app.bot.api, 'getChatMember', async (...args: Parameters<typeof original>) => {
         if (args[1] === grace.id) return { status, user: grace, until_date: 0 };
         return original(...args);
       });

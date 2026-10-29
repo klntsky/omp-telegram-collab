@@ -1,4 +1,4 @@
-import { TelegramError } from 'telegraf';
+import { GrammyError } from 'grammy';
 
 interface DeliveryJob {
   execute(): Promise<void>;
@@ -94,7 +94,7 @@ export class TelegramDelivery {
         try {
           await job.execute();
         } catch (error) {
-          if (error instanceof TelegramError && error.code === 429) {
+          if (error instanceof GrammyError && error.error_code === 429) {
             if (this.controller.signal.aborted) {
               job.cancel();
             } else {

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { Telegraf, TelegramError } from 'telegraf';
+import { Bot, GrammyError, HttpError } from 'grammy';
 import { BotService, createBot } from '../src/bot.js';
 import { startService } from '../src/cli.js';
 import { OmpRuntime } from '../src/runtime.js';
@@ -15,6 +15,7 @@ import type { AppConfig } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { runAdmin } from '../src/cli-admin.js';
 import { botId, botToken, chatId, ownerUsername } from './telegram-data.js';
+import { createSmokeApp } from '../scripts/telegram-smoke.js';
 
 test('shutdown while deleting the webhook cannot start an orphan Telegram poller', { timeout: 10_000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-poller-lifecycle-'));
@@ -63,7 +64,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     retain() { return () => {}; },
     async stop() {}, async kill() {}, async close() {},
   };
-  const bot = new Telegraf(botToken, { telegram: { apiRoot: `http://127.0.0.1:${address.port}` } });
+  const bot = new Bot(botToken, { client: { apiRoot: `http://127.0.0.1:${address.port}` } });
   const service = createBot({ config, botConfig: config.bots[0]!, token: botToken, store, runtime, bot });
   const deleting = once(events, 'deleting');
   const launch = service.start();
@@ -72,7 +73,6 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     await service.close();
     releaseWebhook();
     await delay(100);
-    if (polls > 0) bot.stop('test cleanup');
     await launch;
     assert.equal(polls, 0, 'closing during startup must prevent subsequent getUpdates');
   } finally {
@@ -83,6 +83,83 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     server.close();
     await closed;
     store.close();
+  }
+});
+
+for (const failureKind of ['transport', 429, 503] as const) {
+  test(`identity lookup failure reaches startup without framework retries (${failureKind})`, { timeout: 10_000 }, async () => {
+    const app = await createSmokeApp();
+    await app.service.close();
+    const bot = new Bot(botToken, { client: { apiRoot: app.telegramUrl } });
+    const transportFailure = new HttpError('Identity lookup failed', new Error('Original identity transport diagnostic'));
+    let lookups = 0;
+    bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === 'getMe' && ++lookups === 1) {
+        if (failureKind === 'transport') throw transportFailure;
+        return { ok: false, error_code: failureKind, description: 'Identity lookup rejected', parameters: { retry_after: 0 } };
+      }
+      return previous(method, payload, signal);
+    });
+    const service = createBot({ config: app.config, botConfig: app.config.bots[0]!, token: botToken, store: app.store, runtime: app.runtime, bot });
+    try {
+      await assert.rejects(service.initialize(), error => {
+        if (failureKind === 'transport') assert.equal(error, transportFailure);
+        else {
+          assert.ok(error instanceof GrammyError);
+          assert.equal(error.error_code, failureKind);
+          assert.equal(error.description, 'Identity lookup rejected');
+        }
+        return true;
+      });
+      assert.equal(lookups, 1);
+      assert.equal(bot.isInited(), false);
+    } finally { await service.close(); await app.close(); }
+  });
+}
+
+test('shutdown cancels a pending identity request without starting polling or command publication', { timeout: 10_000 }, async () => {
+  const app = await createSmokeApp();
+  await app.service.close();
+  const entered = Promise.withResolvers<void>();
+  const disconnected = Promise.withResolvers<void>();
+  const requests: string[] = [];
+  let release = () => {};
+  const telegram = createServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    const method = request.url?.split('/').at(-1)!;
+    requests.push(method);
+    response.setHeader('Content-Type', 'application/json');
+    if (method === 'getMe') {
+      release = () => response.end(JSON.stringify({ ok: true, result: app.bot.botInfo }));
+      response.once('close', disconnected.resolve);
+      entered.resolve();
+    } else response.end(JSON.stringify({ ok: true, result: true }));
+  });
+  telegram.listen(0, '127.0.0.1');
+  await once(telegram, 'listening');
+  const address = telegram.address();
+  assert.ok(address && typeof address !== 'string');
+  const bot = new Bot(botToken, { client: { apiRoot: `http://127.0.0.1:${address.port}` } });
+  const service = createBot({ config: app.config, botConfig: app.config.bots[0]!, token: botToken, store: app.store, runtime: app.runtime, bot });
+  const launch = service.start().then(() => ({ error: undefined }), error => ({ error }));
+  try {
+    await entered.promise;
+    await service.close();
+    const result = await Promise.race([launch, delay(500).then(() => undefined)]);
+    assert.ok(result, 'shutdown must settle startup without waiting for Telegram');
+    assert.ok(result.error instanceof HttpError);
+    await disconnected.promise;
+    assert.deepEqual(requests, ['getMe']);
+    assert.equal(bot.isInited(), false);
+  } finally {
+    release();
+    await launch;
+    await service.close();
+    telegram.closeAllConnections();
+    const closed = once(telegram, 'close');
+    telegram.close();
+    await closed;
+    await app.close();
   }
 });
 
@@ -153,8 +230,26 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   const initialize = BotService.prototype.initialize;
   const bots: BotService[] = [];
   t.mock.method(BotService.prototype, 'initialize', async function (this: BotService) {
-    this.bot.telegram.options.apiRoot = `http://127.0.0.1:${address.port}`;
-    delete this.bot.telegram.options.agent;
+    const token = this.token;
+    this.bot.api.config.use(async (_previous, method, payload, signal) => {
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+      try {
+        const response = await fetch(`http://127.0.0.1:${address.port}/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        return await response.json();
+      } catch (error) {
+        throw new HttpError(`Network request for '${method}' failed!`, error);
+      } finally {
+        signal?.removeEventListener('abort', abort);
+      }
+    });
     await initialize.call(this);
     bots.push(this);
   });
@@ -274,8 +369,8 @@ test('poll readiness does not wait for online delivery and close cancels and dra
 test('startup preserves the Telegram failure when cleanup also fails', { timeout: 10_000 }, async t => {
   const fixture = await lifecycleFixture(t, { startupFailure: 'getMe', cleanupFailure: new Error('Fixture cleanup failure') });
   await assert.rejects(fixture.start(), error => {
-    assert.ok(error instanceof TelegramError);
-    assert.equal(error.code, 401);
+    assert.ok(error instanceof GrammyError);
+    assert.equal(error.error_code, 401);
     return true;
   });
   assert.equal(fixture.runtimeCloses, 1);
@@ -286,10 +381,9 @@ for (const startupFailure of ['getMe', 'deleteWebhook', 'getUpdates'] as const) 
   test(`failed ${startupFailure} startup sends neither online nor winding-down notices`, { timeout: 10_000 }, async t => {
     const fixture = await lifecycleFixture(t, { startupFailure });
     await assert.rejects(fixture.start(), error => {
-      assert.ok(error instanceof TelegramError, 'startup must fail at the intended Telegram API request');
-      assert.equal(error.code, startupFailure === 'getUpdates' ? 409 : 401);
-      assert.ok('method' in error.on);
-      assert.equal(error.on.method, startupFailure);
+      assert.ok(error instanceof GrammyError, 'startup must fail at the intended Telegram API request');
+      assert.equal(error.error_code, startupFailure === 'getUpdates' ? 409 : 401);
+      assert.equal(error.method, startupFailure);
       return true;
     });
     assert.deepEqual(fixture.notices, []);
