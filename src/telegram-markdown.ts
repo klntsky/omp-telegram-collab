@@ -118,13 +118,23 @@ class MarkdownRuns {
         }
         case 'table': {
           const table = token as Tokens.Table;
-          [table.header, ...table.rows].forEach((row, index) => {
-            if (index) this.text('\n', tags);
-            row.forEach((cell, column) => {
-              if (column) this.text(' | ', tags);
-              this.inline(cell.tokens, index === 0 ? withTag(tags, bold) : tags);
-            });
-          });
+          const rows = [table.header, ...table.rows].map(row => row.map(cell => {
+            const content = new MarkdownRuns();
+            content.inline(cell.tokens, []);
+            return content.runs.map(run => run.text).join('').replace(/[\r\n\t]+/g, ' ');
+          }));
+          const widths = table.header.map((_, column) => Math.max(3, ...rows.map(row => Array.from(row[column] ?? '').length)));
+          const line = (row: string[]) => row.map((cell, column) => {
+            const padding = widths[column]! - Array.from(cell).length;
+            const alignment = table.align[column];
+            const left = alignment === 'right' ? padding : alignment === 'center' ? Math.floor(padding / 2) : 0;
+            return ' '.repeat(left) + cell + ' '.repeat(padding - left);
+          }).join(' | ');
+          this.text([
+            line(rows[0]!),
+            widths.map(width => '-'.repeat(width)).join('-+-'),
+            ...rows.slice(1).map(line),
+          ].join('\n'), [pre, code]);
           break;
         }
         case 'hr':

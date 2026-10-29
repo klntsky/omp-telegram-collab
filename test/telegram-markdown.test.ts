@@ -90,8 +90,9 @@ test('boundaries between formatting runs remain balanced and small chunk limits 
   assert.throws(() => renderTelegramMarkdown('x', 1), RangeError);
 });
 
-test('unsupported tables and images remain readable, with task markers rendered once', () => {
-  const [html] = renderTelegramMarkdown('| Name | Value |\n| --- | --- |\n| **item** | 42 |\n\n![diagram](https://example.com/image.png)\n\n- [x] done\n- [ ] pending');
-  assert.equal(decodedText(html!), 'Name | Value\nitem | 42\n\ndiagram (https://example.com/image.png)\n\n• ☑ done\n• ☐ pending');
+test('tables preserve column structure in Telegram preformatted entities; images and tasks remain readable', () => {
+  const [html] = renderTelegramMarkdown('| Name | Value |\n| --- | ---: |\n| **item** | 42 |\n\n![diagram](https://example.com/image.png)\n\n- [x] done\n- [ ] pending');
+  assert.equal(decodedText(html!), 'Name | Value\n-----+------\nitem |    42\n\ndiagram (https://example.com/image.png)\n\n• ☑ done\n• ☐ pending');
+  assert.ok(html!.startsWith('<pre><code>Name | Value\n-----+------\nitem |    42</code></pre>'));
   assert.ok(!/<(?:table|img|ul|li|h1|p|br)\b/.test(html!));
 });
