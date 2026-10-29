@@ -39,7 +39,7 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    ```
 
    Approval verifies the group and requester, asks for the project directory and prompt settings, and confirms before adding the requester as a project admin. Requests expire after ten minutes. Adding the bot alone does not assign a project or enable Topics.
-8. Send `/new Implement authentication` in the group, then select Open Session in the new topic.
+8. Send `/new Implement authentication` in the group, then select OPEN AGENT in the new topic.
 
 Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
 
@@ -170,7 +170,7 @@ Live Telegram verification requires a BotFather token, configured Mini App, HTTP
 
 ## Debugging
 
-Use `pm2 logs omp-telegram-collab` for deployed service diagnostics. If configuration was saved but not applied, correct the reported error and run `pnpm cli reload`. Reopen Open Session when Telegram launch credentials expire. If capacity is exhausted, close unused Mini Apps or increase the configured limit before selecting Rejoin.
+Use `pm2 logs omp-telegram-collab` for deployed service diagnostics. If configuration was saved but not applied, correct the reported error and run `pnpm cli reload`. Reopen OPEN AGENT when Telegram launch credentials expire. If capacity is exhausted, close unused Mini Apps or increase the configured limit before selecting Rejoin.
 
 Failure diagnostics preserve the original operation error, including multiline OMP discovery messages. Telegram operation failures are logged, and subprocess failure reports retain available exit codes, signals, and killed status. Inspect those original diagnostics rather than treating a generic startup or Telegram failure summary as the cause.
 

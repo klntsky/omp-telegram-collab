@@ -95,7 +95,7 @@ export class GatewaySocket implements GuestTransport {
 		ws.onclose = event => {
 			if (this.#ws !== ws) return;
 			if (event.code === 4001 || event.code === 4002 || event.code === 4003 || event.code === 4009) {
-				this.#finish(event.reason || "Session unavailable. Reopen the topic’s Open Session button.");
+				this.#finish(event.reason || "Session unavailable. Reopen the topic’s OPEN AGENT button.");
 				return;
 			}
 			this.reconnect("Disconnected from the session. Reconnecting…");

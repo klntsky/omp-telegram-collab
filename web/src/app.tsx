@@ -110,7 +110,7 @@ export function App(): ReactNode {
 					<div className="sh-connect-head">
 						<h1 className="sh-connect-title">{loading ? "Opening your Telegram session…" : "Join from Telegram"}</h1>
 						<p className="sh-connect-sub">
-							Use the Open Session button in your group topic. Only current group members can access its conversation.
+							Use the OPEN AGENT button in your group topic. Only current group members can access its conversation.
 						</p>
 					</div>
 					{loading ? <p role="status">Checking Telegram authentication and group membership…</p> : (

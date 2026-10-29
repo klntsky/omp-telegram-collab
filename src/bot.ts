@@ -36,6 +36,9 @@ export interface RuntimeLike {
 }
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Telegraf<Context>; configWritable?: () => boolean; telegramIntervalMs?: number }
 type TopicActivity = 'running' | 'completed' | 'stopped';
+interface StatusFailure { operation: string; at: number; error: unknown }
+interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
+interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
 interface Listener {
   sessionId: string;
   connection?: CollabConnection;
@@ -43,11 +46,10 @@ interface Listener {
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
-  pendingPrompts: { text: string; messageId?: number; onStartupRejected?: () => void }[];
+  pendingPrompts: { text: string; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
-  activeTurn?: boolean;
   activity: 'running' | 'completed';
   initial?: {
     text: string;
@@ -87,7 +89,7 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-const help = '/setup — request or enroll this forum (bot/instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (bot/instance admin)\n/detach — make this topic conversation-only (topic/bot/instance admin)\n/model_preset <name> — set the forum default in General (bot/instance admin), or switch this session (topic/bot/instance admin)\n/list_model_presets — list presets and the forum default (admin in this scope)\n/session — open this session\n/status — readiness\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (bot/instance admin)';
+const help = '/setup — request or enroll this forum (bot/instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (bot/instance admin)\n/detach — make this topic conversation-only (topic/bot/instance admin)\n/model_preset <name> — set the forum default in General (bot/instance admin), or switch this session (topic/bot/instance admin)\n/list_model_presets — list presets and the forum default (admin in this scope)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (bot/instance admin)';
 const defaultSkillHelp = '/set_default_new_topic_skill <exact-name> — set the forum default for new topics; no argument shows it (bot/instance admin)\n/unset_default_new_topic_skill — remove the forum default for future topics (bot/instance admin)';
 const adminHelp = '/make_admin @username — promote for this topic, or the whole bot in General; omit the username when replying to a user\n/list_admins — list global admins and topic admins for this topic, or all topics in this forum from General';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
@@ -103,7 +105,7 @@ const groupCommands = [
   { command: 'attach', description: 'Attach a local OMP host (instance admin)' },
   { command: 'detach', description: 'Make this topic conversation-only (instance admin)' },
   { command: 'session', description: 'Open this topic’s session' },
-  { command: 'status', description: 'Check forum and session readiness' },
+  { command: 'status', description: 'Show host, mirroring, recovery and skill diagnostics' },
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend the service (instance admin)' },
@@ -165,6 +167,9 @@ export class BotService {
   private readonly menuAbort = new TelegramAbortController();
   private backgroundStarted = false;
   private readonly restoring = new Set<string>();
+  private readonly sessionObservations = new Map<string, SessionObservation>();
+  private readonly catalogObservations = new Map<string, {refreshedAt?:number;failure?:StatusFailure;failed?:boolean}>();
+  private readonly reconnecting = new Set<string>();
   private menuTail: Promise<void> = Promise.resolve();
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
@@ -208,6 +213,10 @@ export class BotService {
   }
   private async reportError(ctx: Context, error: unknown): Promise<void> {
     console.error('Telegram operation failed.', error);
+    if (ctx.chat && ctx.message && !/^\/status(?:@|\s|$)/i.test(messageText(ctx.message) ?? '')) {
+      const session = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
+      if (session && this.sessionAssigned(session)) this.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
+    }
     if (!ctx.chat || error instanceof SessionCapacityError) return;
     const diagnostics = error instanceof Error
       ? ['code','signal','killed'].flatMap(key => {
@@ -326,7 +335,17 @@ export class BotService {
     if (signal.aborted || this.stopped) return Promise.resolve();
     const startedAt = performance.now();
     const task = operation(signal).catch(error => {
-      if (error !== signal.reason) console.error(`Bot ${this.id} background ${phase} failed.`, error);
+      if (error !== signal.reason) {
+        const failure = {operation:phase,at:Date.now(),error};
+        if (phase.startsWith('skills:')) {
+          const path = phase.slice('skills:'.length);
+          const observation = this.catalogObservations.get(path) ?? {};
+          observation.failure = failure;
+          observation.failed = true;
+          this.catalogObservations.set(path,observation);
+        } else if (phase.includes(':')) this.sessionObservation(phase.slice(phase.indexOf(':')+1)).failure = failure;
+        console.error(`Bot ${this.id} background ${phase} failed.`, error);
+      }
     }).finally(() => {
       this.backgroundTasks.delete(task);
       console.log(JSON.stringify({event:'bot-background',botId:this.id,phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted}));
@@ -368,6 +387,10 @@ export class BotService {
           signal.throwIfAborted();
           if (!this.options.config.instances[instancePath]?.chats.some(chat => chat.botId === this.id)) return;
           this.options.store.setSkillCatalog(instancePath, skills);
+          const observation = this.catalogObservations.get(instancePath) ?? {};
+          observation.refreshedAt = Date.now();
+          observation.failed = false;
+          this.catalogObservations.set(instancePath,observation);
           await this.syncCommandMenus();
         }, signal);
         this.catalogTasks.set(instancePath, task);
@@ -479,15 +502,90 @@ export class BotService {
     await this.menuTail;
     await Promise.all([...this.topicIcons.values()].map(icon => icon.tail));
   }
-  async authorize(chatId: number, userId: number): Promise<void> {
+  private sessionObservation(id: string): SessionObservation {
+    let observation = this.sessionObservations.get(id);
+    if (!observation) {
+      observation = {};
+      this.sessionObservations.set(id,observation);
+    }
+    return observation;
+  }
+  private async showStatus(ctx: Context): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const destination = contextDestination(ctx);
+    const assigned = findInstance(this.options.config,this.id,chatId);
+    if (!assigned || !this.options.store.isEnrolled(this.id,chatId)) {
+      await replyTo(ctx,destination,`${await this.ready(chatId) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
+      return;
+    }
+    await this.authorize(chatId,ctx.from!.id,true);
+    const path = assigned.path;
+    const failures: StatusFailure[] = [];
+    const suspended = refreshTermination(this.options.config);
+    const lines = [`Bot: ${suspended ? 'online; service terminated' : 'ready'}`];
+    try { lines.push(`Forum: ${await this.ready(chatId) ? 'ready' : 'permissions need attention'}`); }
+    catch (error) {
+      lines.push('Forum: unknown (permission lookup failed)');
+      failures.push({operation:'Forum permissions',at:Date.now(),error});
+    }
+    const stored = this.options.store.getTopic({botId:this.id,destination});
+    const session = stored?.instancePath === path ? stored : undefined;
+    if (stored && !session) lines.push('Session: unavailable (assigned to another project)');
+    else if (session) {
+      const observation = this.sessionObservation(session.id);
+      const listener = this.listeners.get(session.id);
+      lines.push(`Session: ${session.name} (${session.status})`);
+      let host = 'unknown';
+      if (suspended || session.status === 'detached') {
+        host = `unknown (${suspended ? 'service terminated' : 'conversation-only'}; not queried)`;
+      } else {
+        try {
+          host = await withCancellation(this.options.runtime.isRunning(session),AbortSignal.timeout(5000)) ? 'running' : 'stopped';
+        } catch (error) {
+          observation.failure = {operation:'Host status lookup',at:Date.now(),error};
+        }
+      }
+      lines.push(`Host: ${host}`);
+      lines.push(`Mirroring: ${listener?.connection ? 'connected' : listener?.promise ? 'connecting' : observation.mirrored || host === 'running' ? 'disconnected' : 'not attached'}`);
+      const task = observation.task?.state ?? (this.options.store.hasPendingInitialTask(session.id) ? 'waiting for host; not submitted' : 'unknown (no task observed in this process)');
+      lines.push(`Latest task: ${task}`);
+      const recovery = listener?.initial?.phase === 'retrying' ? 'initial task retry scheduled' : this.restoring.has(session.id) ? 'restoring' : this.reconnecting.has(session.id) ? 'reconnecting' : this.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
+      lines.push(`Recovery: ${recovery}`);
+      if (observation.failure) failures.push(observation.failure);
+    } else lines.push(destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
+    const catalog = this.options.store.getSkillCatalog(path);
+    const catalogObservation = this.catalogObservations.get(path);
+    const freshness = this.catalogTasks.has(path) ? 'refreshing' : catalogObservation?.failed ? 'refresh failed' : catalogObservation?.refreshedAt ? 'current' : 'not checked this process';
+    lines.push(`Skill shortcuts: ${catalog ? `saved catalog (${catalog.length} skills); ${freshness}` : `unavailable; ${freshness}`}`);
+    lines.push(`Last successful skill check: ${catalogObservation?.refreshedAt ? new Date(catalogObservation.refreshedAt).toISOString() : 'unknown'} (runtime discovery cache may apply)`);
+    if (catalogObservation?.failure) failures.push(catalogObservation.failure);
+    for (const failure of failures) {
+      const error = failure.error;
+      const fields = error instanceof Error ? ['code','signal','killed'].flatMap(key => {
+        const value = Reflect.get(error,key);
+        return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
+      }) : [];
+      lines.push(`Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n${error instanceof Error ? error.message : String(error)}${fields.length ? '\n'+fields.join('\n') : ''}`);
+    }
+    const text = lines.join('\n');
+    for (let offset = 0; offset < text.length;) {
+      await this.authorize(chatId,ctx.from!.id,true);
+      if (this.assignedPath(chatId) !== path) throw new Error('The group instance assignment changed');
+      let end = Math.min(offset+3900,text.length);
+      if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
+      await replyTo(ctx,destination,text.slice(offset,end));
+      offset = end;
+    }
+  }
+  async authorize(chatId: number, userId: number, statusOnly = false): Promise<void> {
     if (this.stopped) throw this.background.signal.reason;
-    if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
+    if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
     const [chat, user, bot] = await Promise.all([this.bot.telegram.getChat(chatId), this.bot.telegram.getChatMember(chatId, userId), this.bot.telegram.getChatMember(chatId, this.id)]);
-    if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
+    if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
-    if (chat.type !== 'supergroup' || !chat.is_forum || !isActiveMember(user) || bot.status !== 'administrator' || !bot.can_manage_topics) throw new Error('Group access denied');
+    if (chat.type !== 'supergroup' || !isActiveMember(user) || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
   }
   private async ready(chatId: number): Promise<boolean> {
     const [chat, member] = await Promise.all([this.bot.telegram.getChat(chatId), this.bot.telegram.getChatMember(chatId, this.id)]);
@@ -776,7 +874,12 @@ export class BotService {
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
     if (this.stopped || !this.sessionAssigned(session)) return;
     const listener = this.listeners.get(session.id);
-    const running = await withCancellation(this.options.runtime.isRunning(session), this.background.signal);
+    let running: boolean;
+    try { running = await withCancellation(this.options.runtime.isRunning(session),this.background.signal); }
+    catch (error) {
+      if (error !== this.background.signal.reason) this.sessionObservation(session.id).failure = {operation:'Host status lookup',at:Date.now(),error};
+      throw error;
+    }
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     if (!running) {
       this.dropListener(session.id);
@@ -813,7 +916,7 @@ export class BotService {
   }
   private async announce(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
-    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `Open Session to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'Open Session', url: this.link(session) }]] } });
+    const message = await sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `OPEN AGENT to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
     this.requireSessionAssignment(session);
     await this.bot.telegram.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
@@ -1155,6 +1258,14 @@ export class BotService {
   }
   private async handle(ctx: Context): Promise<void> {
     if (this.stopped) return;
+    const statusCommand = messageText(ctx.message)?.match(/^\/status(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
+    if (statusCommand && ctx.chat && ctx.chat.type !== 'private' && ctx.from && !ctx.from.is_bot && ctx.message &&
+        !('forward_origin' in ctx.message) && !('forward_date' in ctx.message)) {
+      if (statusCommand[1] && statusCommand[1].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
+      if (statusCommand[2]?.trim()) { await replyTo(ctx,contextDestination(ctx),'Usage: /status'); return; }
+      await this.showStatus(ctx);
+      return;
+    }
     if (refreshTermination(this.options.config)) {
       try { await this.applyTermination(); }
       finally {
@@ -1265,9 +1376,7 @@ export class BotService {
     if (command?.[1]?.toLowerCase() === 'setup') { await this.setup(ctx); return; }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
-      if (command?.[1]?.toLowerCase() === 'status') {
-        await replyTo(ctx, contextDestination(ctx), `${await this.ready(ctx.chat.id) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
-      } else if (command?.[1]?.toLowerCase() === 'help') {
+      if (command?.[1]?.toLowerCase() === 'help') {
         await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n${adminHelp}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
@@ -1396,10 +1505,9 @@ export class BotService {
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
       if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${help}\n${defaultSkillHelp}\n${adminHelp}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
-      if (action === 'status') { await replyTo(ctx, contextDestination(ctx), `${await this.ready(ctx.chat.id) ? 'Forum ready.' : 'Forum permissions need attention.'}${session ? `\nSession: ${session.name} (${session.status})` : '\nUse /new task to create a session.'}`); return; }
       if (action === 'session') {
         if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }
-        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'Open Session',url:this.link(session)}]]}}); return;
+        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'OPEN AGENT',url:this.link(session)}]]}}); return;
       }
       if (action === 'model_preset' || action === 'list_model_presets') {
         if (!(await this.topicAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require an admin for this topic or bot.'); return; }
@@ -1482,7 +1590,7 @@ export class BotService {
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session,message.message_id);
           await this.setTopicStatus(session, 'stopped');
-          await replyTo(ctx, contextDestination(ctx), 'Session process killed. History is preserved; a managed session can restart on your next instruction or Open Session visit.');
+          await replyTo(ctx, contextDestination(ctx), 'Session process killed. History is preserved; a managed session can restart on your next instruction or OPEN AGENT visit.');
           return;
         }
         if (!(await this.options.runtime.isRunning(session))) {
@@ -1539,6 +1647,7 @@ export class BotService {
       if (this.stopped || !this.sessionAssigned(session) || this.options.store.getSessionGeneration(session.id) !== generation) return;
       const active = this.options.store.getSession(session.id);
       if (active?.status !== 'open') return;
+      this.reconnecting.add(active.id);
       void this.runBackground(`reconnect:${active.id}`, async signal => {
         try {
           const running = await withCancellation(this.options.runtime.isRunning(active), signal);
@@ -1550,7 +1659,7 @@ export class BotService {
           if (error !== signal.reason && !this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(active.id) === generation) this.scheduleReconnect(active, attempt + 1);
           throw error;
         }
-      });
+      }).finally(() => this.reconnecting.delete(active.id));
     }, Math.min(1000 * 2 ** attempt, 16000));
     timer.unref();
     this.reconnects.set(session.id, timer);
@@ -1559,6 +1668,7 @@ export class BotService {
     clearTimeout(this.reconnects.get(id));
     this.reconnects.delete(id);
     const listener = this.listeners.get(id);
+    for (const pending of listener?.pendingPrompts ?? []) pending.observation.state = 'acceptance unknown';
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
     for (const [token, question] of this.questions) {
@@ -1576,8 +1686,9 @@ export class BotService {
       this.requireSessionAssignment(session);
       return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
       onFrame: frame => this.onFrame(session,listener,frame),
-      onClose: () => {
+      onClose: reason => {
         if (this.listeners.get(session.id) !== listener) return;
+        this.sessionObservation(session.id).failure = {operation:'Mirroring disconnected',at:Date.now(),error:reason};
         const connected = listener.connection !== undefined;
         this.dropListener(session.id);
         void this.runBackground(`topic-status:${session.id}`, () => this.refreshTopicStatus(session));
@@ -1585,8 +1696,10 @@ export class BotService {
       },
     }); }).then(connection => {
       if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) { connection.close(); throw new Error('Session closed'); }
+      this.sessionObservation(session.id).mirrored = true;
       listener.connection = connection; return connection;
     }).catch(async error => {
+      if (!this.stopped) this.sessionObservation(session.id).failure = {operation:'Session connection',at:Date.now(),error};
       try {
         if (error instanceof SessionCapacityError && !this.stopped) await this.requestCapacity(session,error.limit);
         throw error;
@@ -1601,12 +1714,17 @@ export class BotService {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
-    const pending = {text,messageId,onStartupRejected};
+    const observation: TaskObservation = {state:'waiting for acceptance'};
+    this.sessionObservation(session.id).task = observation;
+    const pending = {text,messageId,onStartupRejected,observation};
     listener.pendingPrompts.push(pending);
+    let attempted = false;
     try {
       this.options.runtime.markPrompt(listener.sessionId);
+      attempted = true;
       listener.connection!.send({t:'prompt',text,...(images?.length ? {images} : {})});
     } catch (error) {
+      observation.state = attempted ? 'acceptance unknown' : 'not accepted';
       const index = listener.pendingPrompts.indexOf(pending);
       if (index !== -1) listener.pendingPrompts.splice(index,1);
       throw error;
@@ -1786,6 +1904,9 @@ export class BotService {
   private onFrame(session: TopicSession, listener: Listener, frame: HostFrame, replay = false): void {
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     this.options.runtime.observeFrame(session.id,frame);
+    if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'error') {
+      this.sessionObservation(session.id).failure = {operation:'OMP notice',at:Date.now(),error:frame.event.message};
+    }
     if (frame.t === 'ui-request') {
       this.relayQuestion(session, listener, frame.request);
       return;
@@ -1811,7 +1932,6 @@ export class BotService {
     if (interruptedBy) {
       listener.pendingAnswers.clear();
       listener.queuedMessages = 0;
-      listener.activeTurn = false;
       listener.activity = 'completed';
       void this.setTopicStatus(session, listener.activity);
       void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
@@ -1820,19 +1940,19 @@ export class BotService {
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity = listener.activeTurn || this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
+      listener.activity = this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
-      listener.activeTurn = true;
       listener.activity = 'running';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      listener.activeTurn = false;
       listener.activity = listener.queuedMessages > 0 ? 'running' : 'completed';
       void this.setTopicStatus(session, listener.activity);
     }
     if (frame.t === 'error') {
       const pending = listener.pendingPrompts.shift();
+      if (pending) pending.observation.state = 'not accepted';
+      this.sessionObservation(session.id).failure = {operation:'OMP instruction',at:Date.now(),error:frame.message};
       if (isStartupRejection(frame)) pending?.onStartupRejected?.();
     }
     if (isStartupRejection(frame) && listener.initial) {
@@ -1883,6 +2003,7 @@ export class BotService {
         const index = listener.pendingPrompts.findIndex(pending => pending.text === content);
         if (index !== -1) {
           const [pending] = listener.pendingPrompts.splice(index,1);
+          pending!.observation.state = 'accepted; completion unknown';
           if (pending!.messageId !== undefined) {
             this.acknowledgeMessage(session,pending!.messageId,listener);
           }
@@ -1898,7 +2019,7 @@ export class BotService {
       listener.pendingStops.length = 0;
       const text = isStartupRejection(frame)
         ? 'The host is still starting. Your instruction was not accepted. Resend it after startup.'
-        : 'OMP rejected an instruction. Open Session for details before resending.';
+        : 'OMP rejected an instruction. OPEN AGENT for details before resending.';
       void sendTo(this.bot.telegram, topicDestination(session.chatId, session.threadId), text).catch(() => undefined);
       return;
     }

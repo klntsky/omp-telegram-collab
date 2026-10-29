@@ -37,16 +37,16 @@ export class SessionAccessError extends Error {}
 export function readTelegramLaunch(): TelegramLaunch {
 	const app = window.Telegram?.WebApp;
 	if (!app?.initData) {
-		throw new Error("Open this Mini App using the Open Session button in your Telegram topic. Telegram authentication is required.");
+		throw new Error("Open this Mini App using the OPEN AGENT button in your Telegram topic. Telegram authentication is required.");
 	}
 	const botHint = new URLSearchParams(window.location.search).get("bot");
 	const botId = Number(botHint);
 	if (!botHint || !/^\d+$/.test(botHint) || !Number.isSafeInteger(botId) || botId <= 0) {
-		throw new Error("This Mini App is missing its bot configuration. Set its BotFather app URL to include ?bot=<bot ID>, then reopen the topic’s Open Session button.");
+		throw new Error("This Mini App is missing its bot configuration. Set its BotFather app URL to include ?bot=<bot ID>, then reopen the topic’s OPEN AGENT button.");
 	}
 	const startParam = app.initDataUnsafe.start_param;
 	if (typeof startParam !== "string" || !/^s_[A-Za-z0-9_-]{16,128}$/.test(startParam)) {
-		throw new Error("No session was selected. Open this Mini App from the Open Session button in a Telegram topic.");
+		throw new Error("No session was selected. Open this Mini App from the OPEN AGENT button in a Telegram topic.");
 	}
 	return { botId, sessionId: startParam.slice(2), initData: app.initData };
 }
@@ -66,11 +66,11 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		throw new Error("Could not reach the session service. Check your connection and Retry.");
 	}
 	if (!response.ok) {
-		if (response.status === 409) throw new SessionAccessError("This session was killed. Select Rejoin or reopen the topic’s Open Session button to resume explicitly.");
+		if (response.status === 409) throw new SessionAccessError("This session was killed. Select Rejoin or reopen the topic’s OPEN AGENT button to resume explicitly.");
 		if (response.status === 401 || response.status === 403) {
-			throw new SessionAccessError("Telegram authentication expired or access was denied. Reopen the topic’s Open Session button and confirm you are still a group member.");
+			throw new SessionAccessError("Telegram authentication expired or access was denied. Reopen the topic’s OPEN AGENT button and confirm you are still a group member.");
 		}
-		if (response.status === 404) throw new SessionAccessError("This topic’s session is unavailable. Reopen its Open Session button in Telegram.");
+		if (response.status === 404) throw new SessionAccessError("This topic’s session is unavailable. Reopen its OPEN AGENT button in Telegram.");
 		throw new Error("The session service is unavailable. Retry in a moment.");
 	}
 	let data: unknown;

@@ -173,7 +173,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       }
       fail(4003, options.store.getSession(sessionId)?.status === 'detached'
         ? 'This topic is conversation-only; its session is detached'
-        : 'Session process killed. Reopen Open Session to restart.');
+        : 'Session process killed. Reopen OPEN AGENT to restart.');
     });
     const expiry = setTimeout(() => fail(4001,'Authentication expired'),Math.max(1,Math.min(900000,(identity.authDate+3600)*1000-Date.now()))); expiry.unref();
     function fail(code: number, message: string): void {

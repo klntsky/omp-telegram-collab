@@ -65,7 +65,7 @@ for (const [source, message] of [
       const announcement = app.messages.find(value => value.message_thread_id === session.threadId && value.reply_markup);
       assert.ok(announcement, 'the session entry remains available when the host cannot start');
       assert.deepEqual(announcement.reply_markup, {
-        inline_keyboard: [[{ text: 'Open Session', url: `https://t.me/FixtureOmpBot/app?startapp=s_${session.id}` }]],
+        inline_keyboard: [[{ text: 'OPEN AGENT', url: `https://t.me/FixtureOmpBot/app?startapp=s_${session.id}` }]],
       });
       assert.deepEqual(pinsAtStartup, [{ chat_id: session.chatId, message_id: announcement.message_id, disable_notification: true }]);
       const before = app.messages.length;

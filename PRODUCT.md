@@ -34,7 +34,7 @@ Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as ima
 
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
-New session topics get a quietly pinned Open Session message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
+New session topics get a quietly pinned OPEN AGENT message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
 
 The service becomes ready after mandatory runtime/history checks, bot identity and cached-command setup, HTTP binding, and the first successful Telegram poll for every configured bot. Session restoration, status maintenance, and fresh skill discovery run afterward without delaying readiness. A slow project's discovery does not delay another project's command-menu refresh.
 
@@ -42,7 +42,7 @@ Online notices are sent after readiness; slow notice delivery does not hold star
 
 Rename a topic to change its stored display name. Close it to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
-`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh Open Session visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
+`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
 
 While terminated, commands, prompts, callbacks, and Mini App agent access are blocked. Every command receives “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
 
@@ -168,7 +168,7 @@ OMP's Collab protocol has no prompt admission acknowledgement or idempotency key
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 
-The Mini App retains its transcript and draft during transient failures. Reconnects use capped exponential backoff and a fresh single-use ticket with renewed authentication and membership checks. They do not queue or replay instructions. Leave, denied membership, expired launch credentials, invalid actions, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available. Reopen Open Session when Telegram credentials expire.
+The Mini App retains its transcript and draft during transient failures. Reconnects use capped exponential backoff and a fresh single-use ticket with renewed authentication and membership checks. They do not queue or replay instructions. Leave, denied membership, expired launch credentials, invalid actions, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available. Reopen OPEN AGENT when Telegram credentials expire.
 
 ## 4. Attached sessions and transcript
 
