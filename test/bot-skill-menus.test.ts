@@ -5,6 +5,66 @@ import { chatId } from './telegram-data.js';
 import { Telegraf } from 'telegraf';
 import { createBot } from '../src/bot.js';
 import { botToken, botId, ownerId, ownerUsername } from './telegram-data.js';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+
+test('a slow instance does not delay another menu, and close cancels refresh without late publication', {timeout:10000}, async t => {
+  const app = await createSmokeApp();
+  await app.service.close();
+  const firstPath = Object.keys(app.config.instances)[0]!;
+  const secondPath = join(firstPath,'second');
+  await mkdir(secondPath);
+  const secondChat = chatId - 1;
+  app.config.instances[secondPath] = {admins:[],chats:[{botId,chatId:secondChat}]};
+  const slow = Promise.withResolvers<Array<{name:string;description:string}>>();
+  t.mock.method(app.runtime,'listSkills',async (path: string) => path === firstPath ? slow.promise : [{name:'fast-skill',description:'Independent catalog'}]);
+  const bot = new Telegraf(botToken,{telegram:{apiRoot:app.telegramUrl}});
+  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot,telegramIntervalMs:0});
+  const published = Promise.withResolvers<void>();
+  const original = bot.telegram.callApi.bind(bot.telegram);
+  t.mock.method(bot.telegram,'callApi',async (...args:Parameters<typeof original>) => {
+    const result = await original(...args);
+    if (args[0] === 'setMyCommands' && JSON.stringify(args[1]).includes('skill_fast_skill')) published.resolve();
+    return result;
+  });
+  try {
+    await service.initialize();
+    service.startBackground();
+    await published.promise;
+    const before = app.store.getSkillCatalog(firstPath);
+    await service.close();
+    slow.resolve([{name:'late-skill',description:'Must not publish'}]);
+    await service.refreshSkillCatalogs();
+    assert.deepEqual(app.store.getSkillCatalog(firstPath),before);
+    const commands = await bot.telegram.getMyCommands({scope:{type:'chat',chat_id:secondChat}});
+    assert.ok(commands.some(command=>command.command==='skill_fast_skill'));
+  } finally { slow.resolve([]); await service.close(); await app.close(); }
+});
+
+test('assignment cleanup and acknowledgement do not wait for catalog discovery', {timeout:10000}, async t => {
+  const app = await createSmokeApp();
+  const pending = Promise.withResolvers<Array<{name:string;description:string}>>();
+  const entered = Promise.withResolvers<void>();
+  t.mock.method(app.runtime,'listSkills',() => { entered.resolve(); return pending.promise; });
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Removed assignment'}});
+    const instancePath = Object.keys(app.config.instances)[0]!;
+    const session = app.store.listSessions(botId)[0]!;
+    const detached: string[] = [];
+    app.service.onSessionKill(id => detached.push(id));
+    const before = app.store.getSkillCatalog(instancePath);
+    const refresh = app.service.refreshSkillCatalogs();
+    await entered.promise;
+    app.config.instances[instancePath]!.chats = [];
+    await app.service.reconcileConfiguration();
+    assert.deepEqual(detached,[session.id]);
+    assert.deepEqual(await app.bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}}),[]);
+    pending.resolve([{name:'stale-skill',description:'Old assignment'}]);
+    await refresh;
+    assert.deepEqual(app.store.getSkillCatalog(instancePath),before);
+  } finally { pending.resolve([]); await app.close(); }
+});
 
 test('restart serves cached shortcuts and reaches polling while discovery is blocked', async t => {
   const app = await createSmokeApp();
@@ -21,6 +81,7 @@ test('restart serves cached shortcuts and reaches polling while discovery is blo
     const ready = Promise.withResolvers<void>();
     polling = service.start(ready.resolve);
     await Promise.race([ready.promise, polling]);
+    service.startBackground();
     const commands = await bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}});
     assert.ok(commands.some(command=>command.command==='skill_cached_skill'));
     await bot.handleUpdate({update_id:9000,message:{
@@ -29,15 +90,8 @@ test('restart serves cached shortcuts and reaches polling while discovery is blo
       text:'/help',
     }});
     assert.match(String(app.messages.at(-1)?.text), /\/skills/);
-    const published = Promise.withResolvers<void>();
-    const original = bot.telegram.setMyCommands.bind(bot.telegram);
-    t.mock.method(bot.telegram,'setMyCommands',async (...args:Parameters<typeof original>) => {
-      const result = await original(...args);
-      if (args[0].some(command=>command.command==='skill_fresh_skill')) published.resolve();
-      return result;
-    });
     discovery.resolve([{name:'fresh-skill',description:'Refreshed discovery'}]);
-    await published.promise;
+    await service.refreshSkillCatalogs();
     const refreshed = await bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}});
     assert.ok(refreshed.some(command=>command.command==='skill_fresh_skill'));
     assert.ok(!refreshed.some(command=>command.command==='skill_cached_skill'));
@@ -50,34 +104,22 @@ test('restart serves cached shortcuts and reaches polling while discovery is blo
   }
 });
 
-test('catalog refresh publishes changes once, removes obsolete aliases and preserves menus on failure', async t => {
+test('catalog refresh removes obsolete aliases and preserves menus on failure', async t => {
   const app = await createSmokeApp();
   try {
     const scope = {type:'chat' as const,chat_id:chatId};
-    const original = app.bot.telegram.setMyCommands.bind(app.bot.telegram);
-    let writes = 0;
-    t.mock.method(app.bot.telegram,'setMyCommands',async (...args:Parameters<typeof original>) => {
-      writes++;
-      return original(...args);
-    });
-    await app.service.reconcileConfiguration();
-    assert.equal(writes,0);
     const catalog = t.mock.method(app.runtime,'listSkills',async () => [{name:'New-Skill',description:'Newly installed'}]);
-    await app.service.reconcileConfiguration();
+    await app.service.refreshSkillCatalogs();
     const changed = await app.bot.telegram.getMyCommands({scope});
     assert.ok(changed.some(command=>command.command==='skill_new_skill'));
     assert.ok(!changed.some(command=>command.command==='skill_pdf_tools'));
-    assert.equal(writes,1);
-    await app.service.reconcileConfiguration();
-    assert.equal(writes,1);
     const diagnostic = new Error('Catalog discovery failed\nOriginal permission diagnostic');
     catalog.mock.mockImplementation(async () => { throw diagnostic; });
     const originalLog = console.error.bind(console);
     const observed: unknown[] = [];
     t.mock.method(console,'error',(...args:unknown[]) => { observed.push(...args); originalLog(...args); });
-    await app.service.reconcileConfiguration();
+    await app.service.refreshSkillCatalogs();
     assert.deepEqual(await app.bot.telegram.getMyCommands({scope}),changed);
-    assert.equal(writes,1);
     assert.ok(observed.includes(diagnostic));
   } finally { await app.close(); }
 });
@@ -93,7 +135,7 @@ test('menu capacity and alias collisions do not hide canonical skills from inlin
       {name:'技能',description:'Unicode skill without a Telegram alias'},
     ];
     t.mock.method(app.runtime,'listSkills',async () => skills);
-    await app.service.reconcileConfiguration();
+    await app.service.refreshSkillCatalogs();
     const commands = await app.bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}});
     assert.equal(commands.length,100);
     assert.equal(commands.filter(command=>command.command==='skill_first_name').length,1);

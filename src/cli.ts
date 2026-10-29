@@ -1,9 +1,10 @@
 import { stdout, stderr } from 'node:process';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { watchFile, unwatchFile, existsSync } from 'node:fs';
+import { watchFile, unwatchFile, existsSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod, unlink, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createControlServer, type Server } from 'node:http';
+import { inspect } from 'node:util';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { readConfig, defaultConfigPath, validateStart, findInstance } from './config.js';
 import type { AppConfig } from '../shared/contracts.js';
@@ -14,16 +15,40 @@ import { OmpRuntime } from './runtime.js';
 import { runAdmin, notifyReload } from './cli-admin.js';
 import { sendTo } from './telegram-destination.js';
 
-async function notifyGroups(config: AppConfig, bots: BotService[], store: Store, text: string): Promise<void> {
-  await Promise.allSettled(bots.map(async bot => {
-    await Promise.allSettled(store.listGroups(bot.id).filter(chat => findInstance(config, bot.id, chat)).map(async chatId => {
+let pendingExitMarker: { path: string; startedAt: number } | undefined;
+process.once('exit', () => {
+  if (pendingExitMarker) {
+    try { writeFileSync(pendingExitMarker.path, JSON.stringify({ startedAt: pendingExitMarker.startedAt, predecessorExitedAt: Date.now() }), { mode: 0o600 }); }
+    catch (error) { writeSync(2, `Restart exit marker write failed: ${inspect(error)}\n`); }
+  }
+});
+
+function timing(phase: string, since: number): void {
+  stdout.write(`Service timing ${phase}: ${(performance.now() - since).toFixed(1)} ms\n`);
+}
+
+async function notifyGroups(config: AppConfig, bots: BotService[], store: Store, text: string, signal?: AbortSignal): Promise<void> {
+  const botResults = await Promise.allSettled(bots.map(async bot => {
+    const groupResults = await Promise.allSettled(store.listGroups(bot.id).filter(chat => findInstance(config, bot.id, chat)).map(async chatId => {
+      if (signal?.aborted) return;
       const controller = new TelegramAbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      const timeout = setTimeout(abort, 5000);
       try {
         await sendTo(bot.bot.telegram, {kind:'general',chatId}, text, undefined, {signal:controller.signal});
-      } finally { clearTimeout(timeout); }
+      } finally {
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', abort);
+      }
     }));
+    for (const result of groupResults) {
+      if (result.status === 'rejected' && !signal?.aborted) console.error(`Lifecycle notification failed for bot ${bot.id}:`, result.reason);
+    }
   }));
+  for (const result of botResults) {
+    if (result.status === 'rejected' && !signal?.aborted) console.error('Lifecycle notification failed:', result.reason);
+  }
 }
 
 interface Generation {
@@ -34,9 +59,11 @@ interface Generation {
   close(): Promise<void>;
 }
 
-async function launch(config: AppConfig, onPollingFailure: () => void): Promise<Generation> {
+async function launch(config: AppConfig, onPollingFailure: () => void, initialLaunch = false): Promise<Generation> {
   const startupAt = Date.now();
-  const restartMarker = join(config.dataDir, 'restart-started-at');
+  const launchAt = performance.now();
+  if (initialLaunch) stdout.write(`Service timing process-start-to-launch bootstrap/dependencies/config: ${launchAt.toFixed(1)} ms\n`);
+  const restartMarker = join(config.dataDir, 'restart-timing.json');
   validateStart(config);
   const runtime = new OmpRuntime(config);
   let store: Store | undefined;
@@ -44,39 +71,79 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
   let server: GatewayServer | undefined;
   let closePromise: Promise<void> | undefined;
   let started = false;
+  const onlineController = new AbortController();
+  let onlineTask = Promise.resolve();
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
-      if (started && store) {
-        await writeFile(restartMarker, String(Date.now()), { mode: 0o600 });
-        await notifyGroups(config, bots, store, 'OMP bot service is winding down. Sessions will be unavailable until it is back online.');
-      }
-      if (server) {
-        await server.closeConnections();
-        if (server.listening) {
-          const closed = Promise.withResolvers<void>();
-          server.close(error => error ? closed.reject(error) : closed.resolve());
-          await closed.promise;
+      const shutdownAt = performance.now();
+      onlineController.abort();
+      await onlineTask;
+      let failure: unknown;
+      let failed = false;
+      const attempt = async (operation: () => Promise<void> | void) => {
+        try { await operation(); }
+        catch (error) {
+          console.error('Service cleanup failed:', error);
+          if (!failed) { failed = true; failure = error; }
         }
+      };
+      let notices = Promise.resolve();
+      if (started && store) {
+        const startedAt = Date.now();
+        await attempt(async () => {
+          await writeFile(restartMarker, JSON.stringify({ startedAt, predecessorExitedAt: null }), { mode: 0o600 });
+          pendingExitMarker = { path: restartMarker, startedAt };
+        });
+        const noticeAt = performance.now();
+        notices = notifyGroups(config, bots, store, 'OMP bot service is winding down. Sessions will be unavailable until it is back online.').finally(() => timing('shutdown notices', noticeAt));
       }
-      await Promise.allSettled(bots.map(bot => bot.close()));
-      await runtime.close();
-      store?.close();
+      const drainAt = performance.now();
+      await attempt(async () => {
+        if (server) {
+          await server.closeConnections();
+          if (server.listening) {
+            const closed = Promise.withResolvers<void>();
+            server.close(error => error ? closed.reject(error) : closed.resolve());
+            await closed.promise;
+          }
+        }
+      });
+      await Promise.all(bots.map(bot => attempt(() => bot.close())));
+      timing('shutdown drain', drainAt);
+      const runtimeAt = performance.now();
+      await attempt(() => runtime.close());
+      timing('shutdown runtime', runtimeAt);
+      await attempt(() => notices);
+      const storeAt = performance.now();
+      await attempt(() => store?.close());
+      timing('shutdown store', storeAt);
+      timing('shutdown total', shutdownAt);
+      if (failed) throw failure;
     })();
     return closePromise;
   };
   try {
+    let phaseAt = performance.now();
     await runtime.acquire();
+    timing('runtime acquire', phaseAt);
+    phaseAt = performance.now();
     store = new Store(join(config.dataDir, 'telegram.sqlite'));
+    timing('store open', phaseAt);
+    phaseAt = performance.now();
     await runtime.validateSessionPaths(store.listSessions());
+    timing('session validation', phaseAt);
     for (const botConfig of config.bots) {
       const bot = createBot({ config, botConfig, token: botConfig.token, store, runtime });
       bots.push(bot);
+      phaseAt = performance.now();
       await bot.initialize();
+      timing(`bot ${bot.id} initialization`, phaseAt);
       if (bot.id !== botConfig.id) throw new Error(`Telegram bot identity does not match configured bot ${botConfig.id}`);
       stdout.write(`Verified @${bot.bot.botInfo!.username} (bot ${bot.id}). Set the BotFather Mini App web URL to ${new URL(`/?bot=${bot.id}`, config.publicUrl).href}\n`);
     }
     if (config.terminated) await Promise.all(bots.map(bot => bot.applyTermination()));
     server = createServer({ config, bots, store, runtime });
+    phaseAt = performance.now();
     const listening = Promise.withResolvers<void>();
     server.once('error', listening.reject);
     server.listen(config.port, config.host, () => {
@@ -84,31 +151,44 @@ async function launch(config: AppConfig, onPollingFailure: () => void): Promise<
       listening.resolve();
     });
     await listening.promise;
+    timing('HTTP bind', phaseAt);
     await Promise.all(bots.map(bot => {
+      const pollAt = performance.now();
       const { promise, resolve, reject } = Promise.withResolvers<void>();
-      void bot.start(resolve).then(() => {
+      void bot.start(() => { timing(`bot ${bot.id} first poll`, pollAt); resolve(); }).then(() => {
         if (!started) reject(new Error('Telegram polling stopped during startup'));
       }, error => {
         if (!started) { reject(error); return; }
         stderr.write('Telegram polling stopped. Check bot credentials, network access, and that no other poller is running.\n');
+        console.error('Telegram polling failure:', error);
         process.exitCode = 1;
         onPollingFailure();
       });
       return promise;
     }));
     started = true;
-    const restartAt = await readFile(restartMarker, 'utf8').then(Number).catch(error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      return startupAt;
-    });
-    await notifyGroups(config, bots, store, `OMP bot service is back online (restarting took ${((Date.now() - restartAt) / 1000).toFixed(2)} seconds).`);
-    await unlink(restartMarker).catch(error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    });
+    const readyAt = performance.now();
+    timing('launch-to-first-poll-ready', launchAt);
+    if (initialLaunch) timing('process-start-to-ready', 0);
+    for (const bot of bots) bot.startBackground();
+    onlineTask = (async () => {
+      const marker = await readFile(restartMarker, 'utf8').then(text => JSON.parse(text) as { startedAt: number; predecessorExitedAt: number | null }).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        return { startedAt: startupAt, predecessorExitedAt: null };
+      });
+      if (onlineController.signal.aborted) return;
+      if (initialLaunch && marker.predecessorExitedAt !== null) stdout.write(`Service timing process replacement gap: ${(performance.timeOrigin - marker.predecessorExitedAt).toFixed(1)} ms\n`);
+      await unlink(restartMarker).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
+      pendingExitMarker = undefined;
+      if (onlineController.signal.aborted) return;
+      await notifyGroups(config, bots, store!, `OMP bot service is back online (restarting took ${((Date.now() - marker.startedAt) / 1000).toFixed(2)} seconds).`, onlineController.signal);
+    })().catch(error => console.error('Online notification failed:', error)).finally(() => timing('ready-to-notification', readyAt));
     stdout.write(`OMP Telegram listening on ${config.host}:${config.port}. Configuration: ${config.configPath}\n`);
     return { config, store, runtime, bots, close };
   } catch (error) {
-    await close();
+    await close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));
     throw error;
   }
 }
@@ -121,7 +201,7 @@ function serviceSettings(config: AppConfig): string {
 export async function startService(configPath = defaultConfigPath()): Promise<{ close(): Promise<void>; reload(): Promise<void> }> {
   configPath = resolve(configPath);
   const pollingFailure = Promise.withResolvers<void>();
-  let generation = await launch(readConfig(configPath), pollingFailure.resolve);
+  let generation = await launch(readConfig(configPath), pollingFailure.resolve, true);
   let closing = false;
   let closePromise: Promise<void> | undefined;
   let reloadTail = Promise.resolve();
@@ -146,7 +226,8 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         await generation.close();
         try { generation = await launch(next, pollingFailure.resolve); }
         catch (error) {
-          generation = await launch(previous, pollingFailure.resolve);
+          try { generation = await launch(previous, pollingFailure.resolve); }
+          catch (rollbackError) { console.error('Configuration rollback failed:', rollbackError); }
           throw error;
         }
         await bindControl(next.dataDir);
@@ -195,7 +276,10 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
 
   const changed = () => { void reload().catch(error => stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : 'Reload failed'}\n`)); };
   try { await bindControl(generation.config.dataDir); }
-  catch (error) { await generation.close(); throw error; }
+  catch (error) {
+    await generation.close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));
+    throw error;
+  }
   watchFile(configPath, { interval: 500, persistent: false }, changed);
   const service = {
     reload,
@@ -216,7 +300,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       return closePromise;
     },
   };
-  void pollingFailure.promise.then(() => service.close()).catch(error => stderr.write(`Service shutdown failed: ${error instanceof Error ? error.message : 'Unknown error'}\n`));
+  void pollingFailure.promise.then(() => service.close()).catch(error => console.error('Service shutdown failed:', error));
   return service;
 }
 
@@ -251,7 +335,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (args.length > 1) throw new Error(usage.trim());
   if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram --config ${JSON.stringify(configPath)} configure.`);
   const service = await startService(configPath);
-  const shutdown = () => { void service.close().catch(error => { stderr.write(`${error instanceof Error ? error.message : 'Shutdown failed'}\n`); process.exitCode = 1; }); };
+  const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }

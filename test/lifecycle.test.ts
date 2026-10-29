@@ -86,7 +86,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
   }
 });
 
-async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'getMe' | 'deleteWebhook' | 'getUpdates'; noticeFailure?: boolean } = {}) {
+async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'getMe' | 'deleteWebhook' | 'getUpdates'; noticeFailure?: boolean; holdOnlineNotice?: boolean; cleanupFailure?: Error } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-lifecycle-'));
   const secondBotId = botId + 1;
   const groups = [[botId, chatId], [botId, chatId - 1], [secondBotId, chatId - 2]];
@@ -100,6 +100,8 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
 
   const notices: { botId: number; payload: Record<string, unknown> }[] = [];
   const ready = new Set<number>();
+  const noticeEvents = new EventEmitter();
+  let pendingOnline = 0;
   const telegram = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
@@ -127,6 +129,12 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       result = [];
     } else if (method === 'sendMessage') {
       notices.push({ botId: id, payload });
+      noticeEvents.emit('notice');
+      if (options.holdOnlineNotice && String(payload.text).includes('back online')) {
+        pendingOnline++;
+        response.once('close', () => { pendingOnline--; });
+        return;
+      }
       if (options.noticeFailure) {
         response.end(JSON.stringify({ ok: false, error_code: 403, description: 'Fixture cannot send notices' }));
         return;
@@ -155,6 +163,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   t.mock.method(OmpRuntime.prototype, 'close', async function (this: OmpRuntime) {
     runtimeCloses++;
     await closeRuntime.call(this);
+    if (options.cleanupFailure) throw options.cleanupFailure;
   });
   let storeCloses = 0;
   const closeStore = Store.prototype.close;
@@ -188,6 +197,10 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   });
   return {
     notices, ready, groups, config, bots, session,
+    get pendingOnline() { return pendingOnline; },
+    async waitNotices(count: number) {
+      while (notices.length < count) await once(noticeEvents, 'notice');
+    },
     get runtimeCloses() { return runtimeCloses; },
     get storeCloses() { return storeCloses; },
     async start() { service = await startService(config.configPath); return service; },
@@ -198,6 +211,7 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
   const fixture = await lifecycleFixture(t);
   const service = await fixture.start();
   assert.equal(fixture.ready.size, 2);
+  await fixture.waitNotices(3);
   const targets = fixture.groups.map(([id, chat]) => `${id}:${chat}`).sort();
   const assertNotices = (notices: typeof fixture.notices, text: unknown) => {
     assert.equal(typeof text, 'string');
@@ -223,6 +237,7 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
   assert.equal(fixture.storeCloses, 1);
   await delay(100);
   const restarted = await fixture.start();
+  await fixture.waitNotices(9);
   const resumedText = String(fixture.notices[6]?.payload.text);
   const elapsed = /restarting took (\d+\.\d{2}) seconds/.exec(resumedText);
   assert.ok(elapsed, resumedText);
@@ -233,11 +248,38 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
 test('failed lifecycle notifications neither fail startup nor prevent shutdown', { timeout: 30_000 }, async t => {
   const fixture = await lifecycleFixture(t, { noticeFailure: true });
   const service = await fixture.start();
+  await fixture.waitNotices(3);
   assert.equal(fixture.notices.length, 3, 'every enrolled group is attempted despite another notification failing');
   await Promise.all([service.close(), service.close()]);
   assert.equal(fixture.notices.length, 6);
   assert.equal(fixture.runtimeCloses, 1);
   assert.equal(fixture.storeCloses, 1);
+});
+
+test('poll readiness does not wait for online delivery and close cancels and drains it', { timeout: 10_000 }, async t => {
+  const fixture = await lifecycleFixture(t, { holdOnlineNotice: true });
+  const service = await fixture.start();
+  assert.equal(fixture.ready.size, 2);
+  await fixture.waitNotices(3);
+  assert.equal(fixture.pendingOnline, 3);
+  await service.close();
+  // Let the fixture HTTP server observe the aborted client connections.
+  while (fixture.pendingOnline > 0) await delay(1);
+  const count = fixture.notices.length;
+  assert.equal(count, 6, 'shutdown sends its own notices despite cancelled online delivery');
+  await delay(30);
+  assert.equal(fixture.notices.length, count, 'no notification can be initiated after close resolves');
+});
+
+test('startup preserves the Telegram failure when cleanup also fails', { timeout: 10_000 }, async t => {
+  const fixture = await lifecycleFixture(t, { startupFailure: 'getMe', cleanupFailure: new Error('Fixture cleanup failure') });
+  await assert.rejects(fixture.start(), error => {
+    assert.ok(error instanceof TelegramError);
+    assert.equal(error.code, 401);
+    return true;
+  });
+  assert.equal(fixture.runtimeCloses, 1);
+  assert.equal(fixture.storeCloses, 1, 'store closes even when runtime cleanup fails');
 });
 
 for (const startupFailure of ['getMe', 'deleteWebhook', 'getUpdates'] as const) {

@@ -143,6 +143,7 @@ for (const source of ['startup','mirror retry']) {
           telegramIntervalMs:0,
         });
         await restarted.initialize();
+        restarted.startBackground();
       }
       else {
         app.disconnect();

@@ -231,7 +231,8 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   writeConfig(config);
   const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot,telegramIntervalMs:0});
   await service.initialize();
-  await service.reconcileConfiguration();
+  service.startBackground();
+  await service.refreshSkillCatalogs();
   const reservation = createHttpServer();
   const reservedUrl = await listen(reservation);
   const port = Number(new URL(reservedUrl).port);

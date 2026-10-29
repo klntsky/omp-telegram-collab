@@ -20,6 +20,7 @@ test('restart skips a confirmed unchanged icon and observes a later human icon c
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
       bot:new Telegraf(botToken,{telegram:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
     await restarted.initialize();
+    restarted.startBackground();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;
     const from = {id:ownerId,is_bot:false,first_name:'Ada',username:ownerUsername};
     await restarted.bot.handleUpdate({update_id:9001,message:{message_id:9001,date:0,chat,from,message_thread_id:42,forum_topic_reopened:{}}});

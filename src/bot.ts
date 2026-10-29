@@ -16,6 +16,7 @@ import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
 import { topicDestination, sameTopicDestination } from '../shared/topic-destination.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
+import { withCancellation } from './cancellation.js';
 
 export interface RuntimeLike {
   ensure(session: TopicSession): Promise<HostBinding>;
@@ -25,7 +26,7 @@ export interface RuntimeLike {
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
   availableModelPresets(instancePath: string): Promise<string[]>;
-  listSkills(instancePath: string, session?: TopicSession): Promise<{name: string; description: string}[]>;
+  listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
   increaseSessionLimit(expectedLimit: number): boolean;
   observeFrame(sessionId: string, frame: HostFrame): void;
@@ -157,7 +158,13 @@ export class BotService {
   private readonly commandMenus = new Map<number, string>();
   private readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
   private menuTimer?: NodeJS.Timeout;
-  private menuRefresh?: Promise<void>;
+  private readonly background = new AbortController();
+  private catalogRefresh = new AbortController();
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private readonly catalogTasks = new Map<string, Promise<void>>();
+  private readonly menuAbort = new TelegramAbortController();
+  private backgroundStarted = false;
+  private readonly restoring = new Set<string>();
   private menuTail: Promise<void> = Promise.resolve();
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
@@ -290,42 +297,86 @@ export class BotService {
       groupCommands,
       { scope: { type: 'all_group_chats' } },
     );
-    await this.syncCommandMenus(false);
+    await this.syncCommandMenus();
     if (refreshTermination(this.options.config)) await this.applyTermination();
-    for (const existing of this.options.store.listSessions(this.id)) {
-      if (this.options.config.terminated || !this.sessionAssigned(existing)) continue;
-      const generation = this.options.store.getSessionGeneration(existing.id);
-      void (async () => {
-        const shouldListen = existing.status === 'open' && (this.options.store.hasPendingInitialTask(existing.id) || await this.options.runtime.isRunning(existing));
-        if (this.stopped || !this.sessionAssigned(existing) || this.options.store.getSessionGeneration(existing.id) !== generation) return;
-        if (shouldListen) await this.sendInitial(existing);
-        else await this.refreshTopicStatus(existing);
-      })().catch(error => {
-        if (!this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(existing.id) === generation) this.scheduleReconnect(existing);
-      });
-    }
+  }
+  startBackground(): void {
+    if (this.stopped || this.backgroundStarted) return;
+    if (!this.bot.botInfo) throw new Error('Bot identity must be initialized before background maintenance');
+    this.backgroundStarted = true;
+    this.restoreSessions();
     this.statusTimer ??= setInterval(() => {
       if (this.stopped || this.options.config.terminated || this.checkingStatuses) return;
       this.checkingStatuses = true;
-      void (async () => {
-        for (const session of this.options.store.listSessions(this.id)) {
-          if (this.stopped) break;
-          if (this.sessionAssigned(session)) await this.refreshTopicStatus(session).catch(() => undefined);
-        }
-      })().finally(() => { this.checkingStatuses = false; });
+      void this.runBackground('topic-status', async signal => {
+        try {
+          for (const session of this.options.store.listSessions(this.id)) {
+            signal.throwIfAborted();
+            if (this.sessionAssigned(session)) await this.refreshTopicStatus(session);
+          }
+        } finally { this.checkingStatuses = false; }
+      });
     }, 30000);
     this.statusTimer.unref();
-    this.refreshCommandMenus();
-    this.menuTimer ??= setInterval(() => this.refreshCommandMenus(), 60000);
+    void this.refreshSkillCatalogs();
+    this.menuTimer ??= setInterval(() => { void this.refreshSkillCatalogs(); }, 60000);
     this.menuTimer.unref();
   }
-  private refreshCommandMenus(): void {
-    if (this.stopped || this.options.config.terminated || this.menuRefresh) return;
-    const refresh = this.syncCommandMenus().catch(error => {
-      console.error('Telegram skill menu refresh failed.', error);
+  private runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal = this.background.signal): Promise<void> {
+    if (signal.aborted || this.stopped) return Promise.resolve();
+    const startedAt = performance.now();
+    const task = operation(signal).catch(error => {
+      if (error !== signal.reason) console.error(`Bot ${this.id} background ${phase} failed.`, error);
+    }).finally(() => {
+      this.backgroundTasks.delete(task);
+      console.log(JSON.stringify({event:'bot-background',botId:this.id,phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted}));
     });
-    this.menuRefresh = refresh;
-    void refresh.finally(() => { if (this.menuRefresh === refresh) this.menuRefresh = undefined; });
+    this.backgroundTasks.add(task);
+    return task;
+  }
+  private restoreSessions(): void {
+    for (const existing of this.options.store.listSessions(this.id)) {
+      if (this.options.config.terminated || !this.sessionAssigned(existing) || this.listeners.has(existing.id) || this.restoring.has(existing.id)) continue;
+      const generation = this.options.store.getSessionGeneration(existing.id);
+      this.restoring.add(existing.id);
+      void this.runBackground(`restore:${existing.id}`, async signal => {
+        try {
+          const shouldListen = existing.status === 'open' && (this.options.store.hasPendingInitialTask(existing.id) ||
+            await withCancellation(this.options.runtime.isRunning(existing), signal));
+          signal.throwIfAborted();
+          if (!this.sessionAssigned(existing) || this.options.store.getSessionGeneration(existing.id) !== generation) return;
+          if (shouldListen) await withCancellation(this.sendInitial(existing), signal);
+          else await this.refreshTopicStatus(existing);
+        } catch (error) {
+          if (error === signal.reason) throw error;
+          if (!this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(existing.id) === generation) this.scheduleReconnect(existing);
+          throw error;
+        }
+      }).finally(() => this.restoring.delete(existing.id));
+    }
+  }
+  refreshSkillCatalogs(): Promise<void> {
+    if (this.stopped || this.options.config.terminated) return Promise.resolve();
+    const signal = this.catalogRefresh.signal;
+    const tasks: Promise<void>[] = [];
+    for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
+      if (!instance.chats.some(chat => chat.botId === this.id)) continue;
+      let task = this.catalogTasks.get(instancePath);
+      if (!task) {
+        task = this.runBackground(`skills:${instancePath}`, async () => {
+          const skills = await withCancellation(this.options.runtime.listSkills(instancePath, undefined, signal), signal);
+          signal.throwIfAborted();
+          if (!this.options.config.instances[instancePath]?.chats.some(chat => chat.botId === this.id)) return;
+          this.options.store.setSkillCatalog(instancePath, skills);
+          await this.syncCommandMenus();
+        }, signal);
+        this.catalogTasks.set(instancePath, task);
+        const current = task;
+        void task.finally(() => { if (this.catalogTasks.get(instancePath) === current) this.catalogTasks.delete(instancePath); });
+      }
+      tasks.push(task);
+    }
+    return Promise.all(tasks).then(() => {});
   }
   onSessionKill(handler: (sessionId: string) => void): () => void {
     this.sessionKillHandlers.add(handler);
@@ -401,6 +452,9 @@ export class BotService {
   }
   async close(): Promise<void> {
     this.stopped = true;
+    this.background.abort(new Error('Bot background maintenance stopped'));
+    this.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
+    this.menuAbort.abort();
     this.delivery.close();
     clearInterval(this.statusTimer);
     clearInterval(this.menuTimer);
@@ -421,10 +475,12 @@ export class BotService {
     this.listeners.clear();
     await this.updateTail;
     await Promise.all(listeners.map(listener => listener.tail));
-    await this.menuRefresh;
+    await Promise.all(this.backgroundTasks);
+    await this.menuTail;
     await Promise.all([...this.topicIcons.values()].map(icon => icon.tail));
   }
   async authorize(chatId: number, userId: number): Promise<void> {
+    if (this.stopped) throw this.background.signal.reason;
     if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
@@ -454,6 +510,7 @@ export class BotService {
     try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
   }
   private requireSessionAssignment(session: TopicSession): void {
+    if (this.stopped) throw this.background.signal.reason;
     if (refreshTermination(this.options.config)) throw new Error(terminationMessage);
     if (!this.sessionAssigned(session)) throw new Error('This session is not assigned to its configured instance path');
   }
@@ -473,28 +530,18 @@ export class BotService {
       ? 'Non-admin prompts require approval by an instance admin.'
       : 'Only instance admins can send prompts. Other members’ messages are ignored.'}`;
   }
-  private syncCommandMenus(discover = true): Promise<void> {
-    const operation = this.menuTail.then(() => this.publishCommandMenus(discover));
+  private syncCommandMenus(): Promise<void> {
+    const operation = this.menuTail.then(() => this.publishCommandMenus());
     this.menuTail = operation.catch(() => {});
     return operation;
   }
-  private async publishCommandMenus(discover: boolean): Promise<void> {
+  private async publishCommandMenus(): Promise<void> {
     const current = new Set<number>();
     for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
       const chats = instance.chats.filter(chat => chat.botId === this.id);
       if (!chats.length) continue;
       for (const chat of chats) current.add(chat.chatId);
-      let skills = this.options.store.getSkillCatalog(instancePath) ?? [];
-      if (discover) {
-        try {
-          skills = await this.options.runtime.listSkills(instancePath);
-          if (this.stopped) return;
-          this.options.store.setSkillCatalog(instancePath, skills);
-        } catch (error) {
-          console.error(`Skill catalog refresh failed for ${instancePath}.`, error);
-          continue;
-        }
-      }
+      const skills = this.options.store.getSkillCatalog(instancePath) ?? [];
       if (this.stopped) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - groupCommands.length));
       const commands = [...groupCommands, ...[...aliases].map(([command, skill]) => ({
@@ -508,14 +555,15 @@ export class BotService {
           this.skillAliases.set(chat.chatId, aliases);
           continue;
         }
-        await this.bot.telegram.setMyCommands(commands, { scope: { type: 'chat', chat_id: chat.chatId } });
+        await this.bot.telegram.callApi('setMyCommands', {commands,scope:{type:'chat',chat_id:chat.chatId}}, {signal:this.menuAbort.signal});
+        if (this.stopped || !this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         this.commandMenus.set(chat.chatId, fingerprint);
         this.skillAliases.set(chat.chatId, aliases);
       }
     }
     for (const chatId of this.commandMenus.keys()) {
       if (current.has(chatId)) continue;
-      await this.bot.telegram.deleteMyCommands({ scope: { type: 'chat', chat_id: chatId } });
+      await this.bot.telegram.callApi('deleteMyCommands', {scope:{type:'chat',chat_id:chatId}}, {signal:this.menuAbort.signal});
       this.commandMenus.delete(chatId);
       this.skillAliases.delete(chatId);
     }
@@ -641,25 +689,23 @@ export class BotService {
     return this.isInstanceAdmin(ctx.chat.id, member.user) && isActiveMember(member);
   }
   async reconcileConfiguration(): Promise<void> {
-    await this.syncCommandMenus();
-    if (this.options.config.terminated) { await this.applyTermination(); return; }
-    this.termination = undefined;
+    if (this.stopped) return;
+    this.catalogRefresh.abort(new Error('Bot configuration changed'));
+    this.catalogRefresh = new AbortController();
+    this.catalogTasks.clear();
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
         this.topicIcons.delete(session.id);
         for (const [token, request] of this.capacityRequests) if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionKillHandlers) handler(session.id);
-      } else if (!this.stopped && session.status === 'open' && !this.listeners.has(session.id)) {
-        const generation = this.options.store.getSessionGeneration(session.id);
-        try {
-          const running = this.options.store.hasPendingInitialTask(session.id) || await this.options.runtime.isRunning(session);
-          if (running && this.sessionAssigned(session) && this.options.store.getSessionGeneration(session.id) === generation) await this.sendInitial(session);
-        } catch (error) {
-          if (!(error instanceof SessionCapacityError)) this.scheduleReconnect(session);
-        }
       }
     }
+    if (this.options.config.terminated) { await this.applyTermination(); return; }
+    this.termination = undefined;
+    await this.syncCommandMenus();
+    this.restoreSessions();
+    void this.refreshSkillCatalogs();
   }
   private link(session: TopicSession): string {
     return `https://t.me/${this.bot.botInfo!.username}/${this.config.miniAppShortName}?startapp=s_${session.id}`;
@@ -667,6 +713,9 @@ export class BotService {
   private async getIconIds(): Promise<Record<TopicActivity, string>> {
     this.iconIds ??= (async () => {
       const controller = new TelegramAbortController();
+      const abort = () => controller.abort();
+      this.background.signal.addEventListener('abort', abort, {once:true});
+      if (this.stopped) abort();
       const timeout = setTimeout(() => controller.abort(), 5000);
       try {
         const stickers = await this.bot.telegram.callApi('getForumTopicIconStickers', {}, { signal: controller.signal });
@@ -678,6 +727,7 @@ export class BotService {
         return { running: find('⚡'), completed: find('✅'), stopped: find('🏁') };
       } finally {
         clearTimeout(timeout);
+        this.background.signal.removeEventListener('abort', abort);
       }
     })().catch(error => { this.iconIds = undefined; throw error; });
     return this.iconIds;
@@ -695,10 +745,13 @@ export class BotService {
     current.tail = current.tail.then(async () => {
       if (this.stopped || !this.sessionAssigned(session) || current.status !== status) return;
       const id = (await this.getIconIds())[status];
-      if (!this.sessionAssigned(session)) return;
+      if (this.stopped || !this.sessionAssigned(session)) return;
       if (this.options.store.getTopicIcon(session.id) === id) return;
       const applied = await this.delivery.run(session.chatId, async () => {
         const controller = new TelegramAbortController();
+        const abort = () => controller.abort();
+        this.background.signal.addEventListener('abort', abort, {once:true});
+        if (this.stopped) abort();
         const timeout = setTimeout(() => controller.abort(), 5000);
         try {
           return await this.bot.telegram.callApi('editForumTopic', {
@@ -706,24 +759,24 @@ export class BotService {
           }, {signal:controller.signal});
         } finally {
           clearTimeout(timeout);
+          this.background.signal.removeEventListener('abort', abort);
         }
       }, () => !this.stopped && this.sessionAssigned(session) && current.status === status, true);
       if (applied !== undefined) this.options.store.setTopicIcon(session.id,id);
     }).catch(async error => {
-      if (error instanceof TelegramError && error.description.includes('TOPIC_NOT_MODIFIED')) {
+      if (!this.stopped && error instanceof TelegramError && error.description.includes('TOPIC_NOT_MODIFIED')) {
         this.options.store.setTopicIcon(session.id,(await this.getIconIds())[status]);
         return;
       }
       if (current.status === status) current.status = undefined;
-      const reason = error instanceof TelegramError ? ` Telegram ${error.code}: ${error.description}` : '';
-      console.warn(`Could not update topic status (${session.id}, ${status}).${reason}`);
+      console.warn(`Could not update topic status (${session.id}, ${status}).`, error);
     });
     return current.tail;
   }
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
-    if (!this.sessionAssigned(session)) return;
+    if (this.stopped || !this.sessionAssigned(session)) return;
     const listener = this.listeners.get(session.id);
-    const running = await this.options.runtime.isRunning(session);
+    const running = await withCancellation(this.options.runtime.isRunning(session), this.background.signal);
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     if (!running) {
       this.dropListener(session.id);
@@ -1486,12 +1539,17 @@ export class BotService {
       if (this.stopped || !this.sessionAssigned(session) || this.options.store.getSessionGeneration(session.id) !== generation) return;
       const active = this.options.store.getSession(session.id);
       if (active?.status !== 'open') return;
-      void this.options.runtime.isRunning(active).then(async running => {
-        if (this.stopped || !this.sessionAssigned(active) || this.options.store.getSessionGeneration(active.id) !== generation) return;
-        if (!this.stopped && running && this.options.store.getSession(active.id)?.status === 'open') await this.sendInitial(active);
-        if (!running) await this.setTopicStatus(active, 'stopped');
-      }).catch(error => {
-        if (!this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(active.id) === generation) this.scheduleReconnect(active, attempt + 1);
+      void this.runBackground(`reconnect:${active.id}`, async signal => {
+        try {
+          const running = await withCancellation(this.options.runtime.isRunning(active), signal);
+          signal.throwIfAborted();
+          if (!this.sessionAssigned(active) || this.options.store.getSessionGeneration(active.id) !== generation) return;
+          if (running && this.options.store.getSession(active.id)?.status === 'open') await withCancellation(this.sendInitial(active), signal);
+          if (!running) await this.setTopicStatus(active, 'stopped');
+        } catch (error) {
+          if (error !== signal.reason && !this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(active.id) === generation) this.scheduleReconnect(active, attempt + 1);
+          throw error;
+        }
       });
     }, Math.min(1000 * 2 ** attempt, 16000));
     timer.unref();
@@ -1522,7 +1580,7 @@ export class BotService {
         if (this.listeners.get(session.id) !== listener) return;
         const connected = listener.connection !== undefined;
         this.dropListener(session.id);
-        void this.refreshTopicStatus(session).catch(() => undefined);
+        void this.runBackground(`topic-status:${session.id}`, () => this.refreshTopicStatus(session));
         if (connected) this.scheduleReconnect(session);
       },
     }); }).then(connection => {
@@ -1534,7 +1592,7 @@ export class BotService {
         throw error;
       } finally {
         if (this.listeners.get(session.id) === listener) this.listeners.delete(session.id);
-        await this.refreshTopicStatus(session).catch(() => undefined);
+        await this.refreshTopicStatus(session).catch(error => console.error(`Topic status refresh failed (${session.id}).`, error));
       }
     });
     return listener.promise;
@@ -1557,6 +1615,7 @@ export class BotService {
   private async sendInitial(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
     await this.listen(session);
+    if (this.stopped) throw this.background.signal.reason;
     const userId = this.options.store.getInitialUser(session.id);
     if (!userId) return;
     await this.authorize(session.chatId,userId);

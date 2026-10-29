@@ -11,6 +11,7 @@ import type { AppConfig, HostBinding, TopicSession } from '../shared/contracts.j
 import { parseCollabLink } from './vendor/link.js';
 import { findInstance, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
+import { withCancellation } from './cancellation.js';
 
 export class SessionCapacityError extends Error {
   constructor(readonly limit: number) {
@@ -188,7 +189,11 @@ export class OmpRuntime {
     catalog?: Array<{ name: string; description: string }>;
     error?: unknown;
   }>();
-  readonly #skillDiscovery = new Map<string, Promise<Array<{ name: string; description: string }>>>();
+  readonly #skillDiscovery = new Map<string, {
+    promise: Promise<Array<{ name: string; description: string }>>;
+    controller: AbortController;
+    consumers: number;
+  }>();
   #closed = false;
   #closing?: Promise<void>;
   #lock?: DatabaseSync;
@@ -432,7 +437,8 @@ export class OmpRuntime {
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
     return Object.keys(presets).filter(name => presets[name] !== null && presets[name] !== undefined).sort((a, b) => a.localeCompare(b));
   }
-  async listSkills(instancePath: string, session?: TopicSession): Promise<Array<{ name: string; description: string }>> {
+  async listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
+    signal?.throwIfAborted();
     this.#assertActive();
     if (this.#closed) throw new Error('OMP runtime is stopping');
     if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
@@ -445,7 +451,7 @@ export class OmpRuntime {
       }
       values = JSON.parse(await this.#hostControl(session, undefined, 'list_skills'));
     } else {
-      values = await this.#cachedSkills(instancePath);
+      values = await this.#cachedSkills(instancePath, signal);
     }
     if (!Array.isArray(values) || values.some(value => !record(value) || typeof value.name !== 'string' || !value.name || typeof value.description !== 'string')) {
       throw new Error('OMP returned an invalid skill catalog');
@@ -458,7 +464,8 @@ export class OmpRuntime {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  async #cachedSkills(instancePath: string): Promise<Array<{ name: string; description: string }>> {
+  async #cachedSkills(instancePath: string, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
+    signal?.throwIfAborted();
     this.#assertActive();
     if (this.#closed) throw new Error('OMP runtime is stopping');
     if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
@@ -469,20 +476,40 @@ export class OmpRuntime {
       if (cached.catalog) return cached.catalog;
       throw cached.error;
     }
-    const pending = this.#skillDiscovery.get(instancePath);
-    if (pending) return pending;
-    const discovery = this.#discoverSkills(instancePath).then(catalog => {
-      if (catalog.some(value => !value.name)) throw new Error('OMP returned an invalid skill catalog');
-      this.#rememberSkills(instancePath, { catalog, expiresAt: Date.now() + 5 * 60_000 });
-      return catalog;
-    }).catch((error: unknown) => {
-      this.#rememberSkills(instancePath, { error, expiresAt: Date.now() + 30_000 });
-      throw error;
-    }).finally(() => {
-      this.#skillDiscovery.delete(instancePath);
-    });
-    this.#skillDiscovery.set(instancePath, discovery);
-    return discovery;
+    let pending = this.#skillDiscovery.get(instancePath);
+    if (pending?.controller.signal.aborted) {
+      const abandoned = pending;
+      await abandoned.promise.catch(error => {
+        if (error !== abandoned.controller.signal.reason) throw error;
+      });
+      return this.#cachedSkills(instancePath, signal);
+    }
+    if (!pending) {
+      const controller = new AbortController();
+      const discovery = this.#discoverSkills(instancePath, controller.signal).then(catalog => {
+        if (catalog.some(value => !value.name)) throw new Error('OMP returned an invalid skill catalog');
+        this.#rememberSkills(instancePath, { catalog, expiresAt: Date.now() + 5 * 60_000 });
+        return catalog;
+      }).catch((error: unknown) => {
+        if (!controller.signal.aborted) this.#rememberSkills(instancePath, { error, expiresAt: Date.now() + 30_000 });
+        throw error;
+      }).finally(() => {
+        this.#skillDiscovery.delete(instancePath);
+      });
+      pending = { promise: discovery, controller, consumers: 0 };
+      this.#skillDiscovery.set(instancePath, pending);
+    }
+    pending.consumers++;
+    try {
+      return await (signal ? withCancellation(pending.promise, signal) : pending.promise);
+    } finally {
+      if (--pending.consumers === 0) {
+        pending.controller.abort(signal?.reason ?? new Error('Skill discovery has no remaining consumers'));
+        await pending.promise.catch(error => {
+          if (error !== pending.controller.signal.reason) throw error;
+        });
+      }
+    }
   }
 
   #rememberSkills(instancePath: string, entry: {
@@ -498,7 +525,7 @@ export class OmpRuntime {
     }
   }
 
-  async #discoverSkills(instancePath: string): Promise<Array<{ name: string; description: string }>> {
+  async #discoverSkills(instancePath: string, signal: AbortSignal): Promise<Array<{ name: string; description: string }>> {
     const args = ompArguments(this.#config.omp.args);
     for (const arg of args) {
       if (!arg.flag.startsWith('-') || ['--', '--alias', '--prewalk', '--prewalk-into', '--plan', '--plan-yolo', '--plan-yolo-into'].includes(arg.flag)) {
@@ -517,6 +544,7 @@ export class OmpRuntime {
       }));
       this.#assertActive();
       if (this.#closed) throw new Error('OMP runtime is stopping');
+      signal.throwIfAborted();
       child = spawn(this.#config.omp.executable, [
         ...this.#config.omp.args, '--cwd', instancePath, '--config', config,
         '--mode', 'rpc', '--no-session', '--no-title',
@@ -578,7 +606,7 @@ export class OmpRuntime {
         });
         processHandle.stdin!.on('error', error => finish(error));
         processHandle.stdin!.write(`${JSON.stringify({ id: requestId, type: 'get_available_commands' })}\n`);
-      return await promise;
+      return await withCancellation(promise, signal);
     } finally {
       if (child) {
         this.#killSkillProcess(child);
@@ -801,7 +829,8 @@ export class OmpRuntime {
     clearInterval(this.#idleTimer);
     this.#closing = (async () => {
       for (const child of this.#skillProcesses) this.#killSkillProcess(child);
-      await Promise.allSettled(this.#skillDiscovery.values());
+      for (const discovery of this.#skillDiscovery.values()) discovery.controller.abort(new Error('OMP runtime is stopping'));
+      await Promise.allSettled([...this.#skillDiscovery.values()].map(discovery => discovery.promise));
       this.#skillCatalogs.clear();
       await Promise.allSettled(this.#pending.values());
       await Promise.allSettled(this.#killing.values());
