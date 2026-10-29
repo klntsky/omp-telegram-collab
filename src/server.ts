@@ -12,7 +12,7 @@ import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorize' | 'relayPrompt' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
 const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),generation:z.number().int().nonnegative().safe().optional()}).strict();
@@ -54,21 +54,24 @@ export function createServer(options: ServerOptions): GatewayServer {
   function checkGeneration(identity: TicketIdentity): void {
     if (identity.generation !== options.store.getSessionGeneration(identity.sessionId)) throw new SessionGenerationError('Session was killed; rejoin explicitly');
   }
-  async function authorize(identity: TicketIdentity): Promise<{bot:GatewayBot;session:TopicSession}> {
+  async function authorize(identity: TicketIdentity, expected?: TopicSession): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
     checkTermination();
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
     if (!bot || !session || session.botId !== identity.botId || Date.now()/1000 - identity.authDate > 3600) throw new Error('Access denied');
+    if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
         await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
     checkGeneration(identity);
-    await bot.authorize(session.chatId,identity.userId);
+    const canControl = await bot.authorizeSession(session,identity.userId);
     const current = options.store.getSession(identity.sessionId);
     if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (findInstance(options.config, current.botId, current.chatId)?.path !== current.instancePath) throw new Error('Instance assignment changed');
+    if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instancePath !== session.instancePath) throw new Error('Instance assignment changed');
+    if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instancePath !== expected.instancePath)) throw new Error('Instance assignment changed');
     checkGeneration(identity);
     checkTermination();
-    return {bot,session:current};
+    return {bot,session:current,canControl};
   }
   const server = createHttpServer((request,response) => {
     void (async () => {
@@ -121,7 +124,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
         else if (error instanceof SessionGenerationError) json(response,409,{error:error.message});
-        else json(response,request.url?.startsWith('/api/') ? 403 : 404,{error:request.url?.startsWith('/api/') ? 'Authentication or access denied' : 'Not found'});
+        else json(response,request.url?.startsWith('/api/') ? 403 : 404,{error:request.url?.startsWith('/api/') ? (error instanceof Error ? error.message : 'Authentication or access denied') : 'Not found'});
       } else response.end();
     });
   }) as GatewayServer;
@@ -160,6 +163,9 @@ export function createServer(options: ServerOptions): GatewayServer {
   function connectSocket(ws: WebSocket, identity: TicketIdentity): void {
     let upstream: CollabConnection | undefined;
     let release: (() => void) | undefined;
+    let connectedSession: TopicSession | undefined;
+    let hostReadOnly = true;
+    let presentedCanControl: boolean | undefined;
     let closed = false, queued = 0, queuedBytes = 0;
     let tail: Promise<void> = Promise.resolve();
     let outgoing: { frame: HostFrame; payload: string }[] = [];
@@ -178,7 +184,11 @@ export function createServer(options: ServerOptions): GatewayServer {
     const expiry = setTimeout(() => fail(4001,'Authentication expired'),Math.max(1,Math.min(900000,(identity.authDate+3600)*1000-Date.now()))); expiry.unref();
     function fail(code: number, message: string): void {
       if (closed) return;
-      closed = true; clearTimeout(expiry); unsubscribeKill(); release?.(); upstream?.close(); ws.close(code,message);
+      closed = true; clearTimeout(expiry); unsubscribeKill(); release?.(); upstream?.close();
+      if (Buffer.byteLength(message) > 123) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({t:'bye',reason:message}));
+        ws.close(code);
+      } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
     function enqueue(bytes: number, action: () => Promise<void>): void {
@@ -191,7 +201,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           fail(4009,error.message);
           const session = options.store.getSession(identity.sessionId);
           if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(() => undefined);
-        } else fail(4003,'Access or session unavailable');
+        } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
       }).finally(() => { queued--; queuedBytes-=bytes; });
     }
     function flushOutgoing(): void {
@@ -204,12 +214,17 @@ export function createServer(options: ServerOptions): GatewayServer {
         outgoing = [];
         pendingBytes = 0;
         try {
-          const current = await authorize(identity);
+          const current = await authorize(identity,connectedSession);
+          if (presentedCanControl !== undefined && current.canControl !== presentedCanControl) {
+            fail(1012,'Session permissions changed; reconnecting');
+            return;
+          }
           for (const {frame,payload} of batch) {
             if (closed || ws.readyState !== WebSocket.OPEN) return;
             checkTermination();
             if (ws.bufferedAmount > 4*1024*1024) { fail(4008,'Slow connection'); return; }
-            const value = frame.t === 'welcome' && current.session.status === 'closed' ? JSON.stringify({...frame,readOnly:true}) : payload;
+            const value = frame.t === 'welcome' ? JSON.stringify({...frame,readOnly:Boolean(frame.readOnly || current.session.status === 'closed' || !current.canControl)}) : payload;
+            if (frame.t === 'welcome') presentedCanControl = current.canControl;
             const sent = Promise.withResolvers<void>();
             ws.send(value,error => error ? sent.reject(error) : sent.resolve());
             await sent.promise;
@@ -232,8 +247,19 @@ export function createServer(options: ServerOptions): GatewayServer {
       try { frame = validateGuestFrame(JSON.parse(data.toString())); }
       catch { fail(4002,'Invalid action'); return; }
       enqueue(Buffer.byteLength(data.toString()),async () => {
-        const {bot,session} = await authorize(identity);
-        if (session.status === 'closed' && frame.t !== 'fetch-transcript') throw new Error('Archived session');
+        const {bot,session,canControl} = await authorize(identity,connectedSession);
+        switch (frame.t) {
+          case 'fetch-transcript': break;
+          case 'prompt':
+          case 'abort':
+          case 'agent-cmd':
+          case 'ui-response':
+            if (!canControl) throw new Error('Administrator access required');
+            if (session.status === 'closed') throw new Error('Archived session');
+            if (hostReadOnly) throw new Error('Host is read-only');
+            break;
+          default: throw new Error('Invalid action');
+        }
         if (!upstream) throw new Error('Session not connected');
         checkTermination();
         if (frame.t === 'prompt') options.runtime.markPrompt(session.id);
@@ -243,6 +269,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     });
     enqueue(0,async () => {
       const {bot,session} = await authorize(identity);
+      connectedSession = session;
       if (closed) return;
       checkGeneration(identity);
       release = options.runtime.retain(session.id);
@@ -250,13 +277,16 @@ export function createServer(options: ServerOptions): GatewayServer {
       const binding = await options.runtime.ensure(session);
       if (closed) return;
       checkTermination();
+      await authorize(identity,session);
       await bot.ensureMirroring(session,binding);
       if (closed) return;
       checkTermination();
+      await authorize(identity,session);
       const connection = await (options.connect ?? connectCollab)(binding,participantName(identity),{
         onFrame: frame => {
           try { checkTermination(); }
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
+          if (frame.t === 'welcome') hostReadOnly = Boolean(frame.readOnly);
           options.runtime.observeFrame(session.id,frame);
           let payload: string;
           try { payload = JSON.stringify(frame); } catch { fail(1011,'Invalid host frame'); return; }
@@ -269,7 +299,13 @@ export function createServer(options: ServerOptions): GatewayServer {
         },
         onClose: () => fail(1011,'Host disconnected'),
       });
-      if (closed) connection.close(); else upstream = connection;
+      try {
+        await authorize(identity,session);
+        if (closed) connection.close(); else upstream = connection;
+      } catch (error) {
+        connection.close();
+        throw error;
+      }
     });
   }
   server.closeConnections = async () => {

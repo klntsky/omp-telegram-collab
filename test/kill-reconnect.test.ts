@@ -60,15 +60,15 @@ test('kill fences a ticket refresh already awaiting membership authorization', a
   const release = Promise.withResolvers<void>();
   try {
     const initial = await (await authorize()).json() as {generation:number};
-    const original = app.service.authorize.bind(app.service);
+    const original = app.service.authorizeSession.bind(app.service);
     let blockNext = true;
-    t.mock.method(app.service,'authorize',async (chatId:number,userId:number) => {
+    t.mock.method(app.service,'authorizeSession',async (...args: Parameters<typeof original>) => {
       if (blockNext) {
         blockNext = false;
         entered.resolve();
         await release.promise;
       }
-      await original(chatId,userId);
+      return original(...args);
     });
     const refreshing = authorize(initial.generation);
     await entered.promise;
@@ -90,14 +90,14 @@ for (const blockAt of [1,2]) {
     let socket: WebSocket | undefined;
     try {
       const initial = await (await authorize()).json() as {ticket:string};
-      const original = app.service.authorize.bind(app.service);
+      const original = app.service.authorizeSession.bind(app.service);
       let calls = 0;
-      t.mock.method(app.service,'authorize',async (chatId:number,userId:number) => {
+      t.mock.method(app.service,'authorizeSession',async (...args: Parameters<typeof original>) => {
         if (++calls === blockAt) {
           entered.resolve();
           await release.promise;
         }
-        await original(chatId,userId);
+        return original(...args);
       });
       socket = new WebSocket(`${app.url.replace('http:','ws:')}/api/socket?ticket=${initial.ticket}`,{origin:app.config.publicUrl});
       const closed = Promise.withResolvers<void>();

@@ -227,6 +227,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 						progress={snap.progress.get(drawerAgent.id)}
 						lifecycle={snap.lifecycle.get(drawerAgent.id)}
 						client={client}
+						phase={snap.phase}
 						readOnly={snap.readOnly}
 						host={toolHost}
 						onClose={closeDrawer}

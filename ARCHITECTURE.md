@@ -78,6 +78,8 @@ The HTTP gateway serves the Mini App and authenticates Telegram launch data. Its
 
 The gateway keeps upstream room credentials on the server. It checks current group membership and configuration assignments before admitting access and before forwarding output batches. Session generations connect persisted invalidation to ticket issuance, connection upgrades, and host admission. Rechecking after asynchronous authorization prevents an earlier decision from authorizing a session that changed while the request was pending.
 
+The bot adapter owns the shared application-admin predicates and evaluates Mini App control using freshly fetched Telegram membership and the stored session destination. The gateway independently admits each queued mutation using that current result, session lifecycle checks, and the raw host read-only restriction before any execution side effect. Its explicit action allowlist defaults to denial. Identity tickets carry no durable administrator capability. Browser read-only state and reconnects project authority for presentation only; neither is trusted to enforce it. Observed role changes on output reconnect the client without granting stale actions, and local session/assignment/generation checks are repeated across asynchronous admission boundaries.
+
 The Mini App owns presentation and client reconnection. It requests fresh authorization through the gateway rather than holding upstream host capabilities. Its transcript and draft are presentation state, not evidence that an instruction executed. The transport must not turn a reconnect into prompt replay.
 
 ## Trust boundaries

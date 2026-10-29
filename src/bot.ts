@@ -13,7 +13,7 @@ import { configWritable, findInstance, readConfig, writeConfig, refreshTerminati
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
-import { topicDestination, sameTopicDestination } from '../shared/topic-destination.js';
+import { topicDestination, sameTopicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
@@ -587,6 +587,14 @@ export class BotService {
     }
   }
   async authorize(chatId: number, userId: number, statusOnly = false): Promise<void> {
+    await this.authorizeMember(chatId, userId, statusOnly);
+  }
+  async authorizeSession(session: TopicSession, userId: number): Promise<boolean> {
+    const member = await this.authorizeMember(session.chatId, userId);
+    this.requireSessionAssignment(session);
+    return this.isTopicAdmin(topicDestination(session.chatId, session.threadId), member.user);
+  }
+  private async authorizeMember(chatId: number, userId: number, statusOnly = false) {
     if (this.stopped) throw this.background.signal.reason;
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
@@ -595,6 +603,9 @@ export class BotService {
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
     if (chat.type !== 'supergroup' || !isActiveMember(user) || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
+    if (this.stopped) throw this.background.signal.reason;
+    if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
+    return user;
   }
   private async ready(chatId: number): Promise<boolean> {
     const [chat, member] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, this.id)]);
@@ -681,18 +692,17 @@ export class BotService {
       config.bots.find(bot => bot.id === this.id)?.admins?.some(admin => admin === user.id || (user.username && admin === user.username.toLowerCase())) ||
       (user.username && assigned.instance.admins.includes(user.username.toLowerCase()))));
   }
-  private isTopicAdmin(ctx: Context, user: Context['from'], config = this.options.config): boolean {
-    if (!ctx.chat || !user || user.is_bot) return false;
-    if (this.isInstanceAdmin(ctx.chat.id, user, config)) return true;
-    const destination = contextDestination(ctx);
+  private isTopicAdmin(destination: TopicDestination, user: Context['from'], config = this.options.config): boolean {
+    if (!user || user.is_bot) return false;
+    if (this.isInstanceAdmin(destination.chatId, user, config)) return true;
     if (destination.kind !== 'topic') return false;
-    const assigned = findInstance(config, this.id, ctx.chat.id);
+    const assigned = findInstance(config, this.id, destination.chatId);
     return Boolean(assigned && this.options.store.isTopicAdmin(this.id, destination, user.id, user.username));
   }
   private async topicAdmin(ctx: Context): Promise<boolean> {
     if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;
     const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
-    return isActiveMember(member) && this.isTopicAdmin(ctx, member.user);
+    return isActiveMember(member) && this.isTopicAdmin(contextDestination(ctx), member.user);
   }
   private async makeAdmin(ctx: Context, arg: string): Promise<void> {
     if (!(await this.topicAdmin(ctx))) {
@@ -720,7 +730,7 @@ export class BotService {
     const persisted = readConfig(this.options.config.configPath);
     const assigned = findInstance(persisted, this.id, ctx.chat!.id);
     if (!assigned || assigned.path !== instancePath || this.assignedPath(ctx.chat!.id) !== instancePath ||
-        !isActiveMember(member) || !this.isTopicAdmin(ctx, member.user, persisted)) {
+        !isActiveMember(member) || !this.isTopicAdmin(contextDestination(ctx), member.user, persisted)) {
       throw new Error('The configured instance assignment or administrator access changed. No promotion was saved.');
     }
     const destination = contextDestination(ctx);

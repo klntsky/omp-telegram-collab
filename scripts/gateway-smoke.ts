@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 import type { AssistantMessage, HostFrame } from '@oh-my-pi/pi-wire';
 import { createSmokeApp } from './telegram-smoke.js';
-import { botId } from '../test/telegram-data.js';
+import { botId, ownerUsername } from '../test/telegram-data.js';
 
 async function waitUntil(predicate: () => boolean, message: string) {
   const deadline = Date.now() + 5000;
@@ -54,6 +54,21 @@ export async function verifyGatewayFlow() {
     reader.on('message', bytes => received.push(bytes.toString()));
     await once(reader, 'open');
     await waitUntil(() => received.some(text => text.includes('snapshot-chunk')), 'reader did not receive initial snapshot');
+    app.setCurrentMember({ username: 'ordinary-viewer', status: 'administrator' });
+    const beforeViewerAction = app.accepted.length;
+    const deniedViewer = once(reader, 'close');
+    reader.send(JSON.stringify({ t: 'abort' }));
+    await deniedViewer;
+    assert.equal(app.accepted.length, beforeViewerAction, 'Telegram administrators without domain grants cannot mutate');
+    const viewerResponse = await authorize();
+    const viewerData = await viewerResponse.json() as { ticket: string };
+    reader = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${viewerData.ticket}`, { origin: app.config.publicUrl });
+    const viewerFrames: HostFrame[] = [];
+    reader.on('message', bytes => { viewerFrames.push(JSON.parse(bytes.toString())); received.push(bytes.toString()); });
+    await once(reader, 'open');
+    await waitUntil(() => viewerFrames.some(frame => frame.t === 'snapshot-chunk'), 'viewer did not receive session snapshot');
+    assert.equal(viewerFrames.find(frame => frame.t === 'welcome')?.readOnly, true);
+    app.setCurrentMember({ username: ownerUsername, status: 'member' });
     app.setMember(false);
     const readerClosed = once(reader, 'close');
     const privateReply: AssistantMessage = {
@@ -64,7 +79,7 @@ export async function verifyGatewayFlow() {
     app.emit({ t: 'event', event: { type: 'message_end', message: privateReply } });
     await readerClosed;
     assert.ok(received.every(text => !text.includes('Private output after membership removal')), 'passive reader cannot receive frames after membership removal');
-    console.log('PASS Gateway signed Mini App HTTP authorization, private host capability isolation, authenticated socket snapshot, active membership revocation, HTTP denial after removal, and passive reader revocation.');
+    console.log('PASS Gateway signed Mini App authorization, private capability isolation, authenticated snapshots, viewer read-only startup, forged viewer mutation rejection, live role revocation, HTTP denial after removal, and passive reader revocation.');
   } finally {
     socket?.terminate();
     reader?.terminate();

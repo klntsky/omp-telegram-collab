@@ -112,7 +112,7 @@ Bot-wide grants persist in configuration (`bots[].admins`); topic grants persist
 
 Admin listings contain only two unnumbered groups, `Global admins` and `Topic admins`, with one user per line and `none` for an empty group, without an explanatory footer. In a topic, its group heading links to the topic. In General, topic-user entries link to their topic using its name when known rather than displaying a numeric topic ID. Link previews are disabled.
 
-Ordinary group members retain Mini App access, `/stop`, and `/kill`. Prompt restrictions are not access restrictions for the Mini App. See [Projects and access](#2-projects-and-access) before inviting members.
+Ordinary group members retain watch-only Mini App access and the Telegram `/stop` and `/kill` commands. Mini App control requires the existing instance-root, bot-admin, or matching topic-admin authority, independently of Telegram prompt settings. See [Projects and access](#2-projects-and-access) before inviting members.
 
 ### 1.3. Replies, questions, and activity
 
@@ -152,9 +152,9 @@ A project is identified by its canonical directory. Several chats can share a pr
 
 OMP runs with the service account's filesystem and credential access. Project registrations and admin lists do not isolate processes. Use a dedicated account or container if users must not access other checkouts or writable configuration.
 
-Every authorized group member can control sessions through the Mini App, regardless of Telegram prompt settings. Admin permissions follow the current owner of each configured username, which can change or transfer.
+Current human group members can watch sessions and fetch transcripts through the Mini App. Only instance roots, bot admins, and admins for the specific topic can submit prompts, interrupt, chat with or kill/revive subagents, or answer agent questions through it. Telegram group-administrator status alone grants no Mini App control. Archived sessions and host read-only restrictions remain read-only even for application admins. Opening the Mini App can still start a stopped host. Admin permissions follow the current owner of each configured username, which can change or transfer.
 
-The backend checks Telegram's signed Mini App data, its age, its session parameter, and current group membership. WebSocket access has separate checks. Links contain opaque mapping IDs; OMP room keys and write tokens stay on the server. Forwarding a Mini App link does not grant membership. Outbound batches require a fresh membership check, and later frames cannot reuse a pending batch's check.
+The backend checks Telegram's signed Mini App data, its age, its session parameter, and current group membership. WebSocket access has separate checks. Every queued mutation receives a fresh server-side authority check before prompt accounting, upstream forwarding, or Telegram relay; browser state and connection closure are not authorization boundaries. Unknown actions are denied. Links contain opaque mapping IDs; OMP room keys and write tokens stay on the server. Forwarding a Mini App link does not grant membership. Outbound batches require a fresh membership check, and later frames cannot reuse a pending batch's check. Observed control-role changes during output delivery trigger reconnect for a fresh read-only presentation. Revocation is checked at admission and output boundaries, not by continuous polling, and does not cancel work already admitted.
 
 A kill advances a persistent session generation before notification or termination. Ticket refreshes, socket upgrades, host admission, and mirroring reject the old generation. Automatic reconnect cannot revive a killed session. Explicit Rejoin gets the current generation.
 

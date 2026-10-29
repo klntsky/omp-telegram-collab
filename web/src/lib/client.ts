@@ -202,10 +202,12 @@ export class GuestClient {
 	}
 
 	sendPrompt(text: string): void {
+		if (this.#readOnly || this.#phase !== "live") return;
 		this.#socket.send({ t: "prompt", text });
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
+		if (this.#readOnly || this.#phase !== "live") return;
 		this.#socket.send({ t: "ui-response", reqId, value });
 		if (this.#uiRequest?.reqId === reqId) {
 			this.#showNextUiRequest();
@@ -214,10 +216,12 @@ export class GuestClient {
 	}
 
 	sendAbort(): void {
+		if (this.#readOnly || this.#phase !== "live") return;
 		this.#socket.send({ t: "abort" });
 	}
 
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
+		if (this.#readOnly || this.#phase !== "live") return;
 		this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
 	}
 
