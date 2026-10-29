@@ -131,14 +131,14 @@ test('another participant starting work does not cancel an explicitly rejected i
   }
 });
 
-test('initialization admits pending initial tasks without eagerly launching other topics', async () => {
+test('reconciliation admits pending initial tasks without eagerly launching other topics', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
     const instancePath = Object.keys(app.config.instances)[0]!;
     app.store.createSession({botId,chatId,threadId:42,instancePath},'Empty topic');
     const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},'Restore pending task',123);
-    await app.service.initialize();
+    await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Restore pending task'}]);
     assert.equal(app.connectionCount,1);
@@ -158,7 +158,7 @@ test('retirement admission rejection preserves an unsent initial task for the ne
     assert.equal(app.accepted.length,0);
     assert.equal(app.store.hasPendingInitialTask(session.id),true);
     fence.mock.restore();
-    await app.service.initialize();
+    app.disconnect();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Preserve unsent task'}]);
     assert.equal(app.store.hasPendingInitialTask(session.id),false);

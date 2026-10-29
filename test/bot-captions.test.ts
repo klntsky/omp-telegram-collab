@@ -89,7 +89,7 @@ test('unapproved image proposals cannot reach the model', async t => {
   }
 });
 
-test('host admission failure retains image bytes for later initialization', async t => {
+test('host admission failure retains image bytes for later reconciliation', async t => {
   const app = await createSmokeApp();
   t.mock.method(app.bot.telegram,'getFileLink',async () => new URL(`data:image/jpeg;base64,${imageData}`));
   try {
@@ -99,7 +99,7 @@ test('host admission failure retains image bytes for later initialization', asyn
     const session = app.store.listSessions(botId)[0]!;
     assert.equal(app.store.hasPendingInitialTask(session.id),true);
     startup.mock.restore();
-    await app.service.initialize();
+    await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{
       t:'prompt',text:'Keep the image',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],

@@ -158,6 +158,8 @@ export class BotService {
   private readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
   private menuTimer?: NodeJS.Timeout;
   private menuRefresh?: Promise<void>;
+  private menuTail: Promise<void> = Promise.resolve();
+  private initialization?: Promise<void>;
   private termination?: Promise<void>;
   private readonly promptProposals = new Map<string, PromptProposal>();
   private readonly receivedMessages = new WeakSet<Context>();
@@ -279,13 +281,16 @@ export class BotService {
     await this.termination;
   }
   get id(): number { return this.bot.botInfo?.id ?? 0; }
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
+    return this.initialization ??= this.initializeOnce();
+  }
+  private async initializeOnce(): Promise<void> {
     this.bot.botInfo ??= await this.bot.telegram.getMe();
     await this.bot.telegram.setMyCommands(
       groupCommands,
       { scope: { type: 'all_group_chats' } },
     );
-    await this.syncCommandMenus();
+    await this.syncCommandMenus(false);
     if (refreshTermination(this.options.config)) await this.applyTermination();
     for (const existing of this.options.store.listSessions(this.id)) {
       if (this.options.config.terminated || !this.sessionAssigned(existing)) continue;
@@ -310,14 +315,17 @@ export class BotService {
       })().finally(() => { this.checkingStatuses = false; });
     }, 30000);
     this.statusTimer.unref();
-    this.menuTimer ??= setInterval(() => {
-      if (this.stopped || this.options.config.terminated || this.menuRefresh) return;
-      const refresh = this.updateTail.then(() => this.syncCommandMenus());
-      this.menuRefresh = refresh;
-      this.updateTail = refresh.catch(error => { console.error('Telegram skill menu refresh failed.', error); });
-      void this.updateTail.finally(() => { if (this.menuRefresh === refresh) this.menuRefresh = undefined; });
-    }, 60000);
+    this.refreshCommandMenus();
+    this.menuTimer ??= setInterval(() => this.refreshCommandMenus(), 60000);
     this.menuTimer.unref();
+  }
+  private refreshCommandMenus(): void {
+    if (this.stopped || this.options.config.terminated || this.menuRefresh) return;
+    const refresh = this.syncCommandMenus().catch(error => {
+      console.error('Telegram skill menu refresh failed.', error);
+    });
+    this.menuRefresh = refresh;
+    void refresh.finally(() => { if (this.menuRefresh === refresh) this.menuRefresh = undefined; });
   }
   onSessionKill(handler: (sessionId: string) => void): () => void {
     this.sessionKillHandlers.add(handler);
@@ -413,6 +421,7 @@ export class BotService {
     this.listeners.clear();
     await this.updateTail;
     await Promise.all(listeners.map(listener => listener.tail));
+    await this.menuRefresh;
     await Promise.all([...this.topicIcons.values()].map(icon => icon.tail));
   }
   async authorize(chatId: number, userId: number): Promise<void> {
@@ -464,25 +473,36 @@ export class BotService {
       ? 'Non-admin prompts require approval by an instance admin.'
       : 'Only instance admins can send prompts. Other members’ messages are ignored.'}`;
   }
-  private async syncCommandMenus(): Promise<void> {
+  private syncCommandMenus(discover = true): Promise<void> {
+    const operation = this.menuTail.then(() => this.publishCommandMenus(discover));
+    this.menuTail = operation.catch(() => {});
+    return operation;
+  }
+  private async publishCommandMenus(discover: boolean): Promise<void> {
     const current = new Set<number>();
     for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
       const chats = instance.chats.filter(chat => chat.botId === this.id);
       if (!chats.length) continue;
       for (const chat of chats) current.add(chat.chatId);
-      let skills: SkillCatalogEntry[];
-      try {
-        skills = await this.options.runtime.listSkills(instancePath);
-      } catch (error) {
-        console.error(`Skill catalog refresh failed for ${instancePath}.`, error);
-        continue;
+      let skills = this.options.store.getSkillCatalog(instancePath) ?? [];
+      if (discover) {
+        try {
+          skills = await this.options.runtime.listSkills(instancePath);
+          if (this.stopped) return;
+          this.options.store.setSkillCatalog(instancePath, skills);
+        } catch (error) {
+          console.error(`Skill catalog refresh failed for ${instancePath}.`, error);
+          continue;
+        }
       }
+      if (this.stopped) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - groupCommands.length));
       const commands = [...groupCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];
       const fingerprint = JSON.stringify([instancePath, commands]);
       for (const chat of chats) {
+        if (!this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         current.add(chat.chatId);
         if (this.commandMenus.get(chat.chatId) === fingerprint) {
           this.skillAliases.set(chat.chatId, aliases);

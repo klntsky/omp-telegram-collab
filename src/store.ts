@@ -47,6 +47,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
+      CREATE TABLE IF NOT EXISTS skill_catalogs (instance_path TEXT PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS topic_admins (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),identity TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,identity));
       COMMIT;`);
@@ -80,6 +81,13 @@ export class Store {
   }
   clearPendingSkills(key: PendingSkillKey): void {
     this.db.prepare('DELETE FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=?').run(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId);
+  }
+  getSkillCatalog(instancePath: string): Array<{ name: string; description: string }> | undefined {
+    const row = this.db.prepare('SELECT skills FROM skill_catalogs WHERE instance_path=?').get(instancePath);
+    return row ? JSON.parse(String(row.skills)) as Array<{ name: string; description: string }> : undefined;
+  }
+  setSkillCatalog(instancePath: string, skills: Array<{ name: string; description: string }>): void {
+    this.db.prepare('INSERT INTO skill_catalogs VALUES (?,?) ON CONFLICT(instance_path) DO UPDATE SET skills=excluded.skills').run(instancePath, JSON.stringify(skills));
   }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
   getTopic(key: { botId: number; destination: TopicDestination }): TopicSession | undefined {

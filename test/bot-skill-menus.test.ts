@@ -2,6 +2,53 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { chatId } from './telegram-data.js';
+import { Telegraf } from 'telegraf';
+import { createBot } from '../src/bot.js';
+import { botToken, botId, ownerId, ownerUsername } from './telegram-data.js';
+
+test('restart serves cached shortcuts and reaches polling while discovery is blocked', async t => {
+  const app = await createSmokeApp();
+  await app.service.close();
+  const instancePath = Object.keys(app.config.instances)[0]!;
+  app.store.enrollGroup(botId, chatId);
+  app.store.setSkillCatalog(instancePath, [{name:'cached-skill',description:'Last successful discovery'}]);
+  const discovery = Promise.withResolvers<Array<{name:string;description:string}>>();
+  t.mock.method(app.runtime,'listSkills',() => discovery.promise);
+  const bot = new Telegraf(botToken, {telegram:{apiRoot:app.telegramUrl}});
+  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot,telegramIntervalMs:0});
+  let polling: Promise<void> | undefined;
+  try {
+    const ready = Promise.withResolvers<void>();
+    polling = service.start(ready.resolve);
+    await Promise.race([ready.promise, polling]);
+    const commands = await bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}});
+    assert.ok(commands.some(command=>command.command==='skill_cached_skill'));
+    await bot.handleUpdate({update_id:9000,message:{
+      message_id:9000,date:0,chat:{id:chatId,type:'supergroup',title:'Fixture'},
+      from:{id:ownerId,first_name:'Ada',username:ownerUsername,is_bot:false},
+      text:'/help',
+    }});
+    assert.match(String(app.messages.at(-1)?.text), /\/skills/);
+    const published = Promise.withResolvers<void>();
+    const original = bot.telegram.setMyCommands.bind(bot.telegram);
+    t.mock.method(bot.telegram,'setMyCommands',async (...args:Parameters<typeof original>) => {
+      const result = await original(...args);
+      if (args[0].some(command=>command.command==='skill_fresh_skill')) published.resolve();
+      return result;
+    });
+    discovery.resolve([{name:'fresh-skill',description:'Refreshed discovery'}]);
+    await published.promise;
+    const refreshed = await bot.telegram.getMyCommands({scope:{type:'chat',chat_id:chatId}});
+    assert.ok(refreshed.some(command=>command.command==='skill_fresh_skill'));
+    assert.ok(!refreshed.some(command=>command.command==='skill_cached_skill'));
+    assert.deepEqual(app.store.getSkillCatalog(instancePath),[{name:'fresh-skill',description:'Refreshed discovery'}]);
+  } finally {
+    discovery.resolve([]);
+    await service.close();
+    await polling;
+    await app.close();
+  }
+});
 
 test('catalog refresh publishes changes once, removes obsolete aliases and preserves menus on failure', async t => {
   const app = await createSmokeApp();

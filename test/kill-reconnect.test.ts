@@ -5,6 +5,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId } from './telegram-data.js';
+import { Telegraf } from 'telegraf';
+import { createBot, type BotService } from '../src/bot.js';
 
 async function setup() {
   const app = await createSmokeApp();
@@ -120,6 +122,7 @@ for (const source of ['startup','mirror retry']) {
     const {app,session} = await setup();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<boolean>();
+    let restarted: BotService | undefined;
     try {
       await app.service.ensureMirroring(session,await app.runtime.ensure(session));
       const original = app.runtime.isRunning.bind(app.runtime);
@@ -132,7 +135,15 @@ for (const source of ['startup','mirror retry']) {
         }
         return original(value);
       });
-      if (source === 'startup') await app.service.initialize();
+      if (source === 'startup') {
+        restarted = createBot({
+          config:app.config,botConfig:app.config.bots[0]!,token:app.service.token,
+          store:app.store,runtime:app.runtime,
+          bot:new Telegraf(app.service.token,{telegram:{apiRoot:app.telegramUrl}}),
+          telegramIntervalMs:0,
+        });
+        await restarted.initialize();
+      }
       else {
         app.disconnect();
         blockNext = true;
@@ -146,6 +157,7 @@ for (const source of ['startup','mirror retry']) {
       assert.equal(app.connectionCount,connections,'stale liveness results must not restart mirroring or its host');
     } finally {
       release.resolve(false);
+      await restarted?.close();
       await app.close();
     }
   });
