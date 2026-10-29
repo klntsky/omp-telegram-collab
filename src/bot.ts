@@ -198,7 +198,13 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => undefined);
+      let callbackAnswered = false;
+      const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
+      ctx.answerCallbackQuery = async (...args) => {
+        const result = await answerCallbackQuery(...args);
+        callbackAnswered = true;
+        return result;
+      };
       const urgent = /^\/terminate(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(messageText(ctx.message) ?? '');
       if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
       if (!urgent && this.collectAlbum(ctx)) { this.queuedUpdates--; return; }
@@ -207,7 +213,10 @@ export class BotService {
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) { await this.reportError(ctx,error); }
-      finally { this.queuedUpdates--; }
+      finally {
+        this.queuedUpdates--;
+        if (ctx.callbackQuery && !callbackAnswered) await ctx.answerCallbackQuery().catch(() => undefined);
+      }
     });
   }
   private async reportError(ctx: Context, error: unknown): Promise<void> {
@@ -972,14 +981,24 @@ export class BotService {
     }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned) {
-      if (!isAdministrator(member)) { await replyTo(ctx, contextDestination(ctx), 'Only a current group administrator can request setup for an unassigned forum.'); return; }
+      if (!isAdministrator(member)) {
+        const text = 'Only a current group administrator can request setup for an unassigned forum.';
+        if (ctx.callbackQuery) await ctx.answerCallbackQuery(text);
+        else await replyTo(ctx, contextDestination(ctx), text);
+        return;
+      }
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
       const quotedPath = "'" + this.options.config.configPath.replaceAll("'", "'\\''") + "'";
       const command = `omp-telegram --config ${quotedPath} approve ${request.code}`;
       await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
       return;
     }
-    if (!this.isInstanceAdmin(ctx.chat.id, member.user)) { await replyTo(ctx, contextDestination(ctx), 'Only a configured instance admin can enroll this group.'); return; }
+    if (!this.isInstanceAdmin(ctx.chat.id, member.user)) {
+      const text = 'Only a configured instance admin can enroll this group.';
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery(text);
+      else await replyTo(ctx, contextDestination(ctx), text);
+      return;
+    }
     this.assignedPath(ctx.chat.id);
     if (setting !== undefined && value !== undefined) {
       if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
@@ -1040,7 +1059,7 @@ export class BotService {
       return;
     }
     if (!(await this.instanceAdmin(ctx))) {
-      await replyTo(ctx, contextDestination(ctx), 'Only a configured instance admin can confirm or cancel a capacity increase.');
+      await ctx.answerCallbackQuery('Only a configured instance admin can confirm or cancel a capacity increase.');
       return;
     }
     await this.authorize(request.chatId,ctx.from!.id);
@@ -1189,7 +1208,7 @@ export class BotService {
         !sameTopicDestination(contextDestination(ctx), contextDestination(proposal.source)) ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
     if (!(await (proposal.sessionId ? this.topicAdmin(ctx) : this.instanceAdmin(ctx)))) {
-      await replyTo(ctx, contextDestination(ctx), 'Only an admin authorized for the target session or new-topic creation can approve this prompt.');
+      await ctx.answerCallbackQuery('Only an admin authorized for the target session or new-topic creation can approve this prompt.');
       return;
     }
     await this.authorize(ctx.chat.id, ctx.from!.id);
