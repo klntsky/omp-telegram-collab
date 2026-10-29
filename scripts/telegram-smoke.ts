@@ -400,12 +400,18 @@ export async function verifyTelegramFlow() {
       {t:'prompt',text:'Resume this topic'},
     ]);
     const beforeReply = app.messages.length;
-    const replyText = 'Agent result ' + 'x'.repeat(5000);
+    const replyText = 'Agent result ' + 'x'.repeat(65536);
     const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: replyText }], model: 'fixture-no-model-call', stopReason: 'stop', timestamp: Date.now() + 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
     app.emit({ t: 'event', event: { type: 'message_end', message: reply } });
     app.emit({ t: 'entry', entry: { type: 'message', id: 'reply-fixture', parentId: null, timestamp: new Date().toISOString(), message: reply } });
-    await waitUntil(() => app.messages.length >= beforeReply + 2, 'assistant response did not reach the topic');
-    assert.equal(app.messages.slice(beforeReply).map(message => message.text).join(''), replyText, 'event and durable entry produce one chunked response');
+    await waitUntil(() => app.messages.length >= beforeReply + 3, 'assistant response did not reach the topic');
+    const replyChunks = app.messages.slice(beforeReply).map(message => {
+      const rich = message.rich_message;
+      assert.ok(rich && typeof rich === 'object' && 'markdown' in rich);
+      assert.equal(typeof rich.markdown, 'string');
+      return rich.markdown;
+    });
+    assert.equal(replyChunks.join(''), replyText, 'event and durable entry produce one chunked response');
     await app.update({ message_thread_id: session.threadId, text: '/kill' });
     assert.equal(await app.runtime.isRunning(session), false);
     assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id, '5408906741125490282');
