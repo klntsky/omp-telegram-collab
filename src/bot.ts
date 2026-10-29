@@ -594,9 +594,10 @@ export class BotService {
     }
     for (const [threadId, admins] of topicGroups) sections.push({ title: `Topic ${threadId} admins`, admins });
     if (destination.kind === 'general' && !topicGroups.size) sections.push({ title: 'Topic admins', admins: new Set() });
-    const lines = sections.flatMap((section, index) => [
-      `${index + 1}. ${section.title}`,
-      ...(section.admins.size ? [...section.admins].map((admin, row) => `${index + 1}.${row + 1} ${admin}`) : [`${index + 1}.1 (none)`]),
+    const lines = sections.flatMap(section => [
+      `${section.title}:`,
+      ...(section.admins.size ? [...section.admins] : ['(none)']),
+      '',
     ]);
     lines.push('Only current human group members can exercise these grants.');
     let chunk = '';
