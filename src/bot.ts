@@ -601,9 +601,9 @@ export class BotService {
       for (const admin of admins) topicAdmins.push(`${admin} · <a href="${topicBase}${threadId}">${name}</a>`);
     }
     const lines = [
-      'Global admins:', ...globalAdmins, '',
+      'Global admins:', ...(globalAdmins.length ? globalAdmins : ['none']), '',
       destination.kind === 'topic' ? `<a href="${topicBase}${destination.threadId}">Topic admins</a>:` : 'Topic admins:',
-      ...topicAdmins,
+      ...(topicAdmins.length ? topicAdmins : ['none']),
     ];
     let chunk = '';
     for (const line of lines) {
