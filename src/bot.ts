@@ -1168,17 +1168,7 @@ export class BotService {
     for (const [token, proposal] of this.promptProposals) if (proposal.expires <= now) this.promptProposals.delete(token);
     const token = randomBytes(16).toString('base64url');
     await this.authorize(ctx.chat!.id,ctx.from!.id);
-    const author = ctx.from!.username ? `@${ctx.from!.username}` : `${ctx.from!.first_name} (user ID ${ctx.from!.id})`;
-    const body = `${author} proposed a prompt:\n${text}`;
-    for (let offset = 0; offset < body.length;) {
-      let end = Math.min(offset+4000,body.length);
-      if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
-      if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-      await replyTo(ctx, contextDestination(ctx), body.slice(offset,end), {
-      });
-      offset = end;
-    }
-    const message = await replyTo(ctx, contextDestination(ctx), 'Prompt proposed. An authorized admin must approve it before it runs. Approval expires in 10 minutes.', {
+    const message = await replyTo(ctx, contextDestination(ctx), 'Approve this prompt?', {
       reply_parameters:{message_id:ctx.message!.message_id,allow_sending_without_reply:true},
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });

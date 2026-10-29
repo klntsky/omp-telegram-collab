@@ -315,7 +315,7 @@ test('a non-admin /new task creates no session until an instance admin approves'
   } finally { await app.close(); }
 });
 
-test('approval reviews a literal Unicode-safe copy and submits the same stored proposal text', async () => {
+test('approval sends one reply reference and submits the stored proposal text', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -327,14 +327,10 @@ test('approval reviews a literal Unicode-safe copy and submits the same stored p
     const text = '😀'.repeat(2047)+'x';
     app.setCurrentMember({username:'grace',status:'member'});
     const before = app.messages.length;
-    await app.update({text,message_thread_id:session.threadId},proposer);
-    const copies = app.messages.slice(before,-1);
-    assert.equal(copies.map(message => message.text).join(''),`@grace proposed a prompt:\n${text}`);
-    for (const message of copies) {
-      assert.ok(String(message.text).length <= 4000);
-      assert.ok(!/[\uD800-\uDBFF]$/.test(String(message.text)));
-      assert.equal(message.parse_mode,undefined);
-    }
+    await app.update({message_id:8200,text,message_thread_id:session.threadId},proposer);
+    assert.equal(app.messages.length,before+1);
+    assert.equal(app.messages.at(-1)!.text,'Approve this prompt?');
+    assert.deepEqual(app.messages.at(-1)!.reply_parameters,{message_id:8200,allow_sending_without_reply:true});
     const proposal = promptProposal(app);
     app.setCurrentMember({username:ownerUsername,status:'member'});
     await app.callback(proposal.approve,proposal.message);

@@ -72,7 +72,7 @@ Other commands, forwarded messages, and bot messages are not prompts. Non-admin 
 
 Instance roots and bot admins can submit `/new`, `/p` in General, and existing-topic prompts directly. Topic admins can submit `/p` and ordinary prompts directly only within their own topic, and approve proposals for that existing topic. Creating a session through `/new` or General `/p`, or approving a new-topic proposal, requires an instance root or bot admin; topic admins follow the ordinary proposal setting for those requests. Topic admins cannot directly `/attach`, change global/forum settings, approve capacity increases, or `/terminate`.
 
-Proposals show the submitted text for review and execute once after approval. They expire after ten minutes or a service restart. A changed assignment or prompt mode, archived topic, killed session, or departed proposer invalidates approval.
+Proposals send one reply to the original message with “Approve this prompt?” and an approval button, without copying the prompt or sending additional notices. They execute once after approval and expire after ten minutes or a service restart. A changed assignment or prompt mode, archived topic, killed session, or departed proposer invalidates approval.
 
 `/skills` opens a picker bound to the requesting user and source topic, including General. Skill buttons work without Telegram inline mode; when inline mode is enabled, Search opens an inline search for that picker. The inline picker context expires after ten minutes; reopen `/skills` to search again. This does not expire the pending selection.
 
