@@ -915,7 +915,8 @@ export class BotService {
   }
   private async announce(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
-    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OPEN AGENT to view this topic. ${this.promptHelp(session.chatId)}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
+    const text = this.allMessagesArePrompts(session.chatId) ? 'Send a message to prompt the agent' : 'Use /p to submit a prompt';
+    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
