@@ -50,6 +50,8 @@ The bot adapter owns topic activity projection. Collab host snapshots reconcile 
 
 The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.
 
+Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
+
 OMP owns worktree creation, change transfer, and live session relocation. The runtime requests OMP's native worktree operation and persists the resulting managed working-directory identity. A worktree-backed session retains its configured instance as the authorization and forum-assignment identity while its worktree supplies execution, history, model settings, and skill-discovery context. Recovery and force termination verify that execution identity rather than treating every session assigned to a repository as the same host. Worktrees remain independent durable filesystem state; host retirement and session shutdown do not remove them.
 
 The runtime boundary owns skill-catalog discovery from OMP for the project and, when applicable, its session host. Bot adapters consume catalog names and descriptions through that boundary rather than inspecting OMP resources themselves.
@@ -62,7 +64,7 @@ OMP owns agent execution, conversation history, interactive questions, and live 
 
 Model-preset operations use a private host-control socket rather than model prompts. OMP owns native preset diagnostics and role precedence; managed-host controls must apply changes only to the session, never persist them into shared OMP role settings. Unsupported older or attached hosts cannot substitute a configuration-writing control path.
 
-The runtime uses OMP's guarded lifecycle boundary for idle retirement. Explicit force termination has a different boundary: the runtime must verify the intended process identity before signaling it. A database lock excludes another service from managing the same runtime data concurrently.
+The runtime nominates idle-retirement candidates from activity observations and leases. The host-control boundary makes the final idle decision before accepting retirement. Unsupported hosts remain running. Retirement acceptance is distinct from observed process exit; an uncertain acknowledgement is reconciled against the same host's lifecycle descriptor. Explicit force termination has a different boundary: the runtime must verify the intended process identity before signaling it. A database lock excludes another service from managing the same runtime data concurrently.
 
 The lifecycle extension instance that creates a host's control server owns its descriptor and socket cleanup. Subagent and unstarted extension instances have no authority to remove the main host's control metadata.
 

@@ -249,6 +249,7 @@ export default async function hostLifecycle(pi) {
         modelPresets: 2,
         skills: true,
         worktree: true,
+        retireIdle: true,
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();

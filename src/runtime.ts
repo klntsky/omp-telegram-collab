@@ -48,7 +48,7 @@ interface ManagedHost {
 }
 
 interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
-interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; retireIdle?: boolean }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -249,7 +249,7 @@ export class OmpRuntime {
       throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
     }
     const operation = (async () => {
-      await this.#shutdown(session.id, host, true);
+      await this.#shutdown(session.id, host, 'worktree');
       if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
       const { dir, pin } = await this.#prepare(session);
       const result = await this.#worktreeRpc(dir, pin, branch);
@@ -428,7 +428,7 @@ export class OmpRuntime {
     for (const [id,host] of candidates) {
       const activity = this.#hostActivity(id);
       if (!host || host.retiring || this.#pending.has(id) || activity.busy || activity.leases || Date.now()-activity.lastUsed < idleMs) continue;
-      await this.stop(id);
+      await this.#stop(id, 'idle');
       if (host.exited) retired++;
     }
     return retired;
@@ -899,12 +899,16 @@ export class OmpRuntime {
   }
 
   stop(id: string): Promise<void> {
+    return this.#stop(id);
+  }
+
+  #stop(id: string, guard?: 'idle' | 'worktree'): Promise<void> {
     const pending = this.#stopping.get(id);
     if (pending) return pending;
     const operation = (async () => {
       await this.#pending.get(id)?.catch(() => undefined);
       const host = this.#managed.get(id);
-      if (host) await this.#shutdown(id,host);
+      if (host) await this.#shutdown(id,host,guard);
     })().finally(() => {
       if (this.#stopping.get(id) === operation) this.#stopping.delete(id);
     });
@@ -1027,6 +1031,7 @@ export class OmpRuntime {
   async #ensureManaged(session: TopicSession): Promise<HostBinding> {
     const id = session.id;
     let owned = this.#managed.get(id);
+    let spawned: ManagedHost | undefined;
     const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
     let prepared: { dir: string; pin: DurableBinding };
     try { prepared = await this.#prepare(session); }
@@ -1055,7 +1060,7 @@ export class OmpRuntime {
         const lifecycle = await this.#lifecycle(id);
         owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
         owned.binding = binding;
-        owned.retiring = lifecycle?.retiring === true;
+        owned.retiring = lifecycle?.pid === host.pid && lifecycle.sessionId === pin.sessionId && lifecycle.retiring === true;
         this.#managed.set(id,owned);
         this.#assertActive();
         return binding;
@@ -1093,6 +1098,7 @@ export class OmpRuntime {
       });
       child.unref();
       owned = { process: child, sessionId: pin.sessionId, exited: false, retiring: false };
+      spawned = owned;
       this.#managed.set(id,owned);
       const record = owned;
       child.once('error',error => { record.failure = error.message; record.exited = true; });
@@ -1120,9 +1126,17 @@ export class OmpRuntime {
       }
       throw new Error('Managed OMP startup timed out');
     } catch (error) {
-      if (owned && !owned.exited && !this.#killing.has(id)) await this.#shutdown(id,owned);
-      if (!owned || owned.exited) this.#managed.delete(id);
-      if (owned?.process && error instanceof Error) {
+      if (spawned && !spawned.exited && !this.#killing.has(id)) {
+        try { await this.#shutdown(id, spawned); }
+        catch (cleanupError) {
+          if (error instanceof Error) {
+            Object.defineProperty(error, 'cleanupError', { value: cleanupError, configurable: true });
+            error.message += `\nOMP startup cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+          }
+        }
+      }
+      if ((!owned || owned.exited) && this.#managed.get(id) === owned) this.#managed.delete(id);
+      if (spawned?.process && error instanceof Error) {
         error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(this.#config.dataDir, 'sessions', id, 'terminal.log')} (previous output: terminal.log.1)`;
       }
       throw error;
@@ -1342,28 +1356,47 @@ export class OmpRuntime {
     this.#activity.delete(id);
   }
 
-  async #shutdown(id: string, host: ManagedHost, idleOnly = false): Promise<void> {
+  async #shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void> {
     if (host.exited) return;
     if (this.#killing.has(id)) return;
     const lifecycle = await this.#lifecycle(id);
     if (!lifecycle || lifecycle.sessionId !== host.sessionId) return;
-    if (idleOnly && lifecycle.worktree !== true) throw new Error('This running OMP host does not support idle-guarded worktree switching. Stop it when idle with /kill, then retry /worktree.');
+    if (guard && (lifecycle.retireIdle !== true || (guard === 'worktree' && lifecycle.worktree !== true))) {
+      if (guard === 'worktree') throw new Error('This running OMP host does not support idle-guarded worktree switching. Stop it when idle with /kill, then retry /worktree.');
+      return;
+    }
     if (this.#killing.has(id)) return;
     if (host.process?.pid && lifecycle.supervisorPid !== host.process.pid) return;
     const current = (await this.#list(Date.now()+5000)).find(value => value.pid === lifecycle.pid && value.sessionId === host.sessionId);
     if (this.#killing.has(id)) return;
     if (!current) { host.exited = true; this.#managed.delete(id); return; }
+    const alreadyRetiring = host.retiring || lifecycle.retiring === true;
     host.retiring = true;
-    const {promise,resolve} = Promise.withResolvers<boolean>();
+    const {promise,resolve} = Promise.withResolvers<'requested' | 'busy' | 'unknown'>();
     const socket = createConnection(lifecycle.socketPath);
-    const done = (value: boolean) => { socket.destroy(); resolve(value); };
-    socket.setTimeout(2000,() => done(false));
-    socket.once('error',() => done(false));
-    socket.once('connect',() => socket.write(idleOnly ? 'retire-idle\n' : 'retire\n'));
-    socket.once('data',data => done(data.toString().trim() === 'requested'));
-    socket.once('end',() => done(false));
-    const requested = await promise;
-    if (!requested) { host.retiring = false; return; }
+    const done = (value: 'requested' | 'busy' | 'unknown') => { socket.destroy(); resolve(value); };
+    socket.setEncoding('utf8');
+    socket.setTimeout(2000,() => done('unknown'));
+    socket.once('error',() => done('unknown'));
+    socket.once('connect',() => socket.write(guard ? 'retire-idle\n' : 'retire\n'));
+    let response = '';
+    socket.on('data',data => {
+      response += data;
+      if (!response.includes('\n')) return;
+      const result = response.trim();
+      done(result === 'requested' || result === 'busy' ? result : 'unknown');
+    });
+    socket.once('end',() => done('unknown'));
+    socket.once('close',() => done('unknown'));
+    const outcome = await promise;
+    if (outcome === 'busy') { host.retiring = alreadyRetiring; return; }
+    if (outcome === 'unknown') {
+      const observed = await this.#lifecycle(id);
+      if (!observed || observed.pid !== lifecycle.pid || observed.supervisorPid !== lifecycle.supervisorPid ||
+          observed.sessionId !== lifecycle.sessionId || observed.socketPath !== lifecycle.socketPath) return;
+      host.retiring = alreadyRetiring || observed.retiring === true;
+      if (!host.retiring) return;
+    }
     const deadline = Date.now()+7500;
     while (Date.now() < deadline) {
       if (!await procIdentity(lifecycle.pid)) {

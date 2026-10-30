@@ -174,13 +174,15 @@ Each successful startup notifies enrolled groups in General: “OMP bot service 
 
 `maxSessions` limits resident managed OMP processes across all bots and projects, not saved conversations. Empty topics consume no process. Hosts idle for five minutes may retire; the runtime tries least-recently-used idle hosts sooner when it needs capacity. Connected Mini Apps and pending or active work protect a host.
 
-Retirement waits for OMP's guarded shutdown and never escalates to signals. This path was verified with OMP 18.13.1. Older hosts without that support are not forcibly retired. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
+Automatic retirement requires the host to confirm that it is idle and has no pending messages. Hosts without that control capability remain running. Retirement never escalates to signals. Accepted retirement blocks new submissions while the host finishes shutting down; an observation timeout does not cancel retirement. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
 
 If retirement cannot free capacity, an instance root or bot admin can approve a prompt to double the shared limit. Topic admins cannot approve capacity increases. Approval saves the new limit and retries the pending initial task once. Other prompts must be resent. Protected configuration requires an administrator CLI update instead. Expired or replayed confirmations cannot increase capacity.
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
+
+Failure to acquire or reconnect to an existing managed host does not retire it. The original connection diagnostic is preserved, and a later attempt can reconnect to the same host.
 
 The Mini App retains its transcript and draft during transient failures. Reconnects use capped exponential backoff and a fresh single-use ticket with renewed authentication and membership checks. They do not queue or replay instructions. Leave, denied membership, expired launch credentials, invalid actions, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available. Reopen OPEN AGENT when Telegram credentials expire.
 

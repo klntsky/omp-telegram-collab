@@ -130,6 +130,8 @@ pm2 save
 
 Keep tokens out of PM2's launch environment. Use `pm2 logs omp-telegram-collab` for diagnostics. Run `pm2 startup` and follow its instructions if startup persistence is not enabled. Do not restart unrelated applications.
 
+Restarting the bot does not reload lifecycle extensions in surviving OMP hosts. Existing hosts without idle-retirement support remain running instead of receiving an unconditional retirement request. Let active work finish before using `/kill` to replace a host when its extension needs updating. Do not clear a retirement descriptor to bypass admission; accepted shutdown may still be pending in the host.
+
 See [Product](PRODUCT.md) for lifecycle readiness and Telegram notice behavior, and [Architecture](ARCHITECTURE.md) for service ownership and shutdown boundaries.
 
 `Service timing` log entries report measured milliseconds for runtime acquire, store open, session validation, each bot's initialization and first successful poll, HTTP bind, launch-to-first-poll-ready, ready-to-notification completion, and shutdown notices/drain/runtime/store/total. These are operation durations, not estimates; overlapping shutdown phases must not be summed. Ready-to-notification includes marker I/O and all notification attempts (including failures or cancellation), not proof that Telegram displayed every message. Initial launch also logs process-start-to-ready and the combined process-start-to-launch bootstrap/dependencies/config interval. This combined interval uses Node's process time origin; pure static module-loading time is not separately measurable here. In-process configuration replacement omits the process-start timings.
