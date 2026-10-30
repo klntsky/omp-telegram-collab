@@ -45,7 +45,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    Select the project directory and prompt settings when asked.
 
-9. Send `/new Implement authentication` in the group to start a session. Select **OPEN AGENT** in the new topic to open the Mini App.
+9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do. Select **OPEN AGENT** in the new topic to open the Mini App.
 
 ## OMP feature coverage
 
