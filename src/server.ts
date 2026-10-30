@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, CollabConnection, TopicSession } from '../shared/contracts.js';
 import { Store } from './store.js';
-import { TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
+import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
 import { connectCollab } from './collab.js';
 import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
@@ -130,6 +130,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
         else if (error instanceof SessionGenerationError) json(response,409,{error:error.message});
+        else if (error instanceof AuthorizationUnavailableError) json(response,503,{error:error.message});
         else json(response,request.url?.startsWith('/api/') ? 403 : 404,{error:request.url?.startsWith('/api/') ? (error instanceof Error ? error.message : 'Authentication or access denied') : 'Not found'});
       } else response.end();
     });
@@ -195,7 +196,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         if (closed) return;
         readAccess.session = current.session;
         readAccess.canControl = current.canControl;
-      }).catch(error => fail(4003,error instanceof Error ? error.message : 'Access or session unavailable'))
+      }).catch(error => fail(error instanceof AuthorizationUnavailableError ? 1013 : 4003,error instanceof Error ? error.message : 'Access or session unavailable'))
         .finally(() => { refreshingAccess = false; });
     },30000);
     accessTimer.unref();
@@ -203,7 +204,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed) return;
       closed = true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close();
       if (Buffer.byteLength(message) > 123) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({t:'bye',reason:message}));
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(code === 1013 ? {t:'error',message} : {t:'bye',reason:message}));
         ws.close(code);
       } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
@@ -214,6 +215,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (queued > 128 || queuedBytes > 8*1024*1024) { fail(4008,'Connection overloaded'); return; }
       tail = tail.then(async () => { if (!closed) await action(); }).catch(async error => {
         if (error instanceof ServiceTerminatedError) fail(4003,error.message);
+        else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
         else if (error instanceof SessionCapacityError) {
           fail(4009,error.message);
           const session = options.store.getSession(identity.sessionId);

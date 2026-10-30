@@ -53,7 +53,7 @@ export class GatewaySocket implements GuestTransport {
 		} catch (error) {
 			if (this.#closed || this.#authorization !== controller) return;
 			if (error instanceof SessionAccessError) this.#finish(error.message);
-			else this.reconnect("Session service unavailable. Reconnecting…");
+			else this.reconnect(`${error instanceof Error ? error.message : String(error)}\nReconnecting…`);
 			return;
 		} finally {
 			clearTimeout(timeout);
@@ -71,6 +71,7 @@ export class GatewaySocket implements GuestTransport {
 			return;
 		}
 		this.#ws = ws;
+		let lastError: string | undefined;
 		ws.onopen = () => {
 			if (this.#ws === ws) this.onOpen?.();
 		};
@@ -89,6 +90,7 @@ export class GatewaySocket implements GuestTransport {
 				return;
 			}
 			if (frame.t === "snapshot-chunk" && frame.final) this.#attempt = 0;
+			if (frame.t === "error") lastError = frame.message;
 			this.onFrame?.(frame);
 		};
 		ws.onerror = () => {};
@@ -98,7 +100,8 @@ export class GatewaySocket implements GuestTransport {
 				this.#finish(event.reason || "Session unavailable. Reopen the topic’s OPEN AGENT button.");
 				return;
 			}
-			this.reconnect("Disconnected from the session. Reconnecting…");
+			const reason = event.reason || (event.code === 1013 ? lastError : undefined);
+			this.reconnect(reason ? `${reason}\nReconnecting…` : "Disconnected from the session. Reconnecting…");
 		};
 	}
 

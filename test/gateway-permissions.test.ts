@@ -383,8 +383,70 @@ test('backend credential reconnects after launch expiry without permitting fallb
   } finally { socket?.terminate(); await app.close(); }
 });
 
+test('idle membership lookup outages close recoverably and credential reconnect succeeds after recovery', async t => {
+  const { app, session, connect } = await fixture();
+  const sockets: WebSocket[] = [];
+  try {
+    app.setCurrentMember({ username: 'viewer', status: 'member' });
+    const exchange = (credential?: string) => fetch(`${app.url}/api/session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id), credential }),
+    });
+    const initial = await exchange();
+    assert.equal(initial.status, 200);
+    const { credential } = await initial.json() as { credential: string };
+    assert.ok(credential);
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const reader = await connect(); sockets.push(reader.socket);
+    assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
+    const failure = new Error(`Temporary getChatMember transport failure:\n${'詳細診断'.repeat(60)}\nOriginal diagnostic retained.`);
+    let unavailable = true;
+    let lookups = 0;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === 'getChatMember' && 'user_id' in payload && Number(payload.user_id) === ownerId) {
+        lookups++;
+        if (unavailable) throw failure;
+      }
+      return previous(method, payload, signal);
+    });
+    const before = app.accepted.length;
+    const closed = once(reader.socket, 'close');
+    t.mock.timers.tick(30000);
+    const [code, reason] = await closed;
+    assert.equal(code, 1013);
+    assert.equal(reason.toString(), '');
+    assert.ok(reader.frames.some(frame => frame.t === 'error' && frame.message === failure.message));
+    assert.ok(!reader.frames.some(frame => frame.t === 'bye'));
+    assert.equal(lookups, 1);
+    assert.equal(app.accepted.length, before);
+    const denied = await exchange(credential);
+    assert.equal(denied.status, 503);
+    assert.deepEqual(await denied.json(), { error: failure.message });
+    assert.equal(lookups, 2);
+    assert.equal(app.accepted.length, before);
+    unavailable = false;
+    const resumed = await exchange(credential);
+    assert.equal(resumed.status, 200);
+    const { ticket } = await resumed.json() as { ticket: string };
+    assert.ok(ticket);
+    const socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${ticket}`, { origin: app.config.publicUrl });
+    sockets.push(socket);
+    const frames: HostFrame[] = [];
+    socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
+    await once(socket, 'open');
+    const deadline = Date.now() + 5000;
+    while (!frames.some(frame => frame.t === 'snapshot-chunk')) {
+      assert.ok(Date.now() < deadline, 'recovered connection snapshot missing');
+      await delay(10);
+    }
+    assert.equal(frames.find(frame => frame.t === 'welcome')?.readOnly, true);
+    assert.equal(socket.readyState, WebSocket.OPEN);
+    assert.equal(app.accepted.length, before);
+  } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
+});
+
 test('idle sockets periodically refresh permissions and close after membership revocation', async t => {
-  const {app,connect} = await fixture();
+  const {app,session,connect} = await fixture();
   let socket: WebSocket | undefined;
   try {
     t.mock.timers.enable({apis:['setInterval']});
@@ -394,5 +456,10 @@ test('idle sockets periodically refresh permissions and close after membership r
     t.mock.timers.tick(30000);
     const [code] = await closed;
     assert.equal(code,4003);
+    const response = await fetch(`${app.url}/api/session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }),
+    });
+    assert.equal(response.status, 403);
   } finally { socket?.terminate(); await app.close(); }
 });

@@ -2,6 +2,12 @@ import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { GuestFrame } from '@oh-my-pi/pi-wire';
 
+export class AuthorizationUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), {cause});
+  }
+}
+
 const userSchema = z.object({ id: z.number().int().positive().safe(), first_name: z.string().min(1).max(256), last_name: z.string().max(256).optional(), username: z.string().max(256).optional(), is_bot: z.boolean().optional() }).passthrough();
 export interface InitData { user: z.infer<typeof userSchema>; authDate: number; startParam: string }
 export function validateInitData(raw: string, token: string, options: { now?: number; maxAgeSeconds?: number } = {}): InitData {

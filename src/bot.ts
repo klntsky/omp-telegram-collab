@@ -6,7 +6,7 @@ import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
-import { isActiveMember, isAdministrator } from './auth.js';
+import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
@@ -807,7 +807,8 @@ export class BotService {
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
-    const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)]);
+    const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)])
+      .catch(error => { throw new AuthorizationUnavailableError(error); });
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
     if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');

@@ -204,6 +204,8 @@ New managed hosts remain in startup when Collab discovery temporarily reports th
 
 The Mini App retains its transcript and draft during transient failures. Automatic reconnects use capped exponential backoff, the cached long-lived backend credential, and a fresh single-use ticket with current membership checks. Service restarts and the age of the original Telegram launch do not require reopening Telegram after the initial exchange. Reconnects do not queue or replay instructions. Leave, denied membership, invalid credentials or actions, a killed session, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available or to resume a killed session explicitly. Backend errors retain their original diagnostics rather than being replaced with expired-launch instructions.
 
+Telegram authorization lookup failures fail closed without becoming permanent access denials. If the current `getChat` or `getChatMember` lookup fails, the gateway refuses admission with HTTP 503 or closes an active socket with code 1013, retaining the original diagnostic. The Mini App silently retries through its existing reconnect flow and rechecks current access; it does not replay the blocked action. Confirmed membership loss and local access denials remain non-recoverable access failures.
+
 ## 4. Attached sessions and transcript
 
 The current supergroup owner and administrators can attach a control-shared OMP host whose working directory matches the assigned project. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
