@@ -15,7 +15,7 @@ test('a slow instance does not delay another menu, and close cancels refresh wit
   const secondPath = join(firstPath,'second');
   await mkdir(secondPath);
   const secondChat = chatId - 1;
-  app.config.instances[secondPath] = {admins:[],chats:[{botId,chatId:secondChat}]};
+  app.config.instances[secondPath] = {chats:[{botId,chatId:secondChat}]};
   const slow = Promise.withResolvers<Array<{name:string;description:string}>>();
   t.mock.method(app.runtime,'listSkills',async (path: string) => path === firstPath ? slow.promise : [{name:'fast-skill',description:'Independent catalog'}]);
   const bot = new Bot(botToken,{client:{apiRoot:app.telegramUrl}});

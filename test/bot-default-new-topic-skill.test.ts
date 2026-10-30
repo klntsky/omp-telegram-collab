@@ -105,7 +105,7 @@ for (const manual of [false,true]) {
       const proposal = app.messages.at(-1)!;
       const markup = proposal.reply_markup as {inline_keyboard:Array<Array<{callback_data:string}>>};
       const approve = markup.inline_keyboard.flat().find(button=>button.callback_data.startsWith('prompt:approve:'))!;
-      app.setCurrentMember({username:ownerUsername,status:'member'});
+      app.setCurrentMember({username:ownerUsername,status:'creator'});
       await setForumSetting(app, 'Default new-topic skill', 'pdf-tools');
       await app.callback(approve.callback_data,proposal);
       assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'/skill:find-skills\n\nProposed task'});

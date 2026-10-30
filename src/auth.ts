@@ -33,7 +33,9 @@ export function isActiveMember(member: unknown): boolean {
   return value.user?.is_bot !== true && (value.status === 'creator' || value.status === 'administrator' || value.status === 'member' || (value.status === 'restricted' && value.is_member === true));
 }
 export function isAdministrator(member: unknown): boolean {
-  return Boolean(member && typeof member === 'object' && 'status' in member && ['creator', 'administrator'].includes(String(member.status)));
+  if (!member || typeof member !== 'object') return false;
+  const value = member as { status?: string; user?: { is_bot?: boolean } };
+  return value.user?.is_bot === false && (value.status === 'creator' || value.status === 'administrator');
 }
 const text = z.string().min(1).max(65536);
 const image = z.object({ type: z.literal('image'), data: z.string().min(1).max(1400000).regex(/^[A-Za-z0-9+/]*={0,2}$/), mimeType: z.enum(['image/png','image/jpeg','image/gif','image/webp']) }).strict();

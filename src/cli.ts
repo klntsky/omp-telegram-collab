@@ -196,7 +196,7 @@ async function launch(config: AppConfig, onPollingFailure: () => void, initialLa
 
 function serviceSettings(config: AppConfig): string {
   const { maxSessions: _, ...omp } = config.omp;
-  return JSON.stringify({ bots: config.bots.map(({ admins: _, ...bot }) => bot), publicUrl: config.publicUrl, host: config.host, port: config.port, dataDir: config.dataDir, omp });
+  return JSON.stringify({ bots: config.bots, publicUrl: config.publicUrl, host: config.host, port: config.port, dataDir: config.dataDir, omp });
 }
 
 export async function startService(configPath = defaultConfigPath()): Promise<{ close(): Promise<void>; reload(): Promise<void> }> {
@@ -307,7 +307,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const usage = `Usage: omp-telegram [--config PATH] <start|setup|configure|reload|create|list|show|remove|admin|chat|approve|bot>
+const usage = `Usage: omp-telegram [--config PATH] <start|setup|configure|reload|create|list|show|remove|chat|approve|bot>
 Instances are identified by directory paths. Run setup for guided configuration.
 `;
 

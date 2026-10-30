@@ -19,6 +19,8 @@ import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-desti
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
 
+class AuthorizationDeniedError extends Error {}
+
 export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
@@ -62,6 +64,7 @@ interface Listener {
     text: string;
     images?: ImageContent[];
     userId: number;
+    authorityUserId: number;
     messageId?: number;
     deadline: number;
     retries: number;
@@ -97,12 +100,12 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'admins' | 'capacity';
+type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity';
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
   | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'capacity'; limit: number; confirm: boolean }
-  | { kind: 'admin' } | { kind: 'close' };
+  | { kind: 'close' };
 interface SettingsPanel {
   token: string;
   chatId: number;
@@ -112,30 +115,28 @@ interface SettingsPanel {
   expires: number;
   revision: number;
   choices: SettingsAction[];
-  adminReply?: { messageId: number; userId: number };
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults, global bot admins and shared capacity (bot/instance admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (bot/instance admin)\n/detach — make this topic conversation-only (topic/bot/instance admin)\n/model_preset <name> — switch this session (topic/bot/instance admin)\n/list_model_presets — list presets for this session (topic/bot/instance admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (bot/instance admin)';
-const settingsHelp = '/settings — forum defaults, global admins and shared capacity (bot/instance admin)';
-const adminHelp = '/make_admin @username — promote for this topic; omit the username when replying to a user\n/list_admins — list admins for this topic\nUse /settings for global bot admins.';
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and shared capacity (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset <name> — switch this session (group admin)\n/list_model_presets — list presets for this session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+const settingsHelp = '/settings — forum defaults and shared capacity (group admin)';
+const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
   { command: 'worktree', description: 'Move session to an OMP worktree; new topic in General' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
-  { command: 'settings', description: 'Forum defaults, global admins and shared capacity (admin)' },
+  { command: 'settings', description: 'Forum defaults and shared capacity (group admin)' },
   { command: 'setup', description: 'Request or enroll this forum, then open settings' },
-  { command: 'make_admin', description: 'Promote a user for this topic (admin)' },
-  { command: 'list_admins', description: 'List global and topic admins for this topic' },
-  { command: 'attach', description: 'Attach a local OMP host (instance admin)' },
-  { command: 'detach', description: 'Make this topic conversation-only (instance admin)' },
+  { command: 'list_admins', description: 'List current human group owner and administrators' },
+  { command: 'attach', description: 'Attach a local OMP host (group admin)' },
+  { command: 'detach', description: 'Make this topic conversation-only (group admin)' },
   { command: 'session', description: 'Open this topic’s session' },
   { command: 'status', description: 'Show host, mirroring, recovery and skill diagnostics' },
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
-  { command: 'terminate', description: 'Terminate all agents and suspend the service (instance admin)' },
-  { command: 'model_preset', description: 'Switch this session’s model preset (topic admin)' },
-  { command: 'list_model_presets', description: 'List this session’s model presets (topic admin)' },
+  { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
+  { command: 'model_preset', description: 'Switch session model preset (group admin)' },
+  { command: 'list_model_presets', description: 'List session model presets (group admin)' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
@@ -217,14 +218,14 @@ export class BotService {
     const persisted = readConfig(this.options.config.configPath);
     if (this.assignedPath(panel.chatId) !== panel.instancePath ||
         findInstance(persisted, this.id, panel.chatId)?.path !== panel.instancePath ||
-        !isActiveMember(member) || !this.isInstanceAdmin(panel.chatId, member.user, persisted)) {
+        !isAdministrator(member)) {
       throw new Error('The configured instance assignment or administrator access changed. No settings were saved.');
     }
     return persisted;
   }
   private async openSettings(ctx: Context): Promise<void> {
-    if (!(await this.instanceAdmin(ctx))) {
-      await replyTo(ctx, contextDestination(ctx), 'Settings require a configured bot or instance admin.');
+    if (!(await this.currentAdmin(ctx))) {
+      await replyTo(ctx, contextDestination(ctx), 'Settings require a current group owner or administrator.');
       return;
     }
     const panel: SettingsPanel = {
@@ -255,7 +256,7 @@ export class BotService {
     let text = 'Settings\nForum defaults apply to this forum, not the current topic. Existing topic skills and running models are unchanged.';
     if (page === 'root') {
       text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nShared capacity: ${config.omp.maxSessions} sessions across all instances`;
-      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Global admins','admins'],['Shared capacity','capacity']] as const) {
+      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Shared capacity','capacity']] as const) {
         button(label, {kind:'page',page:target});
       }
     } else if (page === 'prompts' || page === 'proposals') {
@@ -273,14 +274,6 @@ export class BotService {
       button('Clear default', {kind:'default',field});
       if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
       if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
-    } else if (page === 'admins') {
-      const identities = [...new Set([...assigned.instance.admins, ...(config.bots.find(bot => bot.id === this.id)?.admins ?? [])])];
-      text = 'Global admins\nBot admins apply across this bot’s forums. Instance admins are configured by the local operator.';
-      const visible = identities.slice(offset, offset + 20);
-      text += `\n\n${visible.map(value => typeof value === 'string' ? `@${value}` : `User ${value}`).join('\n') || '(none)'}`;
-      button('Add global admin', {kind:'admin'});
-      if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-20)});
-      if (offset + 20 < identities.length) button('Next', {kind:'page',page,offset:offset+20});
     } else {
       const limit = this.options.runtime.getSessionLimit();
       text = `Shared capacity: ${limit} sessions.\nThis limit applies to all bots and instances in this service, not just this forum. Increasing it does not submit or retry any tasks.`;
@@ -292,7 +285,6 @@ export class BotService {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
       panel.choices = choices;
       panel.revision = revision;
-      delete panel.adminReply;
     } catch (error) {
       this.settingsPanels.delete(panel.token);
       throw error;
@@ -323,13 +315,6 @@ export class BotService {
       return;
     }
     if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
-    if (action.kind === 'admin') {
-      const prompt = await replyTo(ctx,panel.destination,`Settings\n${ctx.from!.first_name}, reply with @username to add a global bot admin. This grants access across this bot’s forums. Reply /cancel to cancel.`,{reply_markup:{force_reply:true,selective:true},entities:[{type:'text_mention',offset:9,length:ctx.from!.first_name.length,user:ctx.from!}]});
-      panel.adminReply = {messageId:prompt.message_id,userId:ctx.from!.id};
-      this.settingsMessages.add(`${panel.chatId}:${prompt.message_id}`);
-      if (this.settingsMessages.size > 4096) this.settingsMessages.delete(this.settingsMessages.values().next().value!);
-      return;
-    }
     if (action.kind === 'capacity') {
       if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The shared session limit changed. Open Shared capacity again.');
       if (!action.confirm) {
@@ -373,23 +358,6 @@ export class BotService {
     const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
     if (!reply || !ctx.chat || !(this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
         (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return false;
-    const panel = [...this.settingsPanels.values()].find(panel => panel.chatId === ctx.chat!.id && panel.adminReply?.messageId === reply.message_id);
-    if (!panel || panel.expires <= Date.now() || !ctx.from || ctx.from.is_bot || (message && 'sender_chat' in message) || panel.adminReply!.userId !== ctx.from.id ||
-        !sameTopicDestination(panel.destination,contextDestination(ctx)) || reply.from?.id !== this.id ||
-        'forward_origin' in reply || 'forward_date' in reply) return true;
-    const text = messageText(message)?.trim() ?? '';
-    if (text === '/cancel') { delete panel.adminReply; return true; }
-    if (!/^@?[A-Za-z0-9_]{1,32}$/.test(text) || !/[A-Za-z]/.test(text)) {
-      const prompt = await replyTo(ctx,panel.destination,'Settings\nReply with a valid @username to add a global bot admin, or /cancel.',{reply_markup:{force_reply:true,selective:true},reply_parameters:{message_id:message!.message_id,allow_sending_without_reply:true}});
-      panel.adminReply = {messageId:prompt.message_id,userId:ctx.from.id};
-      this.settingsMessages.add(`${panel.chatId}:${prompt.message_id}`);
-      if (this.settingsMessages.size > 4096) this.settingsMessages.delete(this.settingsMessages.values().next().value!);
-      return true;
-    }
-    await this.settingsAccess(ctx,panel,true);
-    await this.makeAdmin(ctx,text,true,panel.instancePath);
-    delete panel.adminReply;
-    await this.renderSettings(panel,await this.settingsAccess(ctx,panel),'admins');
     return true;
   }
   private readonly skills: SkillPicker;
@@ -502,7 +470,7 @@ export class BotService {
     if (this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)})?.status === 'detached') return;
     if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
     const promptInput = !text.startsWith('/') || /^\/(?:new|worktree|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
-    if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.topicAdmin(ctx))) return;
+    if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.path === assigned.path).catch(() => undefined);
@@ -764,7 +732,7 @@ export class BotService {
     const destination = contextDestination(ctx);
     const assigned = findInstance(this.options.config,this.id,chatId);
     if (!assigned || !this.options.store.isEnrolled(this.id,chatId)) {
-      await replyTo(ctx,destination,`${await this.ready(chatId) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as an instance admin to enroll an assigned group, or as a group administrator to request assignment.`);
+      await replyTo(ctx,destination,`${await this.ready(chatId) ? 'Forum permissions ready.' : 'Enable Topics in a supergroup and grant Manage Topics and Pin Messages.'} Run /setup as a current group owner or administrator to enroll an assigned group or request local assignment approval.`);
       return;
     }
     await this.authorize(chatId,ctx.from!.id,true);
@@ -833,7 +801,7 @@ export class BotService {
   async authorizeSession(session: TopicSession, userId: number): Promise<boolean> {
     const member = await this.authorizeMember(session.chatId, userId);
     this.requireSessionAssignment(session);
-    return this.isTopicAdmin(topicDestination(session.chatId, session.threadId), member.user);
+    return isAdministrator(member);
   }
   private async authorizeMember(chatId: number, userId: number, statusOnly = false) {
     if (this.stopped) throw this.background.signal.reason;
@@ -843,7 +811,8 @@ export class BotService {
     const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)]);
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
-    if (chat.type !== 'supergroup' || !isActiveMember(user) || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
+    if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
+    if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
     if (this.stopped) throw this.background.signal.reason;
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
     return user;
@@ -886,8 +855,8 @@ export class BotService {
       ? 'Text messages in a session topic are treated as prompts.'
       : 'Use /p <prompt> or reply to my messages in a session topic. Ordinary messages and mentions are ignored.';
     return `${input}\nIn General, /p works like /new (with a task or an interactive reply).\n${this.usersCanProposePrompts(chatId)
-      ? 'Non-admin prompts require approval by an instance admin.'
-      : 'Only instance admins can send prompts. Other members’ messages are ignored.'}`;
+      ? 'Non-admin prompts require approval by a group administrator.'
+      : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
   private syncCommandMenus(): Promise<void> {
     const operation = this.menuTail.then(() => this.publishCommandMenus());
@@ -927,127 +896,28 @@ export class BotService {
       this.skillAliases.delete(chatId);
     }
   }
-  private isInstanceAdmin(chatId: number, user: Context['from'], config = this.options.config): boolean {
-    const assigned = findInstance(config, this.id, chatId);
-    return Boolean(assigned && user && !user.is_bot && (
-      config.bots.find(bot => bot.id === this.id)?.admins?.some(admin => admin === user.id || (user.username && admin === user.username.toLowerCase())) ||
-      (user.username && assigned.instance.admins.includes(user.username.toLowerCase()))));
-  }
-  private isTopicAdmin(destination: TopicDestination, user: Context['from'], config = this.options.config): boolean {
-    if (!user || user.is_bot) return false;
-    if (this.isInstanceAdmin(destination.chatId, user, config)) return true;
-    if (destination.kind !== 'topic') return false;
-    const assigned = findInstance(config, this.id, destination.chatId);
-    return Boolean(assigned && this.options.store.isTopicAdmin(this.id, destination, user.id, user.username));
-  }
-  private async topicAdmin(ctx: Context): Promise<boolean> {
-    if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;
-    const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
-    return isActiveMember(member) && this.isTopicAdmin(contextDestination(ctx), member.user);
-  }
-  private async makeAdmin(ctx: Context, arg: string, global = false, expectedPath?: string): Promise<void> {
-    if (!global && contextDestination(ctx).kind === 'general') {
-      await replyTo(ctx,contextDestination(ctx),'Use /settings to manage global bot admins.');
-      return;
-    }
-    if (global && !(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) throw new Error('Configuration is read-only. No promotion was saved.');
-    if (!(await this.topicAdmin(ctx))) {
-      await replyTo(ctx, contextDestination(ctx), 'Only an admin for this topic or bot can promote users here.');
-      return;
-    }
-    const reply = ctx.message && 'reply_to_message' in ctx.message ? ctx.message.reply_to_message : undefined;
-    const username = arg.replace(/^@/, '').toLowerCase();
-    if (arg ? !/^@?[A-Za-z0-9_]{1,32}$/.test(arg) || !/[A-Za-z]/.test(username)
-      : !reply?.from || reply.from.is_bot || 'sender_chat' in reply) {
-      await replyTo(ctx, contextDestination(ctx), 'Usage: /make_admin @username, or reply to a user’s message with /make_admin. Numeric ID arguments are not supported.');
-      return;
-    }
-    const instancePath = this.assignedPath(ctx.chat!.id);
-    if (expectedPath !== undefined && instancePath !== expectedPath) throw new Error('The group instance assignment changed. No promotion was saved.');
-    let target: string | number = username;
-    if (!arg) {
-      const member = await this.bot.api.getChatMember(ctx.chat!.id, reply!.from!.id);
-      if (!isActiveMember(member) || member.user.is_bot) {
-        await replyTo(ctx, contextDestination(ctx), 'Only a current human member of this forum can be promoted.');
-        return;
-      }
-      target = member.user.id;
-    }
-    const member = await this.bot.api.getChatMember(ctx.chat!.id, ctx.from!.id);
-    const persisted = readConfig(this.options.config.configPath);
-    const assigned = findInstance(persisted, this.id, ctx.chat!.id);
-    if (!assigned || assigned.path !== instancePath || this.assignedPath(ctx.chat!.id) !== instancePath ||
-        !isActiveMember(member) || !(global ? this.isInstanceAdmin(ctx.chat!.id, member.user, persisted) : this.isTopicAdmin(contextDestination(ctx), member.user, persisted))) {
-      throw new Error('The configured instance assignment or administrator access changed. No promotion was saved.');
-    }
-    const destination = contextDestination(ctx);
-    if (global) {
-      const bot = persisted.bots.find(bot => bot.id === this.id)!;
-      bot.admins = [...new Set([...(bot.admins ?? []), target])];
-      writeConfig(persisted);
-      this.options.config.bots.find(bot => bot.id === this.id)!.admins = bot.admins;
-      this.config.admins = bot.admins;
-    } else {
-      this.options.store.addTopicAdmin(this.id, destination, target);
-    }
-    await replyTo(ctx, destination, `${typeof target === 'string' ? `@${target}` : `User ${target}`} is now an admin ${global ? 'for this bot. Saved to configuration.' : 'for this topic only. Saved persistently in runtime data.'}`);
+  private async currentAdmin(ctx: Context): Promise<boolean> {
+    if (!ctx.from || ctx.from.is_bot || ctx.chat?.type !== 'supergroup') return false;
+    return isAdministrator(await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id));
   }
   private async listAdmins(ctx: Context): Promise<void> {
     const destination = contextDestination(ctx);
-    if (destination.kind === 'general') {
-      await replyTo(ctx,destination,'Use /settings to view global bot admins.');
-      return;
-    }
-    const assigned = findInstance(this.options.config, this.id, destination.chatId)!;
-    const globals = [...assigned.instance.admins, ...(this.options.config.bots.find(bot => bot.id === this.id)?.admins ?? [])];
-    const topics = this.options.store.listTopicAdmins(this.id, destination.chatId)
-      .filter(grant => grant.threadId === destination.threadId);
-    const users = new Map<string | number, { label: string; username?: string }>();
-    for (const identity of new Set([...globals, ...topics.map(grant => grant.identity)])) {
-      if (typeof identity === 'string') { users.set(identity, { label: `@${identity}`, username: identity }); continue; }
-      const member = await this.bot.api.getChatMember(destination.chatId, identity);
-      users.set(identity, {
-        label: member.user.username ? `@${member.user.username.toLowerCase()}` : `User ID: ${identity}`,
-        username: member.user.username?.toLowerCase(),
-      });
-    }
-    const globalIdentities = new Set<string | number>(globals);
-    for (const identity of globals) {
-      const username = typeof identity === 'number' ? users.get(identity)?.username : undefined;
-      if (username) globalIdentities.add(username);
-    }
-    const topicGroups = new Map<number, Set<string>>();
-    topicGroups.set(destination.threadId, new Set());
-    for (const grant of topics) {
-      const username = typeof grant.identity === 'number' ? users.get(grant.identity)?.username : grant.identity;
-      if (globalIdentities.has(grant.identity) || (username && globalIdentities.has(username))) continue;
-      let admins = topicGroups.get(grant.threadId);
-      if (!admins) { admins = new Set(); topicGroups.set(grant.threadId, admins); }
-      admins.add(users.get(grant.identity)!.label);
-    }
-    const globalAdmins = [...new Set(globals.map(identity => users.get(identity)!.label))];
-    const topicAdmins: string[] = [];
-    const topicBase = `https://t.me/c/${String(destination.chatId).replace(/^-100/, '')}/`;
-    for (const admins of topicGroups.values()) topicAdmins.push(...admins);
-    const lines = [
-      'Global admins:', ...(globalAdmins.length ? globalAdmins : ['none']), '',
-      `<a href="${topicBase}${destination.threadId}">Topic admins</a>:`,
-      ...(topicAdmins.length ? topicAdmins : ['none']),
-    ];
+    const instancePath = this.assignedPath(destination.chatId);
+    const roster = await this.bot.api.getChatAdministrators(destination.chatId);
+    const lines = ['Group administrators:', ...roster.filter(isAdministrator).map(member =>
+      `${member.status === 'creator' ? 'Owner' : 'Administrator'}: ${member.user.username ? `@${member.user.username}` : `${member.user.first_name} (User ${member.user.id})`}`)];
     let chunk = '';
+    const deliver = async () => {
+      await this.authorize(destination.chatId, ctx.from!.id);
+      if (this.assignedPath(destination.chatId) !== instancePath ||
+          findInstance(readConfig(this.options.config.configPath), this.id, destination.chatId)?.path !== instancePath) throw new Error('The group instance assignment changed');
+      await replyTo(ctx, destination, chunk);
+    };
     for (const line of lines) {
-      if (chunk.length + line.length + 1 > 3800) {
-        await replyTo(ctx, destination, chunk, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
-        chunk = '';
-      }
+      if (chunk.length + line.length + 1 > 3800) { await deliver(); chunk = ''; }
       chunk += `${chunk ? '\n' : ''}${line}`;
     }
-    if (chunk) await replyTo(ctx, destination, chunk, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
-  }
-  private async instanceAdmin(ctx: Context): Promise<boolean> {
-    if (!ctx.from || ctx.from.is_bot || !ctx.chat) return false;
-    const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
-    return this.isInstanceAdmin(ctx.chat.id, member.user) && isActiveMember(member);
+    if (chunk) await deliver();
   }
   async reconcileConfiguration(): Promise<void> {
     if (this.stopped) return;
@@ -1197,7 +1067,7 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
-  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void, worktree = false): Promise<void> {
+  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void, worktree = false, authority = ctx): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
@@ -1205,9 +1075,10 @@ export class BotService {
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
     const initialIcon = task && !worktree ? (await this.getIconIds()).running : undefined;
+    if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree ? undefined : task, ctx.from!.id, images);
+    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree ? undefined : task, ctx.from!.id, images, authority.from!.id);
     if (worktree) {
       const text = await this.options.runtime.worktree(session, task || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);
@@ -1243,11 +1114,10 @@ export class BotService {
     }
     await this.setTopicStatus(session, task ? 'running' : 'finished');
     await this.listen(session);
-    await this.authorize(ctx.chat!.id, ctx.from!.id);
     await this.sendInitial(session);
   }
   private async askTask(ctx: Context): Promise<void> {
-    if (!(await this.instanceAdmin(ctx)) && !this.usersCanProposePrompts(ctx.chat!.id)) return;
+    if (!(await this.currentAdmin(ctx)) && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const name = ctx.from!.first_name;
     const message = await replyTo(ctx, contextDestination(ctx), `${name}, what should we work on? Reply to this message with the initial task.`, {
@@ -1265,7 +1135,7 @@ export class BotService {
     }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned) {
-      if (!isAdministrator(member)) {
+      if (!(await this.currentAdmin(ctx))) {
         const text = 'Only a current group administrator can request setup for an unassigned forum.';
         if (ctx.callbackQuery) await ctx.answerCallbackQuery(text);
         else await replyTo(ctx, contextDestination(ctx), text);
@@ -1277,8 +1147,8 @@ export class BotService {
       await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
       return;
     }
-    if (!this.isInstanceAdmin(ctx.chat.id, member.user)) {
-      const text = 'Only a configured instance admin can enroll this group.';
+    if (!(await this.currentAdmin(ctx))) {
+      const text = 'Only a current group owner or administrator can enroll this group.';
       if (ctx.callbackQuery) await ctx.answerCallbackQuery(text);
       else await replyTo(ctx, contextDestination(ctx), text);
       return;
@@ -1301,7 +1171,7 @@ export class BotService {
     }
     const token = randomBytes(16).toString('base64url');
     const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),
-      `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by an instance admin is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
+      `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by a group administrator is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
       { reply_markup: { inline_keyboard: [[
         { text: `Confirm ${limit} → ${limit * 2}`, callback_data: `capacity:approve:${token}` },
         { text: 'Cancel', callback_data: `capacity:cancel:${token}` },
@@ -1321,8 +1191,8 @@ export class BotService {
       await replyTo(ctx, contextDestination(ctx), 'This capacity request expired. Send a prompt in the topic to request another confirmation.');
       return;
     }
-    if (!(await this.instanceAdmin(ctx))) {
-      await ctx.answerCallbackQuery('Only a configured instance admin can confirm or cancel a capacity increase.');
+    if (!(await this.currentAdmin(ctx))) {
+      await ctx.answerCallbackQuery('Only a current group administrator can confirm or cancel a capacity increase.');
       return;
     }
     await this.authorize(request.chatId,ctx.from!.id);
@@ -1342,7 +1212,7 @@ export class BotService {
     const persisted = readConfig(this.options.config.configPath);
     const assigned = findInstance(persisted, this.id, request.chatId);
     if (!isActiveMember(member) || !assigned ||
-        assigned.path !== session.instancePath || !this.isInstanceAdmin(ctx.chat!.id, member.user, persisted)) {
+        assigned.path !== session.instancePath || !isAdministrator(member)) {
       await replyTo(ctx, contextDestination(ctx), 'The configured instance assignment or administrator access changed. The session limit is unchanged.');
       return;
     }
@@ -1381,7 +1251,7 @@ export class BotService {
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
   private async routePrompt(ctx: Context, text: string, session?: TopicSession, immediateSkill?: string, worktree = false): Promise<void> {
-    const admin = await (session ? this.topicAdmin(ctx) : this.instanceAdmin(ctx));
+    const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     await this.receiveMessage(ctx,true);
@@ -1405,12 +1275,13 @@ export class BotService {
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
-    if (admin) {
+    if (await this.currentAdmin(ctx)) {
       if (session) {
         await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills,topicSkill});
       } else await this.newSession(ctx, text, undefined, undefined, images, !worktree && text ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
       return;
     }
+    if (!this.usersCanProposePrompts(ctx.chat!.id)) return;
     const now = Date.now();
     for (const [token, proposal] of this.promptProposals) if (proposal.expires <= now) this.promptProposals.delete(token);
     const token = randomBytes(16).toString('base64url');
@@ -1434,7 +1305,7 @@ export class BotService {
         ctx.chat.id !== proposal.source.chat!.id || message.message_id !== proposal.messageId ||
         !sameTopicDestination(contextDestination(ctx), contextDestination(proposal.source)) ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
-    if (!(await (proposal.sessionId ? this.topicAdmin(ctx) : this.instanceAdmin(ctx)))) {
+    if (!(await this.currentAdmin(ctx))) {
       await ctx.answerCallbackQuery('Only an admin authorized for the target session or new-topic creation can approve this prompt.');
       return;
     }
@@ -1452,19 +1323,21 @@ export class BotService {
     await this.authorize(ctx.chat.id, proposal.source.from!.id);
     this.promptProposals.delete(token);
     await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
+    if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before prompt approval.');
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text,proposal.images))) {
+      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text,proposal.images,undefined,ctx))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images,undefined,proposal.worktree);
+    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images,undefined,proposal.worktree,ctx);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
-  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}): Promise<boolean> {
+  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     this.requireSessionAssignment(session);
     await this.listen(session);
     await this.authorize(ctx.chat!.id,ctx.from!.id);
+    if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
     if (this.listeners.get(session.id)?.initial) {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
@@ -1588,11 +1461,12 @@ export class BotService {
     const command = (directedReply ? `/p ${text}` : text)?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
     if (command?.[2] && command[2].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
     if (command?.[1]?.toLowerCase() === 'terminate') {
-      if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Termination requires a configured instance admin.'); return; }
+      if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Termination requires a current group administrator.'); return; }
+      const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from!.id);
       const persisted = readConfig(this.options.config.configPath);
       const assigned = findInstance(persisted, this.id, ctx.chat.id);
-      if (!assigned || !this.isInstanceAdmin(ctx.chat.id, ctx.from, persisted)) {
-        await replyTo(ctx, contextDestination(ctx), 'Termination requires a configured instance admin.');
+      if (!assigned || assigned.path !== this.assignedPath(ctx.chat.id) || !isAdministrator(member)) {
+        await replyTo(ctx, contextDestination(ctx), 'Termination requires a current group administrator.');
         return;
       }
       persisted.terminated = true;
@@ -1603,9 +1477,6 @@ export class BotService {
       return;
     }
     if (ctx.chat.type === 'private') {
-      const instances = Object.values(this.options.config.instances).filter(instance => instance.chats.some(chat => chat.botId === this.id));
-      const allowed = ctx.from?.username && instances.some(instance => instance.admins.includes(ctx.from!.username!.toLowerCase()));
-      if (instances.length && !allowed) { await replyTo(ctx, contextDestination(ctx), 'This bot is managed by its configured instance admins. Ask the local operator for access.'); return; }
       await replyTo(ctx, contextDestination(ctx), 'Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup. Configure the Mini App URL in BotFather for this bot.', {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
     }
     if (command?.[1]?.toLowerCase() === 'setup') { await this.setup(ctx); return; }
@@ -1698,7 +1569,6 @@ export class BotService {
       await this.authorize(ctx.chat.id, ctx.from.id);
       const action = command[1]!.toLowerCase();
       let arg = command[3]?.trim() ?? '';
-      if (action === 'make_admin') { await this.makeAdmin(ctx, arg); return; }
       if (action === 'list_admins') {
         if (arg) { await replyTo(ctx, destination, 'Usage: /list_admins'); return; }
         await this.listAdmins(ctx);
@@ -1735,7 +1605,7 @@ export class BotService {
         return;
       }
       if (action === 'detach') {
-        if (!(await this.topicAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires an admin for this topic or bot.'); return; }
+        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.'); return; }
         if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a session topic, not General or an unrelated chat.'); return; }
         await this.detachSession(session);
         await replyTo(ctx, contextDestination(ctx), 'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
@@ -1746,12 +1616,12 @@ export class BotService {
         return;
       }
       if ((action === 'new' || action === 'p') && !this.usersCanProposePrompts(ctx.chat.id) &&
-          !(await (action === 'new' ? this.instanceAdmin(ctx) : this.topicAdmin(ctx)))) return;
+          !(await this.currentAdmin(ctx))) return;
       if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
       if (action === 'worktree') {
         if (destination.kind === 'general') { await this.routePrompt(ctx,arg,undefined,undefined,true); return; }
         if (!session || detached) { await replyTo(ctx,destination,'Use /worktree inside an active session topic, or General to create one.'); return; }
-        if (!(await this.topicAdmin(ctx))) { await replyTo(ctx,destination,'Worktree commands require an admin for this topic or bot.'); return; }
+        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx,destination,'Worktree commands require a group administrator.'); return; }
         await this.authorize(ctx.chat.id,ctx.from.id);
         this.requireSessionAssignment(session);
         if (session.status !== 'open') throw new Error('This session is archived. Reopen the topic before creating a worktree.');
@@ -1767,7 +1637,7 @@ export class BotService {
         return;
       }
       if (action === 'attach') {
-        if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Attaching requires a configured instance admin.'); return; }
+        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Attaching requires a group administrator.'); return; }
         const match = arg.match(/^([A-Za-z0-9_-]+)(?:\s+(.+))?$/);
         if (!match) { await replyTo(ctx, contextDestination(ctx), 'Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.'); return; }
         const instancePath = this.assignedPath(ctx.chat.id);
@@ -1780,7 +1650,7 @@ export class BotService {
         await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'OPEN AGENT',url:this.link(session)}]]}}); return;
       }
       if (action === 'model_preset' || action === 'list_model_presets') {
-        if (!(await this.topicAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require an admin for this topic or bot.'); return; }
+        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }
         if (destination.kind !== 'topic' || !session) { await replyTo(ctx, contextDestination(ctx), `Use /${action} in a session topic. Use /settings for forum defaults.`); return; }
         if (session && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before using model preset commands.'); return; }
         if (action === 'model_preset' ? !/^[A-Za-z][\w-]*$/.test(arg) : Boolean(arg)) {
@@ -1793,7 +1663,7 @@ export class BotService {
         try {
           await this.options.runtime.ensure(session);
           await this.authorize(ctx.chat.id,ctx.from.id);
-          if (!(await this.topicAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require an admin for this topic or bot.'); return; }
+          if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }
           this.requireSessionAssignment(session);
           if (this.options.store.getSessionGeneration(session.id) !== generation ||
               this.options.store.getSession(session.id)?.status !== 'open') throw new Error('The session changed before the model preset command could run');
@@ -1971,22 +1841,37 @@ export class BotService {
       throw error;
     }
   }
+  private async authorizeInitial(session: TopicSession, userId: number, authorityUserId: number): Promise<void> {
+    try {
+      await this.authorize(session.chatId, userId);
+      if (!isAdministrator(await this.bot.api.getChatMember(session.chatId, authorityUserId))) {
+        throw new AuthorizationDeniedError('Administrator access changed before initial task submission.');
+      }
+      this.requireSessionAssignment(session);
+    } catch (error) {
+      if (error instanceof AuthorizationDeniedError) this.options.store.cancelInitialTask(session.id);
+      throw error;
+    }
+  }
   private async sendInitial(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
     await this.listen(session);
     if (this.stopped) throw this.background.signal.reason;
-    const userId = this.options.store.getInitialUser(session.id);
-    if (!userId) return;
-    await this.authorize(session.chatId,userId);
-    this.requireSessionAssignment(session);
     if (!this.options.store.hasPendingInitialTask(session.id)) return;
+    const userId = this.options.store.getInitialUser(session.id);
+    const authorityUserId = this.options.store.getInitialAuthority(session.id);
+    if (!userId || !authorityUserId) {
+      this.options.store.cancelInitialTask(session.id);
+      throw new Error('Initial task has no authorizing administrator. Submit the task again.');
+    }
+    await this.authorizeInitial(session, userId, authorityUserId);
     this.options.runtime.markPrompt(session.id);
     const task = this.options.store.claimInitialTask(session.id);
     if (!task) return;
     const listener = this.listeners.get(session.id)!;
     const messageId = this.options.store.getReplyTarget(session.id);
     const images = this.options.store.getInitialImages(session.id);
-    listener.initial = {text:task,images,userId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
+    listener.initial = {text:task,images,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.options.config.omp.startupTimeoutMs);
     listener.initial.timer.unref();
     this.sendPrompt(listener,task,messageId,images);
@@ -2297,7 +2182,7 @@ export class BotService {
         void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
       } else {
         initial.timer = setTimeout(() => {
-          void this.authorize(session.chatId,initial.userId).then(() => {
+          void this.authorizeInitial(session,initial.userId,initial.authorityUserId).then(() => {
             if (listener.initial !== initial || this.stopped || !this.sessionAssigned(session) || !listener.connection) return;
             if (Date.now() >= initial.deadline) {
               listener.initial = undefined;

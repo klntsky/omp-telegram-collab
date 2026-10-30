@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { readConfig, writeConfig } from '../src/config.js';
-import { botId, chatId, ownerUsername } from './telegram-data.js';
+import { botId, chatId } from './telegram-data.js';
 import { clickSettings, setForumSetting, settingsButton } from './bot-test-helpers.js';
 import type { AppConfig } from '../shared/contracts.js';
 
@@ -19,7 +19,7 @@ test('setup opens current settings and navigation edits one panel with Back and 
   try {
     await app.update({ text: '/setup' });
     const panel = app.messages.at(-1)!;
-    for (const label of ['Prompt mode','User proposals','Default new-topic skill','Default model preset','Global admins','Shared capacity','Close']) settingsButton(panel,label);
+    for (const label of ['Prompt mode','User proposals','Default new-topic skill','Default model preset','Shared capacity','Close']) settingsButton(panel,label);
     await clickSettings(app,'Prompt mode');
     assert.equal(app.messages.at(-1)!.message_id,panel.message_id);
     await clickSettings(app,'Only /p');
@@ -59,10 +59,10 @@ test('settings callbacks reject unauthorized users, old choices and closed panel
     await clickSettings(app,'Prompt mode');
     const page = app.messages.at(-1)!;
     const choice = settingsButton(page,'Only /p');
-    app.setCurrentMember({username:'other_admin',status:'administrator'});
+    app.setCurrentMember({username:'other_admin',status:'member'});
     await app.callback(choice,page);
     assert.notEqual(saved(app).chat.all_messages_are_prompts,false);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({status:'creator'});
     await app.callback(choice,page);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
     await clickSettings(app,'Prompt mode');
@@ -97,7 +97,7 @@ for (const targetKind of ['file','directory'] as const) {
   });
 }
 
-for (const change of ['admins','assignment'] as const) {
+for (const change of ['role','assignment'] as const) {
   test(`settings cannot overwrite persisted ${change} changes after opening a selection`, async () => {
     const app = await createSmokeApp();
     try {
@@ -107,7 +107,7 @@ for (const change of ['admins','assignment'] as const) {
       const choice = settingsButton(panel,'Fast');
       const updated = saved(app).config;
       const instance = Object.values(updated.instances)[0]!;
-      if (change === 'admins') instance.admins = ['another_admin'];
+      if (change === 'role') app.setCurrentMember({status:'member'});
       else instance.chats = [];
       writeConfig(updated);
       await app.callback(choice,panel);
@@ -156,28 +156,12 @@ for (const catalog of ['skill','preset'] as const) {
   });
 }
 
-test('global admin replies are bound to their prompt and never become session prompts', async () => {
+test('settings replies remain control input rather than session prompts', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app,'Global admins');
-    assert.ok(String(app.messages.at(-1)!.text).includes(ownerUsername));
-    await clickSettings(app,'Add global admin');
-    const request = app.messages.at(-1)!;
-    const participant = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
-    await app.update({text:'@intruder',reply_to_message:request},participant);
-    assert.equal(saved(app).config.bots[0]!.admins,undefined);
-    await app.update({text:'@@invalid',reply_to_message:request});
-    assert.equal(saved(app).config.bots[0]!.admins,undefined);
-    const correction = app.messages.at(-1)!;
-    assert.ok(correction.reply_markup && typeof correction.reply_markup === 'object' && 'force_reply' in correction.reply_markup);
-    assert.equal(correction.reply_markup.force_reply,true);
-    await app.update({text:'@intruder',reply_to_message:correction},participant);
-    assert.equal(saved(app).config.bots[0]!.admins,undefined);
-    await app.update({text:'@GrAcE',reply_to_message:correction});
-    assert.deepEqual(saved(app).config.bots[0]!.admins,['grace']);
-    await app.update({text:'@alan',reply_to_message:request});
-    assert.deepEqual(saved(app).config.bots[0]!.admins,['grace']);
+    const panel = app.messages.at(-1)!;
+    await app.update({text:'Do not submit this',reply_to_message:panel});
     assert.deepEqual(app.store.listSessions(botId),[]);
     assert.deepEqual(app.accepted,[]);
   } finally { await app.close(); }
@@ -235,7 +219,7 @@ test('settings choices cannot be replayed from another message or destination', 
   } finally { await app.close(); }
 });
 
-for (const change of ['admins','assignment','unrelated'] as const) {
+for (const change of ['role','assignment','unrelated'] as const) {
   test(`catalog selection re-reads persisted ${change} edits after asynchronous lookup`, async t => {
     const app = await createSmokeApp();
     try {
@@ -245,10 +229,10 @@ for (const change of ['admins','assignment','unrelated'] as const) {
       const choice = settingsButton(panel,'Fast');
       const updated = saved(app).config;
       const instance = Object.values(updated.instances)[0]!;
-      if (change === 'admins') instance.admins = ['another_admin'];
-      else if (change === 'assignment') instance.chats = [];
-      else updated.port = 23456;
+      if (change === 'assignment') instance.chats = [];
+      else if (change === 'unrelated') updated.port = 23456;
       t.mock.method(app.runtime,'availableModelPresets',async()=>{
+        if (change === 'role') app.setCurrentMember({status:'member'});
         writeConfig(updated);
         return ['Fast','Slow'];
       });

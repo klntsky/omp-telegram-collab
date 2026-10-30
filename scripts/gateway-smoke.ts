@@ -54,7 +54,7 @@ export async function verifyGatewayFlow() {
     reader.on('message', bytes => received.push(bytes.toString()));
     await once(reader, 'open');
     await waitUntil(() => received.some(text => text.includes('snapshot-chunk')), 'reader did not receive initial snapshot');
-    app.setCurrentMember({ username: 'ordinary-viewer', status: 'administrator' });
+    app.setCurrentMember({ username: 'ordinary-viewer', status: 'member' });
     const beforeViewerAction = app.accepted.length;
     const deniedViewer = once(reader, 'close');
     reader.send(JSON.stringify({ t: 'abort' }));

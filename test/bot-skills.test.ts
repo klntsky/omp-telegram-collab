@@ -55,7 +55,8 @@ test('skill callbacks accumulate once per user/topic and consume only the next a
     await app.update({ message_thread_id: 42, forum_topic_created: { name: 'Other topic' } });
     await app.update({ text: '/p Other topic', message_thread_id: 42 });
     assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'Other topic' });
-    app.setCurrentMember({ username: ownerUsername, status: 'member' });
+    app.setCurrentMember({ username: ownerUsername, status: 'creator' });
+    app.setUserRole(participant,'administrator');
     await app.update({ text: '/p Other user', message_thread_id: session.threadId }, { ...participant, username: ownerUsername });
     assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'Other user' });
     await app.update({ text: '/p Original user', message_thread_id: session.threadId });
@@ -140,7 +141,7 @@ test('proposal creation freezes and consumes proposer skills without consuming a
     assert.ok(approve?.callback_data);
     assert.equal(prompts(app).length, 1);
     await select(app, 'pdf-tools', session.threadId, participant);
-    app.setCurrentMember({ username: ownerUsername, status: 'member' });
+    app.setCurrentMember({ username: ownerUsername, status: 'creator' });
     await app.callback(approve.callback_data, proposal);
     assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: '/skill:find-skills\n\nFrozen proposal' });
     app.setCurrentMember({ username: 'grace', status: 'member' });
@@ -148,7 +149,7 @@ test('proposal creation freezes and consumes proposer skills without consuming a
     const later = app.messages.at(-1)!;
     const laterApprove = buttons(later).find(button => button.callback_data?.startsWith('prompt:approve:'));
     assert.ok(laterApprove?.callback_data);
-    app.setCurrentMember({ username: ownerUsername, status: 'member' });
+    app.setCurrentMember({ username: ownerUsername, status: 'creator' });
     await app.callback(laterApprove.callback_data, later);
     assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: '/skill:pdf-tools\n\nLater proposal' });
   } finally { await app.close(); }
@@ -193,8 +194,9 @@ test('inline skill search selects only for its original user and topic', async (
     };
     const callback = buttons(picker).find(button => button.text.includes('pdf-tools'))?.callback_data;
     assert.ok(callback);
-    app.setCurrentMember({ username: ownerUsername, status: 'member' });
+    app.setCurrentMember({ username: ownerUsername, status: 'creator' });
     const otherAdmin = { ...participant, username: ownerUsername };
+    app.setUserRole(otherAdmin,'administrator');
     await app.callback(callback, picker, otherAdmin);
     await app.update({ ...selection, message_thread_id: session.threadId }, otherAdmin);
     await app.update({ text: '/p Other user', message_thread_id: session.threadId }, otherAdmin);

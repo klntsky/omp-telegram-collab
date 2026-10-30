@@ -41,6 +41,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
@@ -53,7 +54,6 @@ export class Store {
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS skill_catalogs (instance_path TEXT PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
-      CREATE TABLE IF NOT EXISTS topic_admins (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),identity TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,identity));
       COMMIT;`);
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
@@ -65,23 +65,6 @@ export class Store {
   }
   setBotStatusTopic(botId: number, chatId: number, threadId: number): void {
     this.db.prepare('INSERT INTO bot_status_topics VALUES (?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE SET thread_id=excluded.thread_id').run(botId, chatId, threadId);
-  }
-  addTopicAdmin(botId: number, destination: TopicDestination, identity: string | number): void {
-    if (destination.kind !== 'topic') throw new Error('Topic administrator grants require a non-General topic');
-    this.db.prepare('INSERT OR IGNORE INTO topic_admins VALUES (?,?,?,?)')
-      .run(botId, destination.chatId, destination.threadId, String(identity));
-  }
-  isTopicAdmin(botId: number, destination: TopicDestination, userId: number, username?: string): boolean {
-    if (destination.kind !== 'topic') return false;
-    return Boolean(this.db.prepare('SELECT 1 FROM topic_admins WHERE bot_id=? AND chat_id=? AND thread_id=? AND (identity=? OR identity=?)')
-      .get(botId, destination.chatId, destination.threadId, String(userId), username?.toLowerCase() ?? ''));
-  }
-  listTopicAdmins(botId: number, chatId: number): { threadId: number; identity: string | number }[] {
-    return this.db.prepare('SELECT thread_id,identity FROM topic_admins WHERE bot_id=? AND chat_id=? ORDER BY thread_id,identity')
-      .all(botId, chatId).map(row => ({
-        threadId: Number(row.thread_id),
-        identity: /^\d+$/.test(String(row.identity)) ? Number(row.identity) : String(row.identity),
-      }));
   }
   getPendingSkills(key: PendingSkillKey): string[] {
     return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId).map(row => String(row.name));
@@ -108,7 +91,7 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[]): TopicSession {
+  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[], authorityUserId = initialUserId): TopicSession {
     if (!key.instancePath) throw new Error('A session requires its configured instance path');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     this.db.exec('BEGIN IMMEDIATE');
@@ -119,6 +102,7 @@ export class Store {
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
       if (Number(result.changes) && initialTask && initialUserId) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
+        if (authorityUserId) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
         if (images?.length) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(images));
       }
       this.db.exec('COMMIT');
@@ -178,6 +162,10 @@ export class Store {
   }
   cancelInitialTask(id: string): void {
     this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
+  }
+  getInitialAuthority(id: string): number | undefined {
+    const row = this.db.prepare('SELECT user_id FROM initial_authorities WHERE session_id=?').get(id);
+    return row ? Number(row.user_id) : undefined;
   }
   getInitialImages(id: string): ImageContent[] | undefined {
     const row = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);

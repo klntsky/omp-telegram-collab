@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, botToken, chatId, ownerId, ownerUsername } from './telegram-data.js';
 
-test('/detach requires an instance admin and a session topic', async () => {
+test('/detach requires a group administrator and a session topic', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -17,7 +17,7 @@ test('/detach requires an instance admin and a session topic', async () => {
     await app.update({message_thread_id:42,forum_topic_created:{name:'Keep attached'}});
     const session = app.store.listSessions(botId)[0]!;
     const icon = app.topicEdits.at(-1)?.icon_custom_emoji_id;
-    app.setCurrentMember({username:'not_an_instance_admin'});
+    app.setCurrentMember({username:'ordinary_member',status:'member'});
     await app.update({text:'/detach',message_thread_id:42});
     assert.equal(app.store.getSession(session.id)?.status,'open');
     assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id,icon);

@@ -8,6 +8,7 @@
 - Keep test fixtures isolated per case. Prefer in-memory SQLite unless the scenario verifies disk persistence or restart behavior, and run test files with concurrency five.
 - The full test suite must pass before delivery. A timeout is not an acceptable verification result. Run tests without an arbitrary command deadline, investigate hangs and failures, and do not report completion until the suite passes.
 - Use plain prose for a single-point chat response. For multiple points, use straightforward numbered lists starting at 1, with 1.1, 1.2, and similar numbering when grouping is necessary. This rule applies only to the AI coding agent's own chat responses, not product UI, Telegram bot messages, documentation, or other generated content; use the formatting appropriate to each surface.
+- Do not use skill-specific jargon or internal workflow labels in user-facing responses. Describe the actual work and decisions in plain language, even when a skill asks you to announce its modes or principles.
 - Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.
 - When referring to a GitHub branch in user-facing responses, link its full GitHub branch URL rather than mentioning only its name.
 - When the user says "remember" a preference or instruction, update AGENTS.md with the durable rule rather than only acknowledging it in chat.

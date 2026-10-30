@@ -65,7 +65,7 @@ test('shortcut text respects proposal approval without changing a later pending 
     await app.update({text:'/skill_find_skills Ignored',message_thread_id:session.threadId},participant);
     assert.equal(app.accepted.filter(frame=>frame.t==='prompt').length,1);
     assert.deepEqual(app.store.getPendingSkills({botId,destination:topicDestination(chatId,session.threadId),userId:77}),[]);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
     await setForumSetting(app, 'User proposals', 'Allow user proposals');
     app.setCurrentMember({username:'participant',status:'member'});
@@ -75,7 +75,7 @@ test('shortcut text respects proposal approval without changing a later pending 
     const approve = markup.inline_keyboard.flat().find(button=>button.callback_data.startsWith('prompt:approve:'))!;
     assert.equal(app.accepted.filter(frame=>frame.t==='prompt').length,1);
     await app.update({text:'/skill_pdf_tools',message_thread_id:session.threadId},participant);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(approve.callback_data,proposal);
     assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'/skill:find-skills\n\nProposed task'});
     assert.deepEqual(app.store.getPendingSkills({botId,destination:topicDestination(chatId,session.threadId),userId:77}),['pdf-tools']);

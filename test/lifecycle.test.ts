@@ -288,7 +288,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       { id: botId, token: botToken, miniAppShortName: 'app' },
       { id: secondBotId, token: `${secondBotId}:fixture-other-token-not-valid-on-telegram`, miniAppShortName: 'app' },
     ],
-    instances: { [dir]: { admins: [ownerUsername], chats: groups.map(([botId, chatId]) => ({ botId: botId!, chatId: chatId! })) } },
+    instances: { [dir]: { chats: groups.map(([botId, chatId]) => ({ botId: botId!, chatId: chatId! })) } },
     publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: dir,
     omp: { executable: 'omp', args: [], maxSessions: 8, startupTimeoutMs: 1000 },
   };
@@ -422,7 +422,7 @@ test('a readable protected configuration starts normally and preserves writable 
     assert.equal(stored.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.instancePath, fixture.config.dataDir);
     assert.equal(stored.getSession(fixture.session.id)?.id, fixture.session.id);
   } finally { stored.close(); }
-  await assert.rejects(runAdmin(['admin', 'add', fixture.config.dataDir, 'DeniedAdmin'], fixture.config.configPath), /read-only/);
+  await assert.rejects(runAdmin(['configure', '--max-sessions', '50'], fixture.config.configPath), /read-only/);
   assert.equal(await readFile(fixture.config.configPath, 'utf8'), source);
 });
 

@@ -18,7 +18,7 @@ function fixture(t: TestContext) {
 function validConfig(path: string, directory: string) {
   const config = emptyConfig(path);
   config.bots = [{ id: botId, token: botToken, miniAppShortName: 'app' }];
-  config.instances[directory] = { admins: ['alice'], chats: [{ botId, chatId }] };
+  config.instances[directory] = { chats: [{ botId, chatId }] };
   config.publicUrl = 'https://collab.example.com';
   return config;
 }
@@ -62,11 +62,10 @@ test('missing config is never an implicit empty draft', t => {
   assert.equal(existsSync(path), false);
 });
 
-test('YAML supports normalized per-path admins, multiple bots and multiple chats', t => {
+test('YAML supports multiple bots and multiple chats', t => {
   const { path, dir } = fixture(t);
   const config = validConfig(path, dir);
   config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
-  config.instances[dir]!.admins = ['@Alice', 'BOB_OWNER', 'alice'];
   config.instances[dir]!.chats.push(
     { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true },
     { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true },
@@ -74,7 +73,6 @@ test('YAML supports normalized per-path admins, multiple bots and multiple chats
   );
   writeConfig(config);
   const loaded = readConfig(path);
-  assert.deepEqual(loaded.instances[dir]!.admins, ['alice', 'bob_owner']);
   assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
   assert.equal(findInstance(loaded, botId, -999), undefined);
   assert.deepEqual(loaded.instances[dir]!.chats, [
@@ -87,27 +85,14 @@ test('YAML supports normalized per-path admins, multiple bots and multiple chats
   assert.deepEqual(readConfig(path), loaded);
 });
 
-test('username and numeric bot administrators normalize, roundtrip, deduplicate, and remain optional', t => {
+test('obsolete administrator configuration keys are rejected', t => {
   const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  config.bots[0]!.admins = [123, Number.MAX_SAFE_INTEGER, 123, '@Alice', 'ALICE', 'bob_2'];
-  config.instances[dir]!.chats.push({ botId, chatId: -10042 });
-  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
-  writeConfig(config);
-  const loaded = readConfig(path);
-  assert.deepEqual(loaded.bots[0]!.admins, [123, Number.MAX_SAFE_INTEGER, 'alice', 'bob_2']);
-  assert.equal('admins' in loaded.bots[1]!, false);
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path), loaded);
-});
-
-test('administrator grants reject invalid values', t => {
-  const { path, dir } = fixture(t);
-  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '123', '', '@', '@123', 'bad-name', 'two names', ' alice', 'alice ', '@@alice', 'a'.repeat(33), null]) {
-    const config = validConfig(path, dir);
-    const { configPath: _, ...input } = config;
-    writeFileSync(path, stringify({ ...input, bots: [{ ...config.bots[0], admins: [id] }] }));
-    assertInvalid(path, () => readConfig(path), 'bots.0.admins.0');
+  const { configPath: _, ...input } = validConfig(path, dir);
+  for (const admins of [[], ['alice'], [42]]) {
+    writeFileSync(path, stringify({ ...input, bots: [{ ...input.bots[0], admins }] }));
+    assertInvalid(path, () => readConfig(path), 'bots.0');
+    writeFileSync(path, stringify({ ...input, instances: { [dir]: { ...input.instances[dir], admins } } }));
+    assertInvalid(path, () => readConfig(path), `instances.${dir}`);
   }
 });
 
@@ -143,7 +128,7 @@ test('forum model defaults reject names outside the native preset-name grammar',
   for (const default_model_preset of ['', '1Fast', '../Fast', 'Fast/Slow', 'Fast Slow', 'Fast.Slow', true, 1, null, [], {}]) {
     writeFileSync(path, stringify({
       ...config,
-      instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, default_model_preset }] } },
+      instances: { [dir]: { chats: [{ botId, chatId, default_model_preset }] } },
     }));
     assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_model_preset`);
   }
@@ -179,7 +164,7 @@ test('new-topic skill defaults reject whitespace, controls, backslashes, and non
     'Team\\Review', true, 1, null, [], {}]) {
     writeFileSync(path, stringify({
       ...config,
-      instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, default_new_topic_skill }] } },
+      instances: { [dir]: { chats: [{ botId, chatId, default_new_topic_skill }] } },
     }));
     assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_new_topic_skill`);
   }
@@ -195,7 +180,7 @@ test('YAML defaults prompt options independently and rejects nonboolean values',
     for (const mode of ['true', 'false', '', 0, 1, null, [], {}]) {
       writeFileSync(path, stringify({
         ...config,
-        instances: { [dir]: { admins: ['alice'], chats: [{ botId, chatId, [option]: mode }] } },
+        instances: { [dir]: { chats: [{ botId, chatId, [option]: mode }] } },
       }));
       assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.${option}`);
     }
@@ -213,9 +198,9 @@ test('explicit creation canonicalizes directories but reads never retarget store
   writeConfig(config);
   rmSync(original, { recursive: true });
   assert.equal(Object.keys(readConfig(path).instances)[0], original);
-  config.instances[original]!.admins.push('bob');
+  config.instances[original]!.chats[0]!.all_messages_are_prompts = false;
   writeConfig(config);
-  assert.deepEqual(readConfig(path).instances[original]!.admins, ['alice', 'bob']);
+  assert.equal(readConfig(path).instances[original]!.chats[0]!.all_messages_are_prompts, false);
   symlinkSync(other, original);
   assert.equal(Object.keys(readConfig(path).instances)[0], original);
 });
@@ -225,9 +210,9 @@ test('duplicate YAML path keys and normalized-path aliases are rejected', t => {
   const config = validConfig(path, dir);
   const { configPath: _configPath, ...value } = config;
   const source = stringify(value);
-  writeFileSync(path, source.replace('instances:\n', `instances:\n  ${JSON.stringify(dir)}: {admins: [], chats: []}\n`));
+  writeFileSync(path, source.replace('instances:\n', `instances:\n  ${JSON.stringify(dir)}: {chats: []}\n`));
   assertInvalid(path, () => readConfig(path));
-  config.instances[`${dir}/../${dir.split('/').at(-1)}`] = { admins: [], chats: [] };
+  config.instances[`${dir}/../${dir.split('/').at(-1)}`] = { chats: [] };
   assertInvalid(path, () => writeConfig(config));
 });
 
@@ -236,10 +221,10 @@ test('new stored paths reject symlink aliases and missing directories rather tha
   const config = validConfig(path, dir);
   const alias = join(dir, 'alias');
   symlinkSync(dir, alias);
-  config.instances[alias] = { admins: [], chats: [] };
+  config.instances[alias] = { chats: [] };
   assertInvalid(path, () => writeConfig(config), 'instances');
   delete config.instances[alias];
-  config.instances[join(dir, 'missing')] = { admins: [], chats: [] };
+  config.instances[join(dir, 'missing')] = { chats: [] };
   assertInvalid(path, () => writeConfig(config), 'instances');
   assert.equal(existsSync(path), false);
 });
@@ -250,7 +235,7 @@ test('duplicate bot IDs, tokens, chat assignments and missing referenced bots fa
     (config: AppConfig) => { config.bots.push({ ...config.bots[0]! }); },
     (config: AppConfig) => { config.bots.push({ ...config.bots[0]!, token: `${botId}:different-token` }); },
     (config: AppConfig) => { config.bots[0]!.id = 42; },
-    (config: AppConfig) => { config.instances[join(dir, 'missing')] = { admins: [], chats: [{ botId, chatId }] }; },
+    (config: AppConfig) => { config.instances[join(dir, 'missing')] = { chats: [{ botId, chatId }] }; },
     (config: AppConfig) => { config.instances[dir]!.chats.push({ botId: 42, chatId: -42 }); },
     (config: AppConfig) => { config.instances[dir]!.chats.push({ botId, chatId }); },
   ]) {
@@ -260,14 +245,10 @@ test('duplicate bot IDs, tokens, chat assignments and missing referenced bots fa
   }
 });
 
-test('YAML validates public origins, usernames, runtime fields and literal arguments without exposing secrets', t => {
+test('YAML validates public origins, runtime fields and literal arguments without exposing secrets', t => {
   const { path, dir } = fixture(t);
   for (const url of ['http://example.com', 'https://user:password@example.com', 'https://example.com/path', 'https://example.com/?q=1', 'https://example.com/#fragment']) {
     const config = validConfig(path, dir); config.publicUrl = url;
-    assertInvalid(path, () => writeConfig(config));
-  }
-  for (const username of ['', '123456', '@@alice', 'alice owner', 'a'.repeat(33)]) {
-    const config = validConfig(path, dir); config.instances[dir]!.admins = [username];
     assertInvalid(path, () => writeConfig(config));
   }
   for (const number of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {

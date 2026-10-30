@@ -12,7 +12,7 @@ async function fixture(t: TestContext) {
   const repository = join(directory, 'repository');
   await mkdir(repository);
   const config: AppConfig = {
-    bots: [{ id: 1, token: '1:fixture', miniAppShortName: 'app' }], instances: { [repository]: { admins: [], chats: [{ botId: 1, chatId: -100 }] } },
+    bots: [{ id: 1, token: '1:fixture', miniAppShortName: 'app' }], instances: { [repository]: { chats: [{ botId: 1, chatId: -100 }] } },
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir: join(directory, 'data'),
     omp: { executable: 'omp', args: [], maxSessions: 1, startupTimeoutMs: 10000 },

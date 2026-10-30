@@ -16,7 +16,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/packages/coding-agent/src/slash-commands), including built-in slash commands, aliases, and top-level CLI commands. Project and plugin commands vary by installation.
 
-Open the Mini App with `/session` or the topic's OPEN AGENT button. Current group members can watch; instance roots, bot admins, and the topic's admins can use its controls. Telegram group-admin status alone does not grant control. Archived sessions and read-only hosts remain read-only.
+Open the Mini App with `/session` or the topic's OPEN AGENT button. Current group members can watch; the supergroup owner and administrators can use its controls. Manage administrator roles in Telegram. Archived sessions and read-only hosts remain read-only.
 
 | Support level | OMP feature | Use from Telegram |
 | --- | --- | --- |

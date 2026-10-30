@@ -259,7 +259,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   const filename = join(directory, 'telegram.sqlite');
   let store = new Store(filename);
   try {
-    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, 'Pending instruction', 123);
+    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, 'Pending instruction', 123, undefined, 456);
     store.markSnapshot(original.id);
     store.rememberReply(original.id, 'saved-reply');
     store.advanceSessionGeneration(original.id);
@@ -271,6 +271,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.getSessionGeneration(original.id), 1);
     assert.equal(store.hasPendingInitialTask(original.id), true);
     assert.equal(store.getInitialUser(original.id), 123);
+    assert.equal(store.getInitialAuthority(original.id), 456);
     assert.equal(store.hasSnapshot(original.id), true);
     assert.equal(store.rememberReply(original.id, 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
@@ -314,14 +315,14 @@ test('current path validation rejects retargeted assignments and mismatched hist
   await mkdir(otherPath);
   const config = emptyConfig(join(directory, 'config.yaml'));
   config.dataDir = directory;
-  config.instances = { [originalPath]: { admins: ['ada'], chats: [{ botId, chatId }] } };
+  config.instances = { [originalPath]: { chats: [{ botId, chatId }] } };
   const store = new Store(':memory:');
   const runtime = new OmpRuntime(config);
   try {
     const managed = store.createSession({ ...topic, instancePath: originalPath }, 'Managed');
     const attached = store.createSession({ ...topic, threadId: 18, instancePath: originalPath }, 'Attached', { kind: 'attached', instanceId: 'host', sessionId: 'history' });
     await runtime.validateSessionPaths(store.listSessions());
-    const retargeted = { ...config, instances: { [otherPath]: { admins: ['ada'], chats: [{ botId, chatId }] } } };
+    const retargeted = { ...config, instances: { [otherPath]: { chats: [{ botId, chatId }] } } };
     for (const session of [managed, attached]) {
       await assert.rejects(runtime.validateSessionPaths([session], retargeted), /history pinned to another instance path/);
     }

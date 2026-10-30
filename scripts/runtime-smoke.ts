@@ -17,7 +17,7 @@ const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-smoke-'));
 const relay = await startLocalRelay();
 const config: AppConfig = {
   bots: [{ id: 123, token: '123:smoke-token-never-sent-to-telegram', miniAppShortName: 'app' }],
-  instances: { [dir]: { admins: ['smokeadmin'], chats: [{ botId: 123, chatId: -100123 }] } },
+  instances: { [dir]: { chats: [{ botId: 123, chatId: -100123 }] } },
   configPath: join(dir, 'config.yaml'),
   publicUrl: 'https://smoke.example', host: '127.0.0.1', port: 3000, dataDir: dir,
   omp: {
@@ -100,7 +100,7 @@ try {
   }));
   const secondPath = join(dir, 'second checkout');
   await mkdir(secondPath);
-  config.instances[secondPath] = { admins: [], chats: [{ botId: session.botId, chatId: session.chatId - 1 }] };
+  config.instances[secondPath] = { chats: [{ botId: session.botId, chatId: session.chatId - 1 }] };
   runtime.setSessionLimit(2);
   const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instancePath: secondPath };
   const secondBinding = await runtime.ensure(secondSession);
@@ -153,7 +153,7 @@ try {
   execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '-m', 'Smoke root']);
   await writeFile(join(worktreeRepository, 'tracked'), 'dirty tracked\n');
   await writeFile(join(worktreeRepository, 'untracked'), 'dirty untracked\n');
-  reopenedConfig.instances[worktreeRepository] = { admins: [], chats: [{ botId: session.botId, chatId: session.chatId - 2 }] };
+  reopenedConfig.instances[worktreeRepository] = { chats: [{ botId: session.botId, chatId: session.chatId - 2 }] };
   runtime = new OmpRuntime(reopenedConfig);
   const worktreeSession = {
     ...session, id: 'worktree-smoke-session', instancePath: worktreeRepository, chatId: session.chatId - 2,
