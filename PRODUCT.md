@@ -208,6 +208,8 @@ New managed hosts remain in startup when Collab discovery temporarily reports th
 
 The Mini App retains its transcript and draft during transient failures. Automatic reconnects use capped exponential backoff, the cached long-lived backend credential, and a fresh single-use ticket with current membership checks. Service restarts and the age of the original Telegram launch do not require reopening Telegram after the initial exchange. Reconnects do not queue or replay instructions. Leave, denied membership, invalid credentials or actions, a killed session, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available or to resume a killed session explicitly. Backend errors retain their original diagnostics rather than being replaced with expired-launch instructions.
 
+Transient connection notices disappear once the Mini App finishes reconnecting and loading the session snapshot. Unrelated session notices remain visible.
+
 Transient Telegram authorization lookup failures fail closed without becoming permanent access denials. Transport failures, ten-second lookup deadlines, Telegram rate limits (429), and Telegram server errors (5xx) refuse gateway admission with HTTP 503 or close an active socket with code 1013, retaining the original diagnostic. The Mini App silently retries through its existing reconnect flow and rechecks current access; it does not replay the blocked action. Other Telegram 4xx responses, confirmed membership loss, and local access denials remain non-recoverable access failures. Abandoned Mini App authentication requests cancel their lookups and promptly release authentication capacity.
 
 ## 4. Attached sessions and transcript

@@ -166,13 +166,21 @@ test('a retryable gateway diagnostic before welcome reconnects without ending th
     });
     client = new GuestClient(transport, initial.displayName);
     let ended = false;
-    client.subscribe(() => { if (client!.getSnapshot().phase === 'ended') ended = true; });
+    const connectionNoticeIds = new Set<number>();
+    client.subscribe(() => {
+      const snapshot = client!.getSnapshot();
+      if (snapshot.phase === 'ended') ended = true;
+      if (snapshot.phase === 'reconnecting') {
+        for (const notice of snapshot.notices) connectionNoticeIds.add(notice.id);
+      }
+    });
     client.connect();
     await waitFor(() => client!.getSnapshot().phase === 'live');
     assert.equal(ended, false);
     assert.equal(refreshes, 1);
     assert.equal(client.getSnapshot().readOnly, true);
-    assert.ok(client.getSnapshot().notices.some(notice => notice.message.includes(failure.message)));
+    assert.ok(connectionNoticeIds.size > 0);
+    assert.deepEqual(client.getSnapshot().notices.filter(notice => connectionNoticeIds.has(notice.id)), []);
     assert.deepEqual(app.accepted, []);
   } finally {
     client?.close();
