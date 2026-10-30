@@ -114,10 +114,10 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
 
-5. Point that HTTPS address at the configured listen host and port using a reverse proxy or tunnel with WebSocket support. `pnpm start` uses your configured address to print the BotFather web URL.
+5. Choose how to expose the service over HTTPS.
 
    <details>
-   <summary>Use a permanent Cloudflare Tunnel with cloudflared</summary>
+   <summary>Option 1: Use cloudflared</summary>
 
    You need a Cloudflare account and at least one domain added to that account with DNS managed by Cloudflare. This example uses `omp.example.com`. Replace `example.com` with your domain.
 
@@ -144,6 +144,18 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    </details>
 
+   <details>
+   <summary>Option 2: Set up HTTPS manually</summary>
+
+   1. Point your hostname, such as `omp.example.com`, at the server running your reverse proxy.
+   2. Configure the proxy to serve that hostname over HTTPS with a publicly trusted certificate.
+   3. Forward requests to the bot's configured listen address, which defaults to `http://127.0.0.1:3000`. Use an address reachable from the proxy if it runs on another machine.
+   4. Enable WebSocket forwarding for `/api/socket`, preserving the request path and query string.
+   5. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli configure`.
+   6. Open the complete per-bot URL printed at startup in a browser on your phone using mobile data. Confirm that the page loads over HTTPS with a valid certificate. Complete the Telegram connection check below after registering the Mini App.
+
+   </details>
+
 6. In BotFather, send `/newapp` to register the Mini App.
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
@@ -166,4 +178,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    Select the project directory and prompt settings when asked.
 
 9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do. Select **OPEN AGENT** in the new topic to open the Mini App.
+10. Verify the connection in Telegram.
+    1. On your phone, switch to mobile data and open the topic's **OPEN AGENT** button. Confirm that the Mini App loads the session transcript.
+    2. Send a prompt asking the agent to reply with a short greeting. Confirm that its reply appears in both the Mini App and the topic.
+    3. Keep the Mini App open and send another prompt from a second Telegram client. Confirm that the new reply appears in the open Mini App. This checks live updates through the WebSocket connection.
+
 
