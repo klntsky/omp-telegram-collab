@@ -124,7 +124,7 @@ for (const username of [ownerUsername, undefined]) {
       assert.equal(snapshot.state?.isAborting, false);
       assert.equal(snapshot.state?.queuedMessageCount, 0);
       assert.equal(snapshot.activeTools.size, 0);
-      await waitFor(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968');
+      await waitFor(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5408906741125490282');
       assert.equal(await app.runtime.isRunning(session), true);
       const notices = app.messages.slice(before).filter(message => String(message.text).includes('interrupted the chat'));
       assert.equal(notices.length, 1);

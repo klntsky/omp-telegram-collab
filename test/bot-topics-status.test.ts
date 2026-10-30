@@ -55,40 +55,40 @@ test('empty topic creation, initialization, and reopening do not launch managed 
   }
 });
 
-test('topic icons distinguish active work, idle live hosts, and process exit without confusing relay loss', async () => {
+test('topic icons share a finished flag for idle live hosts and process exit without confusing relay loss', async () => {
   const app = await createSmokeApp();
-  const running = '5312016608254762256', completed = '5237699328843200968', stopped = '5408906741125490282';
+  const running = '5312016608254762256', finished = '5408906741125490282';
   const icon = () => app.topicEdits.at(-1)?.icon_custom_emoji_id;
   const state = {cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]};
   try {
     await app.update({text:'/setup'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Status transitions'}});
     const session = app.store.listSessions(botId)[0]!;
-    assert.equal(icon(),stopped);
+    assert.equal(icon(),finished);
     assert.equal(app.connectionCount,0);
     await app.service.ensureMirroring(session,await app.runtime.ensure(session));
-    await eventually(() => icon() === completed);
+    await eventually(() => icon() === finished);
     app.emit({t:'event',event:{type:'agent_start'}});
     await eventually(() => icon() === running);
     app.emit({t:'state',state});
-    await eventually(() => icon() === completed);
+    await eventually(() => icon() === finished);
     app.emit({t:'state',state:{...state,queuedMessageCount:1}});
     await eventually(() => icon() === running);
     app.emit({t:'event',event:{type:'agent_end'}});
     await delay(50);
     assert.equal(icon(),running,'queued work keeps the topic running between turns');
     app.emit({t:'state',state});
-    await eventually(() => icon() === completed);
+    await eventually(() => icon() === finished);
     assert.equal(await app.runtime.isRunning(session),true,'completion does not imply process exit');
     const beforeDisconnect = app.topicEdits.length;
     app.disconnect();
     await delay(100);
-    assert.equal(icon(),completed,'a live process retains its icon when the relay disconnects');
+    assert.equal(icon(),finished,'a live process retains its icon when the relay disconnects');
     assert.equal(app.topicEdits.length,beforeDisconnect);
     await eventually(() => app.connectionCount > 1);
     await app.runtime.stop(session.id);
     app.disconnect();
-    await eventually(() => icon() === stopped);
+    await eventually(() => icon() === finished);
     assert.ok(app.topicEdits.every(edit => edit.chat_id === chatId && edit.message_thread_id === 42));
     assert.deepEqual(app.accepted,[],'status observation never submits instructions');
   } finally {
@@ -96,7 +96,7 @@ test('topic icons distinguish active work, idle live hosts, and process exit wit
   }
 });
 
-test('periodic topic status checks detect idle retirement without a relay close event', async t => {
+test('periodic topic status checks detect retirement without a relay close event', async t => {
   t.mock.timers.enable({apis:['setInterval']});
   const app = await createSmokeApp();
   try {
@@ -104,7 +104,8 @@ test('periodic topic status checks detect idle retirement without a relay close 
     await app.update({message_thread_id:42,forum_topic_created:{name:'Retiring host'}});
     const session = app.store.listSessions(botId)[0]!;
     await app.service.ensureMirroring(session,await app.runtime.ensure(session));
-    await eventually(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968');
+    app.emit({t:'event',event:{type:'agent_start'}});
+    await eventually(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256');
     await app.runtime.stop(session.id);
     t.mock.timers.tick(30000);
     await eventually(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5408906741125490282');
@@ -127,7 +128,7 @@ test('closing a working topic does not claim the process stopped while guarded s
     await app.update({message_thread_id:42,forum_topic_closed:{}});
     assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id,'5312016608254762256');
     app.emit({t:'event',event:{type:'agent_end'}});
-    await eventually(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5237699328843200968');
+    await eventually(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5408906741125490282');
     assert.equal(app.store.getSession(session.id)?.status,'closed');
   } finally {
     await app.close();

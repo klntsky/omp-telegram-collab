@@ -39,7 +39,7 @@ export interface RuntimeLike {
   close(): Promise<void>;
 }
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Bot<Context>; configWritable?: () => boolean; telegramIntervalMs?: number }
-type TopicActivity = 'running' | 'completed' | 'stopped';
+type TopicActivity = 'running' | 'finished';
 interface StatusFailure { operation: string; at: number; error: unknown }
 interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
 interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
@@ -57,7 +57,7 @@ interface Listener {
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
-  activity: 'running' | 'completed';
+  activity: TopicActivity;
   initial?: {
     text: string;
     images?: ImageContent[];
@@ -183,7 +183,7 @@ export class BotService {
   private readonly questions = new Map<string, PendingQuestion>();
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
-  private readonly topicIcons = new Map<string, { status?: TopicActivity; tail: Promise<void> }>();
+  private readonly topicIcons = new Map<string, { status?: TopicActivity; revision: number; tail: Promise<void> }>();
   private readonly sessionKillHandlers = new Set<(sessionId: string) => void>();
   private readonly commandMenus = new Map<number, string>();
   private readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
@@ -1085,7 +1085,7 @@ export class BotService {
           if (!id) throw new Error(`Telegram topic icon unavailable: ${emoji}`);
           return id;
         };
-        return { running: find('⚡'), completed: find('✅'), stopped: find('🏁') };
+        return { running: find('⚡'), finished: find('🏁') };
       } finally {
         clearTimeout(timeout);
         this.background.signal.removeEventListener('abort', abort);
@@ -1097,38 +1097,40 @@ export class BotService {
     if (this.stopped || !this.sessionAssigned(session)) return Promise.resolve();
     let icon = this.topicIcons.get(session.id);
     if (!icon) {
-      icon = { tail: Promise.resolve() };
+      icon = { revision: 0, tail: Promise.resolve() };
       this.topicIcons.set(session.id, icon);
     }
     if (icon.status === status) return icon.tail;
     icon.status = status;
     const current = icon;
+    const revision = ++current.revision;
     current.tail = current.tail.then(async () => {
-      if (this.stopped || !this.sessionAssigned(session) || current.status !== status) return;
-      const id = (await this.getIconIds())[status];
-      if (this.stopped || !this.sessionAssigned(session)) return;
-      if (this.options.store.getTopicIcon(session.id) === id) return;
-      const applied = await this.delivery.run(session.chatId, async () => {
+      if (this.stopped || !this.sessionAssigned(session) || current.revision !== revision) return;
+      const ids = await this.getIconIds();
+      if (this.stopped || !this.sessionAssigned(session) || current.revision !== revision) return;
+      await this.delivery.run(session.chatId, async () => {
+        const id = status === 'finished' ? this.options.store.getTopicFinishIcon(session.id) ?? ids.finished : ids.running;
+        if (this.options.store.getTopicIcon(session.id) === id) return;
         const controller = new TelegramAbortController();
         const abort = () => controller.abort();
         this.background.signal.addEventListener('abort', abort, {once:true});
         if (this.stopped) abort();
         const timeout = setTimeout(() => controller.abort(), 5000);
         try {
-          return await this.bot.api.editForumTopic(
-            session.chatId, session.threadId, {icon_custom_emoji_id:id}, controller.signal);
+          try {
+            await this.bot.api.editForumTopic(
+              session.chatId, session.threadId, {icon_custom_emoji_id:id}, controller.signal);
+          } catch (error) {
+            if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
+          }
+          this.options.store.setTopicIcon(session.id,current.revision === revision ? id : undefined);
         } finally {
           clearTimeout(timeout);
           this.background.signal.removeEventListener('abort', abort);
         }
-      }, () => !this.stopped && this.sessionAssigned(session) && current.status === status, true);
-      if (applied !== undefined) this.options.store.setTopicIcon(session.id,id);
-    }).catch(async error => {
-      if (!this.stopped && error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')) {
-        this.options.store.setTopicIcon(session.id,(await this.getIconIds())[status]);
-        return;
-      }
-      if (current.status === status) current.status = undefined;
+      }, () => !this.stopped && this.sessionAssigned(session) && current.revision === revision, true);
+    }).catch(error => {
+      if (current.revision === revision) current.status = undefined;
       console.warn(`Could not update topic status (${session.id}, ${status}).`, error);
     });
     return current.tail;
@@ -1156,7 +1158,7 @@ export class BotService {
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     if (!running) {
       this.dropListener(session.id);
-      await this.setTopicStatus(session, 'stopped');
+      await this.setTopicStatus(session, 'finished');
     } else if (listener?.connection) {
       await this.setTopicStatus(session, listener.activity);
     }
@@ -1239,7 +1241,7 @@ export class BotService {
       if (original.message) await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, original.message.message_id);
     }
-    await this.setTopicStatus(session, task ? 'running' : 'stopped');
+    await this.setTopicStatus(session, task ? 'running' : 'finished');
     await this.listen(session);
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     await this.sendInitial(session);
@@ -1626,13 +1628,24 @@ export class BotService {
         const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
         if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
         await this.announce(session);
-        await this.setTopicStatus(session, 'stopped');
+        await this.setTopicStatus(session, 'finished');
         await this.refreshTopicStatus(session);
       }
       return;
     }
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
+      if (edited.icon_custom_emoji_id !== undefined && ctx.from?.id !== this.id) {
+        this.options.store.setTopicFinishIcon(session.id,edited.icon_custom_emoji_id);
+        this.options.store.setTopicIcon(session.id,edited.icon_custom_emoji_id);
+        const icon = this.topicIcons.get(session.id);
+        if (icon) {
+          const status = icon.status;
+          ++icon.revision;
+          icon.status = undefined;
+          if (status && !detached) void this.setTopicStatus(session,status);
+        }
+      }
       if (edited.name && ctx.from?.id !== this.id) {
         const title = this.stripTopicStatus(session,edited.name);
         const listener = this.listeners.get(session.id);
@@ -1649,13 +1662,6 @@ export class BotService {
             this.titleRevisions.get(session.id) === revision &&
             this.options.store.getSessionGeneration(session.id) === generation);
           await this.applySessionTitle(session);
-        }
-      }
-      if (edited.icon_custom_emoji_id !== undefined) {
-        this.options.store.setTopicIcon(session.id,edited.icon_custom_emoji_id);
-        if (ctx.from?.id !== this.id) {
-          const icon = this.topicIcons.get(session.id);
-          if (icon) icon.status = undefined;
         }
       }
       if (ctx.from?.id === this.id && edited.icon_custom_emoji_id !== undefined && edited.name === undefined) {
@@ -1823,13 +1829,13 @@ export class BotService {
           for (const handler of this.sessionKillHandlers) handler(session.id);
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session,message.message_id);
-          await this.setTopicStatus(session, 'stopped');
+          await this.setTopicStatus(session, 'finished');
           await replyTo(ctx, contextDestination(ctx), 'Session process killed. History is preserved; a managed session can restart on your next instruction or OPEN AGENT visit.');
           return;
         }
         if (!(await this.options.runtime.isRunning(session))) {
           this.dropListener(session.id);
-          await this.setTopicStatus(session, 'stopped');
+          await this.setTopicStatus(session, 'finished');
           await replyTo(ctx, contextDestination(ctx), 'Session is not running.');
           return;
         }
@@ -1888,7 +1894,7 @@ export class BotService {
           signal.throwIfAborted();
           if (!this.sessionAssigned(active) || this.options.store.getSessionGeneration(active.id) !== generation) return;
           if (running && this.options.store.getSession(active.id)?.status === 'open') await withCancellation(this.sendInitial(active), signal);
-          if (!running) await this.setTopicStatus(active, 'stopped');
+          if (!running) await this.setTopicStatus(active, 'finished');
         } catch (error) {
           if (error !== signal.reason && !this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(active.id) === generation) this.scheduleReconnect(active, attempt + 1);
           throw error;
@@ -1914,7 +1920,7 @@ export class BotService {
     this.requireSessionAssignment(session);
     const existing = this.listeners.get(session.id);
     if (existing?.promise) return existing.promise;
-    const listener: Listener = {sessionId:session.id,tail:Promise.resolve(),queued:0,recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),pendingStops:[],queuedMessages:0,activity:'completed'};
+    const listener: Listener = {sessionId:session.id,tail:Promise.resolve(),queued:0,recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),pendingStops:[],queuedMessages:0,activity:'finished'};
     this.listeners.set(session.id, listener);
     listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session)).then(async binding => {
       await this.applySessionTitle(session);
@@ -2258,7 +2264,7 @@ export class BotService {
     if (interruptedBy) {
       listener.pendingAnswers.clear();
       listener.queuedMessages = 0;
-      listener.activity = 'completed';
+      listener.activity = 'finished';
       void this.setTopicStatus(session, listener.activity);
       void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
         
@@ -2266,13 +2272,13 @@ export class BotService {
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity = this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'completed';
+      listener.activity = this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'finished';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
       listener.activity = 'running';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      listener.activity = listener.queuedMessages > 0 ? 'running' : 'completed';
+      listener.activity = listener.queuedMessages > 0 ? 'running' : 'finished';
       void this.setTopicStatus(session, listener.activity);
     }
     if (frame.t === 'error') {
