@@ -18,8 +18,6 @@ export class TelegramDelivery {
   private readonly chats = new Map<number, ChatDelivery>();
   private readonly controller = new AbortController();
 
-  constructor(private readonly intervalMs = 3100) {}
-
   run<T>(chatId: number, action: () => Promise<T>, active: () => boolean, background = false): Promise<T | undefined> {
     if (this.controller.signal.aborted) return Promise.resolve(undefined);
     let chat = this.chats.get(chatId);
@@ -90,7 +88,6 @@ export class TelegramDelivery {
           continue;
         }
         queue.shift();
-        chat.nextStartAt = Date.now() + this.intervalMs;
         try {
           await job.execute();
         } catch (error) {

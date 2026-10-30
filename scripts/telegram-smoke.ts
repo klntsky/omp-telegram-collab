@@ -281,7 +281,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   };
   const bot = new Bot(botToken, { client: { apiRoot: telegramUrl } });
   writeConfig(config);
-  const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot,telegramIntervalMs:0});
+  const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot});
   await service.initialize();
   service.startBackground();
   await service.refreshSkillCatalogs();

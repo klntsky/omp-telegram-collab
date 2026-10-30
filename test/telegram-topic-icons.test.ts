@@ -19,7 +19,7 @@ test('restart skips unchanged icons and retains a later human finish icon on reo
     await app.service.close();
     const before = app.topicEdits.length;
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
-      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}})});
     await restarted.initialize();
     restarted.startBackground();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;

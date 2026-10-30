@@ -40,7 +40,7 @@ export interface RuntimeLike {
   retain(sessionId: string): () => void;
   close(): Promise<void>;
 }
-export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Bot<Context>; configWritable?: () => boolean; telegramIntervalMs?: number }
+export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Bot<Context>; configWritable?: () => boolean }
 type TopicActivity = 'running' | 'finished';
 interface StatusFailure { operation: string; at: number; error: unknown }
 interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
@@ -370,7 +370,7 @@ export class BotService {
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
-    this.delivery = new TelegramDelivery(options.telegramIntervalMs);
+    this.delivery = new TelegramDelivery();
     this.config = options.botConfig;
     this.token = options.token;
     this.skills = new SkillPicker({

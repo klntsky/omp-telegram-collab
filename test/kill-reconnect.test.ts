@@ -140,7 +140,6 @@ for (const source of ['startup','mirror retry']) {
           config:app.config,botConfig:app.config.bots[0]!,token:app.service.token,
           store:app.store,runtime:app.runtime,
           bot:new Bot(app.service.token,{client:{apiRoot:app.telegramUrl}}),
-          telegramIntervalMs:0,
         });
         await restarted.initialize();
         restarted.startBackground();

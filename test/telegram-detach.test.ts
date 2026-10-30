@@ -70,7 +70,7 @@ test('/detach disables prompts and session access and leaves its icon alone acro
     await app.service.close();
     reopenedStore = new Store(`${app.config.dataDir}/telegram.sqlite`);
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:reopenedStore,runtime:app.runtime,
-      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}})});
     await restarted.initialize();
     restarted.startBackground();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;

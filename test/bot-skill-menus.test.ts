@@ -19,7 +19,7 @@ test('a slow instance does not delay another menu, and close cancels refresh wit
   const slow = Promise.withResolvers<Array<{name:string;description:string}>>();
   t.mock.method(app.runtime,'listSkills',async (path: string) => path === firstPath ? slow.promise : [{name:'fast-skill',description:'Independent catalog'}]);
   const bot = new Bot(botToken,{client:{apiRoot:app.telegramUrl}});
-  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot,telegramIntervalMs:0});
+  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot});
   const published = Promise.withResolvers<void>();
   bot.api.config.use(async (previous, method, payload, signal) => {
     const result = await previous(method, payload, signal);
@@ -74,7 +74,7 @@ test('restart serves cached shortcuts and reaches polling while discovery is blo
   const discovery = Promise.withResolvers<Array<{name:string;description:string}>>();
   t.mock.method(app.runtime,'listSkills',() => discovery.promise);
   const bot = new Bot(botToken, {client:{apiRoot:app.telegramUrl}});
-  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot,telegramIntervalMs:0});
+  const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot});
   let polling: Promise<void> | undefined;
   try {
     const ready = Promise.withResolvers<void>();

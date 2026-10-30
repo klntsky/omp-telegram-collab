@@ -78,7 +78,7 @@ test('restart retains generated prefix knowledge before a native welcome', async
     await app.service.close();
     app.topicTitleStatuses.set(session.id,{worktree:true,branch:'new-branch'});
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
-      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),telegramIntervalMs:0});
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}})});
     await restarted.initialize();
     const chat = {id:chatId,type:'supergroup',title:'Fixture project',is_forum:true} as const;
     const from = {id:ownerId,is_bot:false,first_name:'Ada',username:ownerUsername};

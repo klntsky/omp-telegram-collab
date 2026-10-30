@@ -146,7 +146,7 @@ Changing a topic icon saves it as that topic's finish icon, regardless of sessio
 
 Host state snapshots reconcile the activity icon: no streaming or queued work clears a stale running indication even if an agent-end event was missed. Agent lifecycle events update the icon promptly between snapshots; pending initial tasks retain the startup indication. The bot removes its own icon-change service notices, not human icon edits or rename notices. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
 
-Telegram delivery uses a per-chat queue with at least 3.1 seconds between scheduled operations. Questions and receipts take priority over icon updates. A Telegram `429` pauses delivery for `retry_after`. Ambiguous network failures are not retried automatically.
+Telegram delivery uses a per-chat queue with no fixed delay between operations. Questions and receipts take priority over icon updates. A Telegram `429` pauses that chat's delivery for `retry_after`, then retries the operation if it is still relevant. A `429` without `retry_after` uses a five-second cooldown. Ambiguous network failures are not retried automatically.
 
 ### 1.4. Model presets
 
