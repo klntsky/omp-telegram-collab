@@ -362,7 +362,7 @@ export async function verifyTelegramFlow() {
       for (const [index, scope] of menuScopes.entries()) {
         const menu = await app.bot.api.getMyCommands({ scope });
         const commands = new Set(menu.map(command => command.command));
-        for (const command of ['new', 'p', 'setup', 'settings', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets', 'skills']) {
+        for (const command of ['new', 'p', 'setup', 'settings', 'session', 'stop', 'kill', 'model_preset', 'skills']) {
           assert.ok(commands.has(command), `${scope.type} must advertise /${command} in ${mode} mode`);
         }
         for (const command of previous?.[index] ?? []) {

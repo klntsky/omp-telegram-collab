@@ -43,7 +43,7 @@ test('settings command menus remove superseded preference commands but retain se
       const commands = (await app.bot.api.getMyCommands({scope})).map(command=>command.command);
       assert.ok(commands.includes('settings'));
       assert.ok(commands.includes('model_preset'));
-      assert.ok(commands.includes('list_model_presets'));
+      assert.ok(!commands.includes('list_model_presets'));
       assert.ok(!commands.includes('set_default_new_topic_skill'));
       assert.ok(!commands.includes('unset_default_new_topic_skill'));
     }

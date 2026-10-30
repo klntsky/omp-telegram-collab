@@ -116,7 +116,7 @@ interface SettingsPanel {
   revision: number;
   choices: SettingsAction[];
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and shared capacity (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset <name> — switch this session (group admin)\n/list_model_presets — list presets for this session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and shared capacity (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and shared capacity (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
@@ -137,8 +137,7 @@ const groupCommands = [
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
-  { command: 'model_preset', description: 'Switch session model preset (group admin)' },
-  { command: 'list_model_presets', description: 'List session model presets (group admin)' },
+  { command: 'model_preset', description: 'List presets; /model_preset <name> switches an idle session' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
@@ -196,6 +195,8 @@ export class BotService {
   private catalogRefresh = new AbortController();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private readonly catalogTasks = new Map<string, Promise<void>>();
+  private readonly presetCatalogs = new Map<string, string[]>();
+  private presetRefresh?: Promise<void>;
   private readonly apiAbort = new TelegramAbortController();
   private backgroundStarted = false;
   private readonly restoring = new Set<string>();
@@ -540,7 +541,8 @@ export class BotService {
     }, 30000);
     this.statusTimer.unref();
     void this.refreshSkillCatalogs();
-    this.menuTimer ??= setInterval(() => { void this.refreshSkillCatalogs(); }, 60000);
+    void this.refreshPresetCatalogs();
+    this.menuTimer ??= setInterval(() => { void this.refreshSkillCatalogs(); void this.refreshPresetCatalogs(); }, 60000);
     this.menuTimer.unref();
   }
   private runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal = this.background.signal): Promise<void> {
@@ -612,6 +614,47 @@ export class BotService {
       tasks.push(task);
     }
     return Promise.all(tasks).then(() => {});
+  }
+  private refreshPresetCatalogs(): Promise<void> {
+    if (this.stopped || this.options.config.terminated) return Promise.resolve();
+    if (this.presetRefresh) return this.presetRefresh;
+    const signal = this.catalogRefresh.signal;
+    const tasks = Object.entries(this.options.config.instances)
+      .filter(([, instance]) => instance.chats.some(chat => chat.botId === this.id))
+      .map(([instancePath]) => this.runBackground(`presets:${instancePath}`, async () => {
+        const names = await withCancellation(this.options.runtime.availableModelPresets(instancePath), signal);
+        signal.throwIfAborted();
+        if (!this.options.config.instances[instancePath]?.chats.some(chat => chat.botId === this.id)) return;
+        this.presetCatalogs.set(instancePath, names);
+        await this.syncCommandMenus();
+      }, signal));
+    const task = Promise.all(tasks).then(() => {});
+    this.presetRefresh = task;
+    void task.finally(() => { if (this.presetRefresh === task) this.presetRefresh = undefined; });
+    return task;
+  }
+  private presetDescription(instancePath: string): string {
+    let description = groupCommands.find(command => command.command === 'model_preset')!.description;
+    const names = [...(this.presetCatalogs.get(instancePath) ?? [])].sort((a, b) => a.length - b.length || a.localeCompare(b));
+    let separator = '. Presets: ';
+    for (const name of names) {
+      if (description.length + separator.length + name.length > 256) break;
+      description += separator + name;
+      separator = ', ';
+    }
+    return description;
+  }
+  private async replyPresetUsage(ctx: Context, instancePath: string, guidance = ''): Promise<void> {
+    const names = await this.options.runtime.availableModelPresets(instancePath);
+    await this.replyPresetText(ctx, `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\nAvailable presets:\n${names.length ? names.join('\n') : '(none configured)'}${guidance}`);
+  }
+  private async replyPresetText(ctx: Context, text: string): Promise<void> {
+    for (let offset = 0; offset < text.length;) {
+      let end = Math.min(offset+4000,text.length);
+      if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
+      await replyTo(ctx, contextDestination(ctx), text.slice(offset,end));
+      offset = end;
+    }
   }
   onSessionKill(handler: (sessionId: string) => void): () => void {
     this.sessionKillHandlers.add(handler);
@@ -905,7 +948,8 @@ export class BotService {
       const skills = this.options.store.getSkillCatalog(instancePath) ?? [];
       if (this.stopped) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - baseCommands.length));
-      const commands = [...baseCommands, ...[...aliases].map(([command, skill]) => ({
+      const instanceCommands = baseCommands.map(command => command.command === 'model_preset' ? {...command, description:this.presetDescription(instancePath)} : command);
+      const commands = [...instanceCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];
       const fingerprint = JSON.stringify([instancePath, commands]);
@@ -917,7 +961,7 @@ export class BotService {
           continue;
         }
         await this.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.apiAbort.signal);
-        await this.bot.api.setMyCommands([...baseCommands,cliCommand,...commands.slice(baseCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.apiAbort.signal);
+        await this.bot.api.setMyCommands([...instanceCommands,cliCommand,...commands.slice(instanceCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.apiAbort.signal);
         if (this.stopped || !this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         this.commandMenus.set(chat.chatId, fingerprint);
         this.skillAliases.set(chat.chatId, aliases);
@@ -959,6 +1003,7 @@ export class BotService {
     this.catalogRefresh.abort(new Error('Bot configuration changed'));
     this.catalogRefresh = new AbortController();
     this.catalogTasks.clear();
+    this.presetRefresh = undefined;
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
@@ -973,6 +1018,7 @@ export class BotService {
     await this.syncSessionEntries();
     this.restoreSessions();
     void this.refreshSkillCatalogs();
+    void this.refreshPresetCatalogs();
   }
   private async syncSessionEntries(): Promise<void> {
     for (const session of this.options.store.listSessions(this.id)) {
@@ -1727,12 +1773,12 @@ export class BotService {
         await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:this.sessionMarkup(session)});
         return;
       }
-      if (action === 'model_preset' || action === 'list_model_presets') {
+      if (action === 'model_preset') {
         if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }
-        if (destination.kind !== 'topic' || !session) { await replyTo(ctx, contextDestination(ctx), `Use /${action} in a session topic. Use /settings for forum defaults.`); return; }
+        if (destination.kind !== 'topic' || !session) { await this.replyPresetUsage(ctx, assigned.path, '\nUse this command in a session topic. Use /settings for forum defaults.'); return; }
         if (session && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before using model preset commands.'); return; }
-        if (action === 'model_preset' ? !/^[A-Za-z][\w-]*$/.test(arg) : Boolean(arg)) {
-          await replyTo(ctx, contextDestination(ctx), action === 'model_preset' ? 'Usage: /model_preset <name> (a letter, then letters, digits, - or _)' : 'Usage: /list_model_presets');
+        if (arg && !/^[A-Za-z][\w-]*$/.test(arg)) {
+          await this.replyPresetUsage(ctx, session.instancePath);
           return;
         }
         if (!session) return;
@@ -1745,18 +1791,14 @@ export class BotService {
           this.requireSessionAssignment(session);
           if (this.options.store.getSessionGeneration(session.id) !== generation ||
               this.options.store.getSession(session.id)?.status !== 'open') throw new Error('The session changed before the model preset command could run');
-          let text = await this.options.runtime.modelPresets(session,action === 'model_preset' ? arg : undefined);
-          if (action === 'list_model_presets') {
+          let text = await this.options.runtime.modelPresets(session,arg || undefined);
+          if (!arg) {
             const preset = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
               .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)?.default_model_preset;
             text += `\nDefault model preset: ${preset ?? '(not set)'}`;
+            text = `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\n${text}`;
           }
-          for (let offset = 0; offset < text.length;) {
-            let end = Math.min(offset+4000,text.length);
-            if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-            await replyTo(ctx, contextDestination(ctx), text.slice(offset,end));
-            offset = end;
-          }
+          await this.replyPresetText(ctx, text);
         } finally { release(); }
         return;
       }

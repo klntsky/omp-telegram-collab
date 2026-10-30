@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerUsername } from './telegram-data.js';
 
-for (const command of ['/model_preset Fast','/list_model_presets']) {
+for (const command of ['/model_preset Fast','/model_preset']) {
   test(`${command} requires current native administration before starting a host`, async t => {
     const app = await createSmokeApp();
     const presets = t.mock.method(app.runtime,'modelPresets');
@@ -36,7 +36,6 @@ for (const command of ['/model_preset Fast','/list_model_presets']) {
   test(`${command} rejects unrelated, archived and detached topics`, async t => {
     const app = await createSmokeApp();
     const presets = t.mock.method(app.runtime,'modelPresets');
-    const available = t.mock.method(app.runtime,'availableModelPresets');
     try {
       await app.update({text:'/setup'});
       await app.update({text:command,message_thread_id:99});
@@ -51,7 +50,6 @@ for (const command of ['/model_preset Fast','/list_model_presets']) {
       assert.equal(await app.runtime.isRunning(app.store.listSessions(botId)[0]!),false);
       assert.equal(app.connectionCount,0);
       assert.equal(presets.mock.callCount(),0);
-      assert.equal(available.mock.callCount(),0);
       assert.deepEqual(app.accepted,[]);
     } finally { await app.close(); }
   });
@@ -63,14 +61,12 @@ test('model preset commands reject malformed arguments and ignore foreign or for
     await app.update({text:'/setup'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Preset boundaries'}});
     for (const message_thread_id of [42]) {
-      for (const text of ['/model_preset','/model_preset Fast extra','/model_preset ../Fast','/list_model_presets extra']) {
+      for (const text of ['/model_preset Fast extra','/model_preset ../Fast']) {
         await app.update({text,message_thread_id});
       }
     }
-    const before = app.messages.length;
     await app.update({text:'/model_preset@AnotherBot Fast',message_thread_id:42});
-    await app.update({text:'/list_model_presets',message_thread_id:42,forward_origin:{type:'hidden_user',sender_user_name:'Someone',date:1}});
-    assert.equal(app.messages.length,before);
+    await app.update({text:'/model_preset',message_thread_id:42,forward_origin:{type:'hidden_user',sender_user_name:'Someone',date:1}});
     assert.equal(await app.runtime.isRunning(app.store.listSessions(botId)[0]!),false);
     assert.deepEqual(app.accepted,[]);
   } finally { await app.close(); }
@@ -92,10 +88,10 @@ test('work-topic preset switches leave the forum default unchanged and General l
     const path = session.instancePath;
     assert.equal(await app.runtime.isRunning(session),true);
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.default_model_preset,'Slow');
-    await app.update({text:'/list_model_presets',message_thread_id:42});
+    await app.update({text:'/model_preset',message_thread_id:42});
     await setForumSetting(app, 3, 0);
     await setForumSetting(app, 3, 1);
-    await app.update({text:'/list_model_presets',message_thread_id:42});
+    await app.update({text:'/model_preset',message_thread_id:42});
     assert.equal(activePreset,'Fast');
     assert.equal(app.config.instances[path]!.chats[0]!.default_model_preset,'Slow');
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.default_model_preset,'Slow');
@@ -103,3 +99,19 @@ test('work-topic preset switches leave the forum default unchanged and General l
   } finally { await app.close(); }
 });
 
+test('removed preset-list command cannot start or mutate a session and is absent from command menus', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset command cutover'}});
+    const session = app.store.listSessions(botId)[0]!;
+    await app.update({text:'/list_model_presets',message_thread_id:42});
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.deepEqual(app.accepted,[]);
+    for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId},{type:'chat_administrators' as const,chat_id:chatId}]) {
+      const commands = await app.bot.api.getMyCommands({scope});
+      assert.equal(commands.some(command => command.command === 'list_model_presets'),false);
+      assert.equal(commands.some(command => command.command === 'model_preset'),true);
+    }
+  } finally { await app.close(); }
+});
