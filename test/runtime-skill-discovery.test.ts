@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -29,6 +29,7 @@ async function fixture(t: TestContext, failure = false, held = false) {
 const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(counter)}, 'call\\n');
 fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+fs.writeFileSync(${JSON.stringify(join(directory, 'cwd'))}, process.cwd());
 ${failure ? "process.stderr.write('Original catalog diagnostic\\nPermission denied: <skills> & config\\n'); process.exit(23);" : `let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', part => {
@@ -73,6 +74,26 @@ test('concurrent catalogs share discovery and new skills appear after freshness 
   now += 5 * 60000 + 1;
   assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'new-skill',description:'Newly installed'}]);
   assert.equal(await app.calls(),2);
+});
+
+test('stopped worktree sessions discover skills in their own cwd and cache separately from the assigned project', async t => {
+  const app = await fixture(t);
+  const worktree = join(app.directory, 'worktree');
+  await mkdir(worktree);
+  t.mock.method(app.runtime, 'isRunning', async () => false);
+  const session = {
+    id: 'worktree-skills', botId: 1, chatId: -100, threadId: 2, instancePath: app.directory,
+    name: 'Worktree skills', status: 'open' as const, createdAt: Date.now(),
+    runtime: { kind: 'managed' as const, worktreePath: worktree },
+  };
+  await app.runtime.listSkills(app.directory, session);
+  assert.equal(await readFile(join(app.directory, 'cwd'), 'utf8'), worktree);
+  await app.runtime.listSkills(app.directory);
+  assert.equal(await readFile(join(app.directory, 'cwd'), 'utf8'), app.directory);
+  assert.equal(await app.calls(), 2);
+  await app.runtime.listSkills(app.directory, session);
+  assert.equal(await app.calls(), 2);
+  await assert.rejects(app.runtime.listSkills(worktree, session), /Instance path is not configured/);
 });
 
 test('discovery failures preserve multiline diagnostics and share a bounded failure cooldown', async t => {

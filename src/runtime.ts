@@ -233,6 +233,32 @@ export class OmpRuntime {
     this.#sessionLimit = expectedLimit * 2;
     return true;
   }
+  async createWorktree(instancePath: string): Promise<string> {
+    this.#assertActive();
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
+    if (await realpath(instancePath) !== instancePath) throw new Error('Instance path identity changed');
+    const root = path.resolve(this.#config.dataDir, 'worktrees');
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const destination = path.join(root, randomUUID());
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    execFile('git', ['worktree', 'add', '--detach', destination, 'HEAD'], {
+      cwd: instancePath, encoding: 'utf8',
+    }, error => error ? reject(error) : resolve());
+    await promise;
+    return realpath(destination);
+  }
+
+  #sessionCwd(session: TopicSession): string {
+    return session.runtime.kind === 'managed' ? session.runtime.worktreePath ?? session.instancePath : session.instancePath;
+  }
+
+  async #validatedSessionCwd(session: TopicSession): Promise<string> {
+    if (await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance path identity changed');
+    const cwd = this.#sessionCwd(session);
+    if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+    return cwd;
+  }
   async validateSessionPaths(sessions: TopicSession[], config = this.#config): Promise<void> {
     for (const session of sessions) {
       const assigned = findInstance(config, session.botId, session.chatId);
@@ -240,19 +266,20 @@ export class OmpRuntime {
       if (session.instancePath !== assigned.path) throw new Error(`Chat ${session.chatId} has history pinned to another instance path`);
       if (await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance path identity changed');
       if (session.runtime.kind !== 'managed') continue;
+      const cwd = await this.#validatedSessionCwd(session);
       const directory = path.resolve(config.dataDir, 'sessions', session.id);
       const history = path.join(directory, 'history.jsonl');
       let pin: DurableBinding | undefined;
       try {
         pin = JSON.parse(await readFile(path.join(directory, 'binding.json'), 'utf8')) as DurableBinding;
-        if (pin.version !== 1 || pin.cwd !== session.instancePath || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
-          throw new Error(`Saved session ${session.id} conflicts with instance path ${session.instancePath}`);
+        if (pin.version !== 1 || pin.cwd !== cwd || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
+          throw new Error(`Saved session ${session.id} conflicts with working directory ${cwd}`);
         }
       } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
       try {
         const header = await readHeader(history);
-        if (header.cwd !== session.instancePath || (pin && header.id !== pin.sessionId)) {
-          throw new Error(`Saved history ${session.id} conflicts with instance path ${session.instancePath}`);
+        if (header.cwd !== cwd || (pin && header.id !== pin.sessionId)) {
+          throw new Error(`Saved history ${session.id} conflicts with working directory ${cwd}`);
         }
       } catch (error) {
         if (!errno(error, 'ENOENT') || pin) throw error;
@@ -378,7 +405,7 @@ export class OmpRuntime {
       if (errno(error,'ENOENT')) return false;
       throw error;
     }
-    return pin.cwd === session.instancePath && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
+    return pin.cwd === this.#sessionCwd(session) && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
   }
 
   ensure(session: TopicSession): Promise<HostBinding> {
@@ -451,7 +478,7 @@ export class OmpRuntime {
       }
       values = JSON.parse(await this.#hostControl(session, undefined, 'list_skills'));
     } else {
-      values = await this.#cachedSkills(instancePath, signal);
+      values = await this.#cachedSkills(session ? await this.#validatedSessionCwd(session) : instancePath, signal);
     }
     if (!Array.isArray(values) || values.some(value => !record(value) || typeof value.name !== 'string' || !value.name || typeof value.description !== 'string')) {
       throw new Error('OMP returned an invalid skill catalog');
@@ -468,7 +495,6 @@ export class OmpRuntime {
     signal?.throwIfAborted();
     this.#assertActive();
     if (this.#closed) throw new Error('OMP runtime is stopping');
-    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
     const cached = this.#skillCatalogs.get(instancePath);
     if (cached && cached.expiresAt > Date.now()) {
       this.#skillCatalogs.delete(instancePath);
@@ -517,7 +543,7 @@ export class OmpRuntime {
     catalog?: Array<{ name: string; description: string }>;
     error?: unknown;
   }): void {
-    if (this.#closed || !Object.hasOwn(this.#config.instances, instancePath)) return;
+    if (this.#closed) return;
     this.#skillCatalogs.delete(instancePath);
     this.#skillCatalogs.set(instancePath, entry);
     while (this.#skillCatalogs.size > 128) {
@@ -632,7 +658,7 @@ export class OmpRuntime {
     if (assigned && assigned.path !== session.instancePath) throw new Error('Managed session forum assignment changed');
     const name = assigned?.instance.chats.find(chat => chat.botId === session.botId && chat.chatId === session.chatId)?.default_model_preset;
     if (name === undefined) return { overlay: {}, args: this.#config.omp.args };
-    const presets = await this.#nativeSetting(session.instancePath, 'modelPresets');
+    const presets = await this.#nativeSetting(this.#sessionCwd(session), 'modelPresets');
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
     const preset = Object.hasOwn(presets, name) ? presets[name] : undefined;
     if (preset === undefined || preset === null) {
@@ -643,8 +669,8 @@ export class OmpRuntime {
     for (const [role, selector] of Object.entries(preset.modelRoles)) {
       if (typeof selector !== 'string' || !selector.trim()) throw new Error(`Invalid model preset "${name}": role "${role}" is not a model selector`);
     }
-    const defaultThinking = await this.#nativeSetting(session.instancePath, 'defaultThinkingLevel');
-    const currentRoles = await this.#nativeSetting(session.instancePath, 'modelRoles');
+    const defaultThinking = await this.#nativeSetting(this.#sessionCwd(session), 'defaultThinkingLevel');
+    const currentRoles = await this.#nativeSetting(this.#sessionCwd(session), 'modelRoles');
     if (!record(currentRoles)) throw new Error('OMP config get modelRoles returned an invalid role mapping');
     const modelRoles = Object.fromEntries([
       ...Object.keys(currentRoles).map(role => [role, null]),
@@ -691,7 +717,7 @@ export class OmpRuntime {
         const current = (await this.#list(deadline)).find(host => host.instanceId === binding.instanceId);
         const descriptor = await this.#lifecycle(session.id);
         if (!current || current.sessionId !== binding.sessionId || current.generation !== binding.generation ||
-            current.pid !== lifecycle.pid || current.cwd !== session.instancePath ||
+            current.pid !== lifecycle.pid || current.cwd !== this.#sessionCwd(session) ||
             descriptor?.pid !== lifecycle.pid || descriptor.sessionId !== binding.sessionId ||
             descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 2) {
           throw new Error('OMP host identity changed during model preset control');
@@ -871,8 +897,7 @@ export class OmpRuntime {
     const stat = await lstat(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Managed session directory is invalid');
     await chmod(dir, 0o700);
-    const cwd = await realpath(session.instancePath);
-    if (cwd !== session.instancePath) throw new Error('Instance path identity changed');
+    const cwd = await this.#validatedSessionCwd(session);
     const sessionFile = path.join(dir, 'history.jsonl');
     let pin: DurableBinding | undefined;
     try {
@@ -1133,7 +1158,7 @@ export class OmpRuntime {
         this.#activity.delete(id);
         return;
       }
-      if (pin.version !== 1 || pin.sessionFile !== path.join(dir, 'history.jsonl') || pin.cwd !== session.instancePath) {
+      if (pin.version !== 1 || pin.sessionFile !== path.join(dir, 'history.jsonl') || pin.cwd !== this.#sessionCwd(session)) {
         throw new Error('Managed OMP binding is incompatible with this configuration');
       }
       const header = await readHeader(pin.sessionFile);
@@ -1157,7 +1182,7 @@ export class OmpRuntime {
     if (host) {
       if (target.kind === 'attached' && host.sessionId !== target.sessionId) throw new Error('Attached OMP session identity changed');
       const cwd = await realpath(host.cwd);
-      if (cwd !== session.instancePath) throw new Error('OMP host does not belong to this instance path');
+      if (cwd !== this.#sessionCwd(session)) throw new Error('OMP host does not belong to this session working directory');
       if (pin && cwd !== pin.cwd) throw new Error('Managed host working directory changed');
       if (owned?.binding && (owned.binding.instanceId !== host.instanceId || owned.binding.sessionId !== host.sessionId)) {
         throw new Error('Managed OMP host identity changed');

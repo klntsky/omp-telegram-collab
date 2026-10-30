@@ -131,7 +131,7 @@ for (const allMessagesArePrompts of [true,false]) {
 }
 
 for (const allMessagesArePrompts of [true, false]) {
-  for (const command of ['/p', '/new']) {
+  for (const command of ['/p', '/new', '/worktree']) {
   test(`${command} includes replied-to text and captions as greentext with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {

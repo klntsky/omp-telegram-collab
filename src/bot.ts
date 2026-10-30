@@ -19,6 +19,7 @@ import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js
 import { withCancellation } from './cancellation.js';
 
 export interface RuntimeLike {
+  createWorktree(instancePath: string): Promise<string>;
   ensure(session: TopicSession): Promise<HostBinding>;
   isRunning(session: TopicSession): Promise<boolean>;
   attach(instanceId: string, instancePath: string): Promise<HostBinding>;
@@ -84,17 +85,19 @@ interface PromptProposal {
   images?: ImageContent[];
   instancePath: string;
   sessionId?: string;
+  worktree?: boolean;
   generation?: number;
   allMessagesArePrompts: boolean;
   messageId: number;
   expires: number;
 }
-const help = '/setup — request or enroll this forum (bot/instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/attach instanceId [name] — attach local host (bot/instance admin)\n/detach — make this topic conversation-only (topic/bot/instance admin)\n/model_preset <name> — set the forum default in General (bot/instance admin), or switch this session (topic/bot/instance admin)\n/list_model_presets — list presets and the forum default (admin in this scope)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (bot/instance admin)';
+const help = '/setup — request or enroll this forum (bot/instance admin; group admin for unassigned forums)\n/new task — new topic and session\n/worktree [task] — new topic and session in a separate Git worktree; no task creates an empty session\n/attach instanceId [name] — attach local host (bot/instance admin)\n/detach — make this topic conversation-only (topic/bot/instance admin)\n/model_preset <name> — set the forum default in General (bot/instance admin), or switch this session (topic/bot/instance admin)\n/list_model_presets — list presets and the forum default (admin in this scope)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (bot/instance admin)';
 const defaultSkillHelp = '/set_default_new_topic_skill <exact-name> — set the forum default for new topics; no argument shows it (bot/instance admin)\n/unset_default_new_topic_skill — remove the forum default for future topics (bot/instance admin)';
 const adminHelp = '/make_admin @username — promote for this topic, or the whole bot in General; omit the username when replying to a user\n/list_admins — list global admins and topic admins for this topic, or all topics in this forum from General';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
+  { command: 'worktree', description: 'Start a new session in a separate Git worktree' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
   { command: 'set_default_new_topic_skill', description: 'Set or show the new-topic skill default (admin)' },
@@ -280,7 +283,7 @@ export class BotService {
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
     if (this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)})?.status === 'detached') return;
     if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
-    const promptInput = !text.startsWith('/') || /^\/(?:new|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
+    const promptInput = !text.startsWith('/') || /^\/(?:new|worktree|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
     if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.topicAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
@@ -939,15 +942,25 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
-  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void): Promise<void> {
+  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void, worktree = false): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
+    const worktreePath = worktree ? await this.options.runtime.createWorktree(instancePath) : undefined;
+    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
     const initialIcon = task ? (await this.getIconIds()).running : undefined;
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached ? undefined : task, ctx.from!.id, images);
+    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed', ...(worktreePath ? {worktreePath} : {})}, attached ? undefined : task, ctx.from!.id, images);
+    if (worktree && !task) {
+      const sourceKey = this.skills.key(ctx);
+      const destinationKey = {...sourceKey,destination:topicDestination(session.chatId,session.threadId)};
+      for (const skill of this.options.store.getPendingSkills(sourceKey)) this.options.store.addPendingSkill(destinationKey,skill);
+      this.options.store.clearPendingSkills(sourceKey);
+      const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
+      if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
+    }
     accepted?.();
     if (initialIcon) this.options.store.setTopicIcon(session.id,initialIcon);
     if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
@@ -958,7 +971,7 @@ export class BotService {
     await this.announce(session);
     const source = ctx.message;
     if (task && source && 'reply_to_message' in source && source.reply_to_message &&
-        (/^\/(?:new|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
+        (/^\/(?:new|worktree|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
           this.directedReplies.has(ctx))) {
       await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
@@ -1163,7 +1176,7 @@ export class BotService {
       ? 'Default new-topic skill cleared. Existing topics are unchanged.'
       : `Default new-topic skill: /skill:${name}. It will mention this skill in the first prompt of future topics. Existing topics are unchanged.`);
   }
-  private async routePrompt(ctx: Context, text: string, session?: TopicSession, immediateSkill?: string): Promise<void> {
+  private async routePrompt(ctx: Context, text: string, session?: TopicSession, immediateSkill?: string, worktree = false): Promise<void> {
     const admin = await (session ? this.topicAdmin(ctx) : this.instanceAdmin(ctx));
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
@@ -1176,8 +1189,8 @@ export class BotService {
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
     const skillKey = this.skills.key(ctx);
     const pendingSkills = this.options.store.getPendingSkills(skillKey);
-    const topicSkill = session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
-    const mentionedSkills = [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...(immediateSkill ? [immediateSkill] : [])])];
+    const topicSkill = worktree && !text ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
+    const mentionedSkills = worktree && !text ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...(immediateSkill ? [immediateSkill] : [])])];
     if (mentionedSkills.length) {
       const available = await this.options.runtime.listSkills(instancePath, session);
       const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
@@ -1191,7 +1204,7 @@ export class BotService {
     if (admin) {
       if (session) {
         await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills,topicSkill});
-      } else await this.newSession(ctx, text, undefined, undefined, images, () => this.options.store.clearPendingSkills(skillKey));
+      } else await this.newSession(ctx, text, undefined, undefined, images, text ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
       return;
     }
     const now = Date.now();
@@ -1203,11 +1216,11 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-      source:ctx,text,images,instancePath,
+      source:ctx,text,images,instancePath,worktree,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
-    this.options.store.clearPendingSkills(skillKey);
+    if (!worktree || text) this.options.store.clearPendingSkills(skillKey);
     if (session && topicSkill) this.options.store.clearNewTopicSkill(session.id);
   }
   private async approvePrompt(ctx: Context, token: string): Promise<void> {
@@ -1240,7 +1253,7 @@ export class BotService {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images);
+    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images,undefined,proposal.worktree);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
   private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}): Promise<boolean> {
@@ -1486,7 +1499,7 @@ export class BotService {
         await this.skills.open(ctx, session, arg === 'clear');
         return;
       }
-      if ((action === 'p' || action === 'new' || skillAlias) && 'reply_to_message' in message && message.reply_to_message) {
+      if ((action === 'p' || action === 'new' || action === 'worktree' || skillAlias) && 'reply_to_message' in message && message.reply_to_message) {
         const reply = message.reply_to_message;
         const quoted = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
         if (quoted) {
@@ -1509,13 +1522,14 @@ export class BotService {
         await replyTo(ctx, contextDestination(ctx), 'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
         return;
       }
-      if (detached && !['new','attach','help','start'].includes(action)) {
+      if (detached && !['new','worktree','attach','help','start'].includes(action)) {
         await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /new to create a separate session topic.');
         return;
       }
       if ((action === 'new' || action === 'p') && !this.usersCanProposePrompts(ctx.chat.id) &&
           !(await (action === 'new' ? this.instanceAdmin(ctx) : this.topicAdmin(ctx)))) return;
       if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
+      if (action === 'worktree') { await this.routePrompt(ctx,arg,undefined,undefined,true); return; }
       if (action === 'attach') {
         if (!(await this.instanceAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Attaching requires a configured instance admin.'); return; }
         const match = arg.match(/^([A-Za-z0-9_-]+)(?:\s+(.+))?$/);

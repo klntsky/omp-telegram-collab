@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -128,6 +129,36 @@ try {
     reopenedStore.close();
   }
   console.log('PASS current database/config reopen preserves actual OMP history bytes, topic identity, pending task, and live host binding.');
+  const worktreeRepository = join(dir, 'worktree-repository');
+  await mkdir(worktreeRepository);
+  execFileSync('git', ['init', '--quiet', worktreeRepository]);
+  execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Smoke root']);
+  reopenedConfig.instances[worktreeRepository] = { admins: [], chats: [{ botId: session.botId, chatId: session.chatId - 2 }] };
+  runtime = new OmpRuntime(reopenedConfig);
+  const worktreePath = await runtime.createWorktree(worktreeRepository);
+  const worktreeSession = {
+    ...session, id: 'worktree-smoke-session', instancePath: worktreeRepository, chatId: session.chatId - 2,
+    runtime: { kind: 'managed' as const, worktreePath },
+  };
+  try {
+    const binding = await runtime.ensure(worktreeSession);
+    const guest = await connectCollab(binding, 'Worktree verifier', {
+      onFrame(frame) {
+        if (frame.t === 'welcome') assert.equal(frame.header.cwd, worktreePath);
+      },
+      onClose() {},
+    });
+    guest.close();
+    await runtime.validateSessionPaths([worktreeSession]);
+    await runtime.kill(worktreeSession);
+    assert.equal(await runtime.isRunning(worktreeSession), false);
+    const resumed = await runtime.ensure(worktreeSession);
+    assert.equal(resumed.sessionId, binding.sessionId);
+    await runtime.kill(worktreeSession);
+    console.log('PASS actual worktree host uses isolated cwd, validates persisted identity, and resumes exact history after kill.');
+  } finally {
+    await runtime.close();
+  }
   await verifyBusyHostRetirement(await mkdtemp(join(dir,'guard-')),config.omp.executable,relay.url);
   await verifyRuntimeKill(await mkdtemp(join(dir,'kill-')),config.omp.executable,relay.url);
   console.log('PASS actual OMP PTY startup, encrypted guest welcome, multiple instance paths, wrong-path attachment denial, capacity rejection, exact-history restart, and session mismatch denial.');

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { once, EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -182,6 +183,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   let sessionLimit = config.omp.maxSessions;
   const managedSessions = new Set<string>();
   const runtime = {
+    async createWorktree(_instancePath: string) { return `/fixture/worktrees/${randomUUID()}`; },
     async ensure(session: TopicSession) {
       if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) {
         if (managedSessions.size >= sessionLimit) throw new SessionCapacityError(sessionLimit);

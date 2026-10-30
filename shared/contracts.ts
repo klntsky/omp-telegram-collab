@@ -41,7 +41,7 @@ export interface TopicSession extends TopicKey {
   instancePath: string;
   name: string;
   status: 'open' | 'closed' | 'detached';
-  runtime: { kind: 'managed' } | { kind: 'attached'; instanceId: string; sessionId: string };
+  runtime: { kind: 'managed'; worktreePath?: string } | { kind: 'attached'; instanceId: string; sessionId: string };
   createdAt: number;
 }
 

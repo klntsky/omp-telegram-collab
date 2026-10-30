@@ -10,6 +10,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | Command or action | Result |
 | --- | --- |
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
+| `/worktree [task]` | Create a separate topic and managed session in a new Git worktree, from General or any topic. No task creates an empty session rather than asking for a task. |
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
@@ -36,6 +37,10 @@ Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as ima
 General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
 New session topics get a quietly pinned OPEN AGENT message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
+
+`/worktree` creates a unique Git worktree from the assigned repository's current HEAD, without copying uncommitted changes. The session keeps the configured project assignment and authorization but runs in the new worktree. Worktrees persist after stopping, killing, detaching, or restarting a session and are not automatically removed. Creation errors retain their Git diagnostics and do not create a session.
+
+`/worktree <task>` uses the same authorization, proposal approval, skill selection, quote, image, and forwarding rules as `/new <task>`. It always creates a separate topic, including when invoked inside an existing or detached topic. Only an instance root or bot admin can create it directly or approve its proposal. No Git worktree is created for an unapproved proposal. A bare `/worktree` preserves explicit pending skills by transferring them from the originating scope to the new topic for that user's next prompt, and snapshots the forum's new-topic default for the first prompt. With a task, skills are read from the originating scope and the forum default, not the source topic's unused first-prompt default.
 
 The pinned message contains only “Use /p to submit a prompt” in explicit-prompt mode or “Send a message to prompt the agent” in all-messages mode, plus the OPEN AGENT button.
 
@@ -147,7 +152,7 @@ In a session topic, the command starts the host if needed and switches only that
 
 ## 2. Projects and access
 
-A project is identified by its canonical directory. Several chats can share a project. Each topic keeps separate history, but all sessions in that project share working files. Removing a chat disables access and mirroring without deleting history or killing hosts. A chat with saved topics cannot move to another project.
+A project is identified by its canonical directory. Several chats can share a project. Each topic keeps separate history. Ordinary sessions share the configured checkout's working files; `/worktree` sessions use separate Git worktrees. Removing a chat disables access and mirroring without deleting history or killing hosts. A chat with saved topics cannot move to another project.
 
 
 OMP runs with the service account's filesystem and credential access. Project registrations and admin lists do not isolate processes. Use a dedicated account or container if users must not access other checkouts or writable configuration.
