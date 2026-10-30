@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isActiveMember, TicketStore, validateGuestFrame, validateInitData } from '../src/auth.js';
+import { isActiveMember, issueCredential, validateCredential, TicketStore, validateGuestFrame, validateInitData } from '../src/auth.js';
 import { botToken, ownerId, signedInitData } from './telegram-data.js';
 
 const sessionId = 'RkJQtSOXgS9CFpCqE_BxYg';
@@ -66,4 +66,19 @@ test('WebSocket tickets are single-use and expire at their boundary', () => {
   assert.equal(tickets.consume(ticket, now + 59_999), undefined);
   const expired = tickets.issue(identity, now);
   assert.equal(tickets.consume(expired, now + 60_000), undefined);
+});
+
+test('backend credentials survive launch expiry and bind the signed bot, session, user and generation', () => {
+  const identity = {botId:123,sessionId,generation:7,userId:ownerId,displayName:'Ada',authDate:1};
+  const credential = issueCredential(identity,botToken);
+  assert.deepEqual(validateCredential(credential,botToken,123,sessionId),identity);
+  assert.throws(() => validateCredential(credential,'other-token',123,sessionId));
+  assert.throws(() => validateCredential(credential,botToken,124,sessionId));
+  assert.throws(() => validateCredential(credential,botToken,123,'A'.repeat(22)));
+  const [payload,signature] = credential.split('.');
+  const altered = Buffer.from(JSON.stringify({...identity,userId:ownerId+1})).toString('base64url');
+  assert.throws(() => validateCredential(`${altered}.${signature}`,botToken,123,sessionId));
+  for (const invalid of ['', 'x'.repeat(2049), `${payload}.short`, `${credential}.extra`]) {
+    assert.throws(() => validateCredential(invalid,botToken,123,sessionId));
+  }
 });

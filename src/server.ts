@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, CollabConnection, TopicSession } from '../shared/contracts.js';
 import { Store } from './store.js';
-import { TicketStore, validateInitData, validateGuestFrame, type TicketIdentity } from './auth.js';
+import { TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
 import { connectCollab } from './collab.js';
 import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
@@ -15,7 +15,7 @@ import { findInstance, refreshTermination } from './config.js';
 export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
-const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),generation:z.number().int().nonnegative().safe().optional()}).strict();
+const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
 class SessionGenerationError extends Error {}
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
@@ -57,7 +57,7 @@ export function createServer(options: ServerOptions): GatewayServer {
   async function authorize(identity: TicketIdentity, expected?: TopicSession, access?: {canControl: boolean}): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
     checkTermination();
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
-    if (!bot || !session || session.botId !== identity.botId || Date.now()/1000 - identity.authDate > 3600) throw new Error('Access denied');
+    if (!bot || !session || session.botId !== identity.botId) throw new Error('Access denied');
     if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
         await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
@@ -90,20 +90,26 @@ export function createServer(options: ServerOptions): GatewayServer {
           const parsed = requestSchema.parse(await body(request));
           const bot = botMap.get(parsed.botId);
           if (!bot) throw new Error('Access denied');
-          const authentication = validateInitData(parsed.initData,bot.token);
-          if (authentication.startParam !== `s_${parsed.sessionId}`) throw new Error('Access denied');
-          const identity: TicketIdentity = {
-            botId:parsed.botId,
-            sessionId:parsed.sessionId,
-            generation:parsed.generation ?? options.store.getSessionGeneration(parsed.sessionId),
-            userId:authentication.user.id,
-            username:authentication.user.username,
-            displayName:[authentication.user.first_name,authentication.user.last_name].filter(Boolean).join(' ').slice(0,80),
-            authDate:authentication.authDate,
-          };
+          let identity: TicketIdentity;
+          if (parsed.credential !== undefined) {
+            identity = validateCredential(parsed.credential,bot.token,parsed.botId,parsed.sessionId);
+            identity.generation = parsed.generation ?? options.store.getSessionGeneration(parsed.sessionId);
+          } else {
+            const authentication = validateInitData(parsed.initData,bot.token);
+            if (authentication.startParam !== `s_${parsed.sessionId}`) throw new Error('Access denied');
+            identity = {
+              botId:parsed.botId,
+              sessionId:parsed.sessionId,
+              generation:parsed.generation ?? options.store.getSessionGeneration(parsed.sessionId),
+              userId:authentication.user.id,
+              username:authentication.user.username,
+              displayName:[authentication.user.first_name,authentication.user.last_name].filter(Boolean).join(' ').slice(0,80),
+              authDate:authentication.authDate,
+            };
+          }
           const {session,canControl} = await authorize(identity);
           checkGeneration(identity);
-          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,ticket:tickets.issue({...identity,access:{session,canControl}}),displayName:participantName(identity)});
+          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),ticket:tickets.issue({...identity,access:{session,canControl}}),displayName:participantName(identity)});
           return;
         } finally {
           pendingRequests--;
@@ -181,10 +187,21 @@ export function createServer(options: ServerOptions): GatewayServer {
         ? 'This topic is conversation-only; its session is detached'
         : 'Session process killed. Reopen OPEN AGENT to restart.');
     });
-    const expiry = setTimeout(() => fail(4001,'Authentication expired'),Math.max(1,Math.min(900000,(identity.authDate+3600)*1000-Date.now()))); expiry.unref();
+    let refreshingAccess = false;
+    const accessTimer = setInterval(() => {
+      if (closed || refreshingAccess) return;
+      refreshingAccess = true;
+      void authorize(identity,connectedSession).then(current => {
+        if (closed) return;
+        readAccess.session = current.session;
+        readAccess.canControl = current.canControl;
+      }).catch(error => fail(4003,error instanceof Error ? error.message : 'Access or session unavailable'))
+        .finally(() => { refreshingAccess = false; });
+    },30000);
+    accessTimer.unref();
     function fail(code: number, message: string): void {
       if (closed) return;
-      closed = true; clearTimeout(expiry); unsubscribeKill(); release?.(); upstream?.close();
+      closed = true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close();
       if (Buffer.byteLength(message) > 123) {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({t:'bye',reason:message}));
         ws.close(code);
@@ -233,7 +250,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       });
     }
     ws.on('error',() => fail(1011,'Connection failed'));
-    ws.on('close',() => { closed=true; clearTimeout(expiry); unsubscribeKill(); release?.(); upstream?.close(); });
+    ws.on('close',() => { closed=true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close(); });
     ws.on('message',(data,binary) => {
       try { checkTermination(); }
       catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }

@@ -50,6 +50,32 @@ export function validateGuestFrame(value: unknown): Exclude<GuestFrame, {t:'hell
   return guestSchema.parse(value) as Exclude<GuestFrame, {t:'hello'}>;
 }
 export interface TicketIdentity { botId: number; sessionId: string; generation: number; userId: number; username?: string; displayName: string; authDate: number }
+const credentialSchema = z.object({
+  botId: z.number().int().positive().safe(),
+  sessionId: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+  generation: z.number().int().nonnegative().safe(),
+  userId: z.number().int().positive().safe(),
+  username: z.string().max(256).optional(),
+  displayName: z.string().max(80),
+  authDate: z.number().int().nonnegative().safe(),
+}).strict();
+function credentialSignature(payload: string, token: string): Buffer {
+  return createHmac('sha256', token).update('omp-telegram-session-v1\0').update(payload).digest();
+}
+export function issueCredential(identity: TicketIdentity, token: string): string {
+  const payload = Buffer.from(JSON.stringify(credentialSchema.parse(identity))).toString('base64url');
+  return `${payload}.${credentialSignature(payload, token).toString('base64url')}`;
+}
+export function validateCredential(raw: string, token: string, botId: number, sessionId: string): TicketIdentity {
+  if (typeof raw !== 'string' || raw.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(raw)) throw new Error('Invalid session credential');
+  const [payload, signature] = raw.split('.') as [string, string];
+  const actual = Buffer.from(signature, 'base64url');
+  const expected = credentialSignature(payload, token);
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected) || actual.toString('base64url') !== signature) throw new Error('Invalid session credential');
+  const identity = credentialSchema.parse(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')));
+  if (identity.botId !== botId || identity.sessionId !== sessionId) throw new Error('Invalid session credential');
+  return identity;
+}
 export class TicketStore<T extends TicketIdentity = TicketIdentity> {
   private readonly tickets = new Map<string, { identity: T; expires: number }>();
   issue(identity: T, now = Date.now()): string {

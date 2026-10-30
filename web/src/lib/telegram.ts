@@ -27,12 +27,40 @@ export interface TelegramLaunch {
 
 export interface AuthorizedSession {
 	session: { id: string; name: string; status: "open" | "closed" };
+	credential: string;
 	ticket: string;
 	generation: number;
 	displayName: string;
 }
 
 export class SessionAccessError extends Error {}
+
+const sessionCredentials = new Map<string, { initData: string; credential: string }>();
+
+function readSessionCredential(launch: TelegramLaunch): string | undefined {
+	const key = `omp-collab-auth:${launch.botId}:${launch.sessionId}`;
+	let cached = sessionCredentials.get(key);
+	if (!cached) {
+		try {
+			const stored: unknown = JSON.parse(globalThis.sessionStorage.getItem(key) ?? "null");
+			if (stored && typeof stored === "object" && "initData" in stored && "credential" in stored &&
+				typeof stored.initData === "string" && typeof stored.credential === "string" && stored.credential) {
+				cached = { initData: stored.initData, credential: stored.credential };
+				sessionCredentials.set(key, cached);
+			}
+		} catch {}
+	}
+	return cached?.initData === launch.initData ? cached.credential : undefined;
+}
+
+function saveSessionCredential(launch: TelegramLaunch, credential: string): void {
+	const key = `omp-collab-auth:${launch.botId}:${launch.sessionId}`;
+	const cached = { initData: launch.initData, credential };
+	sessionCredentials.set(key, cached);
+	try {
+		globalThis.sessionStorage.setItem(key, JSON.stringify(cached));
+	} catch {}
+}
 
 export function readTelegramLaunch(): TelegramLaunch {
 	const app = window.Telegram?.WebApp;
@@ -52,44 +80,42 @@ export function readTelegramLaunch(): TelegramLaunch {
 }
 
 export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number): Promise<AuthorizedSession> {
-	let response: Response;
-	try {
-		response = await fetch("/api/session", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			credentials: "same-origin",
-			cache: "no-store",
-			body: JSON.stringify({ ...launch, generation }),
-			signal,
-		});
-	} catch {
-		throw new Error("Could not reach the session service. Check your connection and Retry.");
-	}
+	const response = await fetch("/api/session", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		credentials: "same-origin",
+		cache: "no-store",
+		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation }),
+		signal,
+	});
 	if (!response.ok) {
-		if (response.status === 409) throw new SessionAccessError("This session was killed. Select Rejoin or reopen the topic’s OPEN AGENT button to resume explicitly.");
-		if (response.status === 401 || response.status === 403) {
-			throw new SessionAccessError("Telegram authentication expired or access was denied. Reopen the topic’s OPEN AGENT button and confirm you are still a group member.");
+		const body = await response.text();
+		let message = body || `Session request failed (${response.status} ${response.statusText}).`;
+		try {
+			const error: unknown = JSON.parse(body);
+			if (error && typeof error === "object" && "error" in error && typeof error.error === "string") {
+				message = error.error;
+			}
+		} catch {}
+		if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409) {
+			throw new SessionAccessError(message);
 		}
-		if (response.status === 404) throw new SessionAccessError("This topic’s session is unavailable. Reopen its OPEN AGENT button in Telegram.");
-		throw new Error("The session service is unavailable. Retry in a moment.");
+		throw new Error(message);
 	}
-	let data: unknown;
-	try {
-		data = await response.json();
-	} catch {
-		throw new Error("The session service returned an invalid response. Retry in a moment.");
-	}
+	const data: unknown = await response.json();
 	if (!data || typeof data !== "object") throw new Error("Invalid session response. Retry in a moment.");
 	const result = data as Partial<AuthorizedSession>;
 	if (
 		!result.session || result.session.id !== launch.sessionId || typeof result.session.name !== "string" ||
 		(result.session.status !== "open" && result.session.status !== "closed") ||
 		typeof result.ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(result.ticket) ||
+		typeof result.credential !== "string" || !result.credential ||
 		typeof result.generation !== "number" || !Number.isSafeInteger(result.generation) || result.generation < 0 ||
 		typeof result.displayName !== "string" || !result.displayName
 	) {
 		throw new Error("Invalid session response. Retry in a moment.");
 	}
+	saveSessionCredential(launch, result.credential);
 	return result as AuthorizedSession;
 }
 

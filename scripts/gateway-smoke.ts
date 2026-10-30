@@ -55,9 +55,20 @@ export async function verifyGatewayFlow() {
     });
     const response = await authorize();
     assert.equal(response.status, 200);
-    const data = await response.json() as { ticket: string; session: { id: string } };
+    const data = await response.json() as { ticket: string; credential: string; session: { id: string } };
     assert.equal(data.session.id, session.id);
     assert.ok(!JSON.stringify(data).includes('secret-capability'), 'HTTP session response must not expose the private host capability');
+    const resume = (credential: string) => fetch(`${app.url}/api/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botId, sessionId: session.id, initData: 'expired-launch-data', credential }),
+    });
+    const resumed = await resume(data.credential);
+    assert.equal(resumed.status, 200, 'backend credentials must reconnect independently of Telegram launch data');
+    const resumedData = await resumed.json() as { session: { id: string }; ticket: string };
+    assert.equal(resumedData.session.id, session.id);
+    assert.notEqual(resumedData.ticket, data.ticket, 'reconnect must receive a fresh single-use ticket');
+    assert.equal((await resume(`${data.credential}tampered`)).status, 403, 'tampered backend credentials must be denied');
     const socketUrl = `${app.url.replace('http:', 'ws:')}/api/socket?ticket=${encodeURIComponent(data.ticket)}`;
     const connectionsBeforeDeniedUpgrades = app.connectionCount;
     await assertUpgradeDenied(socketUrl, 'https://untrusted.invalid', 'a cross-origin request with a valid ticket must be denied');
@@ -85,6 +96,7 @@ export async function verifyGatewayFlow() {
     await socketClosed;
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length, promptsBeforeRevocation, 'a removed member cannot send prompts through an existing socket');
     assert.equal((await authorize()).status, 403);
+    assert.equal((await resume(data.credential)).status, 403, 'backend credentials must not bypass revoked membership');
     app.setMember(true);
     const readerResponse = await authorize();
     assert.equal(readerResponse.status, 200);

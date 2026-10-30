@@ -355,3 +355,44 @@ test('an admitted ticket retains read access through warm upgrade and initializa
     assert.equal(socket.readyState, WebSocket.OPEN);
   } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
 });
+
+test('backend credential reconnects after launch expiry without permitting fallback or revoked membership', async t => {
+  const {app,session} = await fixture();
+  let socket: WebSocket | undefined;
+  try {
+    const initData = app.initData(session.id);
+    const exchange = (credential?: string) => fetch(`${app.url}/api/session`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({botId,sessionId:session.id,initData,credential}),
+    });
+    const initial = await exchange();
+    assert.equal(initial.status,200);
+    const {credential} = await initial.json() as {credential:string};
+    assert.ok(credential);
+    assert.equal((await exchange('invalid')).status,403,'invalid credential must not fall back to fresh Telegram data');
+    const originalNow = Date.now();
+    t.mock.method(Date,'now',() => originalNow + 7200000);
+    assert.equal((await exchange()).status,403,'expired launch alone must be rejected');
+    const resumed = await exchange(credential);
+    assert.equal(resumed.status,200);
+    const {ticket} = await resumed.json() as {ticket:string};
+    socket = new WebSocket(`${app.url.replace('http:','ws:')}/api/socket?ticket=${ticket}`,{origin:app.config.publicUrl});
+    await once(socket,'open');
+    app.setMember(false);
+    assert.equal((await exchange(credential)).status,403,'credentials must not cache membership');
+  } finally { socket?.terminate(); await app.close(); }
+});
+
+test('idle sockets periodically refresh permissions and close after membership revocation', async t => {
+  const {app,connect} = await fixture();
+  let socket: WebSocket | undefined;
+  try {
+    t.mock.timers.enable({apis:['setInterval']});
+    socket = (await connect()).socket;
+    app.setMember(false);
+    const closed = once(socket,'close');
+    t.mock.timers.tick(30000);
+    const [code] = await closed;
+    assert.equal(code,4003);
+  } finally { socket?.terminate(); await app.close(); }
+});
