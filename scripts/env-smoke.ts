@@ -20,28 +20,26 @@ export async function verifyEnvironmentCli(): Promise<void> {
   try {
     const configured = await run('--config', configPath, 'configure', '--public-url', 'https://cli.example', '--port', '3101', '--data-dir', 'private-data');
     assert.equal(configured.stdout.includes(fixtureToken), false);
-    await run('--config', configPath, 'create', '.', '--admin', '@PrimaryOwner');
+    await run('--config', configPath, 'create', '.');
     const config = readConfig(configPath);
     assert.equal(config.configPath, configPath);
-    assert.deepEqual(config.instances[cwd]?.admins, ['primaryowner']);
+    assert.deepEqual(config.instances[cwd], {chats: []});
     assert.equal(config.port, 3101);
     assert.equal(config.publicUrl, 'https://cli.example');
     assert.equal(config.dataDir, join(cwd, 'private-data'));
     assert.equal((await stat(configPath)).mode & 0o777, 0o600);
-    await run('admin', 'add', '.', 'SecondAdmin', '--config', configPath);
-    assert.deepEqual(readConfig(configPath).instances[cwd]?.admins, ['primaryowner', 'secondadmin']);
     const second = join(cwd, 'other checkout');
     await mkdir(second);
     const alias = join(cwd, 'checkout-alias');
     await symlink(second, alias);
-    await run('--config', configPath, 'create', alias, '--admin', 'OtherAdmin');
-    assert.deepEqual(readConfig(configPath).instances[second]?.admins, ['otheradmin']);
+    await run('--config', configPath, 'create', alias);
+    assert.deepEqual(readConfig(configPath).instances[second], {chats: []});
     assert.equal(readConfig(configPath).instances[alias], undefined);
     const listed = await run('list', '--config', configPath);
     assert.ok(listed.stdout.includes(second));
     assert.equal(listed.stdout.includes(fixtureToken), false);
     const before = await readFile(configPath, 'utf8');
-    await assert.rejects(run('--config', configPath, 'create', '.', '--admin', 'ReplacementAdmin'));
+    await assert.rejects(run('--config', configPath, 'create', '.'));
     assert.equal(await readFile(configPath, 'utf8'), before, 'duplicate creation must never overwrite an existing instance');
     await assert.rejects(run('--config', configPath, 'configure', '--public-url', `https://${fixtureToken}@cli.example`), error => {
       const failure = error as Error & { stderr?: string };
@@ -51,7 +49,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
     });
     assert.equal(await readFile(configPath, 'utf8'), before, 'invalid configuration must not replace existing YAML');
     await chmod(configPath, 0o400);
-    await assert.rejects(run('--config', configPath, 'admin', 'add', '.', 'DeniedAdmin'), error => {
+    await assert.rejects(run('--config', configPath, 'configure', '--max-sessions', '50'), error => {
       const failure = error as Error & { stderr?: string };
       assert.ok(failure.stderr?.includes(configPath));
       assert.equal(failure.stderr?.includes(fixtureToken), false);
@@ -59,8 +57,6 @@ export async function verifyEnvironmentCli(): Promise<void> {
     });
     const shown = await run('--config', configPath, 'show', '.');
     assert.ok(shown.stdout.includes(cwd));
-    assert.ok(shown.stdout.includes('@primaryowner'));
-    assert.ok(shown.stdout.includes('@secondadmin'));
     assert.equal(shown.stdout.includes(fixtureToken), false);
     assert.equal(await readFile(configPath, 'utf8'), before);
     const missing = join(cwd, 'missing.yaml');
@@ -70,7 +66,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
       assert.equal(failure.stderr?.includes(fixtureToken), false);
       return true;
     });
-    console.log('PASS compiled CLI YAML creation/configuration, alternate config path, canonical path identities, per-instance admins, protected-file reads/write rejection, atomic refusal, and credential-safe errors.');
+    console.log('PASS compiled CLI YAML creation/configuration, alternate config path, canonical path identities, protected-file reads/write rejection, atomic refusal, and credential-safe errors.');
   } finally {
     await chmod(configPath, 0o600).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true });

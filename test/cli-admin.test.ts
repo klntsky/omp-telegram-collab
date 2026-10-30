@@ -22,7 +22,7 @@ function fixture(t: TestContext) {
   mkdirSync(other);
   const output: string[] = [];
   const calls: {method: string; payload: Record<string, unknown>; botId: number}[] = [];
-  const state = {forum: true, manageTopics: true, pinMessages: true, requesterStatus: 'administrator', requesterUsername: 'CurrentAdmin', fail: '', failure: new Error('Telegram transport unavailable\nOriginal socket diagnostic')};
+  const state = {forum: true, manageTopics: true, pinMessages: true, requesterStatus: 'administrator', requesterUsername: 'CurrentAdmin' as string | undefined, requesterId: 42, requesterBot: false, fail: '', failure: new Error('Telegram transport unavailable\nOriginal socket diagnostic')};
   const deps: AdminDependencies = {
     interactive: false,
     output: text => output.push(text),
@@ -45,7 +45,7 @@ function fixture(t: TestContext) {
           record('getChatMember', {chat_id: chatId, user_id: userId});
           return userId === botId
             ? {status: 'administrator', can_manage_topics: state.manageTopics, can_pin_messages: state.pinMessages}
-            : {status: state.requesterStatus, user: {id: userId, is_bot: false, username: state.requesterUsername}};
+            : {status: state.requesterStatus, user: {id: state.requesterId, is_bot: state.requesterBot, username: state.requesterUsername}};
         },
         async sendMessage(chatId, text) {
           record('sendMessage', {chat_id: chatId, text});
@@ -60,7 +60,7 @@ function fixture(t: TestContext) {
     const config = emptyConfig(configPath);
     config.bots = [{id: 123456789, token, miniAppShortName: 'app'}];
     if (multipleBots) config.bots.push({id: 987654321, token: secondToken, miniAppShortName: 'second'});
-    config.instances[canonicalPath(project)] = {admins: ['localadmin'], chats: []};
+    config.instances[canonicalPath(project)] = {chats: []};
     writeConfig(config);
     return config;
   };
@@ -73,25 +73,22 @@ test('unhandled commands return false and reads never create a missing configura
   assert.equal(await f.run(['start']), false);
   assert.equal(existsSync(f.configPath), false);
   await assert.rejects(f.run(['list']), /Cannot read/);
-  await assert.rejects(f.run(['admin', 'add', f.project, 'Alice']), /Cannot read/);
+  assert.equal(await f.run(['admin', 'add', f.project, 'Alice']), false);
   assert.equal(existsSync(f.configPath), false);
 });
 
-test('create, list, show, admin changes and remove use canonical directory identities', async t => {
+test('create, list, show and remove use canonical directory identities', async t => {
   const f = fixture(t);
   const alias = join(f.root, 'alias');
   symlinkSync(f.project, alias);
-  await f.run(['create', alias, '--admin', '@Alice', '--admin', 'ALICE', '--admin', 'Bob']);
+  await f.run(['create', alias]);
   const path = canonicalPath(f.project);
   assert.deepEqual(Object.keys(readConfig(f.configPath).instances), [path]);
-  assert.deepEqual(readConfig(f.configPath).instances[path]!.admins, ['alice', 'bob']);
-  await assert.rejects(f.run(['create', f.project, '--admin', 'alice']), /already registered/);
-  await f.run(['admin', 'add', f.project, '@CAROL']);
-  await f.run(['admin', 'remove', alias, 'Bob']);
-  assert.deepEqual(readConfig(f.configPath).instances[path]!.admins, ['alice', 'carol']);
+  assert.deepEqual(readConfig(f.configPath).instances[path], {chats: []});
+  await assert.rejects(f.run(['create', f.project]), /already registered/);
+  await assert.rejects(f.run(['create', f.other, '--admin', 'Alice']), /Unknown option/);
   await f.run(['list']);
   await f.run(['show', alias]);
-  assert.match(f.output.join(''), /@carol/);
   assert.match(f.output.join(''), /project with spaces/);
   rmSync(f.project, {recursive: true});
   await f.run(['show', path]);
@@ -291,7 +288,7 @@ test('removed assignments retain histories and cannot be rebound to another dire
   const session = store.createSession({botId: 123456789, chatId: -1001, threadId: 11, instancePath: canonicalPath(f.project)}, 'existing history');
   store.close();
   await f.run(['chat', 'remove', f.project, '--chat', '-1001']);
-  await f.run(['create', f.other, '--admin', 'AnotherAdmin']);
+  await f.run(['create', f.other]);
   await assert.rejects(f.run(['chat', 'add', f.other, '--chat', '-1001']), /histories pinned/);
   await f.run(['chat', 'add', f.project, '--chat', '-1001']);
   await assert.rejects(f.run(['remove', f.project]), /chat assignments/);
@@ -302,7 +299,7 @@ test('removed assignments retain histories and cannot be rebound to another dire
   retained.close();
 });
 
-test('approval verifies live identities, authorizes requester, enrolls, confirms, then consumes', async t => {
+test('approval verifies live numeric identity, enrolls, confirms, then consumes', async t => {
   const f = fixture(t);
   f.seed();
   const store = f.store();
@@ -311,13 +308,11 @@ test('approval verifies live identities, authorizes requester, enrolls, confirms
   await assert.rejects(f.run(['approve', pending.code, '--path', f.project]), /requires --yes/);
   await f.run(['approve', pending.code, '--path', f.project, '--yes']);
   const config = readConfig(f.configPath);
-  assert.deepEqual(config.instances[canonicalPath(f.project)]!.admins, ['localadmin', 'currentadmin']);
   assert.deepEqual(config.instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
   const approved = f.store();
   assert.equal(approved.getSetupRequest(pending.code), undefined);
   assert.equal(approved.isEnrolled(123456789, -1001), true);
   approved.close();
-  assert.match(f.output.join(''), /Verified requester @currentadmin \(42\)/);
   assert.equal(f.output.join('').includes('OldName'), false);
   assert.equal(f.calls.filter(call => call.method === 'sendMessage').length, 1);
 });
@@ -419,7 +414,7 @@ test('readonly file and readonly parent reject mutations but permit inspection',
   f.seed();
   chmodSync(f.configPath, 0o400);
   await f.run(['list']);
-  await assert.rejects(f.run(['admin', 'add', f.project, 'Alice']), /read-only/);
+  await assert.rejects(f.run(['configure', '--max-sessions', '50']), /read-only/);
   chmodSync(f.configPath, 0o600);
   chmodSync(f.root, 0o500);
   try { await assert.rejects(f.run(['configure', '--max-sessions', '50']), /read-only/); }
@@ -427,9 +422,9 @@ test('readonly file and readonly parent reject mutations but permit inspection',
   assert.equal(readConfig(f.configPath).omp.maxSessions, 8);
 });
 
-test('setup wizard completes service, bot, instance, chat and administrator workflows', async t => {
+test('setup wizard completes service, bot, instance and chat workflows', async t => {
   const f = fixture(t);
-  const answers = ['service', 'https://wizard.example', '127.0.0.1', '4555', join(f.root, 'wizard-data'), 'omp', '["--model","literal model"]', '9', '34567', 'wss://relay.example', 'bot', token, 'wizardapp', 'create', f.project, 'Alice,BOB', 'connect', f.project, '-1001', 'false', 'true', 'admin', 'add', f.project, 'Carol', 'inspect', 'done'];
+  const answers = ['service', 'https://wizard.example', '127.0.0.1', '4555', join(f.root, 'wizard-data'), 'omp', '["--model","literal model"]', '9', '34567', 'wss://relay.example', 'bot', token, 'wizardapp', 'create', f.project, 'connect', f.project, '-1001', 'false', 'true', 'inspect', 'done'];
   const hidden: boolean[] = [];
   await f.run(['setup'], {interactive: true, question: async (_prompt, secret) => { hidden.push(Boolean(secret)); const next = answers.shift(); assert.notEqual(next, undefined); return next!; }});
   assert.deepEqual(answers, []);
@@ -438,7 +433,6 @@ test('setup wizard completes service, bot, instance, chat and administrator work
   assert.equal(config.publicUrl, 'https://wizard.example');
   assert.equal(config.bots[0]!.miniAppShortName, 'wizardapp');
   assert.deepEqual(config.omp.args, ['--model', 'literal model']);
-  assert.deepEqual(config.instances[canonicalPath(f.project)]!.admins, ['alice', 'bob', 'carol']);
   assert.deepEqual(config.instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
   assert.equal(f.output.join('').includes(token), false);
 });
@@ -460,8 +454,76 @@ test('interactive approval can register an existing directory and cancel without
   assert.match(prompts[2]!, /non-admin users.*\[false\]/);
   answers = [f.other, 'false', 'true', 'yes'];
   await f.run(['approve', pending.code], {interactive: true, question});
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.other)]!.admins, ['currentadmin']);
   assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+});
+
+test('local approval registers a selected directory for a creator or administrator without a username', async t => {
+  for (const status of ['creator', 'administrator']) {
+    const f = fixture(t);
+    f.seed();
+    f.state.requesterStatus = status;
+    f.state.requesterUsername = undefined;
+    const store = f.store();
+    const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
+    store.close();
+    await f.run(['approve', pending.code, '--path', f.other, '--yes']);
+    assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.other)], {chats: [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]});
+  }
+});
+
+test('approval rechecks authority but does not bind it to a username', async t => {
+  for (const change of ['username', 'revocation', 'identity', 'bot']) {
+    const f = fixture(t);
+    f.seed();
+    const source = readFileSync(f.configPath, 'utf8');
+    const store = f.store();
+    const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
+    store.close();
+    const approval = f.run(['approve', pending.code, '--path', f.other], {
+      interactive: true,
+      question: async prompt => {
+        if (prompt.includes('[y/N]')) {
+          if (change === 'username') f.state.requesterUsername = 'RenamedAdmin';
+          if (change === 'revocation') f.state.requesterStatus = 'member';
+          if (change === 'identity') f.state.requesterId = 43;
+          if (change === 'bot') f.state.requesterBot = true;
+          return 'yes';
+        }
+        return '';
+      },
+    });
+    if (change === 'username') {
+      await approval;
+      assert.ok(readConfig(f.configPath).instances[canonicalPath(f.other)]);
+    } else {
+      await assert.rejects(approval, /no longer a current group administrator/);
+      assert.equal(readFileSync(f.configPath, 'utf8'), source);
+      const preserved = f.store();
+      assert.ok(preserved.getSetupRequest(pending.code));
+      assert.equal(preserved.isEnrolled(123456789, -1001), false);
+      preserved.close();
+    }
+  }
+});
+
+test('approval preserves original Telegram errors and leaves requests untouched', async t => {
+  for (const method of ['getMe', 'getChat', 'getChatMember']) {
+    const f = fixture(t);
+    f.seed();
+    const source = readFileSync(f.configPath, 'utf8');
+    const store = f.store();
+    const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
+    store.close();
+    f.state.fail = method;
+    await assert.rejects(f.run(['approve', pending.code, '--path', f.other, '--yes']), error => {
+      assert.equal(error, f.state.failure);
+      return true;
+    });
+    assert.equal(readFileSync(f.configPath, 'utf8'), source);
+    const preserved = f.store();
+    assert.ok(preserved.getSetupRequest(pending.code));
+    preserved.close();
+  }
 });
 
 test('configuration writes notify the old data directory and do not roll back failed reloads', async t => {

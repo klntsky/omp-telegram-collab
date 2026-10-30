@@ -137,7 +137,7 @@ test('reconciliation admits pending initial tasks without eagerly launching othe
     await app.update({text:'/setup'});
     const instancePath = Object.keys(app.config.instances)[0]!;
     app.store.createSession({botId,chatId,threadId:42,instancePath},'Empty topic');
-    const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},'Restore pending task',123);
+    const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},'Restore pending task',123,undefined,ownerId);
     await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Restore pending task'}]);

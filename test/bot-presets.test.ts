@@ -6,17 +6,17 @@ import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerUsername } from './telegram-data.js';
 
 for (const command of ['/model_preset Fast','/list_model_presets']) {
-  test(`${command} requires current instance administration before starting a host`, async t => {
+  test(`${command} requires current native administration before starting a host`, async t => {
     const app = await createSmokeApp();
     const presets = t.mock.method(app.runtime,'modelPresets');
     try {
       await app.update({text:'/setup'});
       await app.update({message_thread_id:42,forum_topic_created:{name:'Preset authorization'}});
       const session = app.store.listSessions(botId)[0]!;
-      app.setCurrentMember({username:'another_admin',status:'administrator'});
+      app.setCurrentMember({username:'another_admin',status:'member'});
       await app.update({text:command,message_thread_id:42});
       assert.equal(await app.runtime.isRunning(session),false);
-      app.setCurrentMember({username:ownerUsername,status:'member'});
+      app.setCurrentMember({username:ownerUsername,status:'creator'});
       app.setMember(false);
       await app.update({text:command,message_thread_id:42});
       assert.equal(await app.runtime.isRunning(session),false);
@@ -24,7 +24,7 @@ for (const command of ['/model_preset Fast','/list_model_presets']) {
       const ensure = app.runtime.ensure.bind(app.runtime);
       app.runtime.ensure = async target => {
         const binding = await ensure(target);
-        app.setCurrentMember({username:'removed_admin',status:'administrator'});
+        app.setCurrentMember({username:'removed_admin',status:'member'});
         return binding;
       };
       await app.update({text:command,message_thread_id:42});

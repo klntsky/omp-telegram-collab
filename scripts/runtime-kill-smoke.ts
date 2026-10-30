@@ -41,7 +41,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, label: strin
 
 export async function verifyRuntimeKill(directory: string, executable: string, relayUrl: string): Promise<void> {
   const config: AppConfig = {
-    bots: [], instances: { [directory]: { admins: [], chats: [] } }, configPath: join(directory, 'config.yaml'),
+    bots: [], instances: { [directory]: { chats: [] } }, configPath: join(directory, 'config.yaml'),
     publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: {
       executable,

@@ -87,11 +87,6 @@ function promptMode(value: string, flag = 'all-messages-are-prompts'): boolean {
   if (value !== 'true' && value !== 'false') throw new Error(`--${flag} must be true or false.`);
   return value === 'true';
 }
-function username(value: string): string {
-  const normalized = value.trim().replace(/^@/, '').toLowerCase();
-  if (!/^[a-z0-9_]{1,32}$/.test(normalized) || !/[a-z]/.test(normalized)) throw new Error('Use a Telegram username containing a letter, with at most 32 letters, numbers, or underscores.');
-  return normalized;
-}
 const telegramRecord = z.record(z.unknown());
 function record(value: unknown): Record<string, unknown> {
   const result = telegramRecord.safeParse(value);
@@ -163,12 +158,10 @@ class Administration {
     if (member.status !== 'administrator' || member.can_manage_topics !== true || member.can_pin_messages !== true) throw new Error('Promote the bot to administrator with Manage Topics and Pin Messages permissions.');
     return {chat, me};
   }
-  async requesterAdmin(bot: BotConfig, chatId: number, userId: number): Promise<string> {
+  async requesterAdmin(bot: BotConfig, chatId: number, userId: number): Promise<void> {
     const member = record(await this.api(bot).getChatMember(chatId, userId));
     const user = record(member.user);
     if (user.id !== userId || user.is_bot === true || !['creator', 'administrator'].includes(String(member.status))) throw new Error('The requester is no longer a current group administrator. Request preserved.');
-    if (typeof user.username !== 'string') throw new Error('The requester needs a Telegram username before approval. Request preserved.');
-    return username(user.username);
   }
   historySafe(config: AppConfig, store: Store, path: string, botId: number, chatId: number): void {
     const current = findInstance(config, botId, chatId);
@@ -178,30 +171,19 @@ class Administration {
       if (session.instancePath !== path || canonicalPath(session.instancePath) !== session.instancePath) throw new Error('This bot/chat has histories pinned to a different or unknown directory. It cannot be reassigned safely.');
     }
   }
-  async create(input: string, admins: string[]): Promise<void> {
+  async create(input: string): Promise<void> {
     const path = canonicalPath(input);
     const config = this.load(true);
     this.writable(config);
     if (config.instances[path]) throw new Error(`Instance already registered: ${path}`);
-    const normalized = [...new Set(admins.map(username))];
-    if (!normalized.length) throw new Error('Specify at least one --admin USER.');
-    config.instances[path] = {admins: normalized, chats: []};
+    config.instances[path] = {chats: []};
     await this.save(config);
     this.print(`Created ${path}`);
   }
   show(config: AppConfig, input?: string): void {
     const entries = input === undefined ? Object.entries(config.instances) : (() => { const found = this.instance(config, input); return [[found.path, found.instance] as const]; })();
     if (!entries.length) { this.print('No instances configured.'); return; }
-    for (const [path, instance] of entries) this.print(`${path}\n  admins: ${instance.admins.map(user => `@${user}`).join(', ') || '(none)'}\n  chats: ${instance.chats.map(chat => `${chat.chatId} (bot ${chat.botId}, all_messages_are_prompts: ${chat.all_messages_are_prompts ?? true}, users_can_propose_prompts: ${chat.users_can_propose_prompts ?? false})`).join(', ') || '(none)'}`);
-  }
-  async changeAdmin(input: string, user: string, remove: boolean): Promise<void> {
-    const config = this.load();
-    this.writable(config);
-    const {path, instance} = this.instance(config, input);
-    const name = username(user);
-    instance.admins = remove ? instance.admins.filter(admin => admin !== name) : [...new Set([...instance.admins, name])];
-    await this.save(config);
-    this.print(`${remove ? 'Removed' : 'Added'} @${name} ${remove ? 'from' : 'to'} ${path}`);
+    for (const [path, instance] of entries) this.print(`${path}\n  chats: ${instance.chats.map(chat => `${chat.chatId} (bot ${chat.botId}, all_messages_are_prompts: ${chat.all_messages_are_prompts ?? true}, users_can_propose_prompts: ${chat.users_can_propose_prompts ?? false})`).join(', ') || '(none)'}`);
   }
   async addChat(input: string, chatValue: string, botValue?: string, specifiedMode?: boolean, specifiedProposals?: boolean): Promise<void> {
     const config = this.load();
@@ -233,8 +215,8 @@ class Administration {
       if (!pending) throw new Error('Setup request not found or expired. Ask the group administrator to run /setup again.');
       const bot = await this.selectBot(config, String(pending.botId));
       const {chat, me} = await this.verifyForum(bot, pending.chatId);
-      const admin = await this.requesterAdmin(bot, pending.chatId, pending.userId);
-      this.print(`Verified bot @${String(me.username ?? bot.id)} (${bot.id})\nVerified forum ${String(chat.title ?? pending.chatId)} (${pending.chatId})\nVerified requester @${admin} (${pending.userId}), current group administrator.`);
+      await this.requesterAdmin(bot, pending.chatId, pending.userId);
+      this.print(`Verified bot @${String(me.username ?? bot.id)} (${bot.id})\nVerified forum ${String(chat.title ?? pending.chatId)} (${pending.chatId})\nVerified requester ${pending.userId}, current group administrator.`);
       let target = input;
       if (!target && this.interactive) {
         this.show(config);
@@ -243,15 +225,14 @@ class Administration {
       if (!target) throw new Error('Approval requires --path PATH.');
       const path = canonicalPath(target);
       this.historySafe(config, store, path, bot.id, pending.chatId);
-      const instance = config.instances[path] ?? {admins: [], chats: []};
+      const instance = config.instances[path] ?? {chats: []};
       const assignment = instance.chats.find(value => value.botId === bot.id && value.chatId === pending.chatId);
       const all_messages_are_prompts = await this.selectPromptMode(assignment?.all_messages_are_prompts, specifiedMode);
       const users_can_propose_prompts = await this.selectProposalMode(assignment?.users_can_propose_prompts, specifiedProposals);
-      if (!yes && !/^(y|yes)$/i.test((await this.ask(`Connect this forum to ${path} and authorize @${admin}? [y/N] `)).trim())) { this.print('Approval cancelled; request preserved.'); return; }
+      if (!yes && !/^(y|yes)$/i.test((await this.ask(`Connect this forum to ${path}? [y/N] `)).trim())) { this.print('Approval cancelled; request preserved.'); return; }
       await this.verifyForum(bot, pending.chatId);
-      if (await this.requesterAdmin(bot, pending.chatId, pending.userId) !== admin) throw new Error('The requester username changed during approval. Request preserved; approve again to verify the new identity.');
+      await this.requesterAdmin(bot, pending.chatId, pending.userId);
       if (!store.getSetupRequest(code)) throw new Error('Setup request expired during approval. Ask the administrator to run /setup again.');
-      instance.admins = [...new Set([...instance.admins, admin])];
       if (assignment) Object.assign(assignment, {all_messages_are_prompts, users_can_propose_prompts});
       else instance.chats.push({botId: bot.id, chatId: pending.chatId, all_messages_are_prompts, users_can_propose_prompts});
       config.instances[path] = instance;
@@ -324,24 +305,20 @@ class Administration {
   async setup(): Promise<void> {
     if (!this.interactive) throw new Error('Setup requires an interactive terminal; use the flat commands for automation.');
     for (;;) {
-      const action = (await this.ask('Setup: create, connect, admin, inspect, service, bot, approve, done: ')).trim().toLowerCase();
+      const action = (await this.ask('Setup: create, connect, inspect, service, bot, approve, done: ')).trim().toLowerCase();
       if (action === 'done' || action === 'quit' || action === '') return;
-      if (action === 'create') await this.create(await this.ask('Existing instance directory: '), (await this.ask('Administrator usernames (comma-separated): ')).split(','));
+      if (action === 'create') await this.create(await this.ask('Existing instance directory: '));
       else if (action === 'connect') await this.addChat(await this.ask('Registered instance directory: '), await this.ask('Forum chat ID: '));
-      else if (action === 'admin') {
-        const operation = (await this.ask('Administrator action [add/remove]: ')).trim();
-        if (!['add', 'remove'].includes(operation)) throw new Error('Choose add or remove.');
-        await this.changeAdmin(await this.ask('Registered instance directory: '), await this.ask('Telegram username: '), operation === 'remove');
-      } else if (action === 'inspect') this.show(this.load());
+      else if (action === 'inspect') this.show(this.load());
       else if (action === 'service') await this.configure(new Map());
       else if (action === 'bot') await this.botAdd(new Map());
       else if (action === 'approve') await this.approve((await this.ask('Setup request code: ')).trim(), undefined, false);
-      else this.print('Choose create, connect, admin, inspect, service, bot, approve, or done.');
+      else this.print('Choose create, connect, inspect, service, bot, approve, or done.');
     }
   }
   async run(argv: string[]): Promise<boolean> {
     const [command, ...args] = argv;
-    if (!['create', 'list', 'show', 'remove', 'admin', 'chat', 'approve', 'setup', 'configure', 'bot'].includes(command ?? '')) return false;
+    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'configure', 'bot'].includes(command ?? '')) return false;
     if (command === 'setup') { count(args, 0, 'setup'); await this.setup(); return true; }
     if (command === 'configure') {
       const parsed = parse(args, ['public-url', 'host', 'port', 'data-dir', 'omp-executable', 'omp-arg', 'max-sessions', 'startup-timeout-ms', 'relay-url'], ['clear-omp-args']);
@@ -349,8 +326,8 @@ class Administration {
       await this.configure(parsed.options); return true;
     }
     if (command === 'create') {
-      const parsed = parse(args, ['admin']); count(parsed.positional, 1, 'create PATH --admin USER [--admin USER]');
-      await this.create(parsed.positional[0]!, parsed.options.get('admin') ?? []); return true;
+      const parsed = parse(args, []); count(parsed.positional, 1, 'create PATH');
+      await this.create(parsed.positional[0]!); return true;
     }
     if (command === 'list' || command === 'show') {
       const parsed = parse(args, []); count(parsed.positional, command === 'list' ? 0 : 1, command === 'list' ? 'list' : 'show PATH');
@@ -363,11 +340,6 @@ class Administration {
       if (instance.chats.length) throw new Error('Remove this instance’s chat assignments before removing the instance.');
       delete config.instances[path];
       await this.save(config); this.print(`Removed ${path}. Histories were retained.`); return true;
-    }
-    if (command === 'admin') {
-      const parsed = parse(args, []); count(parsed.positional, 3, 'admin add|remove PATH USER');
-      if (!['add', 'remove'].includes(parsed.positional[0]!)) throw new Error('Usage: omp-telegram admin add|remove PATH USER');
-      await this.changeAdmin(parsed.positional[1]!, parsed.positional[2]!, parsed.positional[0] === 'remove'); return true;
     }
     if (command === 'chat') {
       const parsed = parse(args, ['chat', 'bot', 'all-messages-are-prompts', 'users-can-propose-prompts']); count(parsed.positional, 2, 'chat add|list|remove PATH [--chat ID] [--bot ID] [--all-messages-are-prompts true|false] [--users-can-propose-prompts true|false]');

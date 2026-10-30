@@ -5,8 +5,7 @@ import { test } from 'node:test';
 import WebSocket from 'ws';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
-import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
-import { topicDestination } from '../shared/topic-destination.js';
+import { botId, ownerId, ownerUsername } from './telegram-data.js';
 
 async function fixture() {
   const app = await createSmokeApp();
@@ -63,7 +62,7 @@ for (const action of [
     const { app, connect } = await fixture();
     let socket: WebSocket | undefined;
     try {
-      app.setCurrentMember({ username: 'viewer', status: 'administrator' });
+      app.setCurrentMember({ username: 'viewer', status: 'member' });
       const reader = await connect(); socket = reader.socket;
       let marked = 0, relayed = 0;
       app.runtime.markPrompt = () => { marked++; };
@@ -80,19 +79,17 @@ for (const action of [
   });
 }
 
-test('fresh membership username, not signed identity or Telegram admin status, determines scope and reconnect access', async () => {
+test('current native role controls reconnect access regardless of username', async () => {
   const { app, session, connect } = await fixture();
   const sockets: WebSocket[] = [];
   try {
     app.setCurrentMember({ username: 'viewer', status: 'member' });
     assert.equal(await app.service.authorizeSession(session, ownerId), false);
-    app.store.addTopicAdmin(botId, topicDestination(chatId, session.threadId + 1), 'viewer');
-    assert.equal(await app.service.authorizeSession(session, ownerId), false);
-    app.store.addTopicAdmin(botId, topicDestination(chatId, session.threadId), 'viewer');
+    app.setCurrentMember({status:'administrator'});
     assert.equal(await app.service.authorizeSession(session, ownerId), true);
     const controller = await connect(); sockets.push(controller.socket);
     assert.equal(controller.frames.find(frame => frame.t === 'welcome')?.readOnly, false);
-    app.setCurrentMember({ username: 'renamed', status: 'administrator' });
+    app.setCurrentMember({ username: 'renamed', status: 'member' });
     const before = app.accepted.length;
     const closed = once(controller.socket, 'close');
     controller.socket.send(JSON.stringify({ t: 'abort' }));
@@ -106,7 +103,7 @@ test('fresh membership username, not signed identity or Telegram admin status, d
     while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 900)) {
       assert.ok(Date.now() < deadline); await delay(10);
     }
-    app.setCurrentMember({ username: ownerUsername, status: 'member' });
+    app.setCurrentMember({status:'creator'});
     const restored = await connect(); sockets.push(restored.socket);
     assert.equal(restored.frames.find(frame => frame.t === 'welcome')?.readOnly, false);
   } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
@@ -229,30 +226,28 @@ test('observed role changes reconnect viewers without forwarding the stale outpu
   } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
 });
 
-for (const change of ['grant', 'assignment', 'generation'] as const) {
+for (const change of ['role', 'assignment', 'generation'] as const) {
   test(`mutations recheck ${change} changed during membership lookup`, async () => {
     const { app, session, connect } = await fixture();
     let socket: WebSocket | undefined;
     const entered = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
     try {
-      app.setCurrentMember({ username: 'viewer', status: 'member' });
-      app.config.bots[0]!.admins = [ownerId];
+      app.setCurrentMember({ status: 'creator' });
       socket = (await connect()).socket;
       let held = false;
       app.bot.api.config.use(async (previous, method, payload, signal) => {
-        const result = await previous(method, payload, signal);
         if (!held && method === 'getChatMember' && 'user_id' in payload && Number(payload.user_id) === ownerId) {
           held = true; entered.resolve(); await resume.promise;
         }
-        return result;
+        return previous(method, payload, signal);
       });
       const before = app.accepted.length;
       const closed = once(socket, 'close');
       socket.send(JSON.stringify({ t: 'prompt', text: 'must not pass a stale authorization' }));
       socket.send(JSON.stringify({ t: 'abort' }));
       await entered.promise;
-      if (change === 'grant') app.config.bots[0]!.admins = [];
+      if (change === 'role') app.setCurrentMember({status:'member'});
       else if (change === 'assignment') app.config.instances[session.instancePath]!.chats = [];
       else app.store.advanceSessionGeneration(session.id);
       resume.resolve();

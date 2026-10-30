@@ -123,7 +123,7 @@ if (process.argv[2] !== 'collab') {
   server.once('error', listening.reject);
   server.listen(socketPath, listening.resolve);
   await listening.promise;
-  const config: AppConfig = { bots: [], instances: { [directory]: { admins: [], chats: [] } },
+  const config: AppConfig = { bots: [], instances: { [directory]: { chats: [] } },
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir,
     omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 10000 } };

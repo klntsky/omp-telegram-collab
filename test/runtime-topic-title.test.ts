@@ -28,7 +28,7 @@ async function fixture(t: TestContext, defaultBranch = 'main') {
   await git('config', 'init.defaultBranch', defaultBranch);
   await git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'Initial commit');
   const config: AppConfig = {
-    bots: [], instances: { [repository]: { admins: [], chats: [] } },
+    bots: [], instances: { [repository]: { chats: [] } },
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: { executable: join(directory, 'omp'), args: [], maxSessions: 1, startupTimeoutMs: 10000 },

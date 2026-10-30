@@ -16,7 +16,7 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    pnpm build
    pnpm cli configure
    pnpm cli bot add
-   pnpm cli create /srv/projects/backend --admin alice --admin bob
+   pnpm cli create /srv/projects/backend
    pnpm start
    ```
 
@@ -40,7 +40,7 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    pnpm cli approve REQUEST_CODE
    ```
 
-   Approval verifies the group and requester, asks for the project directory and prompt settings, and confirms before adding the requester as a project admin. Requests expire after ten minutes. Adding the bot alone does not assign a project or enable Topics.
+   Approval verifies the group and the requester's current owner or administrator status, asks for the project directory and prompt settings, and confirms the assignment. The requester does not need a username. Requests expire after ten minutes. Adding the bot alone does not assign a project or enable Topics.
 8. Send `/new Implement authentication` in the group, then select OPEN AGENT in the new topic.
 
 Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
@@ -53,8 +53,6 @@ A project's canonical absolute directory path identifies it. Relative paths and 
 ```sh
 pnpm cli list
 pnpm cli show /srv/projects/backend
-pnpm cli admin add /srv/projects/backend carol
-pnpm cli admin remove /srv/projects/backend bob
 pnpm cli chat add /srv/projects/backend --chat -1001111111111
 pnpm cli chat add /srv/projects/backend --chat -1002222222222 \
   --all-messages-are-prompts false --users-can-propose-prompts true
@@ -83,15 +81,15 @@ pnpm cli --config /etc/omp-telegram/config.yaml start
 pnpm cli show /srv/projects/backend --config /etc/omp-telegram/config.yaml
 ```
 
-Configuration contains bot tokens, project paths, admins, chat assignments, and service settings. The CLI creates private files and validates updates before replacing them atomically. It preserves ownership and mode. Invalid or unreadable configuration causes an error, not an empty configuration.
+Configuration contains bot tokens, project paths, chat assignments, and service settings. The CLI creates private files and validates updates before replacing them atomically. It preserves ownership and mode. Invalid or unreadable configuration causes an error, not an empty configuration.
 
-Optional `bots[].admins: (string | number)[]` stores bot-wide grants as normalized usernames or stable numeric Telegram user IDs. IDs must be positive safe integers; usernames use the existing instance-admin grammar (1–32 ASCII letters, digits, or underscores, containing at least one letter), with an optional leading `@` removed and case folded to lowercase. Validation deduplicates normalized lists. Missing fields remain absent, and existing `instances[path].admins` username roots retain their authority. Topic grants are not configuration fields: they are persisted in the SQLite runtime database and survive restarts.
+Manage group owners and administrators through Telegram's native group settings. `/list_admins` reads the current human administrator roster. The CLI and `/settings` do not maintain a separate administrator list. See [Product](PRODUCT.md#12-prompts-and-permissions) for authorization behavior.
 
-Use `/settings` to manage bot-wide administrators. Use `/make_admin @username` or `/make_admin username` in a session topic, or reply to a user's message with `/make_admin` without arguments, to grant topic-only access. Numeric ID arguments are rejected. Username targets are normalized without a Telegram target lookup because arbitrary handles cannot be resolved. Current human membership is checked when permissions are used. Reply targets must be current human group members and are stored as stable numeric IDs. Topic grants persist in SQLite. Neither operation changes Telegram group roles or crosses bot identities. Revoke grants locally in their owning configuration or database.
+The current configuration format has no `bots[].admins` or `instances[path].admins` fields. Remove those obsolete keys before starting this version; strict validation rejects them. Old SQLite topic grants are never read or converted into Telegram roles. Promote intended operators in Telegram before the cutover.
 
-`/list_admins` in a topic requires current human membership, not administrator privileges. It shows configured global admins and that topic's grants. The settings panel provides bot-wide administration controls. Listed grants do not prove current membership or ownership of a handle.
+Pending initial tasks from before this cutover have no recorded authorizing administrator. Their next admission is cancelled; submit them again after updating group roles. Saved conversations and already submitted tasks remain intact.
 
-Each bot/chat assignment may contain an optional `default_new_topic_skill` string. Configuration validation uses the canonical mentionable-name grammar without trimming, case folding, or alias conversion. The default-skill picker in `/settings` checks catalog existence. Instance roots and bot admins can select or clear the forum default there. Topic admins cannot change it.
+Each bot/chat assignment may contain an optional `default_new_topic_skill` string. Configuration validation uses the canonical mentionable-name grammar without trimming, case folding, or alias conversion. The default-skill picker in `/settings` checks catalog existence before saving.
 
 See [Product](PRODUCT.md#12-prompts-and-permissions) for default-skill application and topic snapshot behavior.
 
@@ -101,7 +99,7 @@ Runtime data lives separately in `dataDir`, which defaults to a `data` directory
 
 Worktree-backed managed sessions require Git and a configured repository with a valid `HEAD`. Configure worktree placement and source-checkout cleanup in OMP's worktree settings. The service invokes OMP's native command rather than creating its own detached checkouts. Keep the configured repository and resulting worktrees available across service restarts, and back up worktree contents alongside runtime data. Closing topics, killing hosts, and stopping the service do not delete worktrees. Inspect and remove unused worktrees only after their sessions no longer need them.
 
-Configuration updates notify the running service and await acknowledgement. Project, admin, chat, and limit changes apply without restarting bots. Bot, listener, and other runtime changes restart the affected components while preserving managed hosts and histories. Mini Apps may need to rejoin. If a saved update fails to apply, the CLI reports that failure. Retry with `pnpm cli reload`.
+Configuration updates notify the running service and await acknowledgement. Project, chat, and limit changes apply without restarting bots. Bot, listener, and other runtime changes restart the affected components while preserving managed hosts and histories. Mini Apps may need to rejoin. If a saved update fails to apply, the CLI reports that failure. Retry with `pnpm cli reload`.
 
 `/terminate` writes top-level `terminated: true`. To resume, an authorized operator removes that entry from the YAML; no restart or Telegram resume command is required. Input handling checks file metadata before dispatch and parses YAML only when the file changes. The existing configuration watcher also applies edits while idle. Keep the configuration and its parent writable if Telegram admins must be able to terminate the service.
 

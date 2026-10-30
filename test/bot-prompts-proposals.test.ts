@@ -184,7 +184,7 @@ for (const allMessagesArePrompts of [true,false]) {
       await app.update({text:'/setup'});
       if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
       await app.update({message_thread_id:42,forum_topic_created:{name:'Admin prompts only'}});
-      app.setCurrentMember({username:'another_user',status:'administrator'});
+      app.setCurrentMember({username:'another_user',status:'member'});
       const before = app.messages.length;
       const reactions = app.reactions.length;
       await app.update({text:allMessagesArePrompts ? 'Ignored task' : '/p Ignored task',message_thread_id:42});
@@ -197,7 +197,7 @@ for (const allMessagesArePrompts of [true,false]) {
     } finally { await app.close(); }
   });
 
-  test(`non-admin prompts wait for one instance-admin approval with all_messages_are_prompts=${allMessagesArePrompts}`, async () => {
+  test(`non-admin prompts wait for one group administrator approval with all_messages_are_prompts=${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
@@ -209,13 +209,13 @@ for (const allMessagesArePrompts of [true,false]) {
       const path = Object.keys(app.config.instances)[0]!;
       assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.users_can_propose_prompts,true);
       const proposer = {id:ownerId+5,first_name:'Grace',username:'grace',is_bot:false};
-      app.setCurrentMember({username:'grace',status:'administrator'});
+      app.setCurrentMember({username:'grace',status:'member'});
       await app.update({message_id:8100,text:allMessagesArePrompts ? 'Proposed multiline\n  task' : '/p Proposed multiline\n  task',message_thread_id:session.threadId},proposer);
       const proposal = promptProposal(app);
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Seed task'}]);
       await app.callback(proposal.approve,proposal.message,proposer);
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Seed task'}]);
-      app.setCurrentMember({username:ownerUsername,status:'member'});
+      app.setCurrentMember({username:ownerUsername,status:'creator'});
       await app.callback(proposal.approve,{...proposal.message,message_thread_id:session.threadId+1});
       await app.callback(proposal.approve,{...proposal.message,message_id:Number(proposal.message.message_id)+1});
       await app.callback(proposal.approve,{...proposal.message,forward_date:1});
@@ -250,7 +250,7 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
       app.setCurrentMember({username:'grace',status:'member'});
       await app.update({text:'Must not execute',message_thread_id:session.threadId});
       const proposal = promptProposal(app);
-      app.setCurrentMember({username:ownerUsername,status:'member'});
+      app.setCurrentMember({username:ownerUsername,status:'creator'});
       if (invalidation === 'disabled') app.config.instances[session.instancePath]!.chats[0]!.users_can_propose_prompts = false;
       else if (invalidation === 'archived') await app.update({message_thread_id:session.threadId,forum_topic_closed:{}});
       else if (invalidation === 'killed') await app.update({text:'/kill',message_thread_id:session.threadId});
@@ -272,10 +272,10 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
   });
 }
 
-test('a non-admin /new task creates no session until an instance admin approves', async () => {
+test('a non-admin /new task creates no session until a group administrator approves', async () => {
   const app = await createSmokeApp();
   try {
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
     await setForumSetting(app, 'User proposals', 'Allow user proposals');
     app.setCurrentMember({username:'grace',status:'member'});
@@ -283,7 +283,7 @@ test('a non-admin /new task creates no session until an instance admin approves'
     const proposal = promptProposal(app);
     assert.deepEqual(app.store.listSessions(botId),[]);
     assert.equal(app.connectionCount,0);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(proposal.approve,proposal.message);
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Proposed initial task'}]);
@@ -308,7 +308,7 @@ test('approval sends one reply reference and submits the stored proposal text', 
     assert.equal(app.messages.at(-1)!.text,'Approve this prompt?');
     assert.deepEqual(app.messages.at(-1)!.reply_parameters,{message_id:8200,allow_sending_without_reply:true});
     const proposal = promptProposal(app);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(proposal.approve,proposal.message);
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
       {t:'prompt',text:'Seed task'},{t:'prompt',text},

@@ -6,18 +6,18 @@ import { botId, ownerId, ownerUsername } from './telegram-data.js';
 
 const terminated = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 
-test('/terminate requires an instance admin, kills all sessions, blocks commands and gateway, and resumes from config removal', async () => {
+test('/terminate requires a group administrator, kills all sessions, blocks commands and gateway, and resumes from config removal', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
     for (const threadId of [42,43]) await app.update({message_thread_id:threadId,forum_topic_created:{name:`Topic ${threadId}`}});
     const sessions = app.store.listSessions(botId);
     for (const session of sessions) await app.service.ensureMirroring(session,await app.runtime.ensure(session));
-    app.setCurrentMember({username:'outsider',status:'administrator'});
+    app.setCurrentMember({username:'outsider',status:'member'});
     await app.update({text:'/terminate'}, {id:ownerId+1,first_name:'Other',username:'outsider',is_bot:false});
     assert.equal(readConfig(app.config.configPath).terminated,undefined);
     for (const session of sessions) assert.equal(await app.runtime.isRunning(session),true);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/terminate'});
     assert.equal(readConfig(app.config.configPath).terminated,true);
     assert.equal(app.messages.at(-1)?.text,terminated);

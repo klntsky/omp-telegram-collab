@@ -50,7 +50,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const pollRequests: Record<string, unknown>[] = [];
   const pendingUpdates: Parameters<Bot['handleUpdate']>[0][] = [];
   let member = true;
-  let memberStatus: 'administrator' | 'creator' | 'member' = 'administrator';
+  let memberStatus: 'administrator' | 'creator' | 'member' = 'creator';
   let thread = 20;
   let messageId = 100;
   let updateId = 0;
@@ -59,6 +59,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   let connectionCount = 0;
   const user: NonNullable<Context['from']> = { id: ownerId, first_name: 'Ada', username: ownerUsername, is_bot: false };
   let currentUser = user;
+  const roles = new Map<number, { user: NonNullable<Context['from']>; status: 'administrator' | 'creator' | 'member' }>();
   const me = { id: botId, first_name: 'OMP', username: 'FixtureOmpBot', is_bot: true, can_join_groups: true, can_read_all_group_messages: true, supports_inline_queries: false };
   const group = { id: chatId, type: 'supergroup' as const, title: 'Fixture project', is_forum: true };
   const telegram = createHttpServer(async (request, response) => {
@@ -91,7 +92,13 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     }
     else if (method === 'getChatMember') result = Number(params.user_id) === botId
       ? { user: me, status: 'administrator', can_manage_topics: true, can_pin_messages: options.botCanPinMessages ?? true }
-      : { user: { ...currentUser, id: Number(params.user_id) }, status: member ? memberStatus : 'left' };
+      : Number(params.user_id) === ownerId
+        ? { user: currentUser, status: member ? memberStatus : 'left' }
+        : { ...(roles.get(Number(params.user_id)) ?? { user: { id: Number(params.user_id), first_name: 'Member', is_bot: false }, status: 'member' }), ...(!member ? {status:'left'} : {}) };
+    else if (method === 'getChatAdministrators') result = [
+      { user: currentUser, status: member ? memberStatus : 'left' },
+      ...roles.values(), { user: me, status: 'administrator' },
+    ].filter(value => value.status === 'creator' || value.status === 'administrator');
     else if (method === 'deleteWebhook') result = true;
     else if (method === 'setMyCommands') {
       commandMenus.set(JSON.stringify(params.scope ?? { type: 'default' }), params.commands);
@@ -175,7 +182,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const store = new Store(options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:');
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'app' }],
-    instances: { [directory]: { admins: [ownerUsername], chats: [{ botId, chatId }] } },
+    instances: { [directory]: { chats: [{ botId, chatId }] } },
     publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: directory,
     configPath: join(directory, 'config.yaml'),
     omp: { executable: 'omp', args: [], maxSessions: options.maxSessions ?? 5, startupTimeoutMs: 60000 },
@@ -287,6 +294,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const server = createServer({ config, bots: [service], store, runtime, connect });
   const url = await listen(server, port);
   async function update(message: Record<string, unknown>, from = user) {
+    if (from.id !== ownerId && !roles.has(from.id)) roles.set(from.id, { user: from, status: 'member' });
     await bot.handleUpdate({ update_id: ++updateId, message: { message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: group, from, ...message } } as Parameters<typeof bot.handleUpdate>[0]);
   }
   async function callback(data: string, message: Record<string, unknown>, from = user) {
@@ -316,6 +324,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         originalFetch(input === fileUrl ? `${telegramUrl}/fixture-image` : input, init));
     },
     setMember(value: boolean) { member = value; },
+    setUserRole(user: NonNullable<Context['from']>, status: 'administrator' | 'creator' | 'member') { roles.set(user.id, { user, status }); },
     setCurrentMember(value: { username?: string; is_bot?: boolean; status?: 'administrator' | 'creator' | 'member' }) {
       currentUser = { ...user, username: value.username, is_bot: value.is_bot ?? false };
       memberStatus = value.status ?? 'administrator';
@@ -456,12 +465,12 @@ export async function verifyTelegramFlow() {
     assert.deepEqual(app.deletedMessages, [{ chat_id: chatId, message_id: 9000 }]);
     console.log('PASS /kill sets the stopped flag before replying; its bot-authored icon notice is deleted.');
     const proposer = {id:ownerId+22,first_name:'Grace',username:'grace',is_bot:false};
-    app.setCurrentMember({username:'grace',status:'administrator'});
+    app.setCurrentMember({username:'grace',status:'member'});
     const beforeIgnored = app.reactions.length;
     await app.update({text:'/p Ignored non-admin task',message_thread_id:session.threadId},proposer);
     assert.equal(app.reactions.length,beforeIgnored);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await clickSetting('User proposals');
     await clickSetting('Allow user proposals');
     app.setCurrentMember({username:'grace',status:'member'});
@@ -472,13 +481,13 @@ export async function verifyTelegramFlow() {
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
     await app.callback(approval,proposal,proposer);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(approval,proposal);
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'Proposed user task'});
     assert.equal(app.store.getReplyTarget(session.id),9100);
     await app.callback(approval,proposal);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,4);
-    console.log('PASS non-admin messages ignored by default; enabled user proposals wait for one-time approval by an instance admin with ordinary group membership.');
+    console.log('PASS non-admin messages ignored by default; enabled user proposals wait for one-time approval by a current group administrator.');
     console.log('PASS Telegram enrollment, /new with pinned session button, explicit startup rejection, all-message prompts, both scoped command menus across prompt-mode changes, ignored discussion, /p routing, topic deduplication, archive/reopen, assistant response relay, /kill, and one-time user proposal approval.');
   } finally {
     await app.close();

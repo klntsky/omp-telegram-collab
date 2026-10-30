@@ -75,7 +75,7 @@ test('unapproved image proposals cannot reach the model', async t => {
     const proposal = app.messages.at(-1)!;
     const markup = proposal.reply_markup as {inline_keyboard:{callback_data:string}[][]};
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(markup.inline_keyboard[0]![0]!.callback_data,proposal);
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{
@@ -165,4 +165,21 @@ test('captionless photos use the largest size in all-message sessions', async t 
   } finally {
     await app.close();
   }
+});
+
+test('demotion during image download cannot submit an administrator prompt', async t => {
+  const app = await createSmokeApp();
+  app.mockFiles(t,imageData);
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Download race'}});
+    app.bot.api.config.use(async (previous,method,payload,signal) => {
+      const result = await previous(method,payload,signal);
+      if (method === 'getFile') app.setCurrentMember({status:'member'});
+      return result;
+    });
+    await app.update({photo,caption:'/p Must not submit',message_thread_id:42});
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    assert.equal(app.connectionCount,0);
+  } finally { await app.close(); }
 });

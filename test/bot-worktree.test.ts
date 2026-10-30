@@ -70,7 +70,7 @@ test('General creates an empty topic then passes native branch arguments without
   } finally { await app.close(); }
 });
 
-test('General worktree waits for instance-admin approval', async t => {
+test('General worktree waits for group administrator approval', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -83,7 +83,7 @@ test('General worktree waits for instance-admin approval', async t => {
       return 'Moved to worktree /fixture/approved';
     });
     const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
-    app.setCurrentMember({username:'participant',status:'administrator'});
+    app.setCurrentMember({username:'participant',status:'member'});
     await app.update({text:'/worktree feature/proposed'},proposer);
     assert.equal(calls,0);
     assert.equal(app.store.listSessions(botId).length,0);
@@ -92,7 +92,7 @@ test('General worktree waits for instance-admin approval', async t => {
     const callback = markup.inline_keyboard[0]![0]!.callback_data;
     await app.callback(callback,message,proposer);
     assert.equal(calls,0);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(callback,message);
     assert.equal(calls,1);
     await app.callback(callback,message);
@@ -125,9 +125,9 @@ test('worktree rejects unrelated, detached, and unauthorized topics without invo
     await app.update({text:'/worktree',message_thread_id:42});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Source'}});
     const participant = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
-    app.setCurrentMember({username:'participant',status:'administrator'});
+    app.setCurrentMember({username:'participant',status:'member'});
     await app.update({text:'/worktree',message_thread_id:42},participant);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/detach',message_thread_id:42});
     await app.update({text:'/worktree',message_thread_id:42});
     assert.equal(calls,0);

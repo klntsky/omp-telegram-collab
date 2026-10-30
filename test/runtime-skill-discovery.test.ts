@@ -50,7 +50,7 @@ process.stdin.on('data', part => {
 `);
   await chmod(executable, 0o700);
   const config: AppConfig = {
-    bots: [], instances: {[directory]:{admins:[],chats:[]}}, configPath:join(directory,'config.yaml'),
+    bots: [], instances: {[directory]:{chats:[]}}, configPath:join(directory,'config.yaml'),
     publicUrl:'https://localhost:3000',host:'127.0.0.1',port:3000,dataDir:directory,
     omp:{executable,args:[],maxSessions:1,startupTimeoutMs:10000},
   };

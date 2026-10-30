@@ -15,12 +15,9 @@ export class ConfigError extends Error {
 }
 
 const tokenPattern = /^[1-9]\d*:[A-Za-z0-9_-]+$/;
-const usernameSchema = z.string().regex(/^@?[A-Za-z0-9_]{1,32}$/).regex(/[A-Za-z]/)
-  .transform(username => username.replace(/^@/, '').toLowerCase());
 const literal = z.string().refine(value => !value.includes('\0'));
 const nonempty = literal.refine(value => value.trim().length > 0);
 const positiveInteger = z.number().int().safe().positive();
-const adminIds = z.array(z.union([positiveInteger, usernameSchema])).transform(ids => [...new Set(ids)]);
 const absolutePath = nonempty.refine(value => isAbsolute(value) && normalize(value) === value);
 const publicUrlSchema = z.string().refine(value => {
   if (value === '') return true;
@@ -53,10 +50,8 @@ const configSchema = z.object({
     id: positiveInteger,
     token: z.string().regex(tokenPattern),
     miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/),
-    admins: adminIds.optional(),
   }).strict().refine(bot => Number(bot.token.split(':')[0]) === bot.id)),
   instances: z.record(absolutePath, z.object({
-    admins: z.array(usernameSchema).transform(admins => [...new Set(admins)]),
     chats: z.array(z.object({
       botId: positiveInteger,
       chatId: z.number().int().safe().refine(value => value !== 0),

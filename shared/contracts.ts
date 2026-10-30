@@ -4,11 +4,9 @@ export interface BotConfig {
   id: number;
   token: string;
   miniAppShortName: string;
-  admins?: (string | number)[];
 }
 
 export interface InstanceConfig {
-  admins: string[];
   chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; default_model_preset?: string; default_new_topic_skill?: string }[];
 }
 

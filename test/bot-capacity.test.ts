@@ -8,7 +8,7 @@ import { botId, chatId, ownerUsername } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 import { capacityRequest, waitingForCapacity } from './bot-capacity-helpers.js';
 
-test('capacity approval requires an active configured instance admin, not group administrator rights', async () => {
+test('capacity approval requires a current native group administrator', async () => {
   const app = await waitingForCapacity();
   try {
     const request = capacityRequest(app);
@@ -20,7 +20,7 @@ test('capacity approval requires an active configured instance admin, not group 
     assert.equal(app.store.hasPendingInitialTask(waiting.id),true);
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Running task'}]);
 
-    app.setCurrentMember({username:'not_the_owner',status:'administrator'});
+    app.setCurrentMember({username:'not_the_owner',status:'member'});
     await app.callback(request.approve,request.message);
     assert.equal(app.runtime.getSessionLimit(),1,'the update username cannot substitute for the current member identity');
     app.setMember(false);
@@ -29,7 +29,7 @@ test('capacity approval requires an active configured instance admin, not group 
     assert.equal(app.store.hasPendingInitialTask(waiting.id),true);
     assert.equal(app.connectionCount,1);
     app.setMember(true);
-    app.setCurrentMember({username:ownerUsername,status:'member'});
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.callback(request.approve,request.message);
     await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
     assert.equal(app.runtime.getSessionLimit(),2);
@@ -220,7 +220,7 @@ test('capacity persistence preserves newer CLI configuration rather than overwri
   }
 });
 
-for (const change of ['limit', 'admins', 'assignment'] as const) {
+for (const change of ['limit', 'role', 'assignment'] as const) {
   test(`capacity approval respects a newer persisted ${change} change before the watcher catches up`, async () => {
     const app = await waitingForCapacity();
     try {
@@ -228,7 +228,7 @@ for (const change of ['limit', 'admins', 'assignment'] as const) {
       const updated = readConfig(app.config.configPath);
       const path = Object.keys(updated.instances)[0]!;
       if (change === 'limit') updated.omp.maxSessions = 3;
-      else if (change === 'admins') updated.instances[path]!.admins = ['another_admin'];
+      else if (change === 'role') app.setCurrentMember({status:'member'});
       else updated.instances[path]!.chats = [];
       writeConfig(updated);
       await app.callback(request.approve, request.message);
