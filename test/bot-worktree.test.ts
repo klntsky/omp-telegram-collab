@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { TopicSession } from '../shared/contracts.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
-import { eventually } from './bot-test-helpers.js';
+import { eventually, setForumSetting } from './bot-test-helpers.js';
 
 for (const branch of ['', ' feature/native']) {
   test(`/worktree${branch} moves the existing topic session without a prompt`, async t => {
@@ -44,7 +44,7 @@ test('General creates an empty topic then passes native branch arguments without
     await app.update({text:'/new Warm host'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const existing = app.store.listSessions(botId)[0]!;
-    await app.update({text:'/set_default_new_topic_skill find-skills'});
+    await setForumSetting(app, 'Default new-topic skill', 'find-skills');
     await app.update({text:'/skill_pdf_tools'});
     const calls: Array<{id:string;branch?:string}> = [];
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
@@ -74,7 +74,7 @@ test('General worktree waits for instance-admin approval', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    await setForumSetting(app, 'User proposals', 'Allow user proposals');
     let calls = 0;
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls++;

@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { chmod } from 'node:fs/promises';
 import { readConfig } from '../src/config.js';
 import { test } from 'node:test';
 import { z } from 'zod';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
-import { eventually } from './bot-test-helpers.js';
+import { eventually, setForumSetting } from './bot-test-helpers.js';
 
 test('default mode starts a session host from ordinary text without a mention', async () => {
   const app = await createSmokeApp();
@@ -34,7 +33,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await app.callback('setup:prompts:false',app.messages.at(-1)!);
+    await setForumSetting(app, 'Prompt mode', 'Only /p');
     const path = Object.keys(app.config.instances)[0]!;
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
     await app.update({message_thread_id:42,forum_topic_created:{name:'Explicit prompts'}});
@@ -76,41 +75,18 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
       {t:'prompt',text:'Implement explicit text\nwith multiple lines'},
     ]);
     await app.update({text:'/setup'});
-    await app.callback('setup:prompts:true',app.messages.at(-1)!);
+    await setForumSetting(app, 'Prompt mode', 'All messages');
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,true);
   } finally { await app.close(); }
 });
 
-test('prompt mode changes require current instance administration and writable configuration', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const setup = app.messages.at(-1)!;
-    const path = Object.keys(app.config.instances)[0]!;
-    for (const member of [
-      {username:'another_admin',status:'administrator' as const},
-    ]) {
-      app.setCurrentMember(member);
-      await app.callback('setup:prompts:false',setup);
-      assert.notEqual(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
-    }
-    app.setCurrentMember({username:ownerUsername,status:'member'});
-    await chmod(app.config.configPath,0o400);
-    await app.callback('setup:prompts:false',setup);
-    assert.notEqual(app.config.instances[path]!.chats[0]!.all_messages_are_prompts,false);
-    assert.notEqual(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
-    await chmod(app.config.configPath,0o600);
-    await app.callback('setup:prompts:false',setup);
-    assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
-  } finally { await app.close(); }
-});
 
 for (const allMessagesArePrompts of [true,false]) {
   test(`bot-directed replies quote context and create sessions from General with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
       const from = {id:botId,is_bot:true,first_name:'OMP'};
       await app.update({message_id:7200,text:'Explain this',reply_to_message:{message_id:9100,from,caption:'Original\ncontext'}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -136,7 +112,7 @@ for (const allMessagesArePrompts of [true, false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
       await app.update({text:command,reply_to_message:{message_id:9000,caption:'Screenshot context\nsecond line',
         photo:[{file_id:'quoted-photo',file_unique_id:'quoted-photo',width:100,height:100}]}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -163,7 +139,7 @@ for (const allMessagesArePrompts of [true, false]) {
       const app = await createSmokeApp();
       try {
         await app.update({text:'/setup'});
-        if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+        if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
         await app.update({text:interactive ? '/p@FixtureOmpBot' : '/p@FixtureOmpBot Create from General',message_thread_id:1});
         if (interactive) {
           assert.equal(app.store.listSessions(botId).length,0);
@@ -183,7 +159,7 @@ test('explicit mode preserves the interactive /new task reply', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await app.callback('setup:prompts:false',app.messages.at(-1)!);
+    await setForumSetting(app, 'Prompt mode', 'Only /p');
     await app.update({text:'/new'});
     const request = app.messages.at(-1)!;
     await app.update({text:'Create this explicit-mode session',reply_to_message:request});
@@ -206,7 +182,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
       await app.update({message_thread_id:42,forum_topic_created:{name:'Admin prompts only'}});
       app.setCurrentMember({username:'another_user',status:'administrator'});
       const before = app.messages.length;
@@ -225,8 +201,8 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await app.callback('setup:proposals:true',app.messages.at(-1)!);
-      if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+      await setForumSetting(app, 'User proposals', 'Allow user proposals');
+      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -267,7 +243,7 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await app.callback('setup:proposals:true',app.messages.at(-1)!);
+      await setForumSetting(app, 'User proposals', 'Allow user proposals');
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -301,7 +277,7 @@ test('a non-admin /new task creates no session until an instance admin approves'
   try {
     app.setCurrentMember({username:ownerUsername,status:'member'});
     await app.update({text:'/setup'});
-    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    await setForumSetting(app, 'User proposals', 'Allow user proposals');
     app.setCurrentMember({username:'grace',status:'member'});
     await app.update({text:'/new Proposed initial task'});
     const proposal = promptProposal(app);
@@ -319,7 +295,7 @@ test('approval sends one reply reference and submits the stored proposal text', 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    await setForumSetting(app, 'User proposals', 'Allow user proposals');
     await app.update({text:'/new Seed task'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const session = app.store.listSessions(botId)[0]!;

@@ -34,42 +34,6 @@ function replyTarget(user = grace) {
   return { message_id: 900, date: 1, chat: { id: chatId, type: 'supergroup' }, from: user, text: 'Please promote me' };
 }
 
-for (const threadId of [undefined, 1]) {
-  test(`General ${threadId === undefined ? 'without a thread ID' : 'with thread ID 1'} persists a numeric bot administrator from a reply`, async t => {
-    const app = await createSmokeApp();
-    try {
-      mockMembers(t, app);
-      await app.update({ text: '/setup' });
-      await app.update({ text: '/make_admin', message_thread_id: threadId, reply_to_message: replyTarget() });
-      assert.deepEqual(readConfig(app.config.configPath).bots[0]!.admins, [grace.id]);
-      assert.equal(Object.hasOwn(persistedChat(app), 'topic_admins'), false);
-      await app.update({ text: '/make_admin', message_thread_id: threadId, reply_to_message: replyTarget() });
-      assert.deepEqual(readConfig(app.config.configPath).bots[0]!.admins, [grace.id], 'repeated promotion is idempotent');
-      await app.update({ text: '/new Delegated administrator task' }, grace);
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Delegated administrator task'));
-      assert.equal(app.store.listSessions(botId).length, 1);
-    } finally { await app.close(); }
-  });
-}
-
-test('a username General promotion permits delegation across this bot’s assigned chats', async t => {
-  const app = await createSmokeApp();
-  try {
-    mockMembers(t, app);
-    const path = Object.keys(app.config.instances)[0]!;
-    app.config.instances[path]!.chats.push({ botId, chatId: otherChat.id });
-    writeConfig(app.config);
-    await app.update({ text: '/setup' });
-    await app.update({ text: '/setup', chat: otherChat });
-    await app.update({ text: '/make_admin @GrAcE' });
-    assert.deepEqual(readConfig(app.config.configPath).bots[0]!.admins, ['grace']);
-    await app.update({ text: '/make_admin ALAN', chat: otherChat }, grace);
-    assert.deepEqual(readConfig(app.config.configPath).bots[0]!.admins, ['grace', 'alan']);
-    await app.update({ text: '/new Bot-wide authority task', chat: otherChat }, alan);
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Bot-wide authority task'));
-    assert.equal(app.store.listSessions(botId)[0]!.chatId, otherChat.id);
-  } finally { await app.close(); }
-});
 
 test('topic promotion permits local prompts and delegation but cannot escalate into General or another topic', async t => {
   const app = await createSmokeApp();
@@ -173,7 +137,7 @@ test('a Telegram membership lookup failure retains the original error details', 
     });
     const errors: unknown[][] = [];
     t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(args); });
-    await app.update({ text: '/make_admin', reply_to_message: replyTarget() });
+    await app.update({ text: '/make_admin', message_thread_id: 42, reply_to_message: replyTarget() });
     assert.deepEqual(readConfig(app.config.configPath), before);
     assert.ok(errors.some(args => args.includes(failure)), 'the original GrammyError reaches error reporting');
     assert.ok(app.messages.some(message => String(message.text).includes(failure.description)), 'the Telegram description reaches the user unchanged');
@@ -200,8 +164,8 @@ test('username promotions normalize and deduplicate persisted grants', async () 
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
-    await app.update({ text: '/make_admin @GrAcE' });
-    await app.update({ text: '/make_admin GRACE' });
+    app.config.bots[0]!.admins = ['grace'];
+    writeConfig(app.config);
     await app.update({ text: '/make_admin @ALAN', message_thread_id: 42 });
     assert.deepEqual(readConfig(app.config.configPath).bots[0]!.admins, ['grace']);
     assert.equal(app.store.isTopicAdmin(botId, topicDestination(chatId, 42), alan.id, alan.username), true);
@@ -216,7 +180,8 @@ for (const status of ['left', 'kicked'] as const) {
       mockMembers(t, app);
       await app.update({ text: '/setup' });
       await app.update({ message_thread_id: 42, forum_topic_created: { name: 'Delegated topic' } });
-      await app.update({ text: '/make_admin grace' });
+      app.config.bots[0]!.admins = ['grace'];
+      writeConfig(app.config);
       await app.update({ text: '/make_admin grace', message_thread_id: 42 });
       const before = readConfig(app.config.configPath);
       const original = app.bot.api.getChatMember.bind(app.bot.api);

@@ -47,26 +47,6 @@ function configureAdmins(app: SmokeApp) {
   app.store.addTopicAdmin(botId + 1, topicDestination(chatId, 42), 'other_bot_admin');
 }
 
-for (const threadId of [undefined, 1]) {
-  test(`General administrator listing (${threadId ?? 'no thread ID'}) includes this forum's global and topic grants`, async t => {
-    const app = await createSmokeApp();
-    try {
-      mockMembers(t, app);
-      configureAdmins(app);
-      await app.update({ text: '/setup' });
-      const text = await list(app, threadId);
-      assert.match(text, /Global admins/);
-      for (const username of [ownerUsername, 'second_root', 'bot_admin', 'alan', 'local_alpha', 'local_beta']) {
-        assert.ok(text.includes(`@${username}`), username);
-        assert.equal(text.split(`@${username}`).length - 1, 1, `${username} is not repeated as a topic admin`);
-      }
-      assert.ok(text.includes(`https://t.me/c/${String(chatId).replace(/^-100/, '')}/42`));
-      assert.ok(text.includes(`https://t.me/c/${String(chatId).replace(/^-100/, '')}/43`));
-      assert.ok(text.includes(`User ID: ${unnamedAdmin.id}`));
-      assert.doesNotMatch(text, /other_chat_admin|other_bot_admin/);
-    } finally { await app.close(); }
-  });
-}
 
 test('an ordinary active member can list separate global and current-topic administrators', async t => {
   const app = await createSmokeApp();
@@ -106,7 +86,7 @@ test('a numeric reply grant resolving to a global root username is omitted from 
       message_id: 900, date: 1, chat: { id: chatId, type: 'supergroup' }, from: rootAlias, text: 'Root reply',
     } });
     assert.equal(app.store.isTopicAdmin(botId, topicDestination(chatId, 42), rootAlias.id), true);
-    for (const threadId of [undefined, 42]) {
+    for (const threadId of [42]) {
       const text = await list(app, threadId);
       assert.equal(text.split(`@${ownerUsername}`).length - 1, 1);
       assert.ok(!text.includes(`User ID: ${rootAlias.id}`));
@@ -119,7 +99,7 @@ test('list_admins rejects arguments rather than listing administrators', async t
   try {
     mockMembers(t, app);
     await app.update({ text: '/setup' });
-    for (const threadId of [undefined, 42]) {
+    for (const threadId of [42]) {
       const text = await list(app, threadId, '/list_admins @grace');
       assert.match(text, /usage|no arguments|does not accept|takes no/i);
       assert.doesNotMatch(text, /Global admins/);

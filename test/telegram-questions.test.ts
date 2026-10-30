@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { z } from 'zod';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId } from './telegram-data.js';
+import { setForumSetting } from './bot-test-helpers.js';
 
 async function eventually(predicate: () => boolean) {
   const deadline = Date.now() + 4000;
@@ -55,7 +56,7 @@ test(`custom choice submits multiline text as an answer with all_messages_are_pr
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
-    if (!allMessagesArePrompts) await app.callback('setup:prompts:false',app.messages.at(-1)!);
+    if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
     await app.update({ text: '/new Start' });
     const session = app.store.listSessions(botId)[0]!;
     app.emit({ t: 'ui-request', request: { kind: 'select', reqId: 81, title: 'Deployment target?', options: ['Production', 'Other (type your own)'] } });

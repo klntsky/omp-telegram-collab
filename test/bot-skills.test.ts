@@ -5,7 +5,7 @@ import type { GuestFrame } from '@oh-my-pi/pi-wire';
 import type { Store } from '../src/store.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, ownerId, ownerUsername } from './telegram-data.js';
-import { eventually } from './bot-test-helpers.js';
+import { eventually, setForumSetting } from './bot-test-helpers.js';
 
 type User = NonNullable<Context['from']>;
 interface App {
@@ -108,7 +108,7 @@ test('ignored commands, discussion and rejected prompts retain skills; clear rem
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await app.callback('setup:prompts:false', app.messages.at(-1)!);
+    await setForumSetting(app, 'Prompt mode', 'Only /p');
     await select(app, 'find-skills', session.threadId);
     await app.update({ text: '/unknown', message_thread_id: session.threadId });
     await app.update({ text: 'Discussion', message_thread_id: session.threadId });
@@ -131,7 +131,7 @@ test('proposal creation freezes and consumes proposer skills without consuming a
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await app.callback('setup:proposals:true', app.messages.at(-1)!);
+    await setForumSetting(app, 'User proposals', 'Allow user proposals');
     app.setCurrentMember({ username: 'grace', status: 'member' });
     await select(app, 'find-skills', session.threadId, participant);
     await app.update({ text: '/p Frozen proposal', message_thread_id: session.threadId }, participant);

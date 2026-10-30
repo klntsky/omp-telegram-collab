@@ -14,19 +14,18 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
-| `/set_default_new_topic_skill <exact-skill-name>` | Set this forum's default skill for future managed topics. Requires an instance root or bot admin; no argument shows it. |
-| `/unset_default_new_topic_skill` | Remove this forum's default skill for future topics. Requires an instance root or bot admin. |
+| `/settings` | Open interactive forum settings, defaults, bot-wide admins, and shared session capacity. Requires an instance root or bot admin. |
 | `/session` | Get the current topic's Mini App link. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
 | `/terminate` | Instance-root or bot-admin service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
 | `/detach` | Make the topic permanently conversation-only. Requires an instance root, bot admin, or this topic's admin. |
 | `/attach INSTANCE_ID` | Connect a running OMP host to a new topic. Requires an instance root or bot admin. |
-| `/list_model_presets` | List project presets and the current selection. Requires an instance root or bot admin, or this topic's admin outside General. |
-| `/model_preset <name>` | Set the forum default in General (instance root or bot admin), or switch an idle topic's session (also available to that topic's admins). |
-| `/make_admin [@username]` | Promote by username (optional `@`), or reply without arguments. Numeric ID arguments are rejected. General grants bot-wide access; other topics grant topic-only access. |
-| `/list_admins` | List this forum's global admins and topic grants. General includes all topics; another topic includes only itself. Available to current group members; accepts no arguments. |
-| `/setup` | Request enrollment or change an assigned forum's prompt settings. |
+| `/list_model_presets` | List project presets and the current selection in a session topic. Requires an instance root, bot admin, or that topic's admin. |
+| `/model_preset <name>` | Switch an idle topic's session. Requires an instance root, bot admin, or that topic's admin. Forum defaults are managed through `/settings`. |
+| `/make_admin [@username]` | Grant topic-only access by username, or reply without arguments. Bot-wide grants are managed through `/settings`. |
+| `/list_admins` | List global admins and this topic's grants. Available to current group members in a topic. |
+| `/setup` | Request or complete forum enrollment, then open `/settings`. |
 | `/status` | Show forum, host, mirroring, task-admission, recovery, skill-cache and failure diagnostics. Current members can inspect assigned forums, including during service termination. Accepts no arguments. |
 | `/help` | Show commands and prompt settings. |
 
@@ -68,7 +67,9 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two settings.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, bot-wide administrators, and shared session capacity. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
+
+Settings catalog failures preserve the displayed controls so administrators can retry or close the panel. Panels lost after a service restart explicitly direct users to reopen `/settings`. Invalid administrator input produces a new bound reply prompt; corrections remain settings input and never become agent tasks.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
@@ -109,19 +110,19 @@ Image albums are submitted as one prompt with all supported images, their captio
 
 Pending skills are consumed when the prompt is accepted, or when a non-admin proposal is created. A proposal freezes the composed text for review and later approval; rejecting or expiring it does not restore the selection. Input ignored or rejected before submission retains pending skills, and a known host-starting rejection restores them. Ambiguous delivery errors do not restore selections because the prompt may already have been admitted. For `/new` or `/p` in General, the originating user's General selection accompanies the new topic's initial task and is consumed when that task is durably accepted, or when its proposal is created.
 
-`/set_default_new_topic_skill <exact-skill-name>` updates the per-bot/chat forum default from General or a session topic; it does not change the current session. Only instance roots and bot admins who are current group members can use it. The exact canonical name must exist in the assigned project's skill catalog and contain no whitespace, control characters, or backslashes; case, punctuation, and namespaces are preserved without normalization. No argument displays the current default. `/unset_default_new_topic_skill` removes it and accepts no arguments. The set command has no clearing argument; `clear` remains an ordinary exact skill name.
+The default new-topic skill picker in `/settings` updates the per-bot/chat forum default without changing the current session. Only instance roots and bot admins who are current group members can change it. The exact canonical name must exist in the assigned project's skill catalog and contain no whitespace, control characters, or backslashes. Case, punctuation, and namespaces are preserved. The picker includes a separate control to clear the default, so `clear` remains an ordinary exact skill name.
 
 Future managed topics snapshot that setting when created. The snapshot persists across bot restarts and adds `/skill:exact-name` only to the first accepted Telegram prompt or frozen proposal, together with explicit pending skill selections and without duplicate mentions. For General `/p` and `/new`, the initial task includes the default and proposals freeze that composed text for approval. For a manually created topic, the first accepted Telegram task can come from any authorized user, not just the topic creator. Later forum-default changes do not alter existing topics, their snapshots, or attached histories. This is a Telegram composition default; Mini App submissions do not apply or consume it.
 
 Configured instance admins remain root administrators identified by their Telegram usernames. `/make_admin @username` (or `/make_admin username`) grants access by username; alternatively, reply to a member's message with `/make_admin` and no arguments to grant access by stable numeric Telegram ID. Numeric ID arguments are rejected. Usernames are normalized by removing an optional `@` and lowercasing with the existing configured username grammar. Telegram cannot resolve arbitrary handles, so username promotion does not look up the target; active human membership is checked when the recipient uses permissions. Reply targets must already be active human group members; bots, departed members, and anonymous/channel senders cannot be reply targets. The caller must also be an active human group member.
 
-In General, promotion grants bot-wide administrator access across the chats assigned to that bot. In any other forum topic, promotion grants access only in that topic of that bot/chat assignment. Instance roots and bot-wide admins can promote in either scope; topic admins can promote other members only within their own topic and cannot grant General or bot-wide access. These grants do not make anyone a Telegram group administrator or grant access through other bots. Telegram group-administrator status alone does not grant application-admin permissions; only enrollment of an unassigned group requires it.
+The administrators page in `/settings` grants bot-wide administrator access across chats assigned to that bot. `/make_admin` grants access only within the current non-General topic. Instance roots and bot-wide admins can grant either scope. Topic admins can promote other members only within their own topic and cannot grant bot-wide access. These grants do not make anyone a Telegram group administrator or grant access through other bots. Telegram group-administrator status alone does not grant application-admin permissions; only enrollment of an unassigned group requires it.
 
 Bot-wide grants persist in configuration (`bots[].admins`); topic grants persist in the SQLite runtime database, not configuration. Both survive restarts and store either normalized username strings or numeric Telegram IDs from replies. Username grants follow the current handle; reply grants remain tied to the user ID despite username changes. Existing instance username roots remain unchanged. There is no Telegram demotion command; remove bot-wide grants locally from configuration or topic grants locally from the database to revoke access.
 
-`/list_admins` accepts no arguments and is available to every active human member of the current assigned forum, not only admins. It shows separate global and topic-admin sections. Global admins are the union of the assigned instance's username roots and the current bot's `bots[].admins` grants. In General, the topic section includes grants from all topics in this bot/chat; elsewhere it includes only the current topic. It never lists grants from another chat or bot. Topic entries already represented globally are omitted by normalized username or numeric-ID aliases. Numeric grants display a current `@username` when Telegram's `getChatMember` lookup provides one, otherwise `User ID: <id>`. Listed username grants are not proof that a handle was verified or its owner is still a member: current human membership is required whenever access is used.
+`/list_admins` accepts no arguments and is available to every active human member of an assigned non-General topic, not only admins. It shows separate global and topic-admin sections for that topic. Global admins are the union of the assigned instance's username roots and the current bot's `bots[].admins` grants. It never lists grants from another chat or bot. Topic entries already represented globally are omitted by normalized username or numeric-ID aliases. Numeric grants display a current `@username` when Telegram's `getChatMember` lookup provides one, otherwise `User ID: <id>`. Listed grants do not prove current membership or ownership of a handle. Current human membership is required whenever access is used.
 
-Admin listings contain only two unnumbered groups, `Global admins` and `Topic admins`, with one user per line and `none` for an empty group, without an explanatory footer. In a topic, its group heading links to the topic. In General, topic-user entries link to their topic using its name when known rather than displaying a numeric topic ID. Link previews are disabled.
+Topic admin listings have `Global admins` and `Topic admins` groups with one user per line and `none` for an empty group. The topic group heading links to the topic. Link previews are disabled. General directs administrators to `/settings` for bot-wide controls.
 
 Ordinary group members retain watch-only Mini App access and the Telegram `/stop` and `/kill` commands. Mini App control requires the existing instance-root, bot-admin, or matching topic-admin authority, independently of Telegram prompt settings. See [Projects and access](#2-projects-and-access) before inviting members.
 
@@ -151,9 +152,9 @@ Telegram delivery uses a per-chat queue with at least 3.1 seconds between schedu
 
 ### 1.4. Model presets
 
-In General, `/model_preset <name>` saves the default for that bot/chat assignment. New managed hosts apply its models and thinking settings before accepting work, including when resuming history. It overrides restored settings and model-selection flags. Existing hosts do not change. A missing saved preset fails startup rather than selecting another one.
+The Default model preset picker in `/settings` saves or clears the default for that bot/chat assignment. New managed hosts apply its models and thinking settings before accepting work, including when resuming history. It overrides restored settings and model-selection flags. Running hosts do not change. A missing saved preset fails startup rather than selecting another one.
 
-In a session topic, the command starts the host if needed and switches only that idle session. It does not change the forum default. Attached hosts must use `/modelpreset` in their local terminal. Older managed hosts that cannot switch without changing shared settings must be restarted first.
+In a session topic, `/model_preset <name>` starts the host if needed and switches only that idle session. It does not change the forum default. Attached hosts must use `/modelpreset` in their local terminal. Older managed hosts that cannot switch without changing shared settings must be restarted first.
 
 
 ## 2. Projects and access
