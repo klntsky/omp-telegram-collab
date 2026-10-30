@@ -12,7 +12,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 ## OMP feature coverage
 
-✅ Supported · ⚠️ Partial support · ❌ No remote equivalent. Coverage means an action is available through Telegram or its Mini App, not merely that the agent can be asked to do it.
+✅ Supported · ⚠️ Partial support · ❌ No remote equivalent. Coverage includes Telegram and Mini App controls, plus agent-managed preset editing as noted below.
 
 Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/packages/coding-agent/src/slash-commands), including built-in slash commands, aliases, and top-level CLI commands. Project and plugin commands vary by installation.
 
@@ -30,7 +30,7 @@ Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/pa
 | ❌ | Export and saved-session sharing (`/export`, `/dump`, `/share`) | No HTML export, request dump, or encrypted sharing controls. |
 | ⚠️ | Copy text and open links (`/copy`, `/open`) | Use ordinary browser selection and links. No OMP conversation picker or last-link action. |
 | ⚠️ | Exit and restart (`/exit`, `/quit`, `/q`, `/restart`) | `/kill` terminates a topic's host; a later prompt can resume a managed session. No orderly exit or same-flags restart control. |
-| ⚠️ | Model presets (`/modelpreset`) | `/model_preset <name>` switches an idle managed session or sets the forum default; `/list_model_presets` lists presets. No preset creation or saving. |
+| ✅ | Model presets (`/modelpreset`) | `/model_preset <name>` switches an idle managed session or sets the forum default; `/list_model_presets` lists presets. To edit presets, just say what you want. |
 | ⚠️ | Model and reasoning selection (`/model`, `/models`, `/switch`, `/effort`) | The Mini App displays model and thinking level. Use `/model_preset` for predefined combinations; no independent selectors. |
 | ❌ | Service and context modes (`/fast`, `/slow`, `/extended-context`, `/prewalk`) | No dedicated controls. |
 | ❌ | Planning, goals, and queues (`/plan`, `/plan-review`, `/vibe`, `/goal`, `/guided-goal`, `/loop`, `/queue`) | No dedicated mode or queue commands. |
