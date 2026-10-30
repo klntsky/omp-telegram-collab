@@ -6,6 +6,10 @@ The Mini App is optional. Setup explains that it adds a live transcript, tool de
 
 An empty public HTTPS origin selects Telegram-only operation for every bot in the service. Prompts, images, replies, agent questions, and Telegram session commands remain available. Mini App launch buttons and `/session` menu entries appear when an HTTPS origin is configured. Enabling the Mini App requires a named app registered in BotFather for each bot. A network failure leaves the configured mode unchanged.
 
+The `/cli` command works in both modes. Its code block and copy button contain only the chat and topic IDs. Requesting the command leaves the host unchanged. Executing it locally resolves the current assignment through the running service, resumes a managed host when needed, and joins the live conversation. Closed, detached, missing, ambiguous, unassigned, and terminated sessions are rejected. Leaving the terminal client leaves the host and Telegram conversation running.
+
+Local terminal access uses the service account's operating-system permissions. Copying the Telegram command grants no access on another machine. Connection capabilities are resolved on the service machine and passed to the local OMP client; local process inspection is within that machine's trust boundary.
+
 ## 1. Telegram sessions
 
 
@@ -20,6 +24,7 @@ An empty public HTTPS origin selects Telegram-only operation for every bot in th
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/settings` | Open interactive forum settings, defaults, and shared session capacity. Requires the current supergroup owner or an administrator. |
 | `/session` | Get the current topic's Mini App link when the Mini App is enabled. |
+| `/cli` | Get a copyable terminal join command for the current open session topic. Requires the current supergroup owner or an administrator. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
 | `/terminate` | Supergroup owner or administrator service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |

@@ -149,6 +149,32 @@ The online message retains end-to-end restart time from the preceding orderly sh
 
 The OMP host ID is not the project directory used by this service. Do not paste Collab capability links into Telegram. Attached hosts remain owned by their terminal and survive service shutdown. `/kill` does terminate them; restart locally and attach the new host to reconnect.
 
+## Open a topic in your terminal
+
+Make the built `omp-telegram` executable available on your shell's `PATH` with `pnpm link --global` from the checkout. If pnpm asks you to configure its global executable directory, run `pnpm setup` and open a new terminal.
+
+1. As a group administrator, send `/cli` in an open session topic.
+2. Copy the command using the reply's copy button.
+3. Run it in an interactive terminal on the service machine as the service account.
+
+   ```sh
+   omp-telegram session join --chat -1001234567890 --topic 42
+   ```
+
+   From a source checkout, use `pnpm cli session join --chat -1001234567890 --topic 42`.
+
+For a custom service configuration, supply its local path:
+
+```sh
+omp-telegram --config /etc/omp-telegram/config.yaml session join --chat -1001234567890 --topic 42
+```
+
+The running service resolves the chat/topic pair through its private `control.sock`. The command requires exactly one enrolled, assigned, open session. A stopped managed host resumes its saved history; an unavailable attached host reports its original failure. OMP runs in the foreground. Leaving its guest client keeps the shared host running.
+
+The local connection protects the host from idle retirement while your terminal client is open. A service restart or configuration change that replaces the service closes the client connection. Run the copied command again to reconnect.
+
+The copied command contains public identifiers. The Unix socket is accessible only to the service account. The resolved Collab capability is passed to `omp join` locally and may be visible through local process inspection. Protect access to that account and machine.
+
 ## Create model presets
 
 Create presets locally with OMP's `/modelpreset save <name>`.

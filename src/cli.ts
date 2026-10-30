@@ -3,7 +3,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { watchFile, unwatchFile, existsSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod, unlink, readFile, writeFile } from 'node:fs/promises';
-import { createServer as createControlServer, type Server } from 'node:http';
+import { createServer as createControlServer, type Server, type ServerResponse } from 'node:http';
 import { inspect } from 'node:util';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { readConfig, defaultConfigPath, validateStart, findInstance } from './config.js';
@@ -13,6 +13,7 @@ import { createBot, type BotService } from './bot.js';
 import { createServer, type GatewayServer } from './server.js';
 import { OmpRuntime } from './runtime.js';
 import { runAdmin, notifyReload } from './cli-admin.js';
+import { runSessionCommand } from './session-cli.js';
 
 let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
@@ -209,6 +210,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   let closePromise: Promise<void> | undefined;
   let reloadTail = Promise.resolve();
   const controls = new Map<string, Server>();
+  const joins = new Set<ServerResponse>();
   let applied = JSON.stringify(generation.config);
 
   const reload = (): Promise<void> => {
@@ -228,6 +230,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         await Promise.all(generation.bots.map(bot => bot.reconcileConfiguration()));
       } else {
         const previous = generation.config;
+        for (const response of joins) response.destroy();
         await generation.close();
         try { generation = await launch(next, pollingFailure.resolve); }
         catch (error) {
@@ -249,25 +252,104 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
     return operation;
   };
 
+  async function joinSession(chatId: unknown, topicId: unknown): Promise<{ result: { url: string; executable: string }; release(): void }> {
+    if (!Number.isSafeInteger(chatId) || (chatId as number) >= 0) throw new Error('chatId must be a negative safe integer');
+    if (!Number.isSafeInteger(topicId) || (topicId as number) <= 1) throw new Error('topicId must be a safe integer greater than 1');
+    await reload();
+    const operation = reloadTail.then(async () => {
+      if (closing) throw new Error('Service is stopping');
+      const current = generation;
+      const matches = current.store.listSessions().filter(session => session.chatId === chatId && session.threadId === topicId &&
+        current.config.bots.some(bot => bot.id === session.botId) &&
+        current.store.isEnrolled(session.botId, session.chatId) &&
+        findInstance(current.config, session.botId, session.chatId)?.path === session.instancePath);
+      if (matches.length > 1) throw new Error('Topic session is ambiguous across configured bots');
+      const session = matches[0];
+      if (!session) throw new Error('No enrolled, assigned topic session found');
+      const sessionGeneration = current.store.getSessionGeneration(session.id);
+      const guard = async () => {
+        if (closing || generation !== current) throw new Error('Service is stopping or its generation changed');
+        const persisted = readConfig(configPath);
+        validateStart(persisted);
+        if (current.config.terminated || persisted.terminated) throw new Error('Service is terminated');
+        if (JSON.stringify(persisted) !== applied) throw new Error('Configuration changed during session join');
+        const stored = current.store.getSession(session.id);
+        if (!stored || stored.status !== 'open' || stored.botId !== session.botId ||
+            stored.chatId !== session.chatId || stored.threadId !== session.threadId ||
+            stored.instancePath !== session.instancePath ||
+            current.store.getSessionGeneration(session.id) !== sessionGeneration) {
+          throw new Error('Topic session is not open or changed during session join');
+        }
+        if (!current.store.isEnrolled(session.botId, session.chatId) ||
+            !current.config.bots.some(bot => bot.id === session.botId) ||
+            findInstance(current.config, session.botId, session.chatId)?.path !== session.instancePath ||
+            findInstance(persisted, session.botId, session.chatId)?.path !== session.instancePath) {
+          throw new Error('Topic session assignment changed');
+        }
+      };
+      await guard();
+      const binding = await current.runtime.ensure(session, guard);
+      await guard();
+      const release = current.runtime.retain(session.id);
+      try {
+        const bot = current.bots.find(bot => bot.id === session.botId);
+        if (!bot) throw new Error('Topic session bot is no longer configured');
+        await bot.ensureMirroring(session, binding, guard);
+        await guard();
+        return { result: { url: binding.url, executable: current.config.omp.executable }, release };
+      } catch (error) {
+        release();
+        throw error;
+      }
+    });
+    reloadTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   async function bindControl(dataDir: string): Promise<void> {
     const socket = join(dataDir, 'control.sock');
     if (controls.has(socket)) return;
     await unlink(socket).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
     const control = createControlServer((request, response) => {
       void (async () => {
-        if (request.method !== 'POST' || request.url !== '/reload') throw new Error('Use POST /reload');
+        if (request.method !== 'POST' || !['/reload', '/session/join'].includes(request.url ?? '')) throw new Error('Use POST /reload');
         let body = '';
         for await (const chunk of request) {
           body += chunk;
           if (Buffer.byteLength(body) > 8192) throw new Error('Request too large');
         }
-        if (JSON.parse(body).configPath !== configPath) throw new Error(`Running service uses a different configuration: ${configPath}`);
-        await reload();
-        response.writeHead(200, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ ok: true }));
+        const payload = JSON.parse(body);
+        if (payload.configPath !== configPath) throw new Error(`Running service uses a different configuration: ${configPath}`);
+        if (request.url === '/session/join') {
+          const { result, release } = await joinSession(payload.chatId, payload.topicId);
+          if (response.destroyed) { release(); return; }
+          joins.add(response);
+          const releaseLease = () => {
+            response.off('close', releaseLease);
+            joins.delete(response);
+            release();
+          };
+          response.once('close', releaseLease);
+          try {
+            response.writeHead(200, { 'content-type': 'application/x-ndjson' });
+            response.write(`${JSON.stringify(result)}\n`);
+          } catch (error) {
+            releaseLease();
+            throw error;
+          }
+        } else {
+          await reload();
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ ok: true }));
+        }
       })().catch(error => {
         response.writeHead(409, { 'content-type': 'application/json' });
-        response.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Configuration reload failed' }));
+        const detail = error as { code?: unknown; signal?: unknown } | null;
+        response.end(JSON.stringify({
+          error: error instanceof Error ? error.message : 'Configuration reload failed',
+          ...(typeof detail?.code === 'string' || typeof detail?.code === 'number' ? { code: detail.code } : {}),
+          ...(typeof detail?.signal === 'string' ? { signal: detail.signal } : {}),
+        }));
       });
     });
     control.requestTimeout = 15000;
@@ -309,7 +391,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const usage = `Usage: omp-telegram [--config PATH] <start|setup|configure|reload|create|list|show|remove|chat|approve|bot>
+const usage = `Usage: omp-telegram [--config PATH] <start|setup|configure|reload|create|list|show|remove|chat|approve|bot|session>
 Instances are identified by directory paths. Run setup for guided configuration.
 `;
 
@@ -333,6 +415,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     stdout.write(`Reload requested for ${configPath}\n`);
     return;
   }
+  if (args[0] === 'session') { await runSessionCommand(args.slice(1), configPath); return; }
   if (args.length && args[0] !== 'start') {
     if (await runAdmin(args, configPath)) return;
     throw new Error(usage.trim());

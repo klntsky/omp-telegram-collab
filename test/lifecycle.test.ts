@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { once, EventEmitter } from 'node:events';
-import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,7 +11,7 @@ import { BotService, createBot } from '../src/bot.js';
 import { startService } from '../src/cli.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
-import type { AppConfig } from '../shared/contracts.js';
+import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { runAdmin } from '../src/cli-admin.js';
 import { botId, botToken, chatId, ownerUsername } from './telegram-data.js';
@@ -450,3 +450,194 @@ test('CLI chat removal is acknowledged live and revokes routing without deleting
     assert.equal(stored.getSession(fixture.session.id)?.status, 'closed');
   } finally { stored.close(); }
 });
+
+async function sessionControl(config: AppConfig, payload: Record<string, unknown>, path = '/session/join') {
+  const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: Record<string, unknown> }>();
+  const request = httpRequest({ socketPath: join(config.dataDir, 'control.sock'), path, method: 'POST' }, response => {
+    let body = '';
+    response.on('data', chunk => {
+      body += chunk;
+      if (response.headers['content-type'] === 'application/x-ndjson' && body.includes('\n')) {
+        resolve({ status: response.statusCode!, body: JSON.parse(body.slice(0, body.indexOf('\n'))) });
+        request.destroy();
+      }
+    });
+    response.on('end', () => resolve({ status: response.statusCode!, body: JSON.parse(body) }));
+    response.on('error', reject);
+  });
+  request.on('error', reject);
+  request.end(JSON.stringify({ configPath: config.configPath, ...payload }));
+  return promise;
+}
+
+for (const publicUrl of ['', 'https://example.invalid']) {
+  test(`private session join resolves a guarded binding independently of publicUrl (${publicUrl || 'disabled'})`, { timeout: 30_000 }, async t => {
+    const fixture = await lifecycleFixture(t);
+    t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
+    fixture.config.publicUrl = publicUrl;
+    if (publicUrl) {
+      const reservation = createServer();
+      reservation.listen(0, '127.0.0.1');
+      await once(reservation, 'listening');
+      const address = reservation.address();
+      assert.ok(address && typeof address !== 'string');
+      fixture.config.port = address.port;
+      const closed = once(reservation, 'close');
+      reservation.close();
+      await closed;
+    }
+    writeConfig(fixture.config);
+    await fixture.start();
+    const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
+    t.after(() => store.close());
+    store.updateSession(fixture.session.id, { status: 'open' });
+    let ensured = 0;
+    t.mock.method(OmpRuntime.prototype, 'ensure', async (session: TopicSession, guard?: () => Promise<void>) => {
+      assert.equal(session.id, fixture.session.id);
+      assert.equal(typeof guard, 'function');
+      await guard!();
+      ensured++;
+      return { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 1, url: 'https://relay.invalid/join#private-session-secret' };
+    });
+    const result = await sessionControl(fixture.config, { chatId, topicId: 27 });
+    assert.deepEqual(result, { status: 200, body: { url: 'https://relay.invalid/join#private-session-secret', executable: 'omp' } });
+    assert.equal(ensured, 1);
+    assert.equal((await stat(join(fixture.config.dataDir, 'control.sock'))).mode & 0o777, 0o600);
+    if (publicUrl) {
+      const exposed = await fetch(`http://127.0.0.1:${fixture.config.port}/session/join`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ configPath: fixture.config.configPath, chatId, topicId: 27 }),
+      });
+      assert.notEqual(exposed.status, 200);
+      assert.equal((await exposed.text()).includes('private-session-secret'), false);
+    }
+    assert.deepEqual(await sessionControl(fixture.config, {}, '/reload'), { status: 200, body: { ok: true } });
+    for (const payload of [{ chatId: 1, topicId: 27 }, { chatId, topicId: 1 }, { chatId, topicId: 2.5 }, { chatId, topicId: 999 }]) {
+      assert.equal((await sessionControl(fixture.config, payload)).status, 409);
+    }
+    for (const status of ['closed', 'detached'] as const) {
+      store.updateSession(fixture.session.id, { status });
+      assert.equal((await sessionControl(fixture.config, { chatId, topicId: 27 })).status, 409);
+    }
+    assert.equal(ensured, 1, 'invalid and unavailable sessions never reach runtime ensure');
+  });
+}
+
+test('private session join preserves runtime diagnostics and rejects a detach during host admission', { timeout: 30_000 }, async t => {
+  const fixture = await lifecycleFixture(t);
+  t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
+  await fixture.start();
+  const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
+  t.after(() => store.close());
+  store.updateSession(fixture.session.id, { status: 'open' });
+  t.mock.method(OmpRuntime.prototype, 'ensure', async () => {
+    throw Object.assign(new Error('Original host launch diagnostic'), { code: 'ENOENT', signal: 'SIGTERM' });
+  });
+  assert.deepEqual(await sessionControl(fixture.config, { chatId, topicId: 27 }), {
+    status: 409, body: { error: 'Original host launch diagnostic', code: 'ENOENT', signal: 'SIGTERM' },
+  });
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  t.mock.method(OmpRuntime.prototype, 'ensure', async (_session: TopicSession, guard?: () => Promise<void>) => {
+    entered.resolve();
+    await release.promise;
+    await guard!();
+    assert.fail('detached session must not create a host');
+  });
+  const joining = sessionControl(fixture.config, { chatId, topicId: 27 });
+  await entered.promise;
+  store.updateSession(fixture.session.id, { status: 'detached' });
+  release.resolve();
+  const rejected = await joining;
+  assert.equal(rejected.status, 409);
+  assert.match(String(rejected.body.error), /not open or changed/);
+  assert.equal('url' in rejected.body, false);
+});
+
+test('private session join rejects ambiguous bot ownership, unassignment, and termination', { timeout: 30_000 }, async t => {
+  const fixture = await lifecycleFixture(t);
+  t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
+  const secondBot = fixture.config.bots[1]!;
+  fixture.config.instances[fixture.config.dataDir]!.chats.push({ botId: secondBot.id, chatId });
+  writeConfig(fixture.config);
+  const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
+  t.after(() => store.close());
+  store.enrollGroup(secondBot.id, chatId);
+  const duplicate = store.createSession({ botId: secondBot.id, chatId, threadId: 27, instancePath: fixture.config.dataDir }, 'Other bot session');
+  store.updateSession(duplicate.id, { status: 'closed' });
+  await fixture.start();
+  let ensured = 0;
+  t.mock.method(OmpRuntime.prototype, 'ensure', async () => {
+    ensured++;
+    assert.fail('rejected sessions must not reach host admission');
+  });
+  const ambiguous = await sessionControl(fixture.config, { chatId, topicId: 27 });
+  assert.equal(ambiguous.status, 409);
+  assert.match(String(ambiguous.body.error), /ambiguous/);
+  fixture.config.instances[fixture.config.dataDir]!.chats =
+    fixture.config.instances[fixture.config.dataDir]!.chats.filter(chat => chat.chatId !== chatId);
+  writeConfig(fixture.config);
+  const unassigned = await sessionControl(fixture.config, { chatId, topicId: 27 });
+  assert.equal(unassigned.status, 409);
+  assert.match(String(unassigned.body.error), /No enrolled, assigned/);
+  fixture.config.instances[fixture.config.dataDir]!.chats.push({ botId, chatId });
+  fixture.config.terminated = true;
+  writeConfig(fixture.config);
+  const terminated = await sessionControl(fixture.config, { chatId, topicId: 27 });
+  assert.equal(terminated.status, 409);
+  assert.match(String(terminated.body.error), /terminated/);
+  assert.equal(ensured, 0);
+});
+
+for (const disconnect of ['client close', 'generation replacement'] as const) {
+test(`private session join retains its host until ${disconnect}`, { timeout: 30_000 }, async t => {
+  const fixture = await lifecycleFixture(t);
+  t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
+  await fixture.start();
+  const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
+  t.after(() => store.close());
+  store.updateSession(fixture.session.id, { status: 'open' });
+  let leases = 0;
+  const released = Promise.withResolvers<void>();
+  t.mock.method(OmpRuntime.prototype, 'retain', (id: string) => {
+    assert.equal(id, fixture.session.id);
+    leases++;
+    return () => { leases--; released.resolve(); };
+  });
+  t.mock.method(OmpRuntime.prototype, 'ensure', async (_session: TopicSession, guard?: () => Promise<void>) => {
+    await guard!();
+    return { instanceId: 'fixture', sessionId: 'fixture', generation: 1, url: 'https://relay.invalid/#private' };
+  });
+  const ready = Promise.withResolvers<void>();
+  const disconnected = Promise.withResolvers<void>();
+  const request = httpRequest({
+    socketPath: join(fixture.config.dataDir, 'control.sock'), path: '/session/join', method: 'POST',
+  }, response => {
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['content-type'], 'application/x-ndjson');
+    response.once('data', chunk => {
+      assert.equal(JSON.parse(String(chunk).trim()).url, 'https://relay.invalid/#private');
+      ready.resolve();
+    });
+    response.on('error', ready.reject);
+    response.once('close', disconnected.resolve);
+  });
+  request.on('error', ready.reject);
+  t.after(() => request.destroy());
+  request.end(JSON.stringify({ configPath: fixture.config.configPath, chatId, topicId: 27 }));
+  await ready.promise;
+  assert.equal(leases, 1);
+  await delay(20);
+  assert.equal(leases, 1, 'writing the binding does not release the foreground host');
+  if (disconnect === 'client close') request.destroy();
+  else {
+    store.updateSession(fixture.session.id, { status: 'closed' });
+    fixture.config.publicUrl = '';
+    writeConfig(fixture.config);
+    assert.deepEqual(await sessionControl(fixture.config, {}, '/reload'), { status: 200, body: { ok: true } });
+  }
+  await disconnected.promise;
+  await released.promise;
+  assert.equal(leases, 0);
+});
+}

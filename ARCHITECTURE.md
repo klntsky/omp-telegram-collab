@@ -102,4 +102,8 @@ Telegram's signature establishes the caller's numeric identity and launch contex
 
 The operating-system account is the filesystem and credential boundary. Project directories, chat assignments, and Telegram roles organize access inside the application but do not sandbox OMP processes. Isolation between mutually untrusted users requires an account or container boundary outside the application.
 
+Local terminal attachment crosses the service account's private Unix control socket. Telegram supplies only a chat/topic lookup command after an administrator check. The service resolves the current enrollment, assignment, and session state and enforces them again at host admission. The local CLI starts the OMP guest client with the privately returned connection capability. Public HTTP routes do not provide this local attachment operation.
+
+The private connection owns a runtime lease for the foreground terminal client. Disconnecting releases the lease. Service replacement closes local terminal connections so a lease cannot remain attached to an obsolete runtime generation.
+
 When the Mini App is enabled, the reverse proxy or tunnel provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.

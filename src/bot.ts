@@ -119,6 +119,8 @@ interface SettingsPanel {
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and shared capacity (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset <name> — switch this session (group admin)\n/list_model_presets — list presets for this session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and shared capacity (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
+const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
+const cliHelp = '/cli — copy a local terminal session join command (group admin)';
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
@@ -890,6 +892,7 @@ export class BotService {
           continue;
         }
         await this.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.apiAbort.signal);
+        await this.bot.api.setMyCommands([...baseCommands,cliCommand,...commands.slice(baseCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.apiAbort.signal);
         if (this.stopped || !this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         this.commandMenus.set(chat.chatId, fingerprint);
         this.skillAliases.set(chat.chatId, aliases);
@@ -898,6 +901,7 @@ export class BotService {
     for (const chatId of this.commandMenus.keys()) {
       if (current.has(chatId)) continue;
       await this.bot.api.deleteMyCommands({scope:{type:'chat',chat_id:chatId}}, this.apiAbort.signal);
+      await this.bot.api.deleteMyCommands({scope:{type:'chat_administrators',chat_id:chatId}}, this.apiAbort.signal);
       this.commandMenus.delete(chatId);
       this.skillAliases.delete(chatId);
     }
@@ -1518,7 +1522,7 @@ export class BotService {
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
       if (command?.[1]?.toLowerCase() === 'help') {
-        await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}\n${this.promptHelp(ctx.chat.id)}`);
+        await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
     }
@@ -1679,7 +1683,19 @@ export class BotService {
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
-      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'cli') {
+        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, destination, 'This command requires a current group administrator.'); return; }
+        if (arg) { await replyTo(ctx, destination, 'Usage: /cli'); return; }
+        if (destination.kind !== 'topic' || !session) { await replyTo(ctx, destination, 'Use /cli in an active session topic.'); return; }
+        this.requireSessionAssignment(session);
+        if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return; }
+        const command = `omp-telegram session join --chat ${destination.chatId} --topic ${destination.threadId}`;
+        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
+          parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
+        });
+        return;
+      }
       if (action === 'session') {
         if (!this.options.config.publicUrl) { await replyTo(ctx, contextDestination(ctx), 'The Mini App is disabled. Continue using this topic to interact with the agent in Telegram.'); return; }
         if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }

@@ -18,6 +18,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | --- | --- | --- |
 | ✅ | Create a session (`/new`) | `/new <task>` creates a topic and starts its session. |
 | ✅ | Open a topic's session (`/session`) | `/session` returns its Mini App link. |
+| ✅ | Join a topic's session in a local terminal (`omp join`) | `/cli` gives administrators a copyable command to run on the bot's machine. |
 | ✅ | Resume the current topic's managed history (`/resume`) | Send a prompt in the existing topic, or open `/session`. |
 | ❌ | Pick another saved session or pin it (`/resume`, `/pin`, `/session`) | No saved-session picker, pin control, or general session-management interface. |
 | ❌ | Rename or relocate a session's workspace (`/rename`, `/move`, `/add-dir`, `/remove-dir`, `/dirs`) | No dedicated title or workspace controls. |
