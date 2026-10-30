@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
+import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
@@ -204,6 +205,10 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
+      if (ctx.chat) {
+        const destination = contextDestination(ctx);
+        if (destination.kind === 'topic' && destination.threadId === this.options.store.getBotStatusTopic(this.id,ctx.chat.id)) return;
+      }
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -312,6 +317,20 @@ export class BotService {
     await this.termination;
   }
   get id(): number { return this.bot.isInited() ? this.bot.botInfo.id : 0; }
+  async sendStatusNotice(chatId: number, text: string, signal?: TelegramAbortSignal): Promise<void> {
+    const create = async () => {
+      const topic = await this.bot.api.createForumTopic(chatId,'Bot status',{},signal);
+      this.options.store.setBotStatusTopic(this.id,chatId,topic.message_thread_id);
+      return topic.message_thread_id;
+    };
+    const threadId = this.options.store.getBotStatusTopic(this.id,chatId) ?? await create();
+    try {
+      await sendTo(this.bot.api,topicDestination(chatId,threadId),text,undefined,signal);
+    } catch (error) {
+      if (!(error instanceof GrammyError) || !/message thread not found|TOPIC_DELETED/i.test(error.description)) throw error;
+      await sendTo(this.bot.api,topicDestination(chatId,await create()),text,undefined,signal);
+    }
+  }
   initialize(): Promise<void> {
     return this.initialization ??= this.initializeOnce();
   }

@@ -171,20 +171,24 @@ Separately shared OMP Collab links bypass this Telegram gateway. Telegram member
 
 Keep the YAML and runtime data private. They contain bot tokens, topic mappings, and OMP histories. Service shutdown does not delete history.
 
-Each successful startup notifies enrolled groups in General: “OMP bot service is back online (restarting took N.NN seconds).” The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice.
+Each successful startup notifies enrolled groups in the reserved **Bot status** forum topic: “OMP bot service is back online (restarting took N.NN seconds).” The bot creates this topic when needed and persists its ID separately for each bot and chat. Later lifecycle notices reuse it; if Telegram reports that the message thread no longer exists, the bot creates a replacement and saves its ID. Notices never fall back to General. The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice in the same reserved topic.
+
+Bot status is not a session topic. Messages there are ignored before command handling, prompt submission, or receipt reactions: slash commands (including `/terminate`, `/setup`, and `/new`), ordinary text, and replies to the bot have no effect. Use General or a session topic for commands and prompts.
 
 
 ## 3. Capacity and reconnection
 
 `maxSessions` limits resident managed OMP processes across all bots and projects, not saved conversations. Empty topics consume no process. Hosts idle for five minutes may retire; the runtime tries least-recently-used idle hosts sooner when it needs capacity. Connected Mini Apps and pending or active work protect a host.
 
-Retirement waits for OMP's guarded shutdown and never escalates to signals. This path was verified with OMP 18.13.1. Older hosts without that support are not forcibly retired. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
+Automatic retirement requires the host to confirm that it is idle and has no pending messages. Hosts without safe retirement support remain running. A timed-out request cancelled before acceptance cannot retire the host later. Accepted retirement blocks new submissions while the host finishes shutting down; an observation timeout does not cancel accepted retirement. Retirement never escalates to signals. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
 
 If retirement cannot free capacity, an instance root or bot admin can approve a prompt to double the shared limit. Topic admins cannot approve capacity increases. Approval saves the new limit and retries the pending initial task once. Other prompts must be resent. Protected configuration requires an administrator CLI update instead. Expired or replayed confirmations cannot increase capacity.
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
+
+Failure to acquire or reconnect to an existing managed host does not retire it. The original connection diagnostic is preserved, and a later attempt can reconnect to the same host.
 
 The Mini App retains its transcript and draft during transient failures. Reconnects use capped exponential backoff and a fresh single-use ticket with renewed authentication and membership checks. They do not queue or replay instructions. Leave, denied membership, expired launch credentials, invalid actions, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available. Reopen OPEN AGENT when Telegram credentials expire.
 

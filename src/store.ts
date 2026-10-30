@@ -36,6 +36,7 @@ export class Store {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
+      CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_path TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
       CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
@@ -56,6 +57,13 @@ export class Store {
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
   listGroups(botId: number): number[] { return this.db.prepare('SELECT chat_id FROM groups WHERE bot_id=? ORDER BY chat_id').all(botId).map(row => Number(row.chat_id)); }
+  getBotStatusTopic(botId: number, chatId: number): number | undefined {
+    const row = this.db.prepare('SELECT thread_id FROM bot_status_topics WHERE bot_id=? AND chat_id=?').get(botId, chatId);
+    return row ? Number(row.thread_id) : undefined;
+  }
+  setBotStatusTopic(botId: number, chatId: number, threadId: number): void {
+    this.db.prepare('INSERT INTO bot_status_topics VALUES (?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE SET thread_id=excluded.thread_id').run(botId, chatId, threadId);
+  }
   addTopicAdmin(botId: number, destination: TopicDestination, identity: string | number): void {
     if (destination.kind !== 'topic') throw new Error('Topic administrator grants require a non-General topic');
     this.db.prepare('INSERT OR IGNORE INTO topic_admins VALUES (?,?,?,?)')
