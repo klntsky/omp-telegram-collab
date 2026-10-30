@@ -89,7 +89,7 @@ test('topic icons distinguish active work, idle live hosts, and process exit wit
     await app.runtime.stop(session.id);
     app.disconnect();
     await eventually(() => icon() === stopped);
-    assert.ok(app.topicEdits.every(edit => edit.chat_id === chatId && edit.message_thread_id === 42 && !('name' in edit)));
+    assert.ok(app.topicEdits.every(edit => edit.chat_id === chatId && edit.message_thread_id === 42));
     assert.deepEqual(app.accepted,[],'status observation never submits instructions');
   } finally {
     await app.close();
@@ -147,8 +147,112 @@ test('status icon notices from this bot are deleted without deleting human edits
     await app.update({message_id:1006,message_thread_id:42,forum_topic_edited:{name:'Bot rename',icon_custom_emoji_id:'5237699328843200968'}},ownBot);
     await app.update({message_id:1007,message_thread_id:42,forum_topic_edited:{icon_custom_emoji_id:'5312016608254762256'}},{...ownBot,id:botId+1});
     assert.deepEqual(app.deletedMessages,[1000,1003].map(message_id => ({chat_id:chatId,message_id})));
-    assert.equal(app.store.listSessions(botId)[0]?.name,'Bot rename');
+    assert.equal(app.store.listSessions(botId)[0]?.name,'Renamed topic','delayed bot rename echoes do not overwrite human intent');
     assert.equal(app.connectionCount,0,'processing service notices never starts a host');
+  } finally {
+    await app.close();
+  }
+});
+
+test('topic titles seed managed sessions and bidirectional updates preserve full OMP names without echoes', async () => {
+  const app = await createSmokeApp();
+  const state = {cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]};
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Initial topic'}});
+    const session = app.store.listSessions(botId)[0]!;
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Before launch'}});
+    assert.equal(app.connectionCount,0);
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.equal(app.store.getPendingSessionTitle(session.id),'Before launch');
+    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    assert.equal(app.sessionTitles.get(session.id),'Before launch');
+    const longTitle = '😀'.repeat(140);
+    const before = app.titleChanges.length;
+    app.emit({t:'state',state:{...state,sessionName:longTitle}});
+    await eventually(() => app.store.getSession(session.id)?.name === '😀'.repeat(128));
+    assert.equal(app.topicEdits.filter(edit => edit.name === '😀'.repeat(128)).length,1);
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'😀'.repeat(128)}},{id:botId,first_name:'OMP',is_bot:true});
+    app.emit({t:'state',state:{...state,sessionName:longTitle}});
+    await delay(30);
+    assert.equal(app.titleChanges.length,before,'Telegram projection never truncates the real OMP title');
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Human wins'}});
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Delayed bot echo'}},{id:botId,first_name:'OMP',is_bot:true});
+    assert.equal(app.store.getSession(session.id)?.name,'Human wins');
+    assert.equal(app.sessionTitles.get(session.id),'Human wins');
+  } finally {
+    await app.close();
+  }
+});
+
+test('pending Telegram title survives stale reconnect snapshots and archived or detached sessions do not rename hosts', async () => {
+  const app = await createSmokeApp();
+  const state = {cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[]};
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Initial'}});
+    const session = app.store.listSessions(botId)[0]!;
+    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    app.disconnect();
+    const realSetTitle = app.runtime.setSessionTitle;
+    app.runtime.setSessionTitle = async () => { throw new Error('Control disconnected'); };
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Offline intent'}});
+    assert.equal(app.store.getPendingSessionTitle(session.id),'Offline intent');
+    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
+    app.emit({t:'state',state:{...state,sessionName:'Stale welcome'}});
+    await delay(30);
+    assert.equal(app.store.getSession(session.id)?.name,'Offline intent');
+    assert.equal(app.store.getPendingSessionTitle(session.id),'Offline intent');
+    app.runtime.setSessionTitle = realSetTitle;
+    app.emit({t:'state',state:{...state,sessionName:'Still stale'}});
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    assert.equal(app.sessionTitles.get(session.id),'Offline intent');
+    await app.update({message_thread_id:42,forum_topic_closed:{}});
+    const before = app.titleChanges.length;
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Archived rename'}});
+    assert.equal(app.titleChanges.length,before);
+    await app.update({message_thread_id:42,text:'/detach'});
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Conversation only'}});
+    assert.equal(app.titleChanges.length,before);
+    assert.equal(app.store.getPendingSessionTitle(session.id),undefined);
+  } finally {
+    await app.close();
+  }
+});
+
+test('attached sessions import the existing OMP title instead of exporting their placeholder', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/attach terminal-instance Placeholder'});
+    const session = app.store.listSessions(botId)[0]!;
+    await eventually(() => app.store.getSession(session.id)?.name === 'Telegram fixture session');
+    assert.equal(app.titleChanges.length,0);
+    assert.equal(app.store.getPendingSessionTitle(session.id),undefined);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a rate-limited OMP topic rename is cancelled after a human rename even after the host acknowledges it', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Initial'}});
+    const session = app.store.listSessions(botId)[0]!;
+    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    app.rateLimitNext('editForumTopic',1);
+    app.emit({t:'state',state:{cwd:'/fixture/project',isStreaming:false,queuedMessageCount:0,participants:[],sessionName:'Old outbound title'}});
+    await delay(50);
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'New human title'}});
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    await delay(1100);
+    assert.equal(app.store.getSession(session.id)?.name,'New human title');
+    assert.ok(!app.topicEdits.some(edit => edit.name === 'Old outbound title'));
   } finally {
     await app.close();
   }

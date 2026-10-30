@@ -54,7 +54,11 @@ Online notices are sent after readiness; slow notice delivery does not hold star
 
 Status retains the latest relevant session and project-catalog failures with operation, observation timestamp, and exact original diagnostics, including multiline messages and available subprocess fields. These observations are scoped to the current bot, assignment and topic and reset on bot restart; historical failures may remain visible after recovery. Skill catalogs persist, but a saved catalog's original discovery timestamp may be unknown. The successful-check timestamp describes this process's catalog check and may use the runtime discovery cache. No additional progress or failure notifications are sent.
 
-Rename a topic to change its stored display name. Close it to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
+Session titles and Telegram topic names synchronize in both directions. Renaming a topic updates the actual OMP session title without submitting a prompt or starting a stopped host; pending renames survive service restarts and apply when the managed host next starts. OMP title changes update the topic while mirroring is connected, including automatically generated titles. Telegram displays at most 128 characters; the full OMP title remains intact. Detached topics no longer synchronize titles.
+
+Telegram-to-OMP renames require a host with session-title control support. Terminal-owned attached hosts without that support report a control error rather than claiming their title changed; OMP-to-Telegram mirroring remains available.
+
+Close a topic to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
 `/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
 

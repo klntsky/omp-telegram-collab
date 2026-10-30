@@ -8,7 +8,7 @@ import { Store, type PendingSkillKey } from './store.js';
 import { isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
-import { SessionCapacityError } from './runtime.js';
+import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
 import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
@@ -22,6 +22,7 @@ export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
   ensure(session: TopicSession): Promise<HostBinding>;
   isRunning(session: TopicSession): Promise<boolean>;
+  setSessionTitle(session: TopicSession, title: string): Promise<void>;
   attach(instanceId: string, instancePath: string): Promise<HostBinding>;
   stop(id: string): Promise<void>;
   kill(session: TopicSession): Promise<void>;
@@ -45,6 +46,7 @@ interface Listener {
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
+  titleTail?: Promise<void>;
   queued: number;
   recovering: boolean;
   pendingPrompts: { text: string; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
@@ -153,6 +155,7 @@ export class BotService {
   readonly config: BotConfig;
   readonly token: string;
   private readonly listeners = new Map<string, Listener>();
+  private readonly titleRevisions = new Map<string,number>();
   private readonly reconnects = new Map<string, NodeJS.Timeout>();
   private readonly capacityRequests = new Map<string, CapacityRequest>();
   private readonly questions = new Map<string, PendingQuestion>();
@@ -916,6 +919,7 @@ export class BotService {
     }
   }
   private async detachSession(session: TopicSession): Promise<void> {
+    this.options.store.setPendingSessionTitle(session.id,undefined);
     this.options.store.updateSession(session.id,{status:'detached'});
     this.options.store.advanceSessionGeneration(session.id);
     this.options.store.cancelInitialTask(session.id);
@@ -1443,7 +1447,14 @@ export class BotService {
     }
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
-      if (edited.name) this.options.store.updateSession(session.id, {name:edited.name});
+      if (edited.name && ctx.from?.id !== this.id) {
+        this.options.store.updateSession(session.id, {name:edited.name});
+        this.titleRevisions.set(session.id,(this.titleRevisions.get(session.id) ?? 0)+1);
+        if (!detached) {
+          this.options.store.setPendingSessionTitle(session.id,edited.name);
+          await this.applySessionTitle(session);
+        }
+      }
       if (edited.icon_custom_emoji_id !== undefined) {
         this.options.store.setTopicIcon(session.id,edited.icon_custom_emoji_id);
         if (ctx.from?.id !== this.id) {
@@ -1745,7 +1756,8 @@ export class BotService {
     if (existing?.promise) return existing.promise;
     const listener: Listener = {sessionId:session.id,tail:Promise.resolve(),queued:0,recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),pendingStops:[],queuedMessages:0,activity:'completed'};
     this.listeners.set(session.id, listener);
-    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session)).then(binding => {
+    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session)).then(async binding => {
+      await this.applySessionTitle(session);
       this.requireSessionAssignment(session);
       return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
       onFrame: frame => this.onFrame(session,listener,frame),
@@ -1964,9 +1976,53 @@ export class BotService {
       console.warn(`Could not relay agent question (${session.id}).`, error);
     }).finally(() => { listener.queued--; });
   }
+  private async applySessionTitle(session: TopicSession): Promise<void> {
+    const title = this.options.store.getPendingSessionTitle(session.id);
+    if (title === undefined || this.stopped || refreshTermination(this.options.config) ||
+        !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open') return;
+    try {
+      await this.options.runtime.setSessionTitle(session,title);
+    } catch (error) {
+      this.sessionObservation(session.id).failure = {operation:'Session title synchronization',at:Date.now(),error};
+      if (error instanceof SessionTitleUnsupportedError && this.options.store.getPendingSessionTitle(session.id) === title) {
+        this.options.store.setPendingSessionTitle(session.id,undefined);
+      }
+    }
+  }
+  private syncTopicTitle(session: TopicSession, listener: Listener, title: string): void {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    const revision = this.titleRevisions.get(session.id);
+    const active = () => !this.stopped && !refreshTermination(this.options.config) &&
+      this.sessionAssigned(session) && this.listeners.get(session.id) === listener &&
+      this.options.store.getSession(session.id)?.status === 'open' &&
+      this.options.store.getSessionGeneration(session.id) === generation &&
+      this.titleRevisions.get(session.id) === revision;
+    listener.titleTail = (listener.titleTail ?? Promise.resolve()).then(async () => {
+      if (!active()) return;
+      const pending = this.options.store.getPendingSessionTitle(session.id);
+      if (pending !== undefined) {
+        if (pending === title) this.options.store.setPendingSessionTitle(session.id,undefined);
+        else await this.applySessionTitle(session);
+        return;
+      }
+      const name = Array.from(title).slice(0,128).join('');
+      if (!name.trim() || this.options.store.getSession(session.id)?.name === name) return;
+      const applied = await this.delivery.run(session.chatId,
+        () => this.bot.api.editForumTopic(session.chatId,session.threadId,{name}),
+        () => active() && this.options.store.getPendingSessionTitle(session.id) === undefined);
+      if (applied && active() && this.options.store.getPendingSessionTitle(session.id) === undefined) {
+        this.options.store.updateSession(session.id,{name});
+      }
+    }).catch(error => {
+      this.sessionObservation(session.id).failure = {operation:'Topic title synchronization',at:Date.now(),error};
+    });
+  }
   private onFrame(session: TopicSession, listener: Listener, frame: HostFrame, replay = false): void {
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     this.options.runtime.observeFrame(session.id,frame);
+    if ((frame.t === 'welcome' || frame.t === 'state') && frame.state.sessionName) {
+      this.syncTopicTitle(session,listener,frame.state.sessionName);
+    }
     if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'error') {
       this.sessionObservation(session.id).failure = {operation:'OMP notice',at:Date.now(),error:frame.event.message};
     }

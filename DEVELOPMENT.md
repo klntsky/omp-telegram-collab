@@ -31,6 +31,8 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
 
    Managed sessions use their loaded skill catalogs; discovery does not reload them or restart active hosts automatically. Older managed hosts without skill-lifecycle support report that a host restart is required. Only when it is safe to interrupt the host, use `/kill`, then submit a prompt to start it again. Lifecycle-extension fixes take effect when a host starts; existing hosts retain their loaded extension code. Attached-host discovery uses the assigned instance settings, not terminal-private loaded skills.
 
+   Two-way topic/session title synchronization uses OMP's native session-name API through the managed host's private lifecycle control socket. Hosts started before title-control support need a host restart before Telegram renames can apply; restarting only the bot does not reload a running host's extension. Terminal-owned attached hosts without that control extension cannot accept Telegram renames and report the original control diagnostic; their OMP titles can still be mirrored to Telegram.
+
 6. Create a Telegram supergroup with Topics enabled. Give the bot Manage Topics and Pin Messages permissions.
 7. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
 

@@ -37,6 +37,8 @@ initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();
 let runtime = new OmpRuntime(config);
 try {
+  await runtime.setSessionTitle(session, 'Queued before host startup');
+  assert.equal(await runtime.isRunning(session), false, 'a topic rename must not launch OMP');
   const [first, same] = await Promise.all([runtime.ensure(session), runtime.ensure(session)]);
   assert.ok(first.sessionId);
   assert.equal(same.sessionId, first.sessionId);
@@ -51,11 +53,24 @@ try {
     await competing.close();
   }
   const frames: string[] = [];
+  const titleState = Promise.withResolvers<void>();
+  await runtime.setSessionTitle(session, 'Telegram title → actual OMP');
   const guest = await connectCollab(first, 'Smoke verifier', {
-    onFrame(frame) { frames.push(frame.t); },
+    onFrame(frame) {
+      frames.push(frame.t);
+      if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Telegram title → actual OMP');
+      if (frame.t === 'state' && frame.state.sessionName === 'Live Telegram rename') titleState.resolve();
+    },
     onClose() {},
   });
   assert.ok(frames.includes('welcome'), 'actual OMP host returns an encrypted welcome');
+  const titleTimer = setTimeout(() => titleState.reject(new Error('Native title rename did not publish collab state')), 10000);
+  try {
+    await runtime.setSessionTitle(session, 'Live Telegram rename');
+    await titleState.promise;
+  } finally {
+    clearTimeout(titleTimer);
+  }
   guest.close();
   const attached = await runtime.attach(first.instanceId, dir);
   assert.equal(attached.sessionId, first.sessionId);
@@ -74,6 +89,7 @@ try {
   const resumedGuest = await connectCollab(resumed, 'Resume verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.id, first.sessionId);
+      if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Live Telegram rename', 'native title persists across a fresh host process');
     },
     onClose() {},
   });

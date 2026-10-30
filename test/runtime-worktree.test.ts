@@ -52,3 +52,12 @@ test('restart validation pins managed history to worktree cwd while retaining fo
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: 'history-id', cwd: app.repository }) + '\n');
   await assert.rejects(app.runtime.validateSessionPaths([session]), /Saved history .* conflicts with working directory/);
 });
+
+test('session title control rejects unsupported attached hosts without pretending to rename', async t => {
+  const app = await fixture(t);
+  const session: TopicSession = { id: 'title-session', botId: 1, chatId: -100, threadId: 2,
+    instancePath: app.repository, name: 'Title', status: 'open', createdAt: Date.now(),
+    runtime: { kind: 'attached', instanceId: 'terminal', sessionId: 'terminal-session' } };
+  await assert.rejects(app.runtime.setSessionTitle(session, 'Telegram title'), /native collab registry does not support renaming/);
+  await assert.rejects(app.runtime.setSessionTitle(session, '  '), /title cannot be empty/);
+});

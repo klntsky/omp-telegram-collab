@@ -196,7 +196,7 @@ export default async function hostLifecycle(pi) {
           };
           try {
             request = JSON.parse(input.trim());
-            if (!request || !['model_presets', 'list_skills'].includes(request.type) || typeof request.requestId !== 'string' ||
+            if (!request || !['model_presets', 'list_skills', 'set_session_title'].includes(request.type) || typeof request.requestId !== 'string' ||
                 request.requestId.length > 128 || typeof request.sessionId !== 'string' ||
                 (request.name !== undefined && typeof request.name !== 'string') ||
                 !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000) {
@@ -212,6 +212,12 @@ export default async function hostLifecycle(pi) {
           socket.once('close', () => clearTimeout(commandTimeout));
           const operation = (commandTail ?? Promise.resolve()).then(() => {
             if (socket.destroyed) throw new Error('OMP model preset request disconnected before execution');
+            if (request.type === 'set_session_title') {
+              assertAvailable(request);
+              if (typeof request.name !== 'string' || !request.name.trim()) throw new Error('OMP session title cannot be empty');
+              if (typeof pi.setSessionName !== 'function') throw new Error('OMP host session title control is unavailable');
+              return Promise.resolve(pi.setSessionName(request.name)).then(() => '');
+            }
             if (request.type === 'list_skills') {
               assertAvailable(request);
               if (skillsError) throw skillsError;
@@ -249,6 +255,7 @@ export default async function hostLifecycle(pi) {
         modelPresets: 2,
         skills: true,
         worktree: true,
+        sessionTitles: typeof pi.setSessionName === 'function',
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();

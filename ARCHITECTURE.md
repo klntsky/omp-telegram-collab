@@ -46,6 +46,8 @@ The delivery queue owns scheduling of Telegram output and rate-limit delays. The
 
 The bot adapter owns topic activity projection. Collab host snapshots reconcile lifecycle-event observations; the runtime's process-liveness boundary distinguishes an idle host from a stopped one. The delivery queue owns only when that projection reaches Telegram, not the underlying activity state.
 
+The bot adapter owns two-way session-title reconciliation between Telegram topic updates and OMP's published session state. The store preserves pending Telegram renames across reconnects so an older host snapshot cannot overwrite them. Telegram delivery applies topic-title changes without owning the underlying OMP title; the runtime boundary performs native session renames without submitting agent prompts.
+
 ## OMP execution and lifecycle
 
 The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.

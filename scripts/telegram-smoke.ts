@@ -182,6 +182,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   };
   let sessionLimit = config.omp.maxSessions;
   const managedSessions = new Set<string>();
+  const sessionTitles = new Map<string,string>();
+  const titleChanges: {sessionId:string;title:string}[] = [];
+  const connectionSessions = new Map<CollabHandlers,string>();
   const runtime = {
     async worktree(session: TopicSession, _branch?: string) {
       session.runtime = {kind:'managed',worktreePath:`/fixture/worktrees/${randomUUID()}`};
@@ -195,6 +198,14 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       return { instanceId: session.id, sessionId: session.id, generation: 1, url: 'server-only-secret-capability' };
     },
     async isRunning(session: TopicSession) { return session.runtime.kind === 'attached' || managedSessions.has(session.id); },
+    async setSessionTitle(session: TopicSession, title: string) {
+      if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) return;
+      sessionTitles.set(session.id,title);
+      titleChanges.push({sessionId:session.id,title});
+      for (const handlers of connections) {
+        if (connectionSessions.get(handlers) === session.id) handlers.onFrame({t:'state',state:{...state,sessionName:title}});
+      }
+    },
     async attach(instanceId: string, _instancePath: string) { return { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' }; },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
     async listSkills(_instancePath: string, _session?: TopicSession) {
@@ -231,7 +242,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const connect = async (binding: { sessionId: string }, _name: string, handlers: CollabHandlers) => {
     connectionCount++;
     connections.add(handlers);
-    handlers.onFrame({ t: 'welcome', proto: 3, header: { type: 'session', id: binding.sessionId, title: 'Telegram fixture session', cwd: state.cwd, timestamp: new Date().toISOString() }, state, agents: [], entryCount: entries.length });
+    connectionSessions.set(handlers,binding.sessionId);
+    const sessionState = {...state,sessionName:sessionTitles.get(binding.sessionId) ?? state.sessionName};
+    handlers.onFrame({ t: 'welcome', proto: 3, header: { type: 'session', id: binding.sessionId, title: sessionState.sessionName, cwd: state.cwd, timestamp: new Date().toISOString() }, state:sessionState, agents: [], entryCount: entries.length });
     handlers.onFrame({ t: 'snapshot-chunk', entries, final: true });
     return {
       send(frame: GuestFrame) {
@@ -286,6 +299,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics,
+    sessionTitles, titleChanges,
     fileRequests,
     pollRequests,
     queueUpdates(...updates: Parameters<Bot['handleUpdate']>[0][]) { pendingUpdates.push(...updates); },

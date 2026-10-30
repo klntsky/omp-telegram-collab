@@ -20,6 +20,13 @@ export class SessionCapacityError extends Error {
   }
 }
 
+export class SessionTitleUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionTitleUnsupportedError';
+  }
+}
+
 interface RegistryHost {
   instanceId: string;
   sessionId: string;
@@ -48,7 +55,7 @@ interface ManagedHost {
 }
 
 interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
-interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; sessionTitles?: boolean }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -786,20 +793,44 @@ export class OmpRuntime {
     return status.ready === true;
   }
 
+  async #runningTitleBinding(session: TopicSession): Promise<HostBinding> {
+    const pin = JSON.parse(await readFile(path.join(this.#config.dataDir, 'sessions', session.id, 'binding.json'), 'utf8')) as DurableBinding;
+    const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
+    const hosts = (await this.#list(deadline)).filter(host => host.sessionId === pin.sessionId && host.cwd === this.#sessionCwd(session));
+    if (hosts.length !== 1) throw new Error('OMP host stopped or changed during session title control');
+    return this.#resolve(hosts[0]!, deadline);
+  }
+
+  async setSessionTitle(session: TopicSession, title: string): Promise<void> {
+    this.#assertActive();
+    if (!title.trim()) throw new Error('OMP session title cannot be empty');
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (session.runtime.kind === 'attached') {
+      throw new SessionTitleUnsupportedError('Session title control is unavailable for this attached OMP host. Rename it with /rename in its terminal; the native collab registry does not support renaming.');
+    }
+    if (!await this.isRunning(session)) return;
+    await this.#hostControl(session, title, 'set_session_title');
+  }
+
   async modelPresets(session: TopicSession, name?: string): Promise<string> {
     return this.#hostControl(session, name, 'model_presets');
   }
 
-  async #hostControl(session: TopicSession, name: string | undefined, type: 'model_presets' | 'list_skills'): Promise<string> {
+  async #hostControl(session: TopicSession, name: string | undefined, type: 'model_presets' | 'list_skills' | 'set_session_title'): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') {
       throw new Error('Model preset control is unavailable for attached OMP hosts. Use a managed topic session or run /modelpreset in the attached host.');
     }
     const release = this.retain(session.id);
     try {
-      const binding = await this.ensure(session);
+      const binding = type === 'set_session_title'
+        ? await this.#runningTitleBinding(session)
+        : await this.ensure(session);
       const deadline = Date.now() + 15000;
       const lifecycle = await this.#lifecycle(session.id);
+      if (type === 'set_session_title' && !lifecycle?.sessionTitles) {
+        throw new Error('OMP host does not support session title control. Retire this managed host and rejoin to load the updated lifecycle extension.');
+      }
       if (!lifecycle || lifecycle.modelPresets !== 2) {
         throw new Error('OMP host does not support model preset control. Retire this managed host and rejoin to load the updated lifecycle extension.');
       }
