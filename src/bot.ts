@@ -32,6 +32,7 @@ export interface RuntimeLike {
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
   availableModelPresets(instancePath: string): Promise<string[]>;
+  providerUsage(instancePath: string): Promise<string>;
   listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
   setSessionLimit(limit: number): void;
@@ -118,7 +119,7 @@ interface SettingsPanel {
   choices: SettingsAction[];
   capacityLimit?: number;
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
@@ -136,6 +137,7 @@ const groupCommands = [
   { command: 'detach', description: 'Make this topic conversation-only (group admin)' },
   { command: 'session', description: 'Open this topic’s session' },
   { command: 'status', description: 'Show host, mirroring, recovery and skill diagnostics' },
+  { command: 'usage', description: 'Show provider plan usage, remaining quotas and resets' },
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
@@ -1695,6 +1697,17 @@ export class BotService {
       if (action === 'list_admins') {
         if (arg) { await replyTo(ctx, destination, 'Usage: /list_admins'); return; }
         await this.listAdmins(ctx);
+        return;
+      }
+      if (action === 'usage') {
+        if (arg) { await replyTo(ctx, destination, 'Usage: /usage'); return; }
+        const usage = await this.options.runtime.providerUsage(assigned.path);
+        for (let offset = 0; offset < usage.length;) {
+          let end = Math.min(offset + 4000, usage.length);
+          if (end < usage.length && /[\uD800-\uDBFF]/.test(usage[end - 1]!)) --end;
+          await replyTo(ctx, destination, usage.slice(offset, end));
+          offset = end;
+        }
         return;
       }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
