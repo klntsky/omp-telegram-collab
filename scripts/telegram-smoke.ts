@@ -184,10 +184,15 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const managedSessions = new Set<string>();
   const sessionTitles = new Map<string,string>();
   const titleChanges: {sessionId:string;title:string}[] = [];
+  const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
   const connectionSessions = new Map<CollabHandlers,string>();
   const runtime = {
+    async topicTitleStatus(session: TopicSession): Promise<{worktree:boolean;branch?:string}> {
+      return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.worktreePath};
+    },
     async worktree(session: TopicSession, _branch?: string) {
       session.runtime = {kind:'managed',worktreePath:`/fixture/worktrees/${randomUUID()}`};
+      topicTitleStatuses.set(session.id,{worktree:true,branch:_branch});
       return `Moved to worktree ${session.runtime.worktreePath}`;
     },
     async ensure(session: TopicSession) {
@@ -299,7 +304,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics,
-    sessionTitles, titleChanges,
+    sessionTitles, titleChanges, topicTitleStatuses,
     fileRequests,
     pollRequests,
     queueUpdates(...updates: Parameters<Bot['handleUpdate']>[0][]) { pendingUpdates.push(...updates); },

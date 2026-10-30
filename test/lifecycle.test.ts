@@ -52,6 +52,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
   const store = new Store(':memory:');
   const runtime = {
     async worktree(): Promise<never> { throw new Error('No worktree creation expected in lifecycle check'); },
+    async topicTitleStatus() { return {worktree:false}; },
     async ensure(): Promise<never> { throw new Error('No sessions expected in lifecycle check'); },
     async isRunning() { return false; },
     async setSessionTitle(): Promise<never> { throw new Error('No title change expected in lifecycle check'); },

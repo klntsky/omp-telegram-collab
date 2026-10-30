@@ -21,6 +21,7 @@ import { withCancellation } from './cancellation.js';
 
 export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
+  topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
   ensure(session: TopicSession): Promise<HostBinding>;
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
@@ -48,6 +49,8 @@ interface Listener {
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
   titleTail?: Promise<void>;
+  titleVersion?: number;
+  sessionTitle?: string;
   queued: number;
   recovering: boolean;
   pendingPrompts: { text: string; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
@@ -157,6 +160,8 @@ export class BotService {
   readonly token: string;
   private readonly listeners = new Map<string, Listener>();
   private readonly titleRevisions = new Map<string,number>();
+  private readonly humanTitles = new Map<string,string>();
+  private readonly titlePrefixes = new Map<string,Set<string>>();
   private readonly reconnects = new Map<string, NodeJS.Timeout>();
   private readonly capacityRequests = new Map<string, CapacityRequest>();
   private readonly questions = new Map<string, PendingQuestion>();
@@ -923,6 +928,17 @@ export class BotService {
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
     if (this.stopped || !this.sessionAssigned(session)) return;
     const listener = this.listeners.get(session.id);
+    if (listener) this.syncTopicTitle(session,listener);
+    else {
+      const generation = this.options.store.getSessionGeneration(session.id);
+      const revision = this.titleRevisions.get(session.id);
+      const title = this.options.store.getPendingSessionTitle(session.id) ?? this.humanTitles.get(session.id) ??
+        this.stripTopicStatus(session,session.name);
+      await this.projectTopicTitle(session,title,() => !this.stopped && this.sessionAssigned(session) &&
+        this.options.store.getSession(session.id)?.status === 'open' &&
+        this.options.store.getSessionGeneration(session.id) === generation &&
+        this.titleRevisions.get(session.id) === revision);
+    }
     let running: boolean;
     try { running = await withCancellation(this.options.runtime.isRunning(session),this.background.signal); }
     catch (error) {
@@ -1461,16 +1477,27 @@ export class BotService {
         if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
         await this.announce(session);
         await this.setTopicStatus(session, 'stopped');
+        await this.refreshTopicStatus(session);
       }
       return;
     }
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
       if (edited.name && ctx.from?.id !== this.id) {
+        const title = this.stripTopicStatus(session,edited.name);
+        const listener = this.listeners.get(session.id);
+        if (listener) listener.sessionTitle = title;
+        this.humanTitles.set(session.id,title);
         this.options.store.updateSession(session.id, {name:edited.name});
         this.titleRevisions.set(session.id,(this.titleRevisions.get(session.id) ?? 0)+1);
         if (!detached) {
-          this.options.store.setPendingSessionTitle(session.id,edited.name);
+          this.options.store.setPendingSessionTitle(session.id,title);
+          const revision = this.titleRevisions.get(session.id);
+          const generation = this.options.store.getSessionGeneration(session.id);
+          await this.projectTopicTitle(session,title,() => !this.stopped && !refreshTermination(this.options.config) &&
+            this.sessionAssigned(session) && this.options.store.getSession(session.id)?.status === 'open' &&
+            this.titleRevisions.get(session.id) === revision &&
+            this.options.store.getSessionGeneration(session.id) === generation);
           await this.applySessionTitle(session);
         }
       }
@@ -2008,30 +2035,75 @@ export class BotService {
       }
     }
   }
-  private syncTopicTitle(session: TopicSession, listener: Listener, title: string): void {
+  private stripTopicStatus(session: TopicSession, title: string): string {
+    const worktree = /^wt:[^\s]*(?:\s+|$)/.exec(title);
+    if (worktree) return title.slice(worktree[0].length);
+    const savedPrefix = this.options.store.getTopicTitlePrefix(session.id);
+    if (savedPrefix && title.startsWith(`${savedPrefix} `)) return title.slice(savedPrefix.length+1);
+    for (const prefix of this.titlePrefixes.get(session.id) ?? []) {
+      if (title.startsWith(`${prefix} `)) return title.slice(prefix.length+1);
+    }
+    return title;
+  }
+  private async projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void> {
+    if (!active()) return;
+    try {
+      const status = await this.options.runtime.topicTitleStatus(session);
+      if (!active()) return;
+      const statusText = `${status.worktree ? 'wt:' : ''}${status.branch ?? ''}`;
+      const prefixLimit = 127-Math.min(Array.from(title).length,64);
+      const statusCharacters = Array.from(statusText);
+      const prefix = statusCharacters.length > prefixLimit
+        ? `${statusCharacters.slice(0,prefixLimit-1).join('')}…` : statusText;
+      let prefixes = this.titlePrefixes.get(session.id);
+      if (!prefixes) this.titlePrefixes.set(session.id,prefixes = new Set());
+      if (!this.humanTitles.has(session.id) && prefix && title.startsWith(`${prefix} `)) title = title.slice(prefix.length+1);
+      this.humanTitles.set(session.id,title);
+      const name = Array.from(`${prefix ? `${prefix} ` : ''}${title}`).slice(0,128).join('');
+      if (!name.trim()) return;
+      if (this.options.store.getSession(session.id)?.name === name) {
+        this.options.store.setTopicTitlePrefix(session.id,prefix);
+        if (prefix) prefixes.add(prefix);
+        return;
+      }
+      const applied = await this.delivery.run(session.chatId,
+        () => this.bot.api.editForumTopic(session.chatId,session.threadId,{name}).catch(error => {
+          if (error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')) return true;
+          throw error;
+        }),active);
+      if (applied && active()) {
+        this.options.store.updateSession(session.id,{name});
+        this.options.store.setTopicTitlePrefix(session.id,prefix);
+        if (prefix) prefixes.add(prefix);
+      }
+    } catch (error) {
+      this.sessionObservation(session.id).failure = {operation:'Topic title synchronization',at:Date.now(),error};
+    }
+  }
+  private syncTopicTitle(session: TopicSession, listener: Listener, title?: string): void {
+    if (title !== undefined) listener.sessionTitle = title;
+    else title = listener.sessionTitle;
     const generation = this.options.store.getSessionGeneration(session.id);
     const revision = this.titleRevisions.get(session.id);
+    const version = listener.titleVersion = (listener.titleVersion ?? 0)+1;
     const active = () => !this.stopped && !refreshTermination(this.options.config) &&
       this.sessionAssigned(session) && this.listeners.get(session.id) === listener &&
       this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation &&
-      this.titleRevisions.get(session.id) === revision;
+      this.titleRevisions.get(session.id) === revision && listener.titleVersion === version;
     listener.titleTail = (listener.titleTail ?? Promise.resolve()).then(async () => {
       if (!active()) return;
       const pending = this.options.store.getPendingSessionTitle(session.id);
       if (pending !== undefined) {
         if (pending === title) this.options.store.setPendingSessionTitle(session.id,undefined);
         else await this.applySessionTitle(session);
-        return;
       }
-      const name = Array.from(title).slice(0,128).join('');
-      if (!name.trim() || this.options.store.getSession(session.id)?.name === name) return;
-      const applied = await this.delivery.run(session.chatId,
-        () => this.bot.api.editForumTopic(session.chatId,session.threadId,{name}),
-        () => active() && this.options.store.getPendingSessionTitle(session.id) === undefined);
-      if (applied && active() && this.options.store.getPendingSessionTitle(session.id) === undefined) {
-        this.options.store.updateSession(session.id,{name});
-      }
+      if (!active()) return;
+      const human = this.options.store.getPendingSessionTitle(session.id) ??
+        (pending === undefined ? title : undefined) ?? this.humanTitles.get(session.id) ??
+        this.stripTopicStatus(session,this.options.store.getSession(session.id)?.name ?? session.name);
+      if (pending !== undefined || title !== undefined) this.humanTitles.set(session.id,human);
+      await this.projectTopicTitle(session,human,active);
     }).catch(error => {
       this.sessionObservation(session.id).failure = {operation:'Topic title synchronization',at:Date.now(),error};
     });
@@ -2039,7 +2111,9 @@ export class BotService {
   private onFrame(session: TopicSession, listener: Listener, frame: HostFrame, replay = false): void {
     if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
     this.options.runtime.observeFrame(session.id,frame);
-    if ((frame.t === 'welcome' || frame.t === 'state') && frame.state.sessionName) {
+    if (frame.t === 'welcome' || (frame.t === 'state' &&
+        (!frame.state.isStreaming || (frame.state.sessionName !== undefined &&
+          frame.state.sessionName !== this.humanTitles.get(session.id))))) {
       this.syncTopicTitle(session,listener,frame.state.sessionName);
     }
     if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'error') {

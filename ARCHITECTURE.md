@@ -48,7 +48,7 @@ The delivery queue owns scheduling of Telegram output and rate-limit delays. The
 
 The bot adapter owns topic activity projection. Collab host snapshots reconcile lifecycle-event observations; the runtime's process-liveness boundary distinguishes an idle host from a stopped one. The delivery queue owns only when that projection reaches Telegram, not the underlying activity state.
 
-The bot adapter owns two-way session-title reconciliation between Telegram topic updates and OMP's published session state. The store preserves pending Telegram renames across reconnects so an older host snapshot cannot overwrite them. Telegram delivery applies topic-title changes without owning the underlying OMP title; the runtime boundary performs native session renames without submitting agent prompts.
+The bot adapter owns two-way session-title reconciliation between Telegram topic updates and OMP's published session state. It separates the readable session title from the generated topic prefix. The runtime owns Git metadata discovery for the session's working directory; the adapter uses that metadata to project and restore the prefix without renaming the underlying OMP session. The store preserves pending readable Telegram renames across reconnects so an older host snapshot cannot overwrite them. Telegram delivery applies topic-title changes without owning the underlying OMP title; the runtime boundary performs native session renames without submitting agent prompts.
 
 ## OMP execution and lifecycle
 

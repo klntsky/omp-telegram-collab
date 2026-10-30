@@ -243,6 +243,53 @@ export class OmpRuntime {
     this.#sessionLimit = expectedLimit * 2;
     return true;
   }
+  async topicTitleStatus(session: TopicSession): Promise<{ worktree: boolean; branch?: string }> {
+    let cwd = this.#sessionCwd(session);
+    if (session.runtime.kind === 'attached') {
+      const runtime = session.runtime;
+      const hosts = await this.#list(Date.now() + this.#config.omp.startupTimeoutMs);
+      const host = hosts.find(value => value.instanceId === runtime.instanceId && value.sessionId === runtime.sessionId);
+      if (!host) throw new Error('Attached OMP host is not available');
+      cwd = host.cwd;
+    }
+    const git = (args: string[], missingRepository = false): Promise<string | undefined> => {
+      const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
+      execFile('git', args, {
+        cwd,
+        env: { ...process.env, LC_ALL: 'C' },
+        timeout: this.#config.omp.startupTimeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: 2 * 1024 * 1024,
+        encoding: 'utf8',
+      }, (error, stdout, stderr) => {
+        if (!error) resolve(stdout.trim());
+        else if (missingRepository && error.code === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(stderr)) resolve(undefined);
+        else reject(error);
+      });
+      return promise;
+    };
+    const metadata = await git(['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], true);
+    if (metadata === undefined) return { worktree: false };
+    const [gitDir, commonDir] = metadata.split('\n');
+    const worktree = gitDir !== commonDir;
+    const branch = await git(['branch', '--show-current']);
+    if (!branch) return { worktree };
+    const remoteHeads = (await git(['for-each-ref', '--format=%(refname) %(symref)', 'refs/remotes']))!
+      .split('\n').map(line => line.split(' '));
+    const remoteHead = remoteHeads.find(([ref, target]) => ref === 'refs/remotes/origin/HEAD' && target)
+      ?? remoteHeads.find(([ref, target]) => ref?.endsWith('/HEAD') && target);
+    let defaultBranch = remoteHead?.[1]?.replace(/^refs\/remotes\/[^/]+\//, '');
+    if (!defaultBranch) {
+      const branches = (await git(['for-each-ref', '--format=%(refname:strip=2)', 'refs/heads']))!.split('\n').filter(Boolean);
+      const configured = await git(['config', '--list']);
+      const initialBranch = configured?.split('\n').findLast(line => line.startsWith('init.defaultbranch='))?.slice('init.defaultbranch='.length);
+      defaultBranch = initialBranch && (branches.includes(initialBranch) || branch === initialBranch) ? initialBranch
+        : branches.find(value => value === 'main') ?? branches.find(value => value === 'master')
+          ?? (branches.length === 1 ? branches[0] : undefined);
+    }
+    return { worktree, ...(branch !== defaultBranch ? { branch } : {}) };
+  }
+
   async worktree(session: TopicSession, branch?: string): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
