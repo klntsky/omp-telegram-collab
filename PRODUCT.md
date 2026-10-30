@@ -117,7 +117,7 @@ Telegram owns administrator promotion and demotion. Manage roles through Telegra
 
 Administrator checks use current Telegram membership. Promotion grants OMP control throughout the assigned group; demotion removes it on the next authorization check. Already admitted operations are not retroactively cancelled. Telegram lookup failures do not fall back to stored grants. Anonymous messages sent as a group or channel cannot establish an individual administrator's authority.
 
-Pending initial tasks also retain the approving administrator's identity. Before submission after startup, recovery, or an explicit startup rejection, that person must still be an owner or administrator and the proposer must still be a current member. Denied pending tasks are cancelled and must be submitted again.
+Pending initial tasks also retain the approving administrator's identity. Before submission after startup, recovery, or an explicit startup rejection, that person must still be an owner or administrator and the proposer must still be a current member. Confirmed membership loss or administrator revocation cancels a pending task; it must be submitted again. A failed Telegram lookup or lifecycle cancellation prevents submission but preserves the unsent task for a later authorized recovery. Failures retain their original diagnostics.
 
 `/list_admins` accepts no arguments and is available to every active human member of an assigned, enrolled forum, in General or a topic. It fetches Telegram's current administrator roster, includes the owner, and excludes bots. Entries show a username when available or a display name and numeric user ID otherwise. The roster is informational and is not reused to authorize later actions.
 

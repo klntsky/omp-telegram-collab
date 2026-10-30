@@ -19,6 +19,8 @@ import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-desti
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
 
+class AuthorizationDeniedError extends Error {}
+
 export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
@@ -809,7 +811,8 @@ export class BotService {
     const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)]);
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
-    if (chat.type !== 'supergroup' || !isActiveMember(user) || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
+    if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
+    if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
     if (this.stopped) throw this.background.signal.reason;
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
     return user;
@@ -1842,11 +1845,11 @@ export class BotService {
     try {
       await this.authorize(session.chatId, userId);
       if (!isAdministrator(await this.bot.api.getChatMember(session.chatId, authorityUserId))) {
-        throw new Error('Administrator access changed before initial task submission.');
+        throw new AuthorizationDeniedError('Administrator access changed before initial task submission.');
       }
       this.requireSessionAssignment(session);
     } catch (error) {
-      this.options.store.cancelInitialTask(session.id);
+      if (error instanceof AuthorizationDeniedError) this.options.store.cancelInitialTask(session.id);
       throw error;
     }
   }

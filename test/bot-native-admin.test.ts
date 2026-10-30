@@ -34,22 +34,25 @@ test('a member using the owner username does not acquire native authority', asyn
   } finally { await app.close(); }
 });
 
-test('demotion during host startup cancels the recoverable initial task', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const ensure = app.runtime.ensure.bind(app.runtime);
-    app.runtime.ensure = async session => {
-      const binding = await ensure(session);
-      app.setCurrentMember({status:'member'});
-      return binding;
-    };
-    await app.update({text:'/new Rejected after demotion'});
-    const session = app.store.listSessions(botId)[0]!;
-    assert.equal(app.store.hasPendingInitialTask(session.id),false);
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
-  } finally { await app.close(); }
-});
+for (const change of ['demotion', 'departure'] as const) {
+  test(`${change} during host startup cancels the recoverable initial task`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      const ensure = app.runtime.ensure.bind(app.runtime);
+      app.runtime.ensure = async session => {
+        const binding = await ensure(session);
+        if (change === 'demotion') app.setCurrentMember({status:'member'});
+        else app.setMember(false);
+        return binding;
+      };
+      await app.update({text:'/new Rejected after authority loss'});
+      const session = app.store.listSessions(botId)[0]!;
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    } finally { await app.close(); }
+  });
+}
 
 test('deferred proposal admission rechecks its approver rather than treating the proposer as an admin', async () => {
   const app = await createSmokeApp({maxSessions:1});
@@ -74,3 +77,47 @@ test('deferred proposal admission rechecks its approver rather than treating the
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').map(frame => frame.text),['Running task']);
   } finally { await app.close(); }
 });
+
+for (const failedLookup of ['getChat', 'proposer', 'approver', 'cancellation'] as const) {
+  test(`an initial task survives a transient ${failedLookup} lookup failure and executes once after recovery`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      const message = `Transient ${failedLookup} lookup failure\nOriginal transport diagnostic`;
+      const failure = failedLookup === 'cancellation' ? new DOMException(message, 'AbortError') : new Error(message);
+      const ensure = app.runtime.ensure.bind(app.runtime);
+      let armed = false;
+      let failed = false;
+      let userLookups = 0;
+      app.runtime.ensure = async session => {
+        const binding = await ensure(session);
+        armed = true;
+        return binding;
+      };
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (armed && !failed) {
+          if (method === 'getChatMember' && 'user_id' in payload && payload.user_id === ownerId) userLookups++;
+          if (((failedLookup === 'getChat' || failedLookup === 'cancellation') && method === 'getChat') ||
+              (failedLookup === 'proposer' && userLookups === 1 && method === 'getChatMember' && 'user_id' in payload && payload.user_id === ownerId) ||
+              (failedLookup === 'approver' && userLookups === 2 && method === 'getChatMember' && 'user_id' in payload && payload.user_id === ownerId)) {
+            failed = true;
+            throw failure;
+          }
+        }
+        return previous(method, payload, signal);
+      });
+      await app.update({text:'/new Recover after lookup failure'});
+      const session = app.store.listSessions(botId)[0]!;
+      assert.equal(app.store.hasPendingInitialTask(session.id),true);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+      const diagnostic = app.messages.find(message => String(message.text).includes(failure.message));
+      assert.ok(diagnostic);
+      app.disconnect();
+      await app.service.reconcileConfiguration();
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      await app.service.reconcileConfiguration();
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Recover after lookup failure'}]);
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    } finally { await app.close(); }
+  });
+}
