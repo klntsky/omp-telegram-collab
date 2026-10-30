@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, ownerUsername } from './telegram-data.js';
-import { eventually } from './bot-test-helpers.js';
+import { eventually, setForumSetting } from './bot-test-helpers.js';
 
 const photo = [{ file_id: 'photo', file_unique_id: 'photo', width: 100, height: 100 }];
 const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
@@ -51,7 +51,7 @@ test('session media follows prompt mode and preserves image document bytes', asy
       t:'prompt',text:'What is funny about this picture?',images:[{type:'image',data:imageData,mimeType:'image/png'}],
     });
     await app.update({text:'/setup'});
-    await app.callback('setup:prompts:false',app.messages.at(-1)!);
+    await setForumSetting(app, 'Prompt mode', 'Only /p');
     await app.update({message_thread_id:session.threadId,document,caption:'Ignored discussion'});
     assert.deepEqual(downloads,['original']);
     await app.update({message_thread_id:session.threadId,document,caption:'/p Explain it'});
@@ -68,7 +68,7 @@ test('unapproved image proposals cannot reach the model', async t => {
   app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
-    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    await setForumSetting(app, 'User proposals', 'Allow user proposals');
     const proposer = {id:77,username:'participant',first_name:'Participant',is_bot:false};
     app.setCurrentMember({username:'participant',status:'member'});
     await app.update({photo,caption:'/new Review this'},proposer);

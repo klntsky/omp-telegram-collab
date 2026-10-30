@@ -47,7 +47,7 @@ Open the Mini App with `/session` or the topic's OPEN AGENT button. Current grou
 | 📱 | Revive a parked or aborted subagent (`/hub`, `/subagents`) | Use Revive in its Mini App drawer. Requires control permission. |
 | 📱 | Inspect subagent model and usage (`/hub`, `/subagents`) | The agent rail and drawer show model, tokens, cost, tool count, and duration when the host supplies them. |
 | ❌ | Configure per-agent models, prewalk, or advisor (`/agents`) | No corresponding Mini App or bot controls. |
-| ✅ | List, switch, and edit model presets (`/modelpreset`) | `/list_model_presets` lists presets; `/model_preset <name>` switches an idle managed session or sets the forum default. To edit presets, just say what you want. |
+| ✅ | List, switch, and edit model presets (`/modelpreset`) | `/list_model_presets` lists presets; `/model_preset <name>` switches an idle managed session. `/settings` selects the forum default. To edit presets, just say what you want. |
 | 📱 | Inspect the current model and reasoning level (`/model`, `/models`, `/switch`, `/effort`) | Read the Mini App header and model/thinking-change markers in the transcript. |
 | ❌ | Select model and reasoning level independently (`/model`, `/models`, `/switch`, `/effort`) | No independent selectors. `/model_preset` applies predefined combinations instead. |
 | 📱 | Inspect context-use percentage (`/context`) | Read the Mini App header's context gauge. |
@@ -68,7 +68,7 @@ Open the Mini App with `/session` or the topic's OPEN AGENT button. Current grou
 | ❌ | Search, install, or update registry skills (`/skills`, `omp skill`) | The Telegram `/skills` picker selects loaded skills, not registry management operations. |
 | ❌ | Toggle the system-prompt skill listing (`/skillful`) | No toggle. |
 | ❌ | Browse or dispatch arbitrary OMP commands (`/init`, discovered file, template, and extension commands) | No command browser or guaranteed built-in slash dispatch. The Mini App composer is not a terminal console. |
-| ❌ | Configure OMP or provider authentication (`/settings`, `/setup`, `/providers`, `/login`, `/logout`) | Telegram `/setup` configures forum enrollment and prompt policy, not OMP settings or credentials. |
+| ❌ | Configure OMP or provider authentication (`/settings`, `/setup`, `/providers`, `/login`, `/logout`) | Telegram `/settings` manages forum policy and defaults, not OMP settings or credentials. `/setup` enrolls a forum. |
 | ❌ | Manage extensions or MCP (`/extensions`, `/status`, `/marketplace`, `/plugins`, `/plugin`, `/reload-plugins`, `/mcp`) | Telegram `/status` reports service diagnostics, not OMP's extension dashboard. |
 | ❌ | Inspect provider limits or open usage dashboards (`/usage`, `/stats`, `/trace`) | No provider-limit, stats, or trace controls. Displayed subagent costs are separate. |
 | ✅ | Copy displayed reply text or follow a link | Use Telegram's or the browser's ordinary selection and link actions. |

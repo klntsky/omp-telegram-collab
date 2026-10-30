@@ -347,7 +347,7 @@ export async function verifyTelegramFlow() {
       for (const [index, scope] of menuScopes.entries()) {
         const menu = await app.bot.api.getMyCommands({ scope });
         const commands = new Set(menu.map(command => command.command));
-        for (const command of ['new', 'p', 'setup', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets', 'skills']) {
+        for (const command of ['new', 'p', 'setup', 'settings', 'session', 'stop', 'kill', 'model_preset', 'list_model_presets', 'skills']) {
           assert.ok(commands.has(command), `${scope.type} must advertise /${command} in ${mode} mode`);
         }
         for (const command of previous?.[index] ?? []) {
@@ -387,12 +387,22 @@ export async function verifyTelegramFlow() {
     console.log('Observed topic icon lifecycle:', app.topicEdits.map(edit => edit.icon_custom_emoji_id).join(' → '));
     await app.update({ message_thread_id: 21, text: 'Check redirect' });
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length, 2);
-    await app.update({ text: '/setup' });
-    await app.callback('setup:prompts:false', app.messages.at(-1)!);
+    await app.update({ text: '/settings' });
+    const settings = app.messages.at(-1)!;
+    async function clickSetting(label: string) {
+      const controls = z.object({inline_keyboard:z.array(z.array(z.object({text:z.string(),callback_data:z.string()})))}).parse(settings.reply_markup);
+      const button = controls.inline_keyboard.flat().find(button => button.text === label);
+      assert.ok(button, `Settings button "${label}" was not found`);
+      await app.callback(button.callback_data, settings);
+    }
+    await clickSetting('Prompt mode');
+    await clickSetting('Only /p');
     const explicitMenus = await verifyMenus('explicit-command', allMessageMenus);
-    await app.callback('setup:prompts:true', app.messages.at(-1)!);
+    await clickSetting('Prompt mode');
+    await clickSetting('All messages');
     const restoredMenus = await verifyMenus('all-message', explicitMenus);
-    await app.callback('setup:prompts:false', app.messages.at(-1)!);
+    await clickSetting('Prompt mode');
+    await clickSetting('Only /p');
     await verifyMenus('explicit-command', restoredMenus);
     const reactionsBeforeDiscussion = app.reactions.length;
     await app.update({ message_thread_id: 21, text: 'Ordinary team discussion.' });
@@ -447,8 +457,8 @@ export async function verifyTelegramFlow() {
     assert.equal(app.reactions.length,beforeIgnored);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
     app.setCurrentMember({username:ownerUsername,status:'member'});
-    await app.update({text:'/setup'});
-    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    await clickSetting('User proposals');
+    await clickSetting('Allow user proposals');
     app.setCurrentMember({username:'grace',status:'member'});
     await app.update({message_id:9100,text:'/p Proposed user task',message_thread_id:session.threadId},proposer);
     const proposal = app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes('prompt:approve:'))!;
