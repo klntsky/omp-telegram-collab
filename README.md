@@ -12,11 +12,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 ## OMP feature coverage
 
-✅ Available in Telegram · 📱 Mini-app only · ⚠️ Partial support · ❌ No remote equivalent. Preset editing through the agent is included. Each row describes the specific action, not every function of the listed OMP command.
-
-Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/packages/coding-agent/src/slash-commands), including built-in slash commands, aliases, and top-level CLI commands. Project and plugin commands vary by installation.
-
-Open the Mini App with `/session` or the topic's OPEN AGENT button. Current group members can watch; the supergroup owner and administrators can use its controls. Manage administrator roles in Telegram. Archived sessions and read-only hosts remain read-only.
+✅ Available in Telegram · 📱 Mini-app only · ⚠️ Partial support · ❌ No remote equivalent.
 
 | Support level | OMP feature | Use from Telegram |
 | --- | --- | --- |
