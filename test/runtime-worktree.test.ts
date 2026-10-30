@@ -30,6 +30,9 @@ test('native worktrees reject externally owned sessions and unconfigured instanc
     runtime: { kind: 'managed' } };
   await assert.rejects(app.runtime.worktree({ ...session, runtime: { kind: 'attached', instanceId: 'external', sessionId: 'external' } }), /Attached OMP sessions cannot switch worktrees/);
   await assert.rejects(app.runtime.worktree({ ...session, instancePath: app.directory }), /Instance path is not configured/);
+  const attached: TopicSession = { ...session, runtime: { kind: 'attached', instanceId: 'terminal', sessionId: 'terminal-session' } };
+  await assert.rejects(app.runtime.setSessionTitle(attached, 'Telegram title'), /native collab registry does not support renaming/);
+  await assert.rejects(app.runtime.setSessionTitle(attached, '  '), /title cannot be empty/);
 });
 
 test('restart validation pins managed history to worktree cwd while retaining forum assignment', async t => {
@@ -53,11 +56,3 @@ test('restart validation pins managed history to worktree cwd while retaining fo
   await assert.rejects(app.runtime.validateSessionPaths([session]), /Saved history .* conflicts with working directory/);
 });
 
-test('session title control rejects unsupported attached hosts without pretending to rename', async t => {
-  const app = await fixture(t);
-  const session: TopicSession = { id: 'title-session', botId: 1, chatId: -100, threadId: 2,
-    instancePath: app.repository, name: 'Title', status: 'open', createdAt: Date.now(),
-    runtime: { kind: 'attached', instanceId: 'terminal', sessionId: 'terminal-session' } };
-  await assert.rejects(app.runtime.setSessionTitle(session, 'Telegram title'), /native collab registry does not support renaming/);
-  await assert.rejects(app.runtime.setSessionTitle(session, '  '), /title cannot be empty/);
-});

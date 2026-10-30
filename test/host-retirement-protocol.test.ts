@@ -198,10 +198,10 @@ test('actual lifecycle host publishes accepted retirement even when the acknowle
   await assert.rejects(readFile(grant), { code: 'ENOENT' });
 });
 
-for (const invalid of ['deadline', 'sessionId', 'pid', 'requestId'] as const) {
-  test(`actual lifecycle host rejects invalid retirement ${invalid} without accepting`, async t => {
-    const app = await fixture();
-    t.after(() => app.close());
+test('actual lifecycle host rejects expired and mismatched retirement identities without accepting', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  for (const invalid of ['deadline', 'sessionId', 'pid', 'requestId'] as const) {
     const { value, grant } = await app.prepare();
     if (invalid === 'deadline') value.deadline = Date.now() - 1;
     else if (invalid === 'sessionId') value.sessionId = 'another-session';
@@ -211,5 +211,5 @@ for (const invalid of ['deadline', 'sessionId', 'pid', 'requestId'] as const) {
     assert.ok(response?.outcome === 'expired' || typeof response?.error === 'string');
     assert.equal(await readFile(grant, 'utf8'), '');
     await app.assertNotRetiring();
-  });
-}
+  }
+});

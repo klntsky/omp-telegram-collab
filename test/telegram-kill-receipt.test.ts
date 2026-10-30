@@ -38,8 +38,8 @@ test('/kill keeps eyes while termination is pending and acknowledges only after 
   } finally { release.resolve(); await updating?.catch(() => undefined); await app.close(); }
 });
 
-for (const outcome of ['failed','denied'] as const) {
-  test(`a ${outcome} /kill never receives a completion reaction`, async () => {
+test('failed and denied /kill commands never receive a completion reaction', async () => {
+  for (const outcome of ['failed','denied'] as const) {
     const app = await createSmokeApp();
     let attempts = 0;
     app.runtime.kill = async () => { attempts++; throw new Error('Process identity could not be verified'); };
@@ -52,5 +52,5 @@ for (const outcome of ['failed','denied'] as const) {
       assert.equal(attempts,outcome === 'denied' ? 0 : 1);
       assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 9102).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
     } finally { await app.close(); }
-  });
-}
+  }
+});

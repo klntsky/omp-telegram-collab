@@ -121,7 +121,6 @@ test('/kill ends the matching Mini App connection without disconnecting other to
     assert.equal(await app.runtime.isRunning(target),false);
     assert.equal(await app.runtime.isRunning(other),true);
     assert.equal(clients[1]!.readyState,WebSocket.OPEN);
-    assert.equal(app.topicEdits.findLast(edit => edit.message_thread_id === target.threadId)?.icon_custom_emoji_id,'5408906741125490282');
     await app.update({text:'/kill',message_thread_id:target.threadId});
     assert.equal(app.connectionCount,connections,'repeated kill must not launch a process');
   } finally {

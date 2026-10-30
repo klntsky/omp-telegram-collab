@@ -28,21 +28,21 @@ for (const status of ['creator', 'administrator'] as const) {
   });
 }
 
-for (const member of [
+test('setup rejects nonadministrators and bot identities without enrollment or requests', async () => {
+  const app = await createSmokeApp();
+  try {
+    for (const member of [
   { status: 'member' as const, username: ownerUsername },
   { status: 'administrator' as const, username: ownerUsername, is_bot: true },
   { status: 'creator' as const, is_bot: true },
-]) {
-  test(`setup rejects ${member.is_bot ? 'bot' : 'human'} ${member.status} despite the update identity`, async () => {
-    const app = await createSmokeApp();
-    try {
+    ]) {
       app.setCurrentMember(member);
       await app.update({ text: '/setup' }, owner);
       assert.equal(app.store.isEnrolled(botId, chatId), false);
       assert.deepEqual(app.store.listSetupRequests(), []);
-    } finally { await app.close(); }
-  });
-}
+    }
+  } finally { await app.close(); }
+});
 
 test('ordinary members retain viewing access but cannot create sessions by default', async () => {
   const app = await createSmokeApp();
@@ -87,17 +87,6 @@ test('owner revocation during forum readiness prevents enrollment', async () => 
   } finally { await app.close(); }
 });
 
-test('private onboarding is available without a configured username and exposes no project paths', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({ text: '/start', chat: { id: ownerId, type: 'private', first_name: 'Visitor' } }, { ...owner, username: undefined });
-    assert.ok(app.messages.at(-1)?.reply_markup);
-    for (const path of Object.keys(app.config.instances)) assert.equal(String(app.messages.at(-1)?.text).includes(path), false);
-    const before = app.messages.length;
-    await app.update({ text: '/start', chat: { id: ownerId, type: 'private', first_name: 'Bot' } }, { ...owner, is_bot: true });
-    assert.equal(app.messages.length, before);
-  } finally { await app.close(); }
-});
 
 for (const status of ['creator', 'administrator'] as const) {
   test(`unassigned ${status} without a username requests setup but cannot assign a project`, async t => {

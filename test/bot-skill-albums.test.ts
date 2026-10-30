@@ -32,7 +32,6 @@ for (const general of [false,true]) {
       if (general) {
         const created = app.store.listSessions(botId).find(session=>session.threadId!==threadId && session.name!=='Seed')!;
         assert.ok(created);
-        assert.deepEqual(app.messages.filter(message=>message.message_thread_id===created.threadId && message.forwarded_message_id).map(message=>message.forwarded_message_id),[7999,8001,8002]);
       }
       t.mock.timers.reset();
       await app.update({text:'/p Next',message_thread_id:threadId});

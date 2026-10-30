@@ -27,14 +27,6 @@ test('new topic skills are explicit exact-name snapshots isolated by session', (
     assert.equal(store.getNewTopicSkill(second.id), 'other-skill');
     store.setNewTopicSkill(first.id, 'restored');
     assert.equal(store.getNewTopicSkill(first.id), 'restored');
-  } finally {
-    store.close();
-  }
-});
-
-test('new topic skill snapshots require an existing session', () => {
-  const store = new Store(':memory:');
-  try {
     assert.throws(() => store.setNewTopicSkill('missing-session', 'skill'), /FOREIGN KEY constraint failed/);
     assert.equal(store.getNewTopicSkill('missing-session'), undefined);
     store.clearNewTopicSkill('missing-session');

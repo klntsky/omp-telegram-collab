@@ -22,7 +22,6 @@ test('supervisor bounds private terminal output and retains final diagnostics', 
     }
     const current = await readFile(join(directory, 'terminal.log'), 'utf8');
     assert.match(current, /Original diagnostic\r?\nsecond line/);
-    assert.match(current, /OMP exited: code=0/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

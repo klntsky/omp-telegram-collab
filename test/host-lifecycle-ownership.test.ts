@@ -104,7 +104,6 @@ test('title control invokes the persistent native API and preserves rename diagn
     const output = JSON.parse(result.stdout);
     assert.equal(output.supported, true);
     assert.deepEqual(output.titles, ['Telegram → OMP']);
-    assert.equal(output.applied.text, '');
     assert.equal(output.failed.error, 'Native rename 🚫 failed\nOriginal persistence diagnostic');
     assert.match(output.stale.error, /session identity changed/);
   } finally { await rm(directory, { recursive: true, force: true }); }

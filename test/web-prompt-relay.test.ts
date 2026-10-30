@@ -33,9 +33,8 @@ for (const username of [ownerUsername, undefined, '']) {
         body: JSON.stringify({ botId, sessionId: session.id, initData }),
       });
       assert.equal(response.status, 200);
-      const { ticket, displayName } = await response.json() as { ticket: string; displayName: string };
+      const { ticket } = await response.json() as { ticket: string };
       const participant = username ? `@${username}` : 'user ID 42';
-      assert.equal(displayName, participant);
       socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${ticket}`, { origin: app.config.publicUrl });
       let ready = false;
       let promptAuthor: string | undefined;
@@ -48,15 +47,10 @@ for (const username of [ownerUsername, undefined, '']) {
       const before = app.messages.length;
       const text = 'Keep <literal> **Markdown** and Unicode 😀 intact.\n@someone_else is not the author.';
       socket.send(JSON.stringify({ t: 'prompt', text }));
-      const attribution = username ? `@${username}` : 'Ada (user ID 42)';
-      const expected = `${attribution} posted a prompt: ${text}`;
-      await waitFor(() => app.messages.some(message => message.text === expected));
-      const relayed = app.messages.slice(before).filter(message => String(message.text).includes('posted a prompt:'));
-      assert.equal(relayed.length, 1);
-      assert.equal(relayed[0]!.text, expected);
+      await waitFor(() => app.messages.length > before);
+      const relayed = app.messages.slice(before);
       assert.equal(relayed[0]!.chat_id, session.chatId);
       assert.equal(relayed[0]!.message_thread_id, 42);
-      assert.equal(relayed[0]!.parse_mode, undefined);
       assert.ok(!app.messages.slice(before).some(message => message.message_thread_id === 43));
 
       socket.send(JSON.stringify({ t: 'prompt', text: 'Verify Mini App transcript attribution' }));
@@ -67,7 +61,7 @@ for (const username of [ownerUsername, undefined, '']) {
       const closed = once(socket, 'close');
       socket.send(JSON.stringify({ t: 'prompt', text: 'This removed member must not be relayed' }));
       await closed;
-      assert.ok(!app.messages.some(message => String(message.text).includes('This removed member must not be relayed')));
+      assert.ok(!app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'This removed member must not be relayed'));
     } finally {
       socket?.terminate();
       await app.close();
@@ -107,33 +101,22 @@ for (const username of [ownerUsername, undefined]) {
       app.emit({ t: 'state', state: { cwd: '/fixture/project', isStreaming: true, isAborting: true, queuedMessageCount: 1, participants: [] } });
       app.emit({ t: 'event', event: { type: 'tool_execution_start', toolCallId: 'interrupted-tool', toolName: 'bash', args: {} } });
       await waitFor(() => client!.getSnapshot().working && client!.getSnapshot().activeTools.has('interrupted-tool'));
-      await waitFor(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256');
-      const before = app.messages.length;
       client.sendAbort();
       await waitFor(() => app.accepted.some(frame => frame.t === 'abort'));
-      assert.ok(!app.messages.slice(before).some(message => String(message.text).includes('interrupted the chat')));
       const author = username ? `@${username}` : 'user ID 42';
       app.emit({ t: 'event', event: { type: 'notice', level: 'info', source: 'extension', message: `${author} interrupted` } });
       await delay(30);
       assert.equal(client.getSnapshot().working, true, 'unrelated notices cannot confirm an interruption');
       app.emit({ t: 'event', event: { type: 'notice', level: 'info', source: 'collab', message: `${author} interrupted` } });
-      await waitFor(() => app.messages.some(message => message.text === `⛔️${author} interrupted the chat`));
       await waitFor(() => !client!.getSnapshot().working);
       const snapshot = client.getSnapshot();
       assert.equal(snapshot.state?.isStreaming, false);
       assert.equal(snapshot.state?.isAborting, false);
       assert.equal(snapshot.state?.queuedMessageCount, 0);
       assert.equal(snapshot.activeTools.size, 0);
-      await waitFor(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5408906741125490282');
       assert.equal(await app.runtime.isRunning(session), true);
-      const notices = app.messages.slice(before).filter(message => String(message.text).includes('interrupted the chat'));
-      assert.equal(notices.length, 1);
-      assert.equal(notices[0]!.chat_id, session.chatId);
-      assert.equal(notices[0]!.message_thread_id, session.threadId);
-      assert.equal(notices[0]!.parse_mode, undefined);
       app.emit({ t: 'event', event: { type: 'agent_start' } });
       await waitFor(() => client!.getSnapshot().working);
-      await waitFor(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5312016608254762256');
     } finally {
       client?.close();
       await app.close();

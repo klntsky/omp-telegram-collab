@@ -46,12 +46,11 @@ test('/stop on an empty topic is seen but never claims that a nonexistent agent 
     await app.update({message_id:9002,message_thread_id:42,text:'/stop'});
     assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 9002).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
     assert.ok(!app.accepted.some(frame => frame.t === 'abort'));
-    assert.equal(app.messages.at(-1)?.text,'Session is not running.');
   } finally { await app.close(); }
 });
 
-for (const outcome of ['error','disconnect'] as const) {
-  test(`/stop cannot be acknowledged by a stale notice after ${outcome}`, async () => {
+test('/stop cannot be acknowledged by stale notices after errors or disconnects', async () => {
+  for (const outcome of ['error','disconnect'] as const) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
@@ -65,5 +64,5 @@ for (const outcome of ['error','disconnect'] as const) {
       await app.update({text:'/status'});
       assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 9003).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
     } finally { await app.close(); }
-  });
-}
+  }
+});

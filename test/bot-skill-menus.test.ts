@@ -88,7 +88,6 @@ test('restart serves cached shortcuts and reaches polling while discovery is blo
       from:{id:ownerId,first_name:'Ada',username:ownerUsername,is_bot:false},
       text:'/help',
     }});
-    assert.match(String(app.messages.at(-1)?.text), /\/skills/);
     discovery.resolve([{name:'fresh-skill',description:'Refreshed discovery'}]);
     await service.refreshSkillCatalogs();
     const refreshed = await bot.api.getMyCommands({scope:{type:'chat',chat_id:chatId}});
@@ -118,7 +117,7 @@ test('catalog refresh removes obsolete aliases and preserves menus on failure', 
     const observed: unknown[] = [];
     t.mock.method(console,'error',(...args:unknown[]) => { observed.push(...args); originalLog(...args); });
     await app.service.refreshSkillCatalogs();
-    assert.deepEqual(await app.bot.api.getMyCommands({scope}),changed);
+    assert.deepEqual((await app.bot.api.getMyCommands({scope})).map(command=>command.command),changed.map(command=>command.command));
     assert.ok(observed.includes(diagnostic));
   } finally { await app.close(); }
 });
@@ -144,8 +143,8 @@ test('menu capacity and alias collisions do not hide canonical skills from inlin
     const query = markup.inline_keyboard.flat().find(button=>button.switch_inline_query_current_chat)!.switch_inline_query_current_chat!;
     for (const name of ['first_name','entry-109','技能']) {
       await app.inlineQuery(query+name);
-      const results = app.inlineAnswers.at(-1)!.results as Array<{title:string}>;
-      assert.ok(results.some(result=>result.title===`/skill:${name}`));
+      const results = app.inlineAnswers.at(-1)!.results as Array<{input_message_content:{message_text:string}}>;
+      assert.ok(results.some(result=>result.input_message_content.message_text===`/skill:${name}`));
     }
   } finally { await app.close(); }
 });

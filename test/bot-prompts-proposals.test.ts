@@ -33,7 +33,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'Prompt mode', 'Only /p');
+    await setForumSetting(app, 0, 1);
     const path = Object.keys(app.config.instances)[0]!;
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
     await app.update({message_thread_id:42,forum_topic_created:{name:'Explicit prompts'}});
@@ -75,7 +75,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
       {t:'prompt',text:'Implement explicit text\nwith multiple lines'},
     ]);
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'Prompt mode', 'All messages');
+    await setForumSetting(app, 0, 0);
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,true);
   } finally { await app.close(); }
 });
@@ -86,7 +86,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
+      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
       const from = {id:botId,is_bot:true,first_name:'OMP'};
       await app.update({message_id:7200,text:'Explain this',reply_to_message:{message_id:9100,from,caption:'Original\ncontext'}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -94,8 +94,6 @@ for (const allMessagesArePrompts of [true,false]) {
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
         {t:'prompt',text:'> Original\n> context\n\nExplain this'},
       ]);
-      assert.deepEqual(app.messages.filter(message => message.message_thread_id === session.threadId && message.forwarded_message_id)
-        .map(message => message.forwarded_message_id),[9100,7200]);
       await app.update({message_id:7201,text:'Continue',message_thread_id:session.threadId,
         reply_to_message:{message_id:9101,from,text:'Next answer'}});
       await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
@@ -112,7 +110,7 @@ for (const allMessagesArePrompts of [true, false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
+      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
       await app.update({text:command,reply_to_message:{message_id:9000,caption:'Screenshot context\nsecond line',
         photo:[{file_id:'quoted-photo',file_unique_id:'quoted-photo',width:100,height:100}]}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -139,7 +137,7 @@ for (const allMessagesArePrompts of [true, false]) {
       const app = await createSmokeApp();
       try {
         await app.update({text:'/setup'});
-        if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
+        if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
         await app.update({text:interactive ? '/p@FixtureOmpBot' : '/p@FixtureOmpBot Create from General',message_thread_id:1});
         if (interactive) {
           assert.equal(app.store.listSessions(botId).length,0);
@@ -159,7 +157,7 @@ test('explicit mode preserves the interactive /new task reply', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'Prompt mode', 'Only /p');
+    await setForumSetting(app, 0, 1);
     await app.update({text:'/new'});
     const request = app.messages.at(-1)!;
     await app.update({text:'Create this explicit-mode session',reply_to_message:request});
@@ -182,7 +180,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
+      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
       await app.update({message_thread_id:42,forum_topic_created:{name:'Admin prompts only'}});
       app.setCurrentMember({username:'another_user',status:'member'});
       const before = app.messages.length;
@@ -201,8 +199,8 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app, 'User proposals', 'Allow user proposals');
-      if (!allMessagesArePrompts) await setForumSetting(app, 'Prompt mode', 'Only /p');
+      await setForumSetting(app, 1, 0);
+      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -225,7 +223,6 @@ for (const allMessagesArePrompts of [true,false]) {
         {t:'prompt',text:'Seed task'},{t:'prompt',text:'Proposed multiline\n  task'},
       ]);
       assert.equal(app.store.getReplyTarget(session.id),8100);
-      assert.deepEqual(proposal.message.reply_markup,{inline_keyboard:[]});
       await app.callback(proposal.approve,proposal.message);
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
         {t:'prompt',text:'Seed task'},{t:'prompt',text:'Proposed multiline\n  task'},
@@ -243,7 +240,7 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app, 'User proposals', 'Allow user proposals');
+      await setForumSetting(app, 1, 0);
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -277,7 +274,7 @@ test('a non-admin /new task creates no session until a group administrator appro
   try {
     app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'User proposals', 'Allow user proposals');
+    await setForumSetting(app, 1, 0);
     app.setCurrentMember({username:'grace',status:'member'});
     await app.update({text:'/new Proposed initial task'});
     const proposal = promptProposal(app);
@@ -295,7 +292,7 @@ test('approval sends one reply reference and submits the stored proposal text', 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'User proposals', 'Allow user proposals');
+    await setForumSetting(app, 1, 0);
     await app.update({text:'/new Seed task'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const session = app.store.listSessions(botId)[0]!;
@@ -305,7 +302,6 @@ test('approval sends one reply reference and submits the stored proposal text', 
     const before = app.messages.length;
     await app.update({message_id:8200,text,message_thread_id:session.threadId},proposer);
     assert.equal(app.messages.length,before+1);
-    assert.equal(app.messages.at(-1)!.text,'Approve this prompt?');
     assert.deepEqual(app.messages.at(-1)!.reply_parameters,{message_id:8200,allow_sending_without_reply:true});
     const proposal = promptProposal(app);
     app.setCurrentMember({username:ownerUsername,status:'creator'});

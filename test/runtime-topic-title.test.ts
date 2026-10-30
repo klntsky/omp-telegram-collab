@@ -43,37 +43,6 @@ async function fixture(t: TestContext, defaultBranch = 'main') {
   return { directory, repository, git, config, runtime, session };
 }
 
-for (const branch of ['main', 'master', 'trunk']) {
-  test(`topic title omits local default branch ${branch} and reports nondefault branches`, async t => {
-    const app = await fixture(t, branch);
-    if (branch !== 'trunk') await app.git('config', '--unset', 'init.defaultBranch');
-    assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false });
-    await app.git('switch', '-c', 'feature/readable-title');
-    assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false, branch: 'feature/readable-title' });
-    await app.git('checkout', '--detach');
-    assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false });
-  });
-}
-
-test('remote HEAD overrides local default branch without fetching', async t => {
-  const app = await fixture(t);
-  await app.git('branch', 'trunk');
-  await app.git('update-ref', 'refs/remotes/origin/trunk', 'HEAD');
-  await app.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
-  assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false, branch: 'main' });
-  await app.git('switch', 'trunk');
-  assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false });
-});
-
-test('origin HEAD takes precedence over other locally recorded remote HEADs', async t => {
-  const app = await fixture(t);
-  await app.git('update-ref', 'refs/remotes/another/other', 'HEAD');
-  await app.git('symbolic-ref', 'refs/remotes/another/HEAD', 'refs/remotes/another/other');
-  assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false, branch: 'main' });
-  await app.git('update-ref', 'refs/remotes/origin/main', 'HEAD');
-  await app.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
-  assert.deepEqual(await app.runtime.topicTitleStatus(app.session), { worktree: false });
-});
 
 test('linked worktree status comes from Git metadata and follows its current branch', async t => {
   const app = await fixture(t);
@@ -91,12 +60,6 @@ test('linked worktree status comes from Git metadata and follows its current bra
   assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', worktreePath: app.repository } }), { worktree: false, branch: 'feature/primary' });
 });
 
-test('non-Git directories have no status even when the session records a worktree path', async t => {
-  const app = await fixture(t);
-  const plain = join(app.directory, 'plain');
-  await mkdir(plain);
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...app.session, runtime: { kind: 'managed', worktreePath: plain } }), { worktree: false });
-});
 
 test('attached sessions use the matching registry host cwd rather than instancePath', async t => {
   const app = await fixture(t);

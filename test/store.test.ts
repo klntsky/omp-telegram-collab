@@ -11,7 +11,7 @@ import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
 
-test('General never becomes a session or changes topic history and pending selections', () => {
+test('General stays outside sessions while task requests and pending selections enforce destination identities', () => {
   const store = new Store(':memory:');
   const general = topicDestination(chatId);
   const destination = topicDestination(chatId, topic.threadId);
@@ -26,16 +26,6 @@ test('General never becomes a session or changes topic history and pending selec
     store.clearPendingSkills({botId,destination:general,userId:42});
     assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
     assert.equal(store.getTopic({botId,destination})?.id, created.id);
-  } finally {
-    store.close();
-  }
-});
-
-test('task requests match destination, bot, and user before being consumed', () => {
-  const store = new Store(':memory:');
-  const general = topicDestination(chatId);
-  const destination = topicDestination(chatId, topic.threadId);
-  try {
     store.addTaskRequest(botId, general, 10, 42);
     assert.equal(store.db.prepare('SELECT thread_id FROM task_requests WHERE message_id=10').get()?.thread_id, 1);
     assert.equal(store.takeTaskRequest(botId, destination, 10, 42), false);

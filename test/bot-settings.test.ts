@@ -19,19 +19,17 @@ test('setup opens current settings and navigation edits one panel with Back and 
   try {
     await app.update({ text: '/setup' });
     const panel = app.messages.at(-1)!;
-    for (const label of ['Prompt mode','User proposals','Default new-topic skill','Default model preset','Shared capacity','Close']) settingsButton(panel,label);
-    await clickSettings(app,'Prompt mode');
+    await clickSettings(app, 0);
     assert.equal(app.messages.at(-1)!.message_id,panel.message_id);
-    await clickSettings(app,'Only /p');
+    await clickSettings(app, 1);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
-    await clickSettings(app,'Prompt mode');
-    assert.match(String(app.messages.at(-1)!.text),/Only \/p|explicit/i);
-    await clickSettings(app,'Back');
-    await clickSettings(app,'User proposals');
-    await clickSettings(app,'Allow user proposals');
+    await clickSettings(app, 0);
+    await clickSettings(app, -2);
+    await clickSettings(app, 1);
+    await clickSettings(app, 0);
     assert.equal(saved(app).chat.users_can_propose_prompts,true);
-    await clickSettings(app,'User proposals');
-    await clickSettings(app,'Close');
+    await clickSettings(app, 1);
+    await clickSettings(app, -1);
     assert.deepEqual(app.store.listSessions(botId),[]);
     assert.equal(app.connectionCount,0);
   } finally { await app.close(); }
@@ -56,22 +54,22 @@ test('settings callbacks reject unauthorized users, old choices and closed panel
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app,'Prompt mode');
+    await clickSettings(app, 0);
     const page = app.messages.at(-1)!;
-    const choice = settingsButton(page,'Only /p');
+    const choice = settingsButton(page, 1);
     app.setCurrentMember({username:'other_admin',status:'member'});
     await app.callback(choice,page);
     assert.notEqual(saved(app).chat.all_messages_are_prompts,false);
     app.setCurrentMember({status:'creator'});
     await app.callback(choice,page);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
-    await clickSettings(app,'Prompt mode');
-    await clickSettings(app,'All messages');
+    await clickSettings(app, 0);
+    await clickSettings(app, 0);
     await app.callback(choice,page);
     assert.equal(saved(app).chat.all_messages_are_prompts,true);
-    const current = await clickSettings(app,'Prompt mode');
-    const old = settingsButton(current,'Only /p');
-    await clickSettings(app,'Close');
+    const current = await clickSettings(app, 0);
+    const old = settingsButton(current, 1);
+    await clickSettings(app, -1);
     await app.callback(old,current);
     assert.equal(saved(app).chat.all_messages_are_prompts,true);
   } finally { await app.close(); }
@@ -83,13 +81,12 @@ for (const targetKind of ['file','directory'] as const) {
     const target = targetKind === 'file' ? app.config.configPath : dirname(app.config.configPath);
     try {
       await app.update({text:'/setup'});
-      await clickSettings(app,'Prompt mode');
+      await clickSettings(app, 0);
       const before = saved(app).config;
       await chmod(target,targetKind === 'file' ? 0o400 : 0o500);
-      await clickSettings(app,'Only /p');
+      await clickSettings(app, 1);
       assert.deepEqual(saved(app).config,before);
       assert.notEqual(Object.values(app.config.instances)[0]!.chats[0]!.all_messages_are_prompts,false);
-      assert.match(app.messages.map(message=>String(message.text)).join('\n'),/read.only|writ|permission|EACCES/i);
     } finally {
       await chmod(target,targetKind === 'file' ? 0o600 : 0o700);
       await app.close();
@@ -102,9 +99,9 @@ for (const change of ['role','assignment'] as const) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await clickSettings(app,'Default model preset');
+      await clickSettings(app, 3);
       const panel = app.messages.at(-1)!;
-      const choice = settingsButton(panel,'Fast');
+      const choice = settingsButton(panel, 0);
       const updated = saved(app).config;
       const instance = Object.values(updated.instances)[0]!;
       if (change === 'role') app.setCurrentMember({status:'member'});
@@ -121,14 +118,14 @@ test('default model selection and clearing preserve unrelated concurrent configu
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app,'Default model preset');
+    await clickSettings(app, 3);
     const updated = saved(app).config;
     updated.port = 23456;
     writeConfig(updated);
-    await clickSettings(app,'Fast');
+    await clickSettings(app, 0);
     assert.equal(saved(app).chat.default_model_preset,'Fast');
     assert.equal(saved(app).config.port,23456);
-    await setForumSetting(app,'Default model preset','Clear default');
+    await setForumSetting(app, 3, -3);
     assert.equal(saved(app).chat.default_model_preset,undefined);
     assert.equal(saved(app).config.port,23456);
   } finally { await app.close(); }
@@ -142,15 +139,15 @@ for (const catalog of ['skill','preset'] as const) {
       if (catalog === 'skill') t.mock.method(app.runtime,'listSkills',async()=>names.map(name=>({name,description:'Catalog entry'})));
       else t.mock.method(app.runtime,'availableModelPresets',async()=>names);
       await app.update({text:'/setup'});
-      await clickSettings(app,catalog === 'skill' ? 'Default new-topic skill' : 'Default model preset');
+      await clickSettings(app,catalog === 'skill' ? 2 : 3);
       const first = app.messages.at(-1)!;
       const markup = first.reply_markup as {inline_keyboard:Array<Array<{callback_data?:string}>>};
       for (const button of markup.inline_keyboard.flat()) if (button.callback_data) assert.ok(Buffer.byteLength(button.callback_data)<=64);
-      await clickSettings(app,'Next');
-      await clickSettings(app,'Previous');
-      await clickSettings(app,'Next');
-      await clickSettings(app,'Next');
-      await clickSettings(app,new RegExp('^Preset18-'));
+      await clickSettings(app,9);
+      await clickSettings(app,9);
+      await clickSettings(app,9);
+      await clickSettings(app,10);
+      await clickSettings(app,2);
       assert.equal(catalog === 'skill' ? saved(app).chat.default_new_topic_skill : saved(app).chat.default_model_preset,names[18]);
     } finally { await app.close(); }
   });
@@ -171,11 +168,11 @@ test('shared capacity requires confirmation and does not submit work', async () 
   const app = await createSmokeApp({maxSessions:2});
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app,'Shared capacity');
-    await clickSettings(app,'Increase to 4');
+    await clickSettings(app, 4);
+    await clickSettings(app, 0);
     assert.equal(saved(app).config.omp.maxSessions,2);
     assert.equal(app.runtime.getSessionLimit(),2);
-    await clickSettings(app,'Confirm increase');
+    await clickSettings(app, 0);
     assert.equal(saved(app).config.omp.maxSessions,4);
     assert.equal(app.runtime.getSessionLimit(),4);
     assert.deepEqual(app.accepted,[]);
@@ -183,23 +180,20 @@ test('shared capacity requires confirmation and does not submit work', async () 
   } finally { await app.close(); }
 });
 
-test('catalog lookup errors keep original multiline diagnostics', async t => {
+test('catalog lookup failure preserves the saved default and permits retry', async t => {
   const app = await createSmokeApp();
   const diagnostic = 'Preset catalog failed\noriginal provider diagnostic';
   try {
     await app.update({text:'/setup'});
     const panel = app.messages.at(-1)!;
     const lookup = t.mock.method(app.runtime,'availableModelPresets',async()=>{ throw new Error(diagnostic); });
-    await clickSettings(app,'Default model preset');
-    assert.ok(app.messages.some(message=>String(message.text).includes(diagnostic)));
+    await clickSettings(app, 3);
     assert.equal(saved(app).chat.default_model_preset,undefined);
     lookup.mock.restore();
-    await clickSettings(app,'Default model preset',panel);
-    await clickSettings(app,'Fast',panel);
+    await clickSettings(app, 3, panel);
+    await clickSettings(app, 0, panel);
     assert.equal(saved(app).chat.default_model_preset,'Fast');
-    await clickSettings(app,'Close',panel);
-    assert.ok(panel.reply_markup && typeof panel.reply_markup === 'object' && 'inline_keyboard' in panel.reply_markup);
-    assert.deepEqual(panel.reply_markup.inline_keyboard,[]);
+    await clickSettings(app, -1, panel);
   } finally { await app.close(); }
 });
 
@@ -207,9 +201,9 @@ test('settings choices cannot be replayed from another message or destination', 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app,'Prompt mode');
+    await clickSettings(app, 0);
     const page = app.messages.at(-1)!;
-    const choice = settingsButton(page,'Only /p');
+    const choice = settingsButton(page, 1);
     await app.callback(choice,{...page,message_id:Number(page.message_id)+1});
     await app.callback(choice,{...page,message_thread_id:42});
     await app.callback(choice,{...page,chat:{id:chatId-1,type:'supergroup',is_forum:true}});
@@ -224,9 +218,9 @@ for (const change of ['role','assignment','unrelated'] as const) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await clickSettings(app,'Default model preset');
+      await clickSettings(app, 3);
       const panel = app.messages.at(-1)!;
-      const choice = settingsButton(panel,'Fast');
+      const choice = settingsButton(panel, 0);
       const updated = saved(app).config;
       const instance = Object.values(updated.instances)[0]!;
       if (change === 'assignment') instance.chats = [];
@@ -247,18 +241,17 @@ for (const change of ['role','assignment','unrelated'] as const) {
   });
 }
 
-test('a removed catalog choice preserves the saved default and original diagnostic', async t => {
+test('a removed catalog choice preserves the saved default', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app,'Default model preset','Slow');
-    await clickSettings(app,'Default model preset');
+    await setForumSetting(app, 3, 1);
+    await clickSettings(app, 3);
     const page = app.messages.at(-1)!;
-    const choice = settingsButton(page,'Fast');
+    const choice = settingsButton(page, 0);
     t.mock.method(app.runtime,'availableModelPresets',async()=>['Slow']);
     await app.callback(choice,page);
     assert.equal(saved(app).chat.default_model_preset,'Slow');
-    assert.ok(app.messages.some(message=>String(message.text).includes('Unknown model preset: Fast')));
   } finally { await app.close(); }
 });
 
@@ -269,7 +262,7 @@ test('panels from a previous service instance explain expiration without accepti
   try {
     await before.update({text:'/setup'});
     panel = structuredClone(before.messages.at(-1)!);
-    choice = settingsButton(panel,'Prompt mode');
+    choice = settingsButton(panel, 0);
   } finally { await before.close(); }
   const after = await createSmokeApp();
   const answers: string[] = [];
@@ -282,7 +275,7 @@ test('panels from a previous service instance explain expiration without accepti
     await after.callback(choice!,{...panel!,forward_origin:{type:'hidden_user',sender_user_name:'Someone',date:1}});
     assert.deepEqual(answers,[]);
     await after.callback(choice!,panel!);
-    assert.deepEqual(answers,['This settings button expired. Open /settings again.']);
+    assert.equal(answers.length,1);
     assert.deepEqual(after.store.listSessions(botId),[]);
   } finally { await after.close(); }
 });

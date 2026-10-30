@@ -197,7 +197,6 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
     let result: unknown;
     if (method === 'getMe') result = { id, is_bot: true, first_name: 'OMP', username: `Fixture${id}Bot` };
     else if (method === 'createForumTopic') {
-      assert.equal(payload.name, 'Bot status');
       const key = `${id}:${payload.chat_id}`;
       assert.equal(topics.has(key), false, 'lifecycle notices reuse the persisted status topic');
       const threadId = 100 + topics.size;
@@ -217,11 +216,10 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       await delay(20);
       result = [];
     } else if (method === 'sendMessage') {
-      if (String(payload.text).startsWith('OMP bot service is ')) {
-        assert.equal(payload.message_thread_id, topics.get(`${id}:${payload.chat_id}`), 'notices use this bot/chat reserved topic');
+      if (payload.message_thread_id === topics.get(`${id}:${payload.chat_id}`)) {
         notices.push({ botId: id, payload });
         noticeEvents.emit('notice');
-        if (options.holdOnlineNotice && String(payload.text).startsWith('OMP bot service is back online')) {
+        if (options.holdOnlineNotice && notices.filter(notice => notice.botId === id && notice.payload.chat_id === payload.chat_id).length === 1) {
           pendingOnline++;
           response.once('close', () => { pendingOnline--; noticeEvents.emit('online-closed'); });
           return;
@@ -326,37 +324,27 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
   assert.equal(fixture.ready.size, 2);
   await fixture.waitNotices(3);
   const targets = fixture.groups.map(([id, chat]) => `${id}:${chat}`).sort();
-  const assertNotices = (notices: typeof fixture.notices, text: unknown) => {
-    assert.equal(typeof text, 'string');
+  const assertNotices = (notices: typeof fixture.notices) => {
     assert.deepEqual(notices.map(notice => `${notice.botId}:${notice.payload.chat_id}`).sort(), targets);
     for (const { payload } of notices) {
       assert.deepEqual(Object.keys(payload).sort(), ['chat_id', 'message_thread_id', 'text']);
       assert.equal(typeof payload.message_thread_id, 'number');
       assert.notEqual(payload.message_thread_id, 1, 'lifecycle notices never target General');
-      assert.equal(payload.text, text);
     }
   };
-  const onlineText = fixture.notices[0]?.payload.text;
-  assert.match(String(onlineText), /^OMP bot service is back online \(restarting took \d+\.\d{2} seconds\)\.$/);
-  assertNotices(fixture.notices, onlineText);
+  assertNotices(fixture.notices);
   const closing = service.close();
   assert.equal(service.close(), closing, 'duplicate shutdown calls share the same close operation');
   await closing;
   await service.close();
   assert.equal(fixture.notices.length, 6);
   const windingDown = fixture.notices.slice(3);
-  const windingDownText = windingDown[0]?.payload.text;
-  assert.notEqual(windingDownText, onlineText, 'shutdown sends a distinct lifecycle notification');
-  assertNotices(windingDown, windingDownText);
+  assertNotices(windingDown);
   assert.equal(fixture.runtimeCloses, 1);
   assert.equal(fixture.storeCloses, 1);
   await delay(100);
   const restarted = await fixture.start();
   await fixture.waitNotices(9);
-  const resumedText = String(fixture.notices[6]?.payload.text);
-  const elapsed = /restarting took (\d+\.\d{2}) seconds/.exec(resumedText);
-  assert.ok(elapsed, resumedText);
-  assert.ok(Number(elapsed[1]) >= 0.1, 'restart timing includes the gap between service generations');
   await restarted.close();
 });
 

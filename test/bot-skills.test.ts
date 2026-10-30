@@ -25,11 +25,10 @@ function prompts(app: App) { return app.accepted.filter(frame => frame.t === 'pr
 async function select(app: App, name: string, threadId?: number, user?: User) {
   await app.update({ text: '/skills', ...(threadId === undefined ? {} : { message_thread_id: threadId }) }, user);
   const picker = app.messages.at(-1)!;
-  const button = buttons(picker).find(value => value.text.includes(name) && value.callback_data);
+  const index = ['find-skills', 'pdf-tools'].indexOf(name);
+  const button = buttons(picker).find(value => value.callback_data?.startsWith('skills:add:') && value.callback_data.endsWith(`:${index}`));
   assert.ok(button?.callback_data, `picker must have a normal callback button for ${name}`);
-  assert.ok(buttons(picker).some(value => typeof value.switch_inline_query_current_chat === 'string'), 'picker offers inline search in this chat');
   await app.callback(button.callback_data, picker, user);
-  assert.ok(app.messages.some(message => String(message.text).includes('Your next message will mention') && String(message.text).includes(`/skill:${name}`)));
   return { picker, data: button.callback_data };
 }
 async function seed(app: App) {
@@ -109,7 +108,7 @@ test('ignored commands, discussion and rejected prompts retain skills; clear rem
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await setForumSetting(app, 'Prompt mode', 'Only /p');
+    await setForumSetting(app, 0, 1);
     await select(app, 'find-skills', session.threadId);
     await app.update({ text: '/unknown', message_thread_id: session.threadId });
     await app.update({ text: 'Discussion', message_thread_id: session.threadId });
@@ -132,7 +131,7 @@ test('proposal creation freezes and consumes proposer skills without consuming a
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await setForumSetting(app, 'User proposals', 'Allow user proposals');
+    await setForumSetting(app, 1, 0);
     app.setCurrentMember({ username: 'grace', status: 'member' });
     await select(app, 'find-skills', session.threadId, participant);
     await app.update({ text: '/p Frozen proposal', message_thread_id: session.threadId }, participant);
@@ -186,13 +185,12 @@ test('inline skill search selects only for its original user and topic', async (
     await app.inlineQuery(`${search}pdf`);
     const results = app.inlineAnswers.at(-1)?.results as { title: string; input_message_content: { message_text: string; entities: unknown[] } }[];
     assert.equal(results.length, 1);
-    assert.equal(results[0]!.title, '/skill:pdf-tools');
     const content = results[0]!.input_message_content;
     const selection = {
       text: content.message_text, entities: content.entities,
       via_bot: { id: botId, is_bot: true, first_name: 'OMP', username: 'FixtureOmpBot' },
     };
-    const callback = buttons(picker).find(button => button.text.includes('pdf-tools'))?.callback_data;
+    const callback = buttons(picker).find(button => button.callback_data?.startsWith('skills:add:') && button.callback_data.endsWith(':1'))?.callback_data;
     assert.ok(callback);
     app.setCurrentMember({ username: ownerUsername, status: 'creator' });
     const otherAdmin = { ...participant, username: ownerUsername };

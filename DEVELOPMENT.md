@@ -169,7 +169,14 @@ pnpm verify
 
 The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
 
-Run a focused test file with `pnpm exec tsx --test --test-concurrency=5 test/bot-presets.test.ts`. Run the disposable real-process kill check with `pnpm exec tsx scripts/runtime-kill-smoke.ts`.
+Run one file or select a test by name (a regular expression), with flags before paths:
+
+```sh
+timeout 60s pnpm test:one test/auth.test.ts
+timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use and expire at their boundary$' test/auth.test.ts
+```
+
+`test:one` accepts Node test-runner flags and one or more paths without adding the full-suite glob. Run the disposable real-process kill check with `timeout 180s pnpm exec tsx scripts/runtime-kill-smoke.ts`.
 
 Live Telegram verification requires a BotFather token, configured Mini App, HTTPS deployment, and forum groups. Local fixtures cannot verify BotFather settings or Telegram client behavior. Do not stop a service that owns an active coding session solely to test lifecycle notices.
 

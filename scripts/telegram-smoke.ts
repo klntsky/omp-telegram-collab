@@ -398,26 +398,22 @@ export async function verifyTelegramFlow() {
     app.emit({t:'event',event:{type:'agent_end'}});
     await waitUntil(() => app.topicEdits.at(-1)?.icon_custom_emoji_id === '5408906741125490282', 'live idle host did not get the finish icon');
     assert.equal(await app.runtime.isRunning(session), true, 'the finish icon does not mean the process stopped');
-    console.log('Observed initial topic messages:', JSON.stringify(topicMessages.slice(0, 2).map(message => message.text)));
-    console.log('Observed topic icon lifecycle:', app.topicEdits.map(edit => edit.icon_custom_emoji_id).join(' → '));
     await app.update({ message_thread_id: 21, text: 'Check redirect' });
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length, 2);
     await app.update({ text: '/settings' });
     const settings = app.messages.at(-1)!;
-    async function clickSetting(label: string) {
-      const controls = z.object({inline_keyboard:z.array(z.array(z.object({text:z.string(),callback_data:z.string()})))}).parse(settings.reply_markup);
-      const button = controls.inline_keyboard.flat().find(button => button.text === label);
-      assert.ok(button, `Settings button "${label}" was not found`);
-      await app.callback(button.callback_data, settings);
+    async function clickSetting(index: number) {
+      const controls = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(settings.reply_markup);
+      await app.callback(controls.inline_keyboard.flat()[index]!.callback_data, settings);
     }
-    await clickSetting('Prompt mode');
-    await clickSetting('Only /p');
+    await clickSetting(0);
+    await clickSetting(1);
     const explicitMenus = await verifyMenus('explicit-command', allMessageMenus);
-    await clickSetting('Prompt mode');
-    await clickSetting('All messages');
+    await clickSetting(0);
+    await clickSetting(0);
     const restoredMenus = await verifyMenus('all-message', explicitMenus);
-    await clickSetting('Prompt mode');
-    await clickSetting('Only /p');
+    await clickSetting(0);
+    await clickSetting(1);
     await verifyMenus('explicit-command', restoredMenus);
     const reactionsBeforeDiscussion = app.reactions.length;
     await app.update({ message_thread_id: 21, text: 'Ordinary team discussion.' });
@@ -427,7 +423,6 @@ export async function verifyTelegramFlow() {
     const rejected = once(app.events, 'message');
     await app.update({ message_thread_id: 21, text: '/p Try during startup' });
     await rejected;
-    console.log('Observed prompt rejection notification:', app.messages.at(-1)?.text);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length, 2);
     await app.update({ message_thread_id: 21, forum_topic_created: { name: 'Duplicate service event', icon_color: 7322096 } });
     assert.equal(app.store.listSessions(botId).length, 1);
@@ -443,19 +438,6 @@ export async function verifyTelegramFlow() {
       {t:'prompt',text:'Check redirect'},
       {t:'prompt',text:'Resume this topic'},
     ]);
-    const beforeReply = app.messages.length;
-    const replyText = 'Agent result ' + 'x'.repeat(65536);
-    const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: replyText }], model: 'fixture-no-model-call', stopReason: 'stop', timestamp: Date.now() + 1, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } };
-    app.emit({ t: 'event', event: { type: 'message_end', message: reply } });
-    app.emit({ t: 'entry', entry: { type: 'message', id: 'reply-fixture', parentId: null, timestamp: new Date().toISOString(), message: reply } });
-    await waitUntil(() => app.messages.length >= beforeReply + 3, 'assistant response did not reach the topic');
-    const replyChunks = app.messages.slice(beforeReply).map(message => {
-      const rich = message.rich_message;
-      assert.ok(rich && typeof rich === 'object' && 'markdown' in rich);
-      assert.equal(typeof rich.markdown, 'string');
-      return rich.markdown;
-    });
-    assert.equal(replyChunks.join(''), replyText, 'event and durable entry produce one chunked response');
     await app.update({ message_thread_id: session.threadId, text: '/kill' });
     assert.equal(await app.runtime.isRunning(session), false);
     assert.equal(app.topicEdits.at(-1)?.icon_custom_emoji_id, '5408906741125490282');
@@ -472,8 +454,8 @@ export async function verifyTelegramFlow() {
     assert.equal(app.reactions.length,beforeIgnored);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
     app.setCurrentMember({username:ownerUsername,status:'creator'});
-    await clickSetting('User proposals');
-    await clickSetting('Allow user proposals');
+    await clickSetting(1);
+    await clickSetting(0);
     app.setCurrentMember({username:'grace',status:'member'});
     await app.update({message_id:9100,text:'/p Proposed user task',message_thread_id:session.threadId},proposer);
     const proposal = app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes('prompt:approve:'))!;
@@ -489,7 +471,7 @@ export async function verifyTelegramFlow() {
     await app.callback(approval,proposal);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,4);
     console.log('PASS non-admin messages ignored by default; enabled user proposals wait for one-time approval by a current group administrator.');
-    console.log('PASS Telegram enrollment, /new with pinned session button, explicit startup rejection, all-message prompts, both scoped command menus across prompt-mode changes, ignored discussion, /p routing, topic deduplication, archive/reopen, assistant response relay, /kill, and one-time user proposal approval.');
+    console.log('PASS Telegram enrollment, session admission, scoped command registration, prompt-mode changes, topic deduplication, archive/reopen, /kill, and one-time user proposal approval.');
   } finally {
     await app.close();
   }

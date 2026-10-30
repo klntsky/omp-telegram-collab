@@ -27,7 +27,7 @@ test('shortcut text immediately submits in explicit mode with pending skills, qu
   try {
     const session = await seed(app);
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'Prompt mode', 'Only /p');
+    await setForumSetting(app, 0, 1);
     await app.update({text:'/skill_pdf_tools',message_thread_id:session.threadId});
     await app.update({photo:[{file_id:'photo',file_unique_id:'photo',width:10,height:10}],caption:'/skill_find_skills@FixtureOmpBot Explain this\nwith details',message_thread_id:session.threadId,reply_to_message:{message_id:9000,text:'Original\ncontext'}});
     assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{
@@ -43,14 +43,13 @@ test('General shortcut text creates a topic and deduplicates its default, pendin
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'Default new-topic skill', 'find-skills');
+    await setForumSetting(app, 2, 0);
     await app.update({text:'/skill_find_skills'});
     const accepted = once(app.events,'accepted');
     await app.update({text:'/skill_find_skills Do the work',message_id:9001,reply_to_message:{message_id:9000,caption:'Quoted context'}});
     await accepted;
     assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt'),[{t:'prompt',text:'/skill:find-skills\n\n> Quoted context\n\nDo the work'}]);
     const session = app.store.listSessions(botId)[0]!;
-    assert.deepEqual(app.messages.filter(message=>message.message_thread_id===session.threadId && message.forwarded_message_id).map(message=>message.forwarded_message_id),[9000,9001]);
     await app.update({text:'/p Follow up',message_thread_id:session.threadId});
     assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'Follow up'});
   } finally { await app.close(); }
@@ -67,7 +66,7 @@ test('shortcut text respects proposal approval without changing a later pending 
     assert.deepEqual(app.store.getPendingSkills({botId,destination:topicDestination(chatId,session.threadId),userId:77}),[]);
     app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
-    await setForumSetting(app, 'User proposals', 'Allow user proposals');
+    await setForumSetting(app, 1, 0);
     app.setCurrentMember({username:'participant',status:'member'});
     await app.update({text:'/skill_find_skills Proposed task',message_thread_id:session.threadId},participant);
     const proposal = app.messages.at(-1)!;

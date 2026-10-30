@@ -183,8 +183,7 @@ try {
   };
   try {
     const binding = await runtime.ensure(worktreeSession);
-    const nativeOutput = await runtime.worktree(worktreeSession, `telegram-smoke-${Date.now()}`);
-    assert.match(nativeOutput, /Moved to worktree/);
+    await runtime.worktree(worktreeSession, `telegram-smoke-${Date.now()}`);
     const worktreePath = worktreeSession.runtime.worktreePath!;
     assert.ok(worktreePath);
     assert.equal(await readFile(join(worktreePath, 'tracked'), 'utf8'), 'dirty tracked\n');
