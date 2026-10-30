@@ -221,6 +221,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     },
     async attach(instanceId: string, _instancePath: string) { return { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' }; },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
+    async providerUsage(_instancePath: string): Promise<string> { throw new Error('No provider usage query configured in fixture'); },
     async listSkills(_instancePath: string, _session?: TopicSession) {
       return [
         { name: 'find-skills', description: 'Discover and install agent skills' },

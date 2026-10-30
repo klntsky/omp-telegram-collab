@@ -614,6 +614,48 @@ export class OmpRuntime {
     return result.value;
   }
 
+  async providerUsage(instancePath: string): Promise<string> {
+    this.#assertActive();
+    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
+    const args: string[] = [];
+    const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
+    for (const arg of ompArguments(this.#config.omp.args)) {
+      if (arg.flag === '--profile') args.push(...arg.args);
+      if (arg.flag === '--config' && arg.value) configFiles.push(arg.value);
+    }
+    args.push('usage', '--json');
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    execFile(this.#config.omp.executable, args, {
+      cwd: instancePath,
+      env: { ...process.env, ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
+      timeout: this.#config.omp.startupTimeoutMs, killSignal: 'SIGKILL',
+      maxBuffer: 2 * 1024 * 1024, encoding: 'utf8',
+    }, (error, stdout) => error ? reject(error) : resolve(stdout));
+    const output = await promise;
+    const result: unknown = JSON.parse(output);
+    if (!record(result) || !Array.isArray(result.reports)) throw new Error('Invalid OMP usage response');
+    const lines: string[] = [];
+    for (const report of result.reports) {
+      if (!record(report) || typeof report.provider !== 'string' || !Array.isArray(report.limits)) {
+        throw new Error('Invalid OMP usage report');
+      }
+      lines.push(report.provider);
+      for (const limit of report.limits) {
+        if (!record(limit) || !record(limit.amount)) throw new Error('Invalid OMP usage limit');
+        const amount = limit.amount;
+        const unit = typeof amount.unit === 'string' ? amount.unit : '';
+        const value = (number: unknown) => typeof number === 'number' && Number.isFinite(number) ? `${number}${unit === 'percent' ? '%' : unit ? ` ${unit}` : ''}` : 'unknown';
+        const window = record(limit.window) ? limit.window : {};
+        const reset = typeof window.resetsAt === 'number' ? new Date(window.resetsAt).toISOString() : undefined;
+        lines.push(`  ${limit.label ?? window.label ?? 'Quota'}: ${value(amount.used)} used; ${value(amount.remaining)} remaining; limit ${value(amount.limit)}${reset ? `; resets ${reset}` : ''}${typeof limit.status === 'string' ? ` [${limit.status}]` : ''}`);
+      }
+      if (!report.limits.length) lines.push('  No quota data available.');
+      if (typeof report.error === 'string') lines.push(report.error);
+      lines.push('');
+    }
+    return lines.join('\n').trim() || 'No provider usage data available.';
+  }
+
   async availableModelPresets(instancePath: string): Promise<string[]> {
     const presets = await this.#nativeSetting(instancePath, 'modelPresets');
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
