@@ -1658,14 +1658,14 @@ export class BotService {
           await this.applySessionTitle(session);
         }
       }
-      if (ctx.from?.id === this.id && edited.icon_custom_emoji_id !== undefined && edited.name === undefined) {
+      if (ctx.from?.id === this.id && (edited.icon_custom_emoji_id !== undefined || edited.name !== undefined)) {
         await this.delivery.run(ctx.chat.id,
           () => this.bot.api.deleteMessage(ctx.chat!.id,message.message_id),
           () => !this.stopped && (detached
             ? this.options.store.getSession(session.id)?.status === 'detached' &&
               findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath
-            : this.sessionAssigned(session))).catch(() => {
-          console.warn(`Could not delete topic icon notice (${session.id}, ${message.message_id}).`);
+            : this.sessionAssigned(session))).catch(error => {
+          console.warn(`Could not delete topic edit notice (${session.id}, ${message.message_id}).`, error);
         });
       }
       return;

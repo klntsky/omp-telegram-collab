@@ -56,7 +56,7 @@ test('empty topic creation, initialization, and reopening do not launch managed 
 });
 
 
-test('status icon notices from this bot are deleted without deleting human edits or renames', async () => {
+test('topic edit notices from this bot are deleted without deleting human or other bot edits', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -68,7 +68,8 @@ test('status icon notices from this bot are deleted without deleting human edits
     await app.update({message_id:1005,message_thread_id:42,forum_topic_edited:{name:'Renamed topic'}});
     await app.update({message_id:1006,message_thread_id:42,forum_topic_edited:{name:'Bot rename',icon_custom_emoji_id:'5237699328843200968'}},ownBot);
     await app.update({message_id:1007,message_thread_id:42,forum_topic_edited:{icon_custom_emoji_id:'5312016608254762256'}},{...ownBot,id:botId+1});
-    assert.deepEqual(app.deletedMessages,[1000,1003].map(message_id => ({chat_id:chatId,message_id})));
+    await app.update({message_id:1008,message_thread_id:42,forum_topic_edited:{name:'Branch switch'}},ownBot);
+    assert.deepEqual(app.deletedMessages,[1000,1003,1006,1008].map(message_id => ({chat_id:chatId,message_id})));
     assert.equal(app.connectionCount,0,'processing service notices never starts a host');
   } finally {
     await app.close();

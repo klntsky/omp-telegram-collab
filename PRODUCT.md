@@ -64,6 +64,8 @@ Session titles and Telegram topic names synchronize in both directions. Telegram
 
 Renaming a topic updates the actual OMP session title without submitting a prompt or starting a stopped host; pending renames survive service restarts and apply when the managed host next starts. Previously generated status is removed from human edits, and the current status is restored even when the user deletes it or the host cannot accept native title changes. Generated status never becomes part of the OMP title. OMP title changes update the readable portion while mirroring is connected, including automatically generated titles. Telegram displays at most 128 Unicode characters including status; the full OMP title remains intact. Long status prefixes are shortened with an ellipsis to reserve space for up to 64 readable-title characters. Detached topics no longer synchronize titles.
 
+The bot deletes its own topic rename and icon-change service messages when their updates arrive, including renames caused by Git status changes. Human and other bots' topic-edit notices are preserved. Cleanup failures retain their original diagnostics in service logs.
+
 Telegram-to-OMP renames require a host with session-title control support. Terminal-owned attached hosts without that support report a control error rather than claiming their title changed; OMP-to-Telegram mirroring remains available.
 
 Close a topic to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
