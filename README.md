@@ -119,13 +119,13 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    3. Enter a description, such as `Run coding sessions from Telegram`.
    4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
    5. Send `/empty` to skip the optional GIF.
-   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`. It looks like `https://your-host.example/?bot=123456789`. Keep the `?bot=...` part. Do not enter a `t.me` link here.
+   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://your-host.example/?bot=123456789`.
    7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
-   8. BotFather returns a link like `https://t.me/your_bot/app`. This is the Telegram launch link, not the web URL.
+   8. BotFather returns the Telegram launch link, such as `https://t.me/your_bot/app`.
 
-   Use `/newapp`, not just the bot profile's Main Mini App or menu-button settings. The topic buttons use the named app's direct link to select the session.
+   The topic buttons use this named app's direct link to select the session.
 
-7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Administrator bots receive ordinary group messages without disabling privacy mode in BotFather.
+7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting. Administrator bots receive ordinary group messages.
 8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
 
    ```sh
