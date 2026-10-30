@@ -17,6 +17,8 @@
     "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs && vite build --config web/vite.config.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
     "test": "tsx --test --test-concurrency=5 test/*.test.ts",
+    "test:integration": "pnpm build && pnpm smoke",
+    "verify": "pnpm check && pnpm test && pnpm test:integration",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:cli": "tsx scripts/smoke.ts cli",
     "smoke:telegram": "tsx scripts/smoke.ts telegram",

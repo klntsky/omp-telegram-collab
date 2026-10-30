@@ -15,6 +15,31 @@ async function waitUntil(predicate: () => boolean, message: string) {
   }
 }
 
+async function assertUpgradeDenied(url: string, origin: string, message: string) {
+  const socket = new WebSocket(url, { origin, handshakeTimeout: 3000 });
+  let opened = false;
+  let received = false;
+  let failed = false;
+  socket.on('open', () => { opened = true; socket.close(); });
+  socket.on('message', () => { received = true; });
+  socket.on('error', () => { failed = true; });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const timer = setTimeout(() => {
+    socket.terminate();
+    reject(new Error(`${message}: connection did not close`));
+  }, 5000);
+  socket.once('close', resolve);
+  try {
+    await promise;
+    assert.equal(opened, false, `${message}: WebSocket upgrade succeeded`);
+    assert.equal(received, false, `${message}: private session frames escaped`);
+    assert.equal(failed, true, `${message}: handshake was not rejected`);
+  } finally {
+    clearTimeout(timer);
+    socket.terminate();
+  }
+}
+
 export async function verifyGatewayFlow() {
   const app = await createSmokeApp();
   let socket: WebSocket | undefined;
@@ -33,11 +58,21 @@ export async function verifyGatewayFlow() {
     const data = await response.json() as { ticket: string; session: { id: string } };
     assert.equal(data.session.id, session.id);
     assert.ok(!JSON.stringify(data).includes('secret-capability'), 'HTTP session response must not expose the private host capability');
-    socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${data.ticket}`, { origin: app.config.publicUrl });
+    const socketUrl = `${app.url.replace('http:', 'ws:')}/api/socket?ticket=${encodeURIComponent(data.ticket)}`;
+    const connectionsBeforeDeniedUpgrades = app.connectionCount;
+    await assertUpgradeDenied(socketUrl, 'https://untrusted.invalid', 'a cross-origin request with a valid ticket must be denied');
+    await assertUpgradeDenied(`${socketUrl}&ticket=${encodeURIComponent(data.ticket)}`, app.config.publicUrl, 'duplicate ticket parameters must be denied');
+    assert.equal(app.connectionCount, connectionsBeforeDeniedUpgrades, 'denied upgrades must not connect to the private host');
+    socket = new WebSocket(socketUrl, { origin: app.config.publicUrl });
     const frames: HostFrame[] = [];
     socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
     await once(socket, 'open');
     await waitUntil(() => frames.some(frame => frame.t === 'snapshot-chunk'), 'authenticated socket did not receive session snapshot');
+    const connectionsBeforeReplay = app.connectionCount;
+    await assertUpgradeDenied(socketUrl, app.config.publicUrl, 'an already-consumed ticket must not admit another socket');
+    assert.equal(app.connectionCount, connectionsBeforeReplay, 'ticket replay must not connect to the private host');
+    app.emit({ t: 'error', message: 'original socket remains live after ticket replay' });
+    await waitUntil(() => frames.some(frame => frame.t === 'error' && frame.message === 'original socket remains live after ticket replay'), 'rejecting ticket replay disrupted the admitted socket');
     const promptsBeforeRevocation = app.accepted.filter(frame => frame.t === 'prompt').length;
     app.setMember(false);
     app.emit({ t: 'error', message: 'read continuity after membership removal' });
@@ -86,7 +121,7 @@ export async function verifyGatewayFlow() {
     await waitUntil(() => app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 902), 'admitted viewer lost read-fetch access');
     assert.equal(reader.readyState, WebSocket.OPEN);
     assert.equal((await authorize()).status, 403, 'a new flow must recheck Telegram membership');
-    console.log('PASS Gateway signed Mini App authorization, private capability isolation, authenticated snapshots, viewer read-only startup, fresh mutation authorization, HTTP denial after removal, and flow-scoped output/read-fetch continuity.');
+    console.log('PASS Gateway signed Mini App authorization, cross-origin and duplicate-ticket upgrade denial without consuming valid admission, single-use ticket replay denial without disrupting the admitted socket, private capability isolation, authenticated snapshots, viewer read-only startup, fresh mutation authorization, HTTP denial after removal, and flow-scoped output/read-fetch continuity.');
   } finally {
     socket?.terminate();
     reader?.terminate();

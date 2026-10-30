@@ -8,6 +8,7 @@ import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime, SessionCapacityError } from '../src/runtime.js';
 import { connectCollab } from '../src/collab.js';
 import { startLocalRelay } from './local-relay.js';
+import { formatCollabLink, parseCollabLink } from '../src/vendor/link.js';
 import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
 import { verifyRuntimeKill } from './runtime-kill-smoke.js';
 import { readConfig, writeConfig } from '../src/config.js';
@@ -55,6 +56,26 @@ try {
   const frames: string[] = [];
   const titleState = Promise.withResolvers<void>();
   await runtime.setSessionTitle(session, 'Telegram title → actual OMP');
+  const controlLink = parseCollabLink(first.url);
+  assert.ok(!('error' in controlLink));
+  assert.ok(controlLink.writeToken);
+  const forgedToken = controlLink.writeToken.slice();
+  forgedToken[0] = forgedToken[0]! ^ 1;
+  const forgedBinding = {
+    ...first,
+    url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
+  };
+  await assert.rejects(async () => {
+    const unauthorized = await connectCollab(forgedBinding, 'Forged capability verifier', {
+      onFrame(frame) {
+        assert.notEqual(frame.t, 'welcome', 'a rejected control welcome must not reach the consumer');
+        assert.notEqual(frame.t, 'snapshot-chunk', 'a rejected control snapshot must not reach the consumer');
+      },
+      onClose() {},
+    });
+    unauthorized.close();
+    assert.fail('a valid room key with a forged write token must not obtain a control connection');
+  }, /Collab host refused control access/);
   const guest = await connectCollab(first, 'Smoke verifier', {
     onFrame(frame) {
       frames.push(frame.t);
@@ -72,6 +93,7 @@ try {
     clearTimeout(titleTimer);
   }
   guest.close();
+  console.log('PASS actual OMP denies a forged write capability despite a valid encryption key; the genuine capability still receives the snapshot and live title updates.');
   const attached = await runtime.attach(first.instanceId, dir);
   assert.equal(attached.sessionId, first.sessionId);
   runtime.markPrompt(session.id);
