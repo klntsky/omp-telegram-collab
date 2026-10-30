@@ -90,9 +90,3 @@ Open the Mini App with `/session` or the topic's OPEN AGENT button. Current grou
 | ❌ | CLI relay, media, and usage (`omp browser-relay`, `omp clip`, `omp play`, `omp say`, `omp stream`, `omp stats`, `omp usage`) | No relay-management, recording, broadcast, speech, or usage-dashboard interfaces. |
 
 Agent tools still run on the host. Missing a remote command does not disable the underlying tool or configured host behavior. See [Product](PRODUCT.md) for current remote behavior and permissions.
-
-## Documentation
-
-- [Product](PRODUCT.md): session behavior, permissions, and user controls.
-- [Development](DEVELOPMENT.md): setup, configuration, testing, and deployment.
-- [Architecture](ARCHITECTURE.md): component ownership and process and trust boundaries.
