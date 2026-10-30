@@ -11,6 +11,7 @@ import { connectCollab } from './collab.js';
 import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
+import { withCancellation } from './cancellation.js';
 
 export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
@@ -48,21 +49,25 @@ export function createServer(options: ServerOptions): GatewayServer {
   let closing = false;
   let pendingRequests = 0;
   let pendingUpgrades = 0;
+  const pendingAuthorizations = new Map<AbortController, ServerResponse>();
   function checkTermination(): void {
     if (refreshTermination(options.config)) throw new ServiceTerminatedError();
   }
   function checkGeneration(identity: TicketIdentity): void {
     if (identity.generation !== options.store.getSessionGeneration(identity.sessionId)) throw new SessionGenerationError('Session was killed; rejoin explicitly');
   }
-  async function authorize(identity: TicketIdentity, expected?: TopicSession, access?: {canControl: boolean}): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
+  async function authorize(identity: TicketIdentity, expected?: TopicSession, access?: {canControl: boolean}, signal?: AbortSignal): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
+    signal?.throwIfAborted();
     checkTermination();
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
     if (!bot || !session || session.botId !== identity.botId) throw new Error('Access denied');
     if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
         await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
+    signal?.throwIfAborted();
     checkGeneration(identity);
-    const canControl = access ? access.canControl : await bot.authorizeSession(session,identity.userId);
+    const canControl = access ? access.canControl : await bot.authorizeSession(session,identity.userId,signal);
+    signal?.throwIfAborted();
     const current = options.store.getSession(identity.sessionId);
     if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
@@ -85,9 +90,17 @@ export function createServer(options: ServerOptions): GatewayServer {
           return;
         }
         pendingRequests++;
+        const controller = new AbortController();
+        const abort = () => controller.abort(new Error('Session authentication request disconnected'));
+        const close = () => { if (!response.writableFinished) abort(); };
+        pendingAuthorizations.set(controller,response);
+        request.once('aborted',abort);
+        response.once('close',close);
+        if (request.aborted || response.destroyed) abort();
         try {
           checkTermination();
-          const parsed = requestSchema.parse(await body(request));
+          const parsed = requestSchema.parse(await withCancellation(body(request),controller.signal));
+          controller.signal.throwIfAborted();
           const bot = botMap.get(parsed.botId);
           if (!bot) throw new Error('Access denied');
           let identity: TicketIdentity;
@@ -107,11 +120,16 @@ export function createServer(options: ServerOptions): GatewayServer {
               authDate:authentication.authDate,
             };
           }
-          const {session,canControl} = await authorize(identity);
+          const {session,canControl} = await withCancellation(authorize(identity,undefined,undefined,controller.signal),controller.signal);
+          controller.signal.throwIfAborted();
+          if (response.destroyed || response.writableEnded) return;
           checkGeneration(identity);
           json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),ticket:tickets.issue({...identity,access:{session,canControl}}),displayName:participantName(identity)});
           return;
         } finally {
+          request.removeListener('aborted',abort);
+          response.removeListener('close',close);
+          pendingAuthorizations.delete(controller);
           pendingRequests--;
         }
       }
@@ -127,6 +145,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       response.writeHead(200,{'content-type':mime[extname(target)] ?? 'application/octet-stream','cache-control':extname(target) === '.html' ? 'no-store' : 'public, max-age=3600','x-content-type-options':'nosniff'});
       response.end(request.method === 'HEAD' ? undefined : data);
     })().catch(error => {
+      if (response.destroyed || response.writableEnded) return;
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
         else if (error instanceof SessionGenerationError) json(response,409,{error:error.message});
@@ -204,7 +223,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed) return;
       closed = true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close();
       if (Buffer.byteLength(message) > 123) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(code === 1013 ? {t:'error',message} : {t:'bye',reason:message}));
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(code === 1013 ? {t:'gateway-error',message} : {t:'bye',reason:message}));
         ws.close(code);
       } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
@@ -325,6 +344,10 @@ export function createServer(options: ServerOptions): GatewayServer {
   }
   server.closeConnections = async () => {
     closing = true;
+    for (const [controller,response] of pendingAuthorizations) {
+      controller.abort(new Error('Gateway server stopped'));
+      response.destroy();
+    }
     for (const ws of sockets.clients) ws.terminate();
     await new Promise<void>(resolve => sockets.close(() => resolve()));
     server.closeIdleConnections();

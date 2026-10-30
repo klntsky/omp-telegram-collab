@@ -71,7 +71,7 @@ export class GatewaySocket implements GuestTransport {
 			return;
 		}
 		this.#ws = ws;
-		let lastError: string | undefined;
+		let gatewayError: string | undefined;
 		ws.onopen = () => {
 			if (this.#ws === ws) this.onOpen?.();
 		};
@@ -84,13 +84,17 @@ export class GatewaySocket implements GuestTransport {
 				if (!value || typeof value !== "object" || !("t" in value) || typeof value.t !== "string") {
 					throw new Error("Invalid frame");
 				}
+				if (value.t === "gateway-error") {
+					if (!("message" in value) || typeof value.message !== "string") throw new Error("Invalid gateway diagnostic");
+					gatewayError = value.message;
+					return;
+				}
 				frame = value as HostFrame;
 			} catch {
 				this.#finish("The session sent an invalid response. Rejoin to try again.");
 				return;
 			}
 			if (frame.t === "snapshot-chunk" && frame.final) this.#attempt = 0;
-			if (frame.t === "error") lastError = frame.message;
 			this.onFrame?.(frame);
 		};
 		ws.onerror = () => {};
@@ -100,7 +104,7 @@ export class GatewaySocket implements GuestTransport {
 				this.#finish(event.reason || "Session unavailable. Reopen the topic’s OPEN AGENT button.");
 				return;
 			}
-			const reason = event.reason || (event.code === 1013 ? lastError : undefined);
+			const reason = event.reason || (event.code === 1013 ? gatewayError : undefined);
 			this.reconnect(reason ? `${reason}\nReconnecting…` : "Disconnected from the session. Reconnecting…");
 		};
 	}

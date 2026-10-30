@@ -270,6 +270,7 @@ export class GuestClient {
 			this.#welcomed = false;
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;
+			this.#pushNotice("error", reason);
 			this.#commit();
 			return;
 		}

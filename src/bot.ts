@@ -797,25 +797,49 @@ export class BotService {
   async authorize(chatId: number, userId: number, statusOnly = false): Promise<void> {
     await this.authorizeMember(chatId, userId, statusOnly);
   }
-  async authorizeSession(session: TopicSession, userId: number): Promise<boolean> {
-    const member = await this.authorizeMember(session.chatId, userId);
+  async authorizeSession(session: TopicSession, userId: number, signal?: AbortSignal): Promise<boolean> {
+    const member = await this.authorizeMember(session.chatId, userId, false, signal);
+    signal?.throwIfAborted();
     this.requireSessionAssignment(session);
     return isAdministrator(member);
   }
-  private async authorizeMember(chatId: number, userId: number, statusOnly = false) {
+  private async authorizeMember(chatId: number, userId: number, statusOnly = false, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     if (this.stopped) throw this.background.signal.reason;
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
     const instancePath = this.assignedPath(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
-    const [chat, user, bot] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, userId), this.bot.api.getChatMember(chatId, this.id)])
-      .catch(error => { throw new AuthorizationUnavailableError(error); });
-    if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
-    if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
-    if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
-    if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
-    if (this.stopped) throw this.background.signal.reason;
-    if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
-    return user;
+    const deadline = new AbortController();
+    const timeoutReason = new DOMException('Telegram authorization lookup timed out after 10 seconds', 'TimeoutError');
+    const cancellation = AbortSignal.any(signal ? [signal, this.background.signal, deadline.signal] : [this.background.signal, deadline.signal]);
+    const telegram = new TelegramAbortController();
+    const cancelTelegram = () => telegram.abort();
+    cancellation.addEventListener('abort', cancelTelegram, {once:true});
+    const timeout = setTimeout(() => deadline.abort(timeoutReason), 10000);
+    try {
+      cancellation.throwIfAborted();
+      const [chat, user, bot] = await withCancellation(Promise.all([
+        this.bot.api.getChat(chatId, telegram.signal),
+        this.bot.api.getChatMember(chatId, userId, telegram.signal),
+        this.bot.api.getChatMember(chatId, this.id, telegram.signal),
+      ]), cancellation).catch(error => {
+        if (cancellation.aborted && cancellation.reason !== timeoutReason) throw cancellation.reason;
+        if (error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 && error.error_code !== 429) throw error;
+        throw new AuthorizationUnavailableError(error);
+      });
+      cancellation.throwIfAborted();
+      if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
+      if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
+      if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
+      if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
+      if (this.stopped) throw this.background.signal.reason;
+      if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
+      return user;
+    } finally {
+      clearTimeout(timeout);
+      cancellation.removeEventListener('abort', cancelTelegram);
+      telegram.abort();
+    }
   }
   private async ready(chatId: number): Promise<boolean> {
     const [chat, member] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, this.id)]);

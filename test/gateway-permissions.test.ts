@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
+import { once, getEventListeners } from 'node:events';
+import { request as httpRequest, type ClientRequest } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import WebSocket from 'ws';
+import { GrammyError, HttpError } from 'grammy';
+import { AuthorizationUnavailableError } from '../src/auth.js';
+import { createServer } from '../src/server.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, ownerId, ownerUsername } from './telegram-data.js';
@@ -200,8 +204,10 @@ test('multiline authorization diagnostics exceed close limits without losing the
     const before = app.accepted.length;
     const closed = once(socket, 'close');
     socket.send(JSON.stringify({ t: 'abort' }));
-    await closed;
-    assert.ok(controller.frames.some(frame => frame.t === 'bye' && frame.reason === message));
+    const [code] = await closed;
+    assert.equal(code, 1013);
+    const frames: unknown[] = controller.frames;
+    assert.deepEqual(frames.find(frame => frame && typeof frame === 'object' && 't' in frame && frame.t === 'gateway-error'), { t: 'gateway-error', message });
     assert.equal(app.accepted.length, before);
   } finally { socket?.terminate(); await app.close(); }
 });
@@ -415,7 +421,8 @@ test('idle membership lookup outages close recoverably and credential reconnect 
     const [code, reason] = await closed;
     assert.equal(code, 1013);
     assert.equal(reason.toString(), '');
-    assert.ok(reader.frames.some(frame => frame.t === 'error' && frame.message === failure.message));
+    assert.ok(reader.frames.some((frame: unknown) => typeof frame === 'object' && frame !== null &&
+      't' in frame && frame.t === 'gateway-error' && 'message' in frame && frame.message === failure.message));
     assert.ok(!reader.frames.some(frame => frame.t === 'bye'));
     assert.equal(lookups, 1);
     assert.equal(app.accepted.length, before);
@@ -462,4 +469,216 @@ test('idle sockets periodically refresh permissions and close after membership r
     });
     assert.equal(response.status, 403);
   } finally { socket?.terminate(); await app.close(); }
+});
+
+test('aborted Mini App authentication requests promptly recover all admission capacity', { timeout: 10000 }, async () => {
+  const { app, session } = await fixture();
+  const clients: ClientRequest[] = [];
+  const signals: { aborted: boolean }[] = [];
+  const entered = Promise.withResolvers<void>();
+  let blocked = true;
+  const before = app.accepted.length;
+  try {
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (blocked && (method === 'getChat' || method === 'getChatMember')) {
+        assert.ok(signal, 'every Telegram authorization read needs cancellation');
+        signals.push(signal);
+        if (signals.length === 64 * 3) entered.resolve();
+        return new Promise<never>(() => {});
+      }
+      return previous(method, payload, signal);
+    });
+    const payload = JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) });
+    for (let index = 0; index < 64; index++) {
+      const client = httpRequest(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      client.on('error', () => {});
+      client.end(payload);
+      clients.push(client);
+    }
+    await entered.promise;
+    const full = await fetch(`${app.url}/api/session`, { method: 'POST', body: payload });
+    assert.equal(full.status, 429);
+    await full.arrayBuffer();
+    clients.forEach(client => client.destroy());
+    const deadline = Date.now() + 2000;
+    while (signals.some(signal => !signal.aborted)) {
+      assert.ok(Date.now() < deadline, 'abandoned Telegram authorization did not cancel promptly');
+      await delay(10);
+    }
+    blocked = false;
+    const recovered = await fetch(`${app.url}/api/session`, { method: 'POST', body: payload });
+    assert.equal(recovered.status, 200, 'abandoned requests must not retain pending authentication slots');
+    await recovered.arrayBuffer();
+    assert.equal(app.accepted.length, before);
+  } finally {
+    blocked = false;
+    clients.forEach(client => client.destroy());
+    await app.close();
+  }
+});
+
+test('authorization cancellation preserves its reason and cleans request listeners despite ignored Telegram signals', { timeout: 5000 }, async () => {
+  const { app, session } = await fixture();
+  const controller = new AbortController();
+  const signals: { aborted: boolean }[] = [];
+  try {
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === 'getChat' || method === 'getChatMember') {
+        assert.ok(signal);
+        signals.push(signal);
+        return new Promise<never>(() => {});
+      }
+      return previous(method, payload, signal);
+    });
+    const reason = new Error('Original caller cancellation diagnostic');
+    const lookup = app.service.authorizeSession(session, ownerId, controller.signal);
+    const rejected = assert.rejects(lookup, error => error === reason);
+    controller.abort(reason);
+    await rejected;
+    assert.ok(signals.every(signal => signal.aborted));
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+    const readsBeforeCancelledCall = signals.length;
+    await assert.rejects(app.service.authorizeSession(session, ownerId, controller.signal), error => error === reason);
+    assert.equal(signals.length, readsBeforeCancelledCall, 'already cancelled authorization must not start Telegram reads');
+  } finally { await app.close(); }
+});
+
+for (const boundary of ['authorize', 'authorizeSession'] as const) {
+  test(`${boundary} bounds ignored Telegram reads to a ten-second deadline`, async t => {
+    const { app, session } = await fixture();
+    const signals: { aborted: boolean }[] = [];
+    let settled = false;
+    try {
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (method === 'getChat' || method === 'getChatMember') {
+          assert.ok(signal);
+          signals.push(signal);
+          return new Promise<never>(() => {});
+        }
+        return previous(method, payload, signal);
+      });
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const lookup = boundary === 'authorize'
+        ? app.service.authorize(session.chatId, ownerId)
+        : app.service.authorizeSession(session, ownerId);
+      const rejected = assert.rejects(lookup, error => {
+        settled = true;
+        assert.ok(error instanceof AuthorizationUnavailableError);
+        assert.ok(error.cause instanceof DOMException);
+        assert.equal(error.cause.name, 'TimeoutError');
+        assert.equal(error.message, error.cause.message);
+        return true;
+      });
+      assert.equal(signals.length, 3);
+      t.mock.timers.tick(9999);
+      await Promise.resolve();
+      assert.equal(settled, false);
+      t.mock.timers.tick(1);
+      await rejected;
+      assert.ok(signals.every(signal => signal.aborted));
+    } finally {
+      t.mock.timers.reset();
+      await app.close();
+    }
+  });
+}
+
+for (const failureKind of [401, 429, 500, 'transport'] as const) {
+  test(`authorization preserves diagnostics and classifies Telegram ${failureKind} failures`, async () => {
+    const { app, session, connect } = await fixture();
+    let socket: WebSocket | undefined;
+    try {
+      socket = (await connect()).socket;
+      const failure = failureKind === 'transport'
+        ? new HttpError('Original authorization transport diagnostic', new Error('ECONNRESET'))
+        : new GrammyError('Original authorization diagnostic', { ok: false, error_code: failureKind, description: `Original Telegram ${failureKind} diagnostic` }, 'getChatMember', {});
+      const transient = failureKind === 'transport' || failureKind === 429 || failureKind >= 500;
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (method === 'getChatMember' && 'user_id' in payload && Number(payload.user_id) === ownerId) throw failure;
+        return previous(method, payload, signal);
+      });
+      await assert.rejects(app.service.authorizeSession(session, ownerId), error => {
+        if (transient) {
+          assert.ok(error instanceof AuthorizationUnavailableError);
+          assert.equal(error.cause, failure);
+          assert.equal(error.message, failure.message);
+        } else assert.equal(error, failure);
+        return true;
+      });
+      const response = await fetch(`${app.url}/api/session`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }),
+      });
+      assert.equal(response.status, transient ? 503 : 403);
+      assert.deepEqual(await response.json(), { error: failure.message });
+      const before = app.accepted.length;
+      const closed = once(socket, 'close');
+      socket.send(JSON.stringify({ t: 'abort' }));
+      const [code] = await closed;
+      assert.equal(code, transient ? 1013 : 4003);
+      assert.equal(app.accepted.length, before, 'failed authorization must not execute mutations');
+    } finally { socket?.terminate(); await app.close(); }
+  });
+}
+
+test('gateway shutdown cancels pending HTTP authorization even when Telegram ignores cancellation', { timeout: 5000 }, async () => {
+  const { app, session } = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const signals: { aborted: boolean }[] = [];
+  let client: ClientRequest | undefined;
+  const gateway = createServer({ config: app.config, bots: [app.service], store: app.store, runtime: app.runtime });
+  try {
+    gateway.listen(0, '127.0.0.1');
+    await once(gateway, 'listening');
+    const address = gateway.address();
+    assert.ok(address && typeof address !== 'string');
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === 'getChat' || method === 'getChatMember') {
+        assert.ok(signal);
+        signals.push(signal);
+        if (signals.length === 3) entered.resolve();
+        return new Promise<never>(() => {});
+      }
+      return previous(method, payload, signal);
+    });
+    client = httpRequest(`http://127.0.0.1:${address.port}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    client.on('error', () => {});
+    client.end(JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }));
+    await entered.promise;
+    await gateway.closeConnections();
+    assert.ok(signals.every(signal => signal.aborted));
+  } finally {
+    client?.destroy();
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    gateway.close(error => error ? reject(error) : resolve());
+    await promise;
+    await app.close();
+  }
+});
+
+test('bot shutdown preserves lifecycle cancellation for authorization with ignored Telegram signals', { timeout: 5000 }, async () => {
+  const { app, session } = await fixture();
+  const signals: { aborted: boolean }[] = [];
+  try {
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === 'getChat' || method === 'getChatMember') {
+        assert.ok(signal);
+        signals.push(signal);
+        return new Promise<never>(() => {});
+      }
+      return previous(method, payload, signal);
+    });
+    const lookup = app.service.authorizeSession(session, ownerId);
+    let cancellation: unknown;
+    const rejected = assert.rejects(lookup, error => {
+      cancellation = error;
+      assert.ok(error instanceof Error);
+      assert.ok(!(error instanceof AuthorizationUnavailableError));
+      return true;
+    });
+    await app.service.close();
+    await rejected;
+    assert.ok(signals.every(signal => signal.aborted));
+    await assert.rejects(app.service.authorizeSession(session, ownerId), error => error === cancellation);
+  } finally { await app.close(); }
 });
