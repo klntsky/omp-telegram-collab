@@ -176,6 +176,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   seed.updateSession(session.id, { status: 'closed' });
   seed.close();
 
+  const topics = new Map<string, number>();
   const notices: { botId: number; payload: Record<string, unknown> }[] = [];
   const ready = new Set<number>();
   const noticeEvents = new EventEmitter();
@@ -193,6 +194,14 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
     }
     let result: unknown;
     if (method === 'getMe') result = { id, is_bot: true, first_name: 'OMP', username: `Fixture${id}Bot` };
+    else if (method === 'createForumTopic') {
+      assert.equal(payload.name, 'Bot status');
+      const key = `${id}:${payload.chat_id}`;
+      assert.equal(topics.has(key), false, 'lifecycle notices reuse the persisted status topic');
+      const threadId = 100 + topics.size;
+      topics.set(key, threadId);
+      result = { message_thread_id: threadId, name: 'Bot status', icon_color: 7322096 };
+    }
     else if (['deleteWebhook', 'setMyCommands', 'deleteMyCommands', 'pinChatMessage', 'editForumTopic', 'deleteMessage'].includes(method ?? '')) result = true;
     else if (method === 'getForumTopicIconStickers') result = [
       { emoji: '\u26a1', custom_emoji_id: '5312016608254762256' },
@@ -206,6 +215,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       await delay(20);
       result = [];
     } else if (method === 'sendMessage') {
+      assert.equal(payload.message_thread_id, topics.get(`${id}:${payload.chat_id}`), 'notices use this bot/chat reserved topic');
       notices.push({ botId: id, payload });
       noticeEvents.emit('notice');
       if (options.holdOnlineNotice && String(payload.text).startsWith('OMP bot service is back online')) {
@@ -306,7 +316,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   };
 }
 
-test('CLI posts online and winding-down notices once per bot and enrolled group in General', { timeout: 30_000 }, async t => {
+test('CLI posts online and winding-down notices once per bot and enrolled group in Bot status', { timeout: 30_000 }, async t => {
   const fixture = await lifecycleFixture(t);
   const service = await fixture.start();
   assert.equal(fixture.ready.size, 2);
@@ -316,7 +326,9 @@ test('CLI posts online and winding-down notices once per bot and enrolled group 
     assert.equal(typeof text, 'string');
     assert.deepEqual(notices.map(notice => `${notice.botId}:${notice.payload.chat_id}`).sort(), targets);
     for (const { payload } of notices) {
-      assert.deepEqual(Object.keys(payload).sort(), ['chat_id', 'text'], 'General is targeted without message_thread_id=1 or a session reply target');
+      assert.deepEqual(Object.keys(payload).sort(), ['chat_id', 'message_thread_id', 'text']);
+      assert.equal(typeof payload.message_thread_id, 'number');
+      assert.notEqual(payload.message_thread_id, 1, 'lifecycle notices never target General');
       assert.equal(payload.text, text);
     }
   };

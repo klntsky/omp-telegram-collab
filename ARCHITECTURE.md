@@ -10,6 +10,8 @@ Configuration is the authority for project directories, bot identities, chat ass
 
 The service owns the readiness boundary: mandatory runtime and history checks, initialized bot identities and cached menus, bound HTTP listener, and a successful first poll for every bot. Only after that boundary does it start adapter maintenance and the separately tracked online notification. Notification delivery is not a readiness dependency. Shutdown cancels the online task, drains input with update acknowledgements intact, and closes component-owned work before storage.
 
+The bot adapter owns lifecycle-notice topic creation and delivery; the store preserves its per-bot, per-forum destination across restarts. The inbound adapter excludes that reserved destination before reactions, command dispatch, or prompt admission, so lifecycle notices cannot become session input.
+
 Each adapter owns a cancellable background task set for session restoration, status maintenance, reconnects, and catalog refreshes. Readiness initialization does not start those lifecycles. Shutdown cancels waits and scheduled retries, fences late results from storage and Telegram side effects, and drains publication and delivery work. Runtime-owned discovery processes outlive an individual consumer only while another consumer still needs them.
 
 The bot adapter enforces application-admin scope independently of Telegram group roles. Configuration owns instance roots and bot-wide grants; SQLite owns topic-local grants across restarts. Promotion rechecks current human membership and assignment authority before writing through the owning persistence boundary. Topic authority cannot grant access outside its topic. See [Product](PRODUCT.md#12-prompts-and-permissions) for command behavior.

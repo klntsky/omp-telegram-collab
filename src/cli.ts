@@ -13,7 +13,6 @@ import { createBot, type BotService } from './bot.js';
 import { createServer, type GatewayServer } from './server.js';
 import { OmpRuntime } from './runtime.js';
 import { runAdmin, notifyReload } from './cli-admin.js';
-import { sendTo } from './telegram-destination.js';
 
 let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
@@ -36,7 +35,7 @@ async function notifyGroups(config: AppConfig, bots: BotService[], store: Store,
       signal?.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(abort, 5000);
       try {
-        await sendTo(bot.bot.api, {kind:'general',chatId}, text, undefined, controller.signal);
+        await bot.sendStatusNotice(chatId, text, controller.signal);
       } finally {
         clearTimeout(timeout);
         signal?.removeEventListener('abort', abort);
