@@ -191,6 +191,8 @@ Telegram mirroring retries an unexpected Collab disconnect up to five times with
 
 Failure to acquire or reconnect to an existing managed host does not retire it. The original connection diagnostic is preserved, and a later attempt can reconnect to the same host.
 
+New managed hosts remain in startup when Collab discovery temporarily reports that a just-discovered host is absent. Recovery uses the original startup deadline and revalidates host identity before connecting. If discovery remains unavailable, startup fails with the original diagnostic. Other connection and identity failures are not retried by this startup recovery.
+
 The Mini App retains its transcript and draft during transient failures. Reconnects use capped exponential backoff and a fresh single-use ticket with renewed authentication and membership checks. They do not queue or replay instructions. Leave, denied membership, expired launch credentials, invalid actions, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available. Reopen OPEN AGENT when Telegram credentials expire.
 
 ## 4. Attached sessions and transcript

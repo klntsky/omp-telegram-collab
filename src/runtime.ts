@@ -1243,6 +1243,7 @@ export class OmpRuntime {
         record.exited = true;
         if (this.#managed.get(id) === record) this.#managed.delete(id);
       });
+      let discoveryFailure: Error | undefined;
       while (Date.now() < deadline) {
         if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
         this.#assertActive();
@@ -1253,15 +1254,23 @@ export class OmpRuntime {
           if (!await belongsTo(host.pid,child.pid)) continue;
           if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new Error('Managed OMP process switched its pinned session');
           if (!await this.#presetReady(dir, pin, host.pid)) continue;
-          const binding = await this.#resolve(host,deadline);
+          let binding: HostBinding;
+          try {
+            binding = await this.#resolve(host,deadline);
+          } catch (error) {
+            if (!(error instanceof Error) || !('code' in error) || error.code !== 1 ||
+                !error.message.endsWith(`\nerror: no active Collab host matches ${host.instanceId}\n`)) throw error;
+            discoveryFailure = error;
+            continue;
+          }
           record.binding = binding;
           this.#assertActive();
           return binding;
         }
         await delay(Math.min(200,Math.max(1,deadline-Date.now())));
-        hosts = await this.#list(deadline);
+        if (Date.now() < deadline) hosts = await this.#list(deadline);
       }
-      throw new Error('Managed OMP startup timed out');
+      throw discoveryFailure ?? new Error('Managed OMP startup timed out');
     } catch (error) {
       if (spawned && !spawned.exited && !this.#killing.has(id)) {
         const cleanup = this.#shutdown(id, spawned);
