@@ -40,6 +40,11 @@ export async function verifyGatewayFlow() {
     await waitUntil(() => frames.some(frame => frame.t === 'snapshot-chunk'), 'authenticated socket did not receive session snapshot');
     const promptsBeforeRevocation = app.accepted.filter(frame => frame.t === 'prompt').length;
     app.setMember(false);
+    app.emit({ t: 'error', message: 'read continuity after membership removal' });
+    socket.send(JSON.stringify({ t: 'fetch-transcript', reqId: 901, agentId: 'worker', fromByte: 0 }));
+    await waitUntil(() => frames.some(frame => frame.t === 'error' && frame.message === 'read continuity after membership removal') &&
+      app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 901), 'admitted flow lost output or read-fetch access after removal');
+    assert.equal(socket.readyState, WebSocket.OPEN);
     const socketClosed = once(socket, 'close');
     socket.send(JSON.stringify({ t: 'prompt', text: 'must be rejected after leaving' }));
     await socketClosed;
@@ -59,7 +64,7 @@ export async function verifyGatewayFlow() {
     const deniedViewer = once(reader, 'close');
     reader.send(JSON.stringify({ t: 'abort' }));
     await deniedViewer;
-    assert.equal(app.accepted.length, beforeViewerAction, 'Telegram administrators without domain grants cannot mutate');
+    assert.equal(app.accepted.length, beforeViewerAction, 'a demoted administrator cannot mutate through an admitted socket');
     const viewerResponse = await authorize();
     const viewerData = await viewerResponse.json() as { ticket: string };
     reader = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${viewerData.ticket}`, { origin: app.config.publicUrl });
@@ -70,16 +75,18 @@ export async function verifyGatewayFlow() {
     assert.equal(viewerFrames.find(frame => frame.t === 'welcome')?.readOnly, true);
     app.setCurrentMember({ username: ownerUsername, status: 'member' });
     app.setMember(false);
-    const readerClosed = once(reader, 'close');
     const privateReply: AssistantMessage = {
       role: 'assistant', content: [{ type: 'text', text: 'Private output after membership removal' }],
       model: 'fixture-no-model-call', stopReason: 'stop', timestamp: Date.now(),
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
     };
     app.emit({ t: 'event', event: { type: 'message_end', message: privateReply } });
-    await readerClosed;
-    assert.ok(received.every(text => !text.includes('Private output after membership removal')), 'passive reader cannot receive frames after membership removal');
-    console.log('PASS Gateway signed Mini App authorization, private capability isolation, authenticated snapshots, viewer read-only startup, forged viewer mutation rejection, live role revocation, HTTP denial after removal, and passive reader revocation.');
+    await waitUntil(() => received.some(text => text.includes('Private output after membership removal')), 'admitted passive reader lost output after membership removal');
+    reader.send(JSON.stringify({ t: 'fetch-transcript', reqId: 902, agentId: 'worker', fromByte: 0 }));
+    await waitUntil(() => app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 902), 'admitted viewer lost read-fetch access');
+    assert.equal(reader.readyState, WebSocket.OPEN);
+    assert.equal((await authorize()).status, 403, 'a new flow must recheck Telegram membership');
+    console.log('PASS Gateway signed Mini App authorization, private capability isolation, authenticated snapshots, viewer read-only startup, fresh mutation authorization, HTTP denial after removal, and flow-scoped output/read-fetch continuity.');
   } finally {
     socket?.terminate();
     reader?.terminate();

@@ -39,7 +39,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 export function createServer(options: ServerOptions): GatewayServer {
-  const tickets = new TicketStore();
+  const tickets = new TicketStore<TicketIdentity & {access: {session: TopicSession; canControl: boolean}}>();
   const sockets = new WebSocketServer({noServer:true,maxPayload:6*1024*1024,perMessageDeflate:false});
   const botMap = new Map(options.bots.map(bot => [bot.id,bot]));
   if (botMap.has(0) || botMap.size !== options.bots.length) throw new Error('Initialize each distinct bot before creating the server');
@@ -54,7 +54,7 @@ export function createServer(options: ServerOptions): GatewayServer {
   function checkGeneration(identity: TicketIdentity): void {
     if (identity.generation !== options.store.getSessionGeneration(identity.sessionId)) throw new SessionGenerationError('Session was killed; rejoin explicitly');
   }
-  async function authorize(identity: TicketIdentity, expected?: TopicSession): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
+  async function authorize(identity: TicketIdentity, expected?: TopicSession, access?: {canControl: boolean}): Promise<{bot:GatewayBot;session:TopicSession;canControl:boolean}> {
     checkTermination();
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
     if (!bot || !session || session.botId !== identity.botId || Date.now()/1000 - identity.authDate > 3600) throw new Error('Access denied');
@@ -62,7 +62,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
         await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
     checkGeneration(identity);
-    const canControl = await bot.authorizeSession(session,identity.userId);
+    const canControl = access ? access.canControl : await bot.authorizeSession(session,identity.userId);
     const current = options.store.getSession(identity.sessionId);
     if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
@@ -101,9 +101,9 @@ export function createServer(options: ServerOptions): GatewayServer {
             displayName:[authentication.user.first_name,authentication.user.last_name].filter(Boolean).join(' ').slice(0,80),
             authDate:authentication.authDate,
           };
-          const {session} = await authorize(identity);
+          const {session,canControl} = await authorize(identity);
           checkGeneration(identity);
-          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,ticket:tickets.issue(identity),displayName:participantName(identity)});
+          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,ticket:tickets.issue({...identity,access:{session,canControl}}),displayName:participantName(identity)});
           return;
         } finally {
           pendingRequests--;
@@ -144,7 +144,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closing || url.pathname !== '/api/socket' || (request.headers.origin && request.headers.origin !== publicOrigin) || sockets.clients.size >= 256 || url.searchParams.getAll('ticket').length !== 1) throw new Error('Access denied');
       const identity = tickets.consume(url.searchParams.get('ticket') ?? '');
       if (!identity) throw new Error('Access denied');
-      await authorize(identity);
+      await authorize(identity,identity.access.session,identity.access);
       checkGeneration(identity);
       checkTermination();
       if (socket.destroyed || closing) return;
@@ -160,12 +160,12 @@ export function createServer(options: ServerOptions): GatewayServer {
       clearTimeout(timeout);
     });
   });
-  function connectSocket(ws: WebSocket, identity: TicketIdentity): void {
+  function connectSocket(ws: WebSocket, identity: TicketIdentity & {access: {session: TopicSession; canControl: boolean}}): void {
     let upstream: CollabConnection | undefined;
     let release: (() => void) | undefined;
     let connectedSession: TopicSession | undefined;
     let hostReadOnly = true;
-    let presentedCanControl: boolean | undefined;
+    const readAccess = identity.access;
     let closed = false, queued = 0, queuedBytes = 0;
     let tail: Promise<void> = Promise.resolve();
     let outgoing: { frame: HostFrame; payload: string }[] = [];
@@ -208,23 +208,18 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed || outgoingScheduled || !outgoing.length) return;
       outgoingScheduled = true;
       enqueue(0,async () => {
-        // Frames arriving during this check belong to the next freshly authorized batch.
+        // Frames arriving during this local check belong to the next batch.
         const batch = outgoing;
         const batchBytes = pendingBytes;
         outgoing = [];
         pendingBytes = 0;
         try {
-          const current = await authorize(identity,connectedSession);
-          if (presentedCanControl !== undefined && current.canControl !== presentedCanControl) {
-            fail(1012,'Session permissions changed; reconnecting');
-            return;
-          }
+          const current = await authorize(identity,connectedSession,readAccess);
           for (const {frame,payload} of batch) {
             if (closed || ws.readyState !== WebSocket.OPEN) return;
             checkTermination();
             if (ws.bufferedAmount > 4*1024*1024) { fail(4008,'Slow connection'); return; }
             const value = frame.t === 'welcome' ? JSON.stringify({...frame,readOnly:Boolean(frame.readOnly || current.session.status === 'closed' || !current.canControl)}) : payload;
-            if (frame.t === 'welcome') presentedCanControl = current.canControl;
             const sent = Promise.withResolvers<void>();
             ws.send(value,error => error ? sent.reject(error) : sent.resolve());
             await sent.promise;
@@ -247,7 +242,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       try { frame = validateGuestFrame(JSON.parse(data.toString())); }
       catch { fail(4002,'Invalid action'); return; }
       enqueue(Buffer.byteLength(data.toString()),async () => {
-        const {bot,session,canControl} = await authorize(identity,connectedSession);
+        const {bot,session,canControl} = await authorize(identity,connectedSession,frame.t === 'fetch-transcript' ? readAccess : undefined);
         switch (frame.t) {
           case 'fetch-transcript': break;
           case 'prompt':
@@ -269,20 +264,20 @@ export function createServer(options: ServerOptions): GatewayServer {
       });
     });
     enqueue(0,async () => {
-      const {bot,session} = await authorize(identity);
+      const {bot,session} = await authorize(identity,readAccess.session,readAccess);
       connectedSession = session;
       if (closed) return;
       checkGeneration(identity);
       release = options.runtime.retain(session.id);
       checkTermination();
-      const binding = await options.runtime.ensure(session);
+      const binding = await options.runtime.ensure(session,async () => { await authorize(identity,session); });
       if (closed) return;
       checkTermination();
-      await authorize(identity,session);
-      await bot.ensureMirroring(session,binding);
+      await authorize(identity,session,readAccess);
+      await bot.ensureMirroring(session,binding,async () => { await authorize(identity,session); });
       if (closed) return;
       checkTermination();
-      await authorize(identity,session);
+      await authorize(identity,session,readAccess);
       const connection = await (options.connect ?? connectCollab)(binding,participantName(identity),{
         onFrame: frame => {
           try { checkTermination(); }
@@ -301,7 +296,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         onClose: () => fail(1011,'Host disconnected'),
       });
       try {
-        await authorize(identity,session);
+        await authorize(identity,session,readAccess);
         if (closed) connection.close(); else upstream = connection;
       } catch (error) {
         connection.close();

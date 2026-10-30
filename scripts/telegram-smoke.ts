@@ -202,8 +202,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       topicTitleStatuses.set(session.id,{worktree:true,branch:_branch});
       return `Moved to worktree ${session.runtime.worktreePath}`;
     },
-    async ensure(session: TopicSession) {
+    async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
       if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) {
+        await beforeMutation?.();
         if (managedSessions.size >= sessionLimit) throw new SessionCapacityError(sessionLimit);
         managedSessions.add(session.id);
       }

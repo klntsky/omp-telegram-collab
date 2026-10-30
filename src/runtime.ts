@@ -512,7 +512,7 @@ export class OmpRuntime {
     }
     this.#discovered = true;
   }
-  async #admitManaged(session: TopicSession): Promise<HostBinding> {
+  async #admitManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     const id = session.id;
     const previous = this.#admission;
     const {promise,resolve} = Promise.withResolvers<void>();
@@ -534,6 +534,7 @@ export class OmpRuntime {
         }
       }
       if (!this.#managed.has(id)) {
+        await beforeMutation?.();
         if (this.#managed.size >= this.#sessionLimit) await this.retireIdle(0);
         if (this.#managed.size >= this.#sessionLimit) throw new SessionCapacityError(this.#sessionLimit);
         this.#managed.set(id,null);
@@ -542,7 +543,7 @@ export class OmpRuntime {
     } finally {
       resolve();
     }
-    return this.#ensureManaged(session);
+    return this.#ensureManaged(session,beforeMutation);
   }
   async isRunning(session: TopicSession): Promise<boolean> {
     this.#assertActive();
@@ -562,7 +563,7 @@ export class OmpRuntime {
     return pin.cwd === this.#sessionCwd(session) && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
   }
 
-  ensure(session: TopicSession): Promise<HostBinding> {
+  ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
     if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
     if (!Object.hasOwn(this.#config.instances, session.instancePath)) return Promise.reject(new Error('Instance path is not configured'));
@@ -570,7 +571,7 @@ export class OmpRuntime {
     if (pending) return pending;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
     const operation = session.runtime.kind === 'managed'
-      ? this.#admitManaged(session)
+      ? this.#admitManaged(session,beforeMutation)
       : this.attach(session.runtime.instanceId, session.instancePath).then(binding => {
         if (session.runtime.kind !== 'attached' || binding.sessionId !== session.runtime.sessionId) {
           throw new Error('Attached OMP session identity changed');
@@ -1143,7 +1144,7 @@ export class OmpRuntime {
     return { dir, pin };
   }
 
-  async #ensureManaged(session: TopicSession): Promise<HostBinding> {
+  async #ensureManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     const id = session.id;
     let owned = this.#managed.get(id);
     let spawned: ManagedHost | undefined;
@@ -1200,6 +1201,7 @@ export class OmpRuntime {
         delete owned.retirement;
         owned.retiring = false;
       }
+      await beforeMutation?.();
       const launch = await this.#presetLaunch(session);
       const overlay = {
         collab: { autoStart: 'control', ...(this.#config.omp.relayUrl ? { relayUrl: this.#config.omp.relayUrl } : {}) },
@@ -1213,6 +1215,7 @@ export class OmpRuntime {
       } else {
         await unlink(startupFile).catch(error => { if (!errno(error, 'ENOENT')) throw error; });
       }
+      await beforeMutation?.();
       this.#assertActive();
       const child = spawn(process.execPath, [
         fileURLToPath(new URL('./host-supervisor.mjs',import.meta.url)),

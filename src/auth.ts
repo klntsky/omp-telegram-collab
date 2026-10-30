@@ -50,16 +50,16 @@ export function validateGuestFrame(value: unknown): Exclude<GuestFrame, {t:'hell
   return guestSchema.parse(value) as Exclude<GuestFrame, {t:'hello'}>;
 }
 export interface TicketIdentity { botId: number; sessionId: string; generation: number; userId: number; username?: string; displayName: string; authDate: number }
-export class TicketStore {
-  private readonly tickets = new Map<string, { identity: TicketIdentity; expires: number }>();
-  issue(identity: TicketIdentity, now = Date.now()): string {
+export class TicketStore<T extends TicketIdentity = TicketIdentity> {
+  private readonly tickets = new Map<string, { identity: T; expires: number }>();
+  issue(identity: T, now = Date.now()): string {
     for (const [key, value] of this.tickets) if (value.expires <= now) this.tickets.delete(key);
     if (this.tickets.size >= 10000) throw new Error('Too many pending connections');
     const ticket = randomBytes(32).toString('base64url');
     this.tickets.set(ticket, { identity, expires: now + 60000 });
     return ticket;
   }
-  consume(ticket: string, now = Date.now()): TicketIdentity | undefined {
+  consume(ticket: string, now = Date.now()): T | undefined {
     const value = this.tickets.get(ticket);
     this.tickets.delete(ticket);
     return value && value.expires > now ? value.identity : undefined;

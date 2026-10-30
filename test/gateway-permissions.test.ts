@@ -153,10 +153,10 @@ for (const change of ['membership', 'generation'] as const) {
     const entered = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
     const ensure = app.runtime.ensure.bind(app.runtime);
-    app.runtime.ensure = async current => {
+    app.runtime.ensure = async (current, beforeMutation) => {
       entered.resolve();
       await resume.promise;
-      return ensure(current);
+      return ensure(current, beforeMutation);
     };
     try {
       const response = await fetch(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }) });
@@ -210,21 +210,32 @@ test('multiline authorization diagnostics exceed close limits without losing the
   } finally { socket?.terminate(); await app.close(); }
 });
 
-test('observed role changes reconnect viewers without forwarding the stale output batch', async () => {
-  const { app, connect } = await fixture();
-  const sockets: WebSocket[] = [];
-  try {
-    const controller = await connect(); sockets.push(controller.socket);
-    app.setCurrentMember({ username: 'viewer', status: 'member' });
-    const closed = once(controller.socket, 'close');
-    app.emit({ t: 'error', message: 'batch after role change' });
-    const [code] = await closed;
-    assert.equal(code, 1012);
-    assert.ok(!controller.frames.some(frame => frame.t === 'error' && frame.message === 'batch after role change'));
-    const reader = await connect(); sockets.push(reader.socket);
-    assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
-  } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
-});
+for (const change of ['role', 'membership'] as const) {
+  test(`admitted readers retain output and fetch access after Telegram ${change} changes`, async () => {
+    const { app, session, connect } = await fixture();
+    const sockets: WebSocket[] = [];
+    try {
+      const controller = await connect(); sockets.push(controller.socket);
+      if (change === 'role') app.setCurrentMember({ username: 'viewer', status: 'member' });
+      else app.setMember(false);
+      app.emit({ t: 'error', message: 'output admitted for this flow' });
+      controller.socket.send(JSON.stringify({ t: 'fetch-transcript', reqId: 902, agentId: 'worker', fromByte: 0 }));
+      const deadline = Date.now() + 5000;
+      while (!controller.frames.some(frame => frame.t === 'error' && frame.message === 'output admitted for this flow') ||
+        !app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 902)) {
+        assert.ok(Date.now() < deadline, 'admitted flow lost read access');
+        await delay(10);
+      }
+      assert.equal(controller.socket.readyState, WebSocket.OPEN);
+      const response = await fetch(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }) });
+      assert.equal(response.status, change === 'membership' ? 403 : 200);
+      if (change === 'role') {
+        const reader = await connect(); sockets.push(reader.socket);
+        assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
+      }
+    } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
+  });
+}
 
 for (const change of ['role', 'assignment', 'generation'] as const) {
   test(`mutations recheck ${change} changed during membership lookup`, async () => {
@@ -256,3 +267,97 @@ for (const change of ['role', 'assignment', 'generation'] as const) {
     } finally { resume.resolve(); socket?.terminate(); await app.close(); }
   });
 }
+
+for (const change of ['membership', 'role'] as const) {
+  test(`queued mutations recheck ${change} immediately before execution`, async () => {
+    const { app, connect } = await fixture();
+    let socket: WebSocket | undefined;
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const relay = app.service.relayPrompt.bind(app.service);
+    app.service.relayPrompt = async (...args) => {
+      entered.resolve();
+      await resume.promise;
+      await relay(...args);
+    };
+    try {
+      socket = (await connect()).socket;
+      socket.send(JSON.stringify({ t: 'prompt', text: 'authorized before revocation' }));
+      await entered.promise;
+      assert.ok(app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'authorized before revocation'));
+      const closed = once(socket, 'close');
+      socket.send(JSON.stringify({ t: 'abort' }));
+      if (change === 'membership') app.setMember(false);
+      else app.setCurrentMember({ status: 'member' });
+      resume.resolve();
+      await closed;
+      assert.ok(!app.accepted.some(frame => frame.t === 'abort'), 'queued mutation used authorization from before it reached execution');
+    } finally { resume.resolve(); socket?.terminate(); await app.close(); }
+  });
+}
+
+for (const change of ['membership', 'role'] as const) {
+  for (const action of [
+    { t: 'prompt', text: 'revoked instruction' }, { t: 'abort' },
+    { t: 'agent-cmd', cmd: 'kill', agentId: 'worker' },
+    { t: 'agent-cmd', cmd: 'revive', agentId: 'worker' },
+    { t: 'agent-cmd', cmd: 'chat', agentId: 'worker', text: 'revoked subagent instruction' },
+    { t: 'ui-response', reqId: 903, value: 'approve' },
+  ]) {
+    test(`fresh ${change} revocation denies admitted ${action.t}${'cmd' in action ? ` ${action.cmd}` : ''}`, async () => {
+      const { app, connect } = await fixture();
+      let socket: WebSocket | undefined;
+      try {
+        socket = (await connect()).socket;
+        if (change === 'membership') app.setMember(false);
+        else app.setCurrentMember({ status: 'member' });
+        const before = app.accepted.length;
+        const messagesBefore = app.messages.length;
+        const closed = once(socket, 'close');
+        socket.send(JSON.stringify(action));
+        await closed;
+        assert.equal(app.accepted.length, before);
+        assert.ok(!app.messages.slice(messagesBefore).some(message => String(message.text).includes('answered: approve')));
+      } finally { socket?.terminate(); await app.close(); }
+    });
+  }
+}
+
+for (const change of ['assignment', 'generation'] as const) {
+  test(`local ${change} invalidation still blocks admitted output`, async () => {
+    const { app, session, connect } = await fixture();
+    let socket: WebSocket | undefined;
+    try {
+      const reader = await connect(); socket = reader.socket;
+      if (change === 'assignment') app.config.instances[session.instancePath]!.chats = [];
+      else app.store.advanceSessionGeneration(session.id);
+      const closed = once(socket, 'close');
+      app.emit({ t: 'error', message: 'must not cross local invalidation' });
+      await closed;
+      assert.ok(!reader.frames.some(frame => frame.t === 'error' && frame.message === 'must not cross local invalidation'));
+    } finally { socket?.terminate(); await app.close(); }
+  });
+}
+
+test('an admitted ticket retains read access through warm upgrade and initialization', async () => {
+  const { app, session, connect } = await fixture();
+  const sockets: WebSocket[] = [];
+  try {
+    const initial = await connect(); sockets.push(initial.socket);
+    const response = await fetch(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }) });
+    assert.equal(response.status, 200);
+    const { ticket } = await response.json() as { ticket: string };
+    app.setMember(false);
+    const socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${ticket}`, { origin: app.config.publicUrl });
+    sockets.push(socket);
+    const frames: HostFrame[] = [];
+    socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
+    await once(socket, 'open');
+    const deadline = Date.now() + 5000;
+    while (!frames.some(frame => frame.t === 'snapshot-chunk')) {
+      assert.ok(Date.now() < deadline, 'admitted warm flow lost initialization access');
+      await delay(10);
+    }
+    assert.equal(socket.readyState, WebSocket.OPEN);
+  } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
+});

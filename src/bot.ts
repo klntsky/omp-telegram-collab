@@ -24,7 +24,7 @@ class AuthorizationDeniedError extends Error {}
 export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
-  ensure(session: TopicSession): Promise<HostBinding>;
+  ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
   attach(instanceId: string, instancePath: string): Promise<HostBinding>;
@@ -618,9 +618,9 @@ export class BotService {
     this.sessionKillHandlers.add(handler);
     return () => { this.sessionKillHandlers.delete(handler); };
   }
-  async ensureMirroring(session: TopicSession, binding: HostBinding): Promise<void> {
+  async ensureMirroring(session: TopicSession, binding: HostBinding, beforeMutation?: () => Promise<void>): Promise<void> {
     this.requireSessionAssignment(session);
-    await this.listen(session,binding);
+    await this.listen(session,binding,beforeMutation);
   }
   async relayPrompt(session: TopicSession, user: {userId:number;username?:string;displayName:string}, text: string): Promise<void> {
     await this.relayMiniAppText(session,user,`posted a prompt: ${text}`);
@@ -1786,13 +1786,14 @@ export class BotService {
     }
     listener?.connection?.close();
   }
-  private listen(session: TopicSession, binding?: HostBinding): Promise<CollabConnection> {
+  private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<CollabConnection> {
     this.requireSessionAssignment(session);
     const existing = this.listeners.get(session.id);
     if (existing?.promise) return existing.promise;
     const listener: Listener = {sessionId:session.id,tail:Promise.resolve(),queued:0,recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),pendingStops:[],queuedMessages:0,activity:'finished'};
     this.listeners.set(session.id, listener);
-    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session)).then(async binding => {
+    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session,beforeMutation)).then(async binding => {
+      await beforeMutation?.();
       await this.applySessionTitle(session);
       this.requireSessionAssignment(session);
       return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
