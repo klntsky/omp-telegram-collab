@@ -117,7 +117,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
    3. Enter a description, such as `Run coding sessions from Telegram`.
-   4. Upload a 640 × 360 photo for the app.
+   4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
    5. Send `/empty` to skip the optional GIF.
    6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`. It looks like `https://your-host.example/?bot=123456789`. Keep the `?bot=...` part. Do not enter a `t.me` link here.
    7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
