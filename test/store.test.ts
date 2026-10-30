@@ -213,6 +213,47 @@ test('confirmed topic icons persist exactly across restart and clearing stays is
   }
 });
 
+test('human finish icons persist independently of projected icons and preserve empty and status choices', async () => {
+  const directory = await mkdtemp(join(tmpdir(),'omp-topic-finish-icons-'));
+  const filename = join(directory,'topics.sqlite');
+  let store = new Store(filename);
+  try {
+    const preferences = ['human-selected-icon','','5312016608254762256','5408906741125490282','5237699328843200968'];
+    const sessions = preferences.map((preference,index) => {
+      const session = store.createSession({...topic,threadId:topic.threadId+index},`Preference ${index}`);
+      assert.equal(store.getTopicFinishIcon(session.id),undefined);
+      store.setTopicFinishIcon(session.id,preference);
+      store.setTopicIcon(session.id,'5312016608254762256');
+      assert.equal(store.getTopicFinishIcon(session.id),preference);
+      return session;
+    });
+    const otherBot = store.createSession({...topic,botId:botId+1},'Other bot');
+    const otherChat = store.createSession({...topic,chatId:chatId-1},'Other chat');
+    store.close();
+    store = new Store(filename);
+    for (const [index,session] of sessions.entries()) {
+      assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
+      assert.equal(store.getTopicIcon(session.id),'5312016608254762256');
+      store.setTopicIcon(session.id,undefined);
+      assert.equal(store.getTopicFinishIcon(session.id),preferences[index],'clearing a projection cannot clear human intent');
+    }
+    assert.equal(store.getTopicFinishIcon(otherBot.id),undefined);
+    assert.equal(store.getTopicFinishIcon(otherChat.id),undefined);
+    assert.equal(store.getTopicFinishIcon('unknown-session'),undefined);
+    store.setTopicFinishIcon(sessions[0]!.id,'updated-human-icon');
+    store.close();
+    store = new Store(filename);
+    assert.equal(store.getTopicFinishIcon(sessions[0]!.id),'updated-human-icon');
+    for (const [index,session] of sessions.entries()) {
+      if (index > 0) assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
+      assert.equal(store.getTopicIcon(session.id),undefined);
+    }
+  } finally {
+    store.close();
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
 test('current sessions retain pending tasks and delivery metadata across a disk reopen', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-current-path-'));
   const filename = join(directory, 'telegram.sqlite');

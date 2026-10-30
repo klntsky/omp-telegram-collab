@@ -139,12 +139,13 @@ Agent questions include the full text, option descriptions, and numbered option 
 | 👀 reaction | The bot received eligible input. |
 | 🤝 reaction | OMP confirmed receipt. For `/stop`, interruption was confirmed. For `/kill`, the process exited. |
 | ⚡ topic icon | An agent turn is running, including tool work. |
-| ✅ topic icon | OMP is alive and idle. |
-| 🏁 topic icon | OMP is stopped or has not started. |
+| 🏁 topic icon, or your chosen topic icon | No agent turn is running, whether the host is idle, stopped, or not started. |
 
 Approval alone does not produce a receipt reaction. Failed or rejected instructions do not get one. A relay disconnect does not mean OMP stopped. The bot checks liveness every 30 seconds and preserves confirmed icons across restarts. Reactions and icon changes depend on Telegram permissions and rate limits.
 
-Topics created with an initial task start with the ⚡ icon directly and retain it during host startup and initial task admission. Empty topics start stopped.
+Topics created with an initial task start with the ⚡ icon directly and retain it during host startup and initial task admission. Empty topics start with the finish icon.
+
+Changing a topic icon saves it as that topic's finish icon, regardless of session activity when you choose it. The choice persists across bot restarts and host stops or resumes. Running turns still use ⚡ and restore your choice when finished. Icon choices are used verbatim, including an empty icon or an activity icon you selected. Bot-authored icon changes do not replace your saved choice. The bot does not use a separate green-checkmark state for idle live hosts.
 
 Host state snapshots reconcile the activity icon: no streaming or queued work clears a stale running indication even if an agent-end event was missed. Agent lifecycle events update the icon promptly between snapshots; pending initial tasks retain the startup indication. The bot removes its own icon-change service notices, not human icon edits or rename notices. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
 

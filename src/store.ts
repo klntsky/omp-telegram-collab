@@ -45,6 +45,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
@@ -201,6 +202,14 @@ export class Store {
   setTopicIcon(id: string, iconId: string | undefined): void {
     if (iconId === undefined) this.db.prepare('DELETE FROM session_topic_icons WHERE session_id=?').run(id);
     else this.db.prepare('INSERT INTO session_topic_icons VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET icon_id=excluded.icon_id').run(id,iconId);
+  }
+  getTopicFinishIcon(id: string): string | undefined {
+    const row = this.db.prepare('SELECT icon_id FROM session_topic_finish_icons WHERE session_id=?').get(id);
+    return row ? String(row.icon_id) : undefined;
+  }
+  setTopicFinishIcon(id: string, iconId: string | undefined): void {
+    if (iconId === undefined) this.db.prepare('DELETE FROM session_topic_finish_icons WHERE session_id=?').run(id);
+    else this.db.prepare('INSERT INTO session_topic_finish_icons VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET icon_id=excluded.icon_id').run(id,iconId);
   }
   rememberReply(id: string, fingerprint: string): boolean {
     const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, fingerprint, Date.now());
