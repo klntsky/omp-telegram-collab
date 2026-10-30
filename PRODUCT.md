@@ -10,7 +10,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | Command or action | Result |
 | --- | --- |
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
-| `/worktree [task]` | Create a separate topic and managed session in a new Git worktree, from General or any topic. No task creates an empty session rather than asking for a task. |
+| `/worktree [branch]` | Run OMP's native worktree operation in the current topic's managed session. In General, create an empty session topic first. The optional argument is a branch name, not a task. |
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
@@ -38,9 +38,9 @@ General never becomes a session. `/stop` and `/kill` work only in session topics
 
 New session topics get a quietly pinned OPEN AGENT message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
 
-`/worktree` creates a unique Git worktree from the assigned repository's current HEAD, without copying uncommitted changes. The session keeps the configured project assignment and authorization but runs in the new worktree. Worktrees persist after stopping, killing, detaching, or restarting a session and are not automatically removed. Creation errors retain their Git diagnostics and do not create a session.
+`/worktree` delegates worktree creation, uncommitted-change transfer, and session relocation to OMP's own command. In a session topic it keeps the same topic and conversation history. The session retains its configured project assignment and authorization while its execution directory changes. Worktree location, branch defaults, change transfer, and source-checkout cleanup follow OMP's settings. Worktrees are not automatically removed when sessions stop or the service restarts.
 
-`/worktree <task>` uses the same authorization, proposal approval, skill selection, quote, image, and forwarding rules as `/new <task>`. It always creates a separate topic, including when invoked inside an existing or detached topic. Only an instance root or bot admin can create it directly or approve its proposal. No Git worktree is created for an unapproved proposal. A bare `/worktree` preserves explicit pending skills by transferring them from the originating scope to the new topic for that user's next prompt, and snapshots the forum's new-topic default for the first prompt. With a task, skills are read from the originating scope and the forum default, not the source topic's unused first-prompt default.
+An instance root, bot admin, or the topic's admin can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same instance-root, bot-admin, or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.
 
 The pinned message contains only “Use /p to submit a prompt” in explicit-prompt mode or “Send a message to prompt the agent” in all-messages mode, plus the OPEN AGENT button.
 
@@ -123,7 +123,7 @@ Ordinary group members retain watch-only Mini App access and the Telegram `/stop
 
 The bot mirrors agent replies into the topic using Telegram rich messages with native rich Markdown, including headings, lists, tables, formulas, and media supported by Telegram. Agent Markdown is sent directly, not converted into ordinary-message HTML or flattened preformatted tables. Long replies split at Markdown block boundaries where possible within the rich-message text limit; oversized code blocks remain fenced and Unicode characters are not split. A single oversized non-code block may span messages. Replies retain their native reply target across service restarts. Telegram failure replies include the underlying operation error as a literal code block.
 
-Mini App prompts also appear in the topic with the sender's Telegram username, or their display name and numeric ID if they have no username.
+Mini App prompts and text answers to agent questions also appear in the topic with the sender's Telegram username, or their display name and numeric ID if they have no username. Text answers preserve multiline content and go to the question, not the prompt queue.
 
 Agent questions include the full text, option descriptions, and numbered option buttons in compact rows of up to five, with Cancel separate. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the Mini App or terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
 

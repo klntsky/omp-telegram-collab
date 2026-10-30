@@ -25,7 +25,7 @@ Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/pa
 | ❌ | Branching and history navigation (`/branch`, `/rewind`, `/fork`, `/tree`) | No branch or rewind controls. |
 | ❌ | Reset, delete, and retry (`/clear`, `/delete`, `/fresh`, `/retry`) | No equivalent actions. |
 | ❌ | Manual context management (`/compact`, `/shake`, `/handoff`) | Automatic compaction is visible in the Mini App; manual controls are absent. |
-| ⚠️ | Worktree sessions (`/wt`, `/worktree`) | `/worktree [task]` creates a separate session from repository HEAD. It does not move the current session or carry uncommitted changes. |
+| ✅ | Worktree sessions (`/wt`, `/worktree`) | `/worktree [branch]` invokes OMP's own worktree operation, keeping the topic's session and carrying uncommitted changes according to OMP's settings. In General, it creates a topic first. |
 | ⚠️ | Live collaboration (`/collab`, `/join`, `/leave`) | `/attach INSTANCE_ID` connects a local host; `/session` opens the Mini App with Leave and Rejoin controls. No arbitrary room joining or share-link creation. |
 | ❌ | Export and saved-session sharing (`/export`, `/dump`, `/share`) | No HTML export, request dump, or encrypted sharing controls. |
 | ⚠️ | Copy text and open links (`/copy`, `/open`) | Use ordinary browser selection and links. No OMP conversation picker or last-link action. |
@@ -51,7 +51,7 @@ Compared with [OMP 18.14.0](https://github.com/can1357/oh-my-pi/tree/v18.14.0/pa
 | ❌ | Voice and recording (`/live`, `/record`) | No realtime voice or terminal-recording controls. |
 | ❌ | Changelog and shortcuts (`/changelog`, `/hotkeys`) | No corresponding OMP viewers. |
 | ⚠️ | CLI collaboration (`omp collab`, `omp join`) | `/attach` connects a local host, but does not expose the full CLI sharing and joining workflows. |
-| ⚠️ | CLI worktree management (`omp worktree`) | `/worktree` creates a worktree-backed session; no list or clear operations. |
+| ⚠️ | CLI worktree management (`omp worktree`) | `/worktree [branch]` invokes the session's native OMP worktree operation; no CLI list or clear interface. |
 | ⚠️ | CLI model, agent, and skill management (`omp models`, `omp agents`, `omp skill`) | `/list_model_presets`, Mini App subagent controls, and `/skills` cover parts of these workflows. |
 | ❌ | CLI protocols, credentials, and onboarding (`omp acp`, `omp auth`, `omp auth-broker`, `omp auth-gateway`, `omp login`, `omp token`, `omp setup`) | Run locally. Telegram `/setup` is unrelated to OMP onboarding. |
 | ❌ | CLI configuration and installation (`omp config`, `omp install`, `omp plugin`, `omp ssh`, `omp tiny-models`, `omp update`, `omp completions`) | Run locally. |

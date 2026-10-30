@@ -183,7 +183,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   let sessionLimit = config.omp.maxSessions;
   const managedSessions = new Set<string>();
   const runtime = {
-    async createWorktree(_instancePath: string) { return `/fixture/worktrees/${randomUUID()}`; },
+    async worktree(session: TopicSession, _branch?: string) {
+      session.runtime = {kind:'managed',worktreePath:`/fixture/worktrees/${randomUUID()}`};
+      return `Moved to worktree ${session.runtime.worktreePath}`;
+    },
     async ensure(session: TopicSession) {
       if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) {
         if (managedSessions.size >= sessionLimit) throw new SessionCapacityError(sessionLimit);

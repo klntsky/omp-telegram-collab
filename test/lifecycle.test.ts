@@ -51,7 +51,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
   writeConfig(config);
   const store = new Store(':memory:');
   const runtime = {
-    async createWorktree(): Promise<never> { throw new Error('No worktree creation expected in lifecycle check'); },
+    async worktree(): Promise<never> { throw new Error('No worktree creation expected in lifecycle check'); },
     async ensure(): Promise<never> { throw new Error('No sessions expected in lifecycle check'); },
     async isRunning() { return false; },
     async attach(): Promise<never> { throw new Error('No host attachment expected in lifecycle check'); },

@@ -187,7 +187,7 @@ export default async function hostLifecycle(pi) {
         input += part;
         if (!input.includes('\n')) return;
         received = true;
-        if (input.trim() !== 'retire') {
+        if (!['retire', 'retire-idle'].includes(input.trim())) {
           let request;
           const respond = result => {
             if (socket.destroyed) return;
@@ -224,6 +224,10 @@ export default async function hostLifecycle(pi) {
           void operation.then(text => respond({ text }), error => respond({ error: error instanceof Error ? error.message : String(error) }));
           return;
         }
+        if (input.trim() === 'retire-idle' && (!context.isIdle() || context.hasPendingMessages())) {
+          socket.end('busy\n');
+          return;
+        }
         descriptor.retiring = true;
         writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
         socket.end('requested\n');
@@ -244,6 +248,7 @@ export default async function hostLifecycle(pi) {
         socketPath,
         modelPresets: 2,
         skills: true,
+        worktree: true,
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();

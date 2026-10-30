@@ -90,6 +90,9 @@ export class Store {
     this.db.prepare('INSERT INTO skill_catalogs VALUES (?,?) ON CONFLICT(instance_path) DO UPDATE SET skills=excluded.skills').run(instancePath, JSON.stringify(skills));
   }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
+  setSessionRuntime(id: string, runtime: TopicSession['runtime']): void {
+    this.db.prepare('UPDATE sessions SET runtime=? WHERE id=?').run(JSON.stringify(runtime), id);
+  }
   getTopic(key: { botId: number; destination: TopicDestination }): TopicSession | undefined {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);

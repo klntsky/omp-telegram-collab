@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '../shared/contracts.js';
@@ -132,17 +132,28 @@ try {
   const worktreeRepository = join(dir, 'worktree-repository');
   await mkdir(worktreeRepository);
   execFileSync('git', ['init', '--quiet', worktreeRepository]);
-  execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '--allow-empty', '-m', 'Smoke root']);
+  await writeFile(join(worktreeRepository, 'tracked'), 'committed\n');
+  execFileSync('git', ['-C', worktreeRepository, 'add', 'tracked']);
+  execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '-m', 'Smoke root']);
+  await writeFile(join(worktreeRepository, 'tracked'), 'dirty tracked\n');
+  await writeFile(join(worktreeRepository, 'untracked'), 'dirty untracked\n');
   reopenedConfig.instances[worktreeRepository] = { admins: [], chats: [{ botId: session.botId, chatId: session.chatId - 2 }] };
   runtime = new OmpRuntime(reopenedConfig);
-  const worktreePath = await runtime.createWorktree(worktreeRepository);
   const worktreeSession = {
     ...session, id: 'worktree-smoke-session', instancePath: worktreeRepository, chatId: session.chatId - 2,
-    runtime: { kind: 'managed' as const, worktreePath },
+    runtime: { kind: 'managed' as const, worktreePath: undefined as string | undefined },
   };
   try {
     const binding = await runtime.ensure(worktreeSession);
-    const guest = await connectCollab(binding, 'Worktree verifier', {
+    const nativeOutput = await runtime.worktree(worktreeSession, `telegram-smoke-${Date.now()}`);
+    assert.match(nativeOutput, /Moved to worktree/);
+    const worktreePath = worktreeSession.runtime.worktreePath!;
+    assert.ok(worktreePath);
+    assert.equal(await readFile(join(worktreePath, 'tracked'), 'utf8'), 'dirty tracked\n');
+    assert.equal(await readFile(join(worktreePath, 'untracked'), 'utf8'), 'dirty untracked\n');
+    const moved = await runtime.ensure(worktreeSession);
+    assert.equal(moved.sessionId, binding.sessionId);
+    const guest = await connectCollab(moved, 'Worktree verifier', {
       onFrame(frame) {
         if (frame.t === 'welcome') assert.equal(frame.header.cwd, worktreePath);
       },
@@ -152,10 +163,14 @@ try {
     await runtime.validateSessionPaths([worktreeSession]);
     await runtime.kill(worktreeSession);
     assert.equal(await runtime.isRunning(worktreeSession), false);
+    await runtime.close();
+    runtime = new OmpRuntime(reopenedConfig);
+    await runtime.validateSessionPaths([worktreeSession]);
     const resumed = await runtime.ensure(worktreeSession);
     assert.equal(resumed.sessionId, binding.sessionId);
     await runtime.kill(worktreeSession);
-    console.log('PASS actual worktree host uses isolated cwd, validates persisted identity, and resumes exact history after kill.');
+    execFileSync('git', ['-C', worktreeRepository, 'worktree', 'remove', '--force', worktreePath]);
+    console.log('PASS native /worktree carries dirty tracked/untracked bytes, retains session identity, and resumes relocated history after runtime restart.');
   } finally {
     await runtime.close();
   }

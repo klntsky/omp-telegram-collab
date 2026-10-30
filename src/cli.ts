@@ -130,7 +130,9 @@ async function launch(config: AppConfig, onPollingFailure: () => void, initialLa
     store = new Store(join(config.dataDir, 'telegram.sqlite'));
     timing('store open', phaseAt);
     phaseAt = performance.now();
-    await runtime.validateSessionPaths(store.listSessions());
+    const sessions = store.listSessions();
+    await runtime.validateSessionPaths(sessions);
+    for (const session of sessions) store.setSessionRuntime(session.id, session.runtime);
     timing('session validation', phaseAt);
     for (const botConfig of config.bots) {
       const bot = createBot({ config, botConfig, token: botConfig.token, store, runtime });
@@ -214,7 +216,9 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       const next = readConfig(configPath);
       validateStart(next);
       if (JSON.stringify(next) === applied) return;
-      await generation.runtime.validateSessionPaths(generation.store.listSessions(), next);
+      const sessions = generation.store.listSessions();
+      await generation.runtime.validateSessionPaths(sessions, next);
+      for (const session of sessions) generation.store.setSessionRuntime(session.id, session.runtime);
       if (serviceSettings(next) === serviceSettings(generation.config)) {
         if (next.terminated === undefined) delete generation.config.terminated;
         Object.assign(generation.config, next);

@@ -26,7 +26,7 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     '--cwd',directory,'--session-dir',directory,'--resume',history,
     '--config',overlay,'--no-extensions','--no-skills','--no-rules','--no-context-files','--no-title',
     '--extension',extension,'--extension',fileURLToPath(new URL('../src/host-lifecycle.mjs',import.meta.url)),
-  ],{cwd:directory,env:{...process.env,TERM:'xterm-256color',OMP_TELEGRAM_SESSION_DIR:directory},name:'xterm-256color',cols:100,rows:30});
+  ],{cwd:directory,env:{...process.env,TERM:'xterm-256color',OMP_TELEGRAM_SESSION_DIR:directory,OMP_TELEGRAM_DEFAULT_PRESET:''},name:'xterm-256color',cols:100,rows:30});
   let exited = false;
   let output = '';
   terminal.onData(part => { output = (output+part).slice(-4000); });

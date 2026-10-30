@@ -1,120 +1,153 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { z } from 'zod';
+import type { TopicSession } from '../shared/contracts.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 
-for (const threadId of [1, 42]) {
-  test(`/worktree from ${threadId === 1 ? 'General' : 'a topic'} creates a separate managed session and forwards quotes`, async t => {
+for (const branch of ['', ' feature/native']) {
+  test(`/worktree${branch} moves the existing topic session without a prompt`, async t => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (threadId !== 1) await app.update({message_thread_id:threadId,forum_topic_created:{name:'Source'}});
-      const calls: string[] = [];
-      t.mock.method(app.runtime,'createWorktree',async (path: string) => { calls.push(path); return '/fixture/worktrees/new'; });
-      await app.update({message_id:8100,text:'/worktree Explain',message_thread_id:threadId,
-        reply_to_message:{message_id:8000,text:'Context'}});
+      await app.update({text:'/new Original task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      const session = app.store.listSessions(botId).find(session => session.runtime.kind === 'managed' && session.runtime.worktreePath)!;
-      assert.ok(session);
-      assert.notEqual(session.threadId,threadId);
-      assert.equal(session.instancePath,Object.keys(app.config.instances)[0]);
-      assert.deepEqual(calls,[session.instancePath]);
-      assert.deepEqual(session.runtime,{kind:'managed',worktreePath:'/fixture/worktrees/new'});
-      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'> Context\n\nExplain'}]);
-      assert.deepEqual(app.messages.filter(message => message.message_thread_id === session.threadId && message.forwarded_message_id)
-        .map(message => message.forwarded_message_id),[8000,8100]);
-      for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
-        assert.ok((await app.bot.api.getMyCommands({scope})).some(command => command.command === 'worktree'));
-      }
-    } finally { await app.close(); }
-  });
-
-  test(`empty /worktree from ${threadId} transfers selections and snapshots the forum default`, async () => {
-    const app = await createSmokeApp();
-    try {
-      await app.update({text:'/setup'});
-      await app.update({text:'/new Warm host'});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      if (threadId !== 1) await app.update({message_thread_id:threadId,forum_topic_created:{name:'Source'}});
-      await app.update({text:'/set_default_new_topic_skill find-skills'});
-      const source = {botId,destination:threadId === 1 ? {kind:'general' as const,chatId} : {kind:'topic' as const,chatId,threadId},userId:ownerId};
-      await app.update({text:'/skill_pdf_tools',message_thread_id:threadId});
-      await app.update({text:'/worktree',message_thread_id:threadId});
-      const session = app.store.listSessions(botId).find(session => session.runtime.kind === 'managed' && session.runtime.worktreePath)!;
-      assert.ok(session);
-      assert.equal(app.store.hasPendingInitialTask(session.id),false);
-      assert.equal(app.store.getNewTopicSkill(session.id),'find-skills');
-      assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
-      assert.equal(app.messages.some(message => String(message.text).includes('what should we work on?')),false);
-      await app.update({text:'/p Next task',message_thread_id:session.threadId});
-      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\nNext task'});
-      assert.deepEqual(app.store.getPendingSkills(source),[]);
+      const before = app.store.listSessions(botId)[0]!;
+      const count = app.accepted.filter(frame => frame.t === 'prompt').length;
+      const calls: Array<{id:string;branch?:string}> = [];
+      t.mock.method(app.runtime,'worktree',async (session: TopicSession, name?: string) => {
+        calls.push({id:session.id,branch:name});
+        session.runtime = {kind:'managed',worktreePath:'/fixture/native-worktree'};
+        return 'Moved to worktree /fixture/native-worktree';
+      });
+      await app.update({text:`/worktree${branch}`,message_thread_id:before.threadId,
+        reply_to_message:{message_id:8000,text:'Not part of the branch'}});
+      assert.deepEqual(calls,[{id:before.id,branch:branch.trim() || undefined}]);
+      assert.equal(app.store.listSessions(botId).length,1);
+      const after = app.store.getSession(before.id)!;
+      assert.equal(after.threadId,before.threadId);
+      assert.equal(after.instancePath,before.instancePath);
+      assert.deepEqual(after.runtime,{kind:'managed',worktreePath:'/fixture/native-worktree'});
+      assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,count);
+      assert.ok(app.messages.some(message => message.message_thread_id === before.threadId && String(message.text).includes('Moved to worktree')));
+      await app.update({text:'/p Continue',message_thread_id:before.threadId});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Continue'));
     } finally { await app.close(); }
   });
 }
 
-for (const task of ['', ' Proposed task']) {
-  test(`/worktree${task} does not allocate until instance-admin approval`, async t => {
-    const app = await createSmokeApp();
-    try {
-      await app.update({text:'/setup'});
-      await app.callback('setup:proposals:true',app.messages.at(-1)!);
-      let creations = 0;
-      t.mock.method(app.runtime,'createWorktree',async () => { creations++; return '/fixture/approved'; });
-      const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
-      app.setCurrentMember({username:'participant',status:'administrator'});
-      await app.update({text:`/worktree${task}`},proposer);
-      assert.equal(creations,0);
-      assert.equal(app.store.listSessions(botId).length,0);
-      const message = app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes('prompt:approve:'))!;
-      const markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(message.reply_markup);
-      const callback = markup.inline_keyboard[0]![0]!.callback_data;
-      await app.callback(callback,message,proposer);
-      assert.equal(creations,0);
-      app.setCurrentMember({username:ownerUsername,status:'member'});
-      await app.callback(callback,message);
-      assert.equal(creations,1);
-      assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',worktreePath:'/fixture/approved'});
-      await app.callback(callback,message);
-      assert.equal(creations,1);
-    } finally { await app.close(); }
-  });
-}
-
-test('Git worktree failure preserves diagnostics and selected skills without creating a session', async t => {
+test('General creates an empty topic then passes native branch arguments without skills or quotes', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
+    await app.update({text:'/new Warm host'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const existing = app.store.listSessions(botId)[0]!;
+    await app.update({text:'/set_default_new_topic_skill find-skills'});
     await app.update({text:'/skill_pdf_tools'});
-    const diagnostic = 'git worktree add failed\nfatal: not a git repository';
-    t.mock.method(app.runtime,'createWorktree',async () => { throw new Error(diagnostic); });
-    await app.update({text:'/worktree Task'});
-    assert.equal(app.store.listSessions(botId).length,0);
-    assert.ok(app.messages.some(message => String(message.text).includes(diagnostic)));
-    assert.equal(app.store.getPendingSkills({botId,destination:{kind:'general',chatId},userId:ownerId}).length,1);
+    const calls: Array<{id:string;branch?:string}> = [];
+    t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
+      assert.equal(app.store.getSession(session.id)?.threadId,session.threadId);
+      calls.push({id:session.id,branch});
+      session.runtime = {kind:'managed',worktreePath:'/fixture/general-worktree'};
+      return 'Moved to worktree /fixture/general-worktree';
+    });
+    await app.update({text:'/worktree feature/native',reply_to_message:{message_id:8000,text:'Ignore this quote'}});
+    const session = app.store.listSessions(botId).find(session => session.id !== existing.id)!;
+    assert.deepEqual(calls,[{id:session.id,branch:'feature/native'}]);
+    assert.notEqual(session.threadId,1);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
+    assert.equal(app.store.getNewTopicSkill(session.id),'find-skills');
+    assert.deepEqual(app.store.getPendingSkills({botId,destination:{kind:'general',chatId},userId:ownerId}),[]);
+    await app.update({text:'/p Next task',message_thread_id:session.threadId});
+    await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\nNext task'});
+    for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
+      assert.ok((await app.bot.api.getMyCommands({scope})).some(command => command.command === 'worktree' && command.description.includes('OMP')));
+    }
   } finally { await app.close(); }
 });
 
-test('/worktree remains available in detached topics and rejects non-admin creation when proposals are disabled', async t => {
+test('General worktree waits for instance-admin approval', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Detached source'}});
-    await app.update({text:'/detach',message_thread_id:42});
-    let creations = 0;
-    t.mock.method(app.runtime,'createWorktree',async () => { creations++; return '/fixture/detached-source'; });
+    await app.callback('setup:proposals:true',app.messages.at(-1)!);
+    let calls = 0;
+    t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
+      calls++;
+      assert.equal(branch,'feature/proposed');
+      session.runtime = {kind:'managed',worktreePath:'/fixture/approved'};
+      return 'Moved to worktree /fixture/approved';
+    });
+    const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
+    app.setCurrentMember({username:'participant',status:'administrator'});
+    await app.update({text:'/worktree feature/proposed'},proposer);
+    assert.equal(calls,0);
+    assert.equal(app.store.listSessions(botId).length,0);
+    const message = app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes('prompt:approve:'))!;
+    const markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(message.reply_markup);
+    const callback = markup.inline_keyboard[0]![0]!.callback_data;
+    await app.callback(callback,message,proposer);
+    assert.equal(calls,0);
+    app.setCurrentMember({username:ownerUsername,status:'member'});
+    await app.callback(callback,message);
+    assert.equal(calls,1);
+    await app.callback(callback,message);
+    assert.equal(calls,1);
+  } finally { await app.close(); }
+});
+
+test('native topic worktree failures preserve exact diagnostics and session state', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/new Original'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const before = app.store.listSessions(botId)[0]!;
+    const diagnostic = "Worktree creation failed: Branch 'existing' already exists; pick another name.\nNative detail";
+    t.mock.method(app.runtime,'worktree',async () => { throw new Error(diagnostic); });
+    await app.update({text:'/worktree existing',message_thread_id:before.threadId});
+    assert.deepEqual(app.store.getSession(before.id),before);
+    assert.equal(app.store.listSessions(botId).length,1);
+    assert.ok(app.messages.some(message => String(message.text).includes(diagnostic)));
+  } finally { await app.close(); }
+});
+
+test('worktree rejects unrelated, detached, and unauthorized topics without invoking OMP', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    let calls = 0;
+    t.mock.method(app.runtime,'worktree',async () => { calls++; return ''; });
+    await app.update({text:'/worktree',message_thread_id:42});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Source'}});
     const participant = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
     app.setCurrentMember({username:'participant',status:'administrator'});
     await app.update({text:'/worktree',message_thread_id:42},participant);
-    assert.equal(creations,0);
     app.setCurrentMember({username:ownerUsername,status:'member'});
+    await app.update({text:'/detach',message_thread_id:42});
     await app.update({text:'/worktree',message_thread_id:42});
-    assert.equal(creations,1);
-    const sessions = app.store.listSessions(botId);
-    assert.equal(sessions.find(session => session.threadId === 42)!.status,'detached');
-    assert.ok(sessions.some(session => session.threadId !== 42 && session.runtime.kind === 'managed' &&
-      session.runtime.worktreePath === '/fixture/detached-source'));
+    assert.equal(calls,0);
+    assert.equal(app.store.listSessions(botId).length,1);
+    assert.equal(app.store.listSessions(botId)[0]!.status,'detached');
+  } finally { await app.close(); }
+});
+
+test('archived topics cannot move their session into a worktree', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/new Original'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const session = app.store.listSessions(botId)[0]!;
+    await app.update({message_thread_id:session.threadId,forum_topic_closed:{}});
+    let calls = 0;
+    t.mock.method(app.runtime,'worktree',async () => { calls++; return ''; });
+    await app.update({text:'/worktree',message_thread_id:session.threadId});
+    assert.equal(calls,0);
+    assert.equal(app.store.getSession(session.id)!.status,'closed');
   } finally { await app.close(); }
 });

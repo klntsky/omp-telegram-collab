@@ -59,7 +59,7 @@ test('default-skill command registers in both menus, preserves exact names and r
   } finally { await app.close(); }
 });
 
-for (const command of ['/new','/p','/worktree']) {
+for (const command of ['/new','/p']) {
   test(`General ${command} merges the default with explicit skills once and preserves quoted images`, async t => {
     const app = await createSmokeApp();
     const data = Buffer.from('image').toString('base64');

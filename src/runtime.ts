@@ -48,7 +48,7 @@ interface ManagedHost {
 }
 
 interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
-interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean }
+interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean }
 
 const FORBIDDEN_ARGS: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -233,20 +233,109 @@ export class OmpRuntime {
     this.#sessionLimit = expectedLimit * 2;
     return true;
   }
-  async createWorktree(instancePath: string): Promise<string> {
+  async worktree(session: TopicSession, branch?: string): Promise<string> {
     this.#assertActive();
-    if (this.#closed) throw new Error('OMP runtime is stopping');
-    if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
-    if (await realpath(instancePath) !== instancePath) throw new Error('Instance path identity changed');
-    const root = path.resolve(this.#config.dataDir, 'worktrees');
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    const destination = path.join(root, randomUUID());
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    execFile('git', ['worktree', 'add', '--detach', destination, 'HEAD'], {
-      cwd: instancePath, encoding: 'utf8',
-    }, error => error ? reject(error) : resolve());
-    await promise;
-    return realpath(destination);
+    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, session.instancePath)) throw new Error('Instance path is not configured');
+    const activity = this.#hostActivity(session.id);
+    if (activity.busy || activity.leases || this.#pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+    await this.ensure(session);
+    const host = this.#managed.get(session.id);
+    if (!host) throw new Error('Managed OMP host is not available');
+    const registered = (await this.#list(Date.now() + this.#config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (this.#hostActivity(session.id).busy || this.#hostActivity(session.id).leases || registered?.busy === true) {
+      throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+    }
+    const operation = (async () => {
+      await this.#shutdown(session.id, host, true);
+      if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      const { dir, pin } = await this.#prepare(session);
+      const result = await this.#worktreeRpc(dir, pin, branch);
+      const state = result.state;
+      if (state.sessionId !== pin.sessionId || typeof state.sessionFile !== 'string') {
+        throw new Error('Native OMP worktree returned an invalid session identity');
+      }
+      const sessionFile = await realpath(state.sessionFile);
+      const header = await readHeader(sessionFile);
+      const cwd = await realpath(header.cwd);
+      if (header.id !== pin.sessionId || header.cwd !== cwd) throw new Error('Native OMP worktree history identity changed');
+      await chmod(sessionFile, 0o600);
+      await writeBinding(dir, { ...pin, cwd, sessionFile });
+      session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { worktreePath: cwd } : {}) };
+      if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
+      return result.text;
+    })();
+    this.#stopping.set(session.id, operation.then(() => undefined, () => undefined));
+    try { return await operation; }
+    finally { this.#stopping.delete(session.id); }
+  }
+
+  async #worktreeRpc(dir: string, pin: DurableBinding, branch?: string): Promise<{ text: string; state: Record<string, unknown> }> {
+    const child = spawn(this.#config.omp.executable, [
+      ...this.#config.omp.args, '--mode', 'rpc', '--resume', pin.sessionFile,
+      '--cwd', pin.cwd, '--config', path.join(dir, 'runtime.yml'), '--no-title',
+    ], { cwd: pin.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.#skillProcesses.add(child);
+    let buffer = '';
+    let diagnostics = '';
+    const outputs: string[] = [];
+    let state: Record<string, unknown> | undefined;
+    let failure: Error | undefined;
+    const { promise: completion, resolve, reject } = Promise.withResolvers<void>();
+    const timer = setTimeout(() => {
+      failure = new Error('OMP worktree command timed out');
+      child.kill('SIGKILL');
+    }, this.#config.omp.startupTimeoutMs);
+    child.once('error', error => { failure = error; });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', part => { diagnostics += part; });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', part => {
+      buffer += part;
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line.trim()) continue;
+        try {
+          const frame = JSON.parse(line) as Record<string, unknown>;
+          if (frame.type === 'command_output' && typeof frame.text === 'string') outputs.push(frame.text);
+          if (frame.type !== 'response') continue;
+          if (frame.success !== true) throw new Error(typeof frame.error === 'string' ? frame.error : 'OMP worktree RPC failed');
+          if (frame.id === 'worktree') {
+            if (!record(frame.data) || frame.data.agentInvoked !== false) throw new Error('OMP worktree unexpectedly invoked an agent');
+            child.stdin.write(`${JSON.stringify({ id: 'state', type: 'get_state' })}\n`);
+          } else if (frame.id === 'state') {
+            if (!record(frame.data)) throw new Error('Invalid OMP worktree state');
+            state = frame.data;
+            child.stdin.end();
+          }
+        } catch (error) {
+          failure = error instanceof Error ? error : new Error(String(error));
+          child.stdin.end();
+        }
+      }
+    });
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (failure) {
+        const text = outputs.join('\n') || diagnostics;
+        if (text && !failure.message.includes(text)) failure.message += `\n${text}`;
+        reject(failure);
+      }
+      else if (code !== 0 || !state) reject(new Error(outputs.join('\n') || diagnostics || 'OMP worktree RPC exited without session state'));
+      else resolve();
+    });
+    child.stdin.on('error', error => { failure ??= error; });
+    child.stdin.write(`${JSON.stringify({ id: 'worktree', type: 'prompt', message: `/worktree${branch ? ` ${branch}` : ''}` })}\n`);
+    try {
+      await completion;
+      return { text: outputs.join('\n'), state: state! };
+    } finally {
+      this.#skillProcesses.delete(child);
+    }
   }
 
   #sessionCwd(session: TopicSession): string {
@@ -266,21 +355,24 @@ export class OmpRuntime {
       if (session.instancePath !== assigned.path) throw new Error(`Chat ${session.chatId} has history pinned to another instance path`);
       if (await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance path identity changed');
       if (session.runtime.kind !== 'managed') continue;
-      const cwd = await this.#validatedSessionCwd(session);
+      let cwd = this.#sessionCwd(session);
       const directory = path.resolve(config.dataDir, 'sessions', session.id);
       const history = path.join(directory, 'history.jsonl');
       let pin: DurableBinding | undefined;
       try {
         pin = JSON.parse(await readFile(path.join(directory, 'binding.json'), 'utf8')) as DurableBinding;
-        if (pin.version !== 1 || pin.cwd !== cwd || pin.sessionFile !== history || typeof pin.sessionId !== 'string') {
+        if (pin.version !== 1 || typeof pin.cwd !== 'string' || !path.isAbsolute(pin.cwd) || typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) || typeof pin.sessionId !== 'string' || !pin.sessionId) {
           throw new Error(`Saved session ${session.id} conflicts with working directory ${cwd}`);
         }
       } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+      if (pin) cwd = pin.cwd;
+      if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
       try {
-        const header = await readHeader(history);
+        const header = await readHeader(pin?.sessionFile ?? history);
         if (header.cwd !== cwd || (pin && header.id !== pin.sessionId)) {
           throw new Error(`Saved history ${session.id} conflicts with working directory ${cwd}`);
         }
+        if (pin) session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { worktreePath: cwd } : {}) };
       } catch (error) {
         if (!errno(error, 'ENOENT') || pin) throw error;
       }
@@ -904,7 +996,7 @@ export class OmpRuntime {
       const metadata = path.join(dir, 'binding.json');
       if (!(await lstat(metadata)).isFile()) throw new Error('Invalid managed binding metadata');
       pin = JSON.parse(await readFile(metadata, 'utf8')) as DurableBinding;
-      if (pin.version !== 1 || pin.sessionFile !== sessionFile || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
+      if (pin.version !== 1 || typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
         throw new Error('Managed OMP binding is incompatible with this configuration');
       }
       await chmod(metadata, 0o600);
@@ -1158,7 +1250,7 @@ export class OmpRuntime {
         this.#activity.delete(id);
         return;
       }
-      if (pin.version !== 1 || pin.sessionFile !== path.join(dir, 'history.jsonl') || pin.cwd !== this.#sessionCwd(session)) {
+      if (pin.version !== 1 || typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) || pin.cwd !== this.#sessionCwd(session)) {
         throw new Error('Managed OMP binding is incompatible with this configuration');
       }
       const header = await readHeader(pin.sessionFile);
@@ -1250,11 +1342,12 @@ export class OmpRuntime {
     this.#activity.delete(id);
   }
 
-  async #shutdown(id: string, host: ManagedHost): Promise<void> {
+  async #shutdown(id: string, host: ManagedHost, idleOnly = false): Promise<void> {
     if (host.exited) return;
     if (this.#killing.has(id)) return;
     const lifecycle = await this.#lifecycle(id);
     if (!lifecycle || lifecycle.sessionId !== host.sessionId) return;
+    if (idleOnly && lifecycle.worktree !== true) throw new Error('This running OMP host does not support idle-guarded worktree switching. Stop it when idle with /kill, then retry /worktree.');
     if (this.#killing.has(id)) return;
     if (host.process?.pid && lifecycle.supervisorPid !== host.process.pid) return;
     const current = (await this.#list(Date.now()+5000)).find(value => value.pid === lifecycle.pid && value.sessionId === host.sessionId);
@@ -1266,7 +1359,7 @@ export class OmpRuntime {
     const done = (value: boolean) => { socket.destroy(); resolve(value); };
     socket.setTimeout(2000,() => done(false));
     socket.once('error',() => done(false));
-    socket.once('connect',() => socket.write('retire\n'));
+    socket.once('connect',() => socket.write(idleOnly ? 'retire-idle\n' : 'retire\n'));
     socket.once('data',data => done(data.toString().trim() === 'requested'));
     socket.once('end',() => done(false));
     const requested = await promise;
