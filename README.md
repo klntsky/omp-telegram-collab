@@ -103,7 +103,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
 
-   Choose the public HTTPS address you will use for the Mini App, such as `https://your-host.example`. Enter it at the `Public HTTPS origin` prompt in `pnpm cli configure`. Set the listen host and port for your reverse proxy or tunnel.
+   Choose the public HTTPS address you will use for the Mini App, such as `https://omp.example.com`. Enter it at the `Public HTTPS origin` prompt in `pnpm cli configure`. Set the listen host and port for your reverse proxy or tunnel.
 
    ```sh
    pnpm cli configure
@@ -115,13 +115,42 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
 
 5. Point that HTTPS address at the configured listen host and port using a reverse proxy or tunnel with WebSocket support. `pnpm start` uses your configured address to print the BotFather web URL.
+
+   <details>
+   <summary>Use a permanent Cloudflare Tunnel with cloudflared</summary>
+
+   You need a Cloudflare account and at least one domain added to that account with DNS managed by Cloudflare. This example uses `omp.example.com`. Replace `example.com` with your domain.
+
+   1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Networking > Tunnels** and select **Create Tunnel**.
+   2. Name the tunnel `omp-telegram`.
+   3. Select your operating system and architecture. Follow the displayed commands to install `cloudflared` and run it as a service on the machine running the bot. On Linux, the service installation command looks like this:
+
+      ```sh
+      sudo cloudflared service install <TUNNEL_TOKEN>
+      ```
+
+      Use the token provided by Cloudflare and keep it private. The service starts the tunnel automatically after reboot.
+
+   4. Once the tunnel connects, select **Continue**.
+   5. Under the tunnel's **Routes**, select **Add route > Published application**.
+   6. Set the subdomain to `omp` and select your domain.
+   7. Set the service URL to `http://127.0.0.1:3000`, matching the bot's default listen address. If you configured another host or port, use that address.
+   8. Save the route. Cloudflare serves `https://omp.example.com` over HTTPS and forwards HTTP and WebSocket traffic to the bot.
+   9. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli configure`. Use the complete per-bot URL printed at startup for BotFather, such as `https://omp.example.com/?bot=123456789`.
+
+   The hostname stays the same across bot and tunnel restarts. Keep the bot and the `cloudflared` service running to make the Mini App available.
+
+   See [Cloudflare's tunnel setup guide](https://developers.cloudflare.com/tunnel/get-started/) for platform-specific installation commands.
+
+   </details>
+
 6. In BotFather, send `/newapp` to register the Mini App.
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
    3. Enter a description, such as `Run coding sessions from Telegram`.
    4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
    5. Send `/empty` to skip the optional GIF.
-   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://your-host.example/?bot=123456789`.
+   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://omp.example.com/?bot=123456789`.
    7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
    8. BotFather returns the Telegram launch link, such as `https://t.me/your_bot/app`.
 
