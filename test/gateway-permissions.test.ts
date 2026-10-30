@@ -274,17 +274,17 @@ for (const change of ['membership', 'role'] as const) {
     let socket: WebSocket | undefined;
     const entered = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
-    const relay = app.service.relayPrompt.bind(app.service);
-    app.service.relayPrompt = async (...args) => {
+    const relay = app.service.relayAnswer.bind(app.service);
+    app.service.relayAnswer = async (...args) => {
       entered.resolve();
       await resume.promise;
       await relay(...args);
     };
     try {
       socket = (await connect()).socket;
-      socket.send(JSON.stringify({ t: 'prompt', text: 'authorized before revocation' }));
+      socket.send(JSON.stringify({ t: 'ui-response', reqId: 901, value: 'authorized before revocation' }));
       await entered.promise;
-      assert.ok(app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'authorized before revocation'));
+      assert.ok(app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 901 && frame.value === 'authorized before revocation'));
       const closed = once(socket, 'close');
       socket.send(JSON.stringify({ t: 'abort' }));
       if (change === 'membership') app.setMember(false);
