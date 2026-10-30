@@ -12,7 +12,7 @@ import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
 const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),generation:z.number().int().nonnegative().safe().optional()}).strict();
@@ -265,6 +265,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         if (frame.t === 'prompt') options.runtime.markPrompt(session.id);
         upstream.send(frame);
         if (frame.t === 'prompt') await bot.relayPrompt(session,identity,frame.text);
+        if (frame.t === 'ui-response' && frame.value !== undefined) await bot.relayAnswer(session,identity,frame.value);
       });
     });
     enqueue(0,async () => {

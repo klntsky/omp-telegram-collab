@@ -31,6 +31,27 @@ async function fixture() {
   return { app, session, connect };
 }
 
+test('Mini App text answers appear verbatim in the Telegram topic without entering the prompt queue', async () => {
+  const { app, session, connect } = await fixture();
+  let socket: WebSocket | undefined;
+  try {
+    socket = (await connect()).socket;
+    const text = 'Deploy to staging\n  Keep <literal> **text** 😀  ';
+    const before = app.messages.length;
+    socket.send(JSON.stringify({t:'ui-response',reqId:901,value:text}));
+    const deadline = Date.now()+5000;
+    while (!app.messages.slice(before).some(message => String(message.text).endsWith(text))) {
+      assert.ok(Date.now() < deadline,'Mini App answer missing from Telegram topic');
+      await delay(10);
+    }
+    const receipt = app.messages.slice(before).find(message => String(message.text).endsWith(text))!;
+    assert.equal(receipt.message_thread_id,session.threadId);
+    assert.equal(receipt.text,`@${ownerUsername} answered: ${text}`);
+    assert.ok(app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 901 && frame.value === text));
+    assert.ok(!app.accepted.some(frame => frame.t === 'prompt' && frame.text === text));
+  } finally { socket?.terminate(); await app.close(); }
+});
+
 for (const action of [
   { t: 'prompt', text: 'forged instruction' }, { t: 'abort' },
   { t: 'agent-cmd', cmd: 'kill', agentId: 'worker' },
