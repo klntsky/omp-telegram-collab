@@ -130,7 +130,7 @@ pm2 save
 
 Keep tokens out of PM2's launch environment. Use `pm2 logs omp-telegram-collab` for diagnostics. Run `pm2 startup` and follow its instructions if startup persistence is not enabled. Do not restart unrelated applications.
 
-Restarting the bot does not reload lifecycle extensions in surviving OMP hosts. Existing hosts without idle-retirement support remain running instead of receiving an unconditional retirement request. Let active work finish before using `/kill` to replace a host when its extension needs updating. Do not clear a retirement descriptor to bypass admission; accepted shutdown may still be pending in the host.
+Restarting the bot does not reload lifecycle extensions in surviving OMP hosts. Existing hosts without cancellable retirement support remain running instead of receiving an unsafe retirement request. An explicit retirement operation on an unsupported host reports that its lifecycle extension needs updating. Let active work finish before using `/kill` to replace a host when its extension needs updating. Do not clear retirement descriptors or remove grant files manually to bypass admission; use the runtime's cancellation and restart recovery paths.
 
 See [Product](PRODUCT.md) for lifecycle readiness and Telegram notice behavior, and [Architecture](ARCHITECTURE.md) for service ownership and shutdown boundaries.
 

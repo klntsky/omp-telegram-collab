@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createConnection } from 'node:net';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -42,16 +42,37 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     try { await readFile(filename); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  let lifecycle: {socketPath:string} | undefined;
+  let lifecycle: {socketPath:string;sessionId:string;pid:number;retirement:number} | undefined;
   async function requestRetirement(): Promise<void> {
     assert.ok(lifecycle);
+    assert.equal(lifecycle.retirement,1);
+    const requestId = randomUUID();
+    const grant = join(directory,`retirement-${requestId}.request`);
+    await writeFile(grant,'',{flag:'wx',mode:0o600});
+    const request = {type:'retire',requestId,sessionId:lifecycle.sessionId,pid:lifecycle.pid,deadline:Date.now()+2000,guard:'none'};
     const {promise,resolve,reject} = Promise.withResolvers<void>();
     const socket = createConnection(lifecycle.socketPath);
     socket.setTimeout(2000,()=>{socket.destroy();reject(new Error('Retirement request timed out'));});
     socket.once('error',reject);
-    socket.once('connect',()=>socket.write('retire\n'));
-    socket.once('data',data=>{assert.equal(data.toString().trim(),'requested');socket.destroy();resolve();});
-    await promise;
+    socket.once('end',()=>reject(new Error('Retirement host disconnected before acknowledgement')));
+    socket.once('close',()=>reject(new Error('Retirement host closed before acknowledgement')));
+    socket.once('connect',()=>socket.write(JSON.stringify(request)+'\n'));
+    let input = '';
+    socket.on('data',data=>{
+      input += data.toString();
+      if (!input.includes('\n')) return;
+      socket.destroy();
+      try {
+        const response = JSON.parse(input.trim());
+        assert.equal(response.requestId,requestId);
+        assert.equal(response.sessionId,request.sessionId);
+        assert.equal(response.pid,request.pid);
+        assert.equal(response.outcome,'requested');
+        resolve();
+      } catch (error) { reject(error); }
+    });
+    try { await promise; }
+    finally { await rm(grant,{force:true}); }
   }
   try {
     await waitFor(()=>exists(join(directory,'lifecycle.json')),'Lifecycle extension did not start');

@@ -215,17 +215,19 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       await delay(20);
       result = [];
     } else if (method === 'sendMessage') {
-      assert.equal(payload.message_thread_id, topics.get(`${id}:${payload.chat_id}`), 'notices use this bot/chat reserved topic');
-      notices.push({ botId: id, payload });
-      noticeEvents.emit('notice');
-      if (options.holdOnlineNotice && String(payload.text).startsWith('OMP bot service is back online')) {
-        pendingOnline++;
-        response.once('close', () => { pendingOnline--; noticeEvents.emit('online-closed'); });
-        return;
-      }
-      if (options.noticeFailure) {
-        response.end(JSON.stringify({ ok: false, error_code: 403, description: 'Fixture cannot send notices' }));
-        return;
+      if (String(payload.text).startsWith('OMP bot service is ')) {
+        assert.equal(payload.message_thread_id, topics.get(`${id}:${payload.chat_id}`), 'notices use this bot/chat reserved topic');
+        notices.push({ botId: id, payload });
+        noticeEvents.emit('notice');
+        if (options.holdOnlineNotice && String(payload.text).startsWith('OMP bot service is back online')) {
+          pendingOnline++;
+          response.once('close', () => { pendingOnline--; noticeEvents.emit('online-closed'); });
+          return;
+        }
+        if (options.noticeFailure) {
+          response.end(JSON.stringify({ ok: false, error_code: 403, description: 'Fixture cannot send notices' }));
+          return;
+        }
       }
       result = { message_id: notices.length, date: 0, chat: { id: payload.chat_id, type: 'supergroup' }, text: payload.text };
     } else {

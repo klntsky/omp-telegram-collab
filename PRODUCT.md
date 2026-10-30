@@ -176,7 +176,7 @@ Bot status is not a session topic. Messages there are ignored before command han
 
 `maxSessions` limits resident managed OMP processes across all bots and projects, not saved conversations. Empty topics consume no process. Hosts idle for five minutes may retire; the runtime tries least-recently-used idle hosts sooner when it needs capacity. Connected Mini Apps and pending or active work protect a host.
 
-Automatic retirement requires the host to confirm that it is idle and has no pending messages. Hosts without that control capability remain running. Retirement never escalates to signals. Accepted retirement blocks new submissions while the host finishes shutting down; an observation timeout does not cancel retirement. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
+Automatic retirement requires the host to confirm that it is idle and has no pending messages. Hosts without safe retirement support remain running. A timed-out request cancelled before acceptance cannot retire the host later. Accepted retirement blocks new submissions while the host finishes shutting down; an observation timeout does not cancel accepted retirement. Retirement never escalates to signals. `/kill` is separate: it verifies process identity before SIGKILL and waits for exit.
 
 If retirement cannot free capacity, an instance root or bot admin can approve a prompt to double the shared limit. Topic admins cannot approve capacity increases. Approval saves the new limit and retries the pending initial task once. Other prompts must be resent. Protected configuration requires an administrator CLI update instead. Expired or replayed confirmations cannot increase capacity.
 

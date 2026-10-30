@@ -187,54 +187,76 @@ export default async function hostLifecycle(pi) {
         input += part;
         if (!input.includes('\n')) return;
         received = true;
-        if (!['retire', 'retire-idle'].includes(input.trim())) {
-          let request;
-          const respond = result => {
-            if (socket.destroyed) return;
-            const response = JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, ...result });
-            socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, error: 'OMP model preset response is too large' })}\n`);
-          };
-          try {
-            request = JSON.parse(input.trim());
-            if (!request || !['model_presets', 'list_skills'].includes(request.type) || typeof request.requestId !== 'string' ||
-                request.requestId.length > 128 || typeof request.sessionId !== 'string' ||
-                (request.name !== undefined && typeof request.name !== 'string') ||
-                !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000) {
-              throw new Error('Invalid OMP model preset request');
+        let request;
+        const respond = result => {
+          if (socket.destroyed) return;
+          const response = JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, ...result });
+          socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, error: 'OMP model preset response is too large' })}\n`);
+        };
+        try {
+          request = JSON.parse(input.trim());
+          if (request?.type === 'retire') {
+            if (typeof request.requestId !== 'string' ||
+                !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.requestId) ||
+                typeof request.sessionId !== 'string' || !Number.isSafeInteger(request.pid) ||
+                !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000 ||
+                !['idle', 'none'].includes(request.guard)) {
+              throw new Error('Invalid OMP retirement request');
             }
-            assertAvailable(request);
-          } catch (error) {
-            respond({ error: error instanceof Error ? error.message : String(error) });
+            const retirementResponse = outcome => respond({ sessionId: request.sessionId, pid: request.pid, outcome });
+            if (request.sessionId !== sessionId || context.sessionManager.getSessionId() !== sessionId ||
+                request.pid !== process.pid || Date.now() >= request.deadline) {
+              retirementResponse('expired');
+              return;
+            }
+            if (request.guard === 'idle' && (!context.isIdle() || context.hasPendingMessages())) {
+              retirementResponse('busy');
+              return;
+            }
+            const nextDescriptor = { ...descriptor, retiring: true };
+            const grant = join(directory, `retirement-${request.requestId}.request`);
+            try {
+              writeFileSync(grant, JSON.stringify(nextDescriptor), { flag: 'r+', mode: 0o600 });
+              renameSync(grant, join(directory, 'lifecycle.json'));
+            } catch (error) {
+              if (error.code !== 'ENOENT') throw error;
+              retirementResponse('expired');
+              return;
+            }
+            descriptor = nextDescriptor;
+            retirementResponse('requested');
+            if (!timer) {
+              timer = context.setInterval(() => context.shutdown(), 1000);
+              context.shutdown();
+            }
             return;
           }
-          clearTimeout(timeout);
-          const commandTimeout = setTimeout(() => socket.destroy(), Math.max(1, request.deadline - Date.now()));
-          socket.once('close', () => clearTimeout(commandTimeout));
-          const operation = (commandTail ?? Promise.resolve()).then(() => {
-            if (socket.destroyed) throw new Error('OMP model preset request disconnected before execution');
-            if (request.type === 'list_skills') {
-              assertAvailable(request);
-              if (skillsError) throw skillsError;
-              if (typeof getActiveSkills !== 'function') throw new Error('OMP host skill discovery is unavailable');
-              return JSON.stringify(getActiveSkills().map(skill => ({ name: skill.name, description: skill.description ?? '' })));
-            }
-            return runPresets(request);
-          });
-          commandTail = operation.then(() => {}, () => {});
-          void operation.then(text => respond({ text }), error => respond({ error: error instanceof Error ? error.message : String(error) }));
+          if (!request || !['model_presets', 'list_skills'].includes(request.type) || typeof request.requestId !== 'string' ||
+              request.requestId.length > 128 || typeof request.sessionId !== 'string' ||
+              (request.name !== undefined && typeof request.name !== 'string') ||
+              !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000) {
+            throw new Error('Invalid OMP model preset request');
+          }
+          assertAvailable(request);
+        } catch (error) {
+          respond({ error: error instanceof Error ? error.message : String(error) });
           return;
         }
-        if (input.trim() === 'retire-idle' && (!context.isIdle() || context.hasPendingMessages())) {
-          socket.end('busy\n');
-          return;
-        }
-        descriptor.retiring = true;
-        writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
-        socket.end('requested\n');
-        if (!timer) {
-          timer = context.setInterval(() => context.shutdown(), 1000);
-          context.shutdown();
-        }
+        clearTimeout(timeout);
+        const commandTimeout = setTimeout(() => socket.destroy(), Math.max(1, request.deadline - Date.now()));
+        socket.once('close', () => clearTimeout(commandTimeout));
+        const operation = (commandTail ?? Promise.resolve()).then(() => {
+          if (socket.destroyed) throw new Error('OMP model preset request disconnected before execution');
+          if (request.type === 'list_skills') {
+            assertAvailable(request);
+            if (skillsError) throw skillsError;
+            if (typeof getActiveSkills !== 'function') throw new Error('OMP host skill discovery is unavailable');
+            return JSON.stringify(getActiveSkills().map(skill => ({ name: skill.name, description: skill.description ?? '' })));
+          }
+          return runPresets(request);
+        });
+        commandTail = operation.then(() => {}, () => {});
+        void operation.then(text => respond({ text }), error => respond({ error: error instanceof Error ? error.message : String(error) }));
       });
       socket.on('error', () => {});
     });
@@ -249,7 +271,7 @@ export default async function hostLifecycle(pi) {
         modelPresets: 2,
         skills: true,
         worktree: true,
-        retireIdle: true,
+        retirement: 1,
       };
       writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
       startupReady?.();
