@@ -169,7 +169,12 @@ test('global admin replies are bound to their prompt and never become session pr
     assert.equal(saved(app).config.bots[0]!.admins,undefined);
     await app.update({text:'@@invalid',reply_to_message:request});
     assert.equal(saved(app).config.bots[0]!.admins,undefined);
-    await app.update({text:'@GrAcE',reply_to_message:request});
+    const correction = app.messages.at(-1)!;
+    assert.ok(correction.reply_markup && typeof correction.reply_markup === 'object' && 'force_reply' in correction.reply_markup);
+    assert.equal(correction.reply_markup.force_reply,true);
+    await app.update({text:'@intruder',reply_to_message:correction},participant);
+    assert.equal(saved(app).config.bots[0]!.admins,undefined);
+    await app.update({text:'@GrAcE',reply_to_message:correction});
     assert.deepEqual(saved(app).config.bots[0]!.admins,['grace']);
     await app.update({text:'@alan',reply_to_message:request});
     assert.deepEqual(saved(app).config.bots[0]!.admins,['grace']);
@@ -199,10 +204,18 @@ test('catalog lookup errors keep original multiline diagnostics', async t => {
   const diagnostic = 'Preset catalog failed\noriginal provider diagnostic';
   try {
     await app.update({text:'/setup'});
-    t.mock.method(app.runtime,'availableModelPresets',async()=>{ throw new Error(diagnostic); });
+    const panel = app.messages.at(-1)!;
+    const lookup = t.mock.method(app.runtime,'availableModelPresets',async()=>{ throw new Error(diagnostic); });
     await clickSettings(app,'Default model preset');
     assert.ok(app.messages.some(message=>String(message.text).includes(diagnostic)));
     assert.equal(saved(app).chat.default_model_preset,undefined);
+    lookup.mock.restore();
+    await clickSettings(app,'Default model preset',panel);
+    await clickSettings(app,'Fast',panel);
+    assert.equal(saved(app).chat.default_model_preset,'Fast');
+    await clickSettings(app,'Close',panel);
+    assert.ok(panel.reply_markup && typeof panel.reply_markup === 'object' && 'inline_keyboard' in panel.reply_markup);
+    assert.deepEqual(panel.reply_markup.inline_keyboard,[]);
   } finally { await app.close(); }
 });
 
@@ -263,4 +276,29 @@ test('a removed catalog choice preserves the saved default and original diagnost
     assert.equal(saved(app).chat.default_model_preset,'Slow');
     assert.ok(app.messages.some(message=>String(message.text).includes('Unknown model preset: Fast')));
   } finally { await app.close(); }
+});
+
+test('panels from a previous service instance explain expiration without accepting forwarded controls', async () => {
+  const before = await createSmokeApp();
+  let panel: Record<string,unknown>;
+  let choice: string;
+  try {
+    await before.update({text:'/setup'});
+    panel = structuredClone(before.messages.at(-1)!);
+    choice = settingsButton(panel,'Prompt mode');
+  } finally { await before.close(); }
+  const after = await createSmokeApp();
+  const answers: string[] = [];
+  after.bot.api.config.use(async (previous,method,payload,signal) => {
+    if (method === 'answerCallbackQuery' && 'text' in payload && typeof payload.text === 'string') answers.push(payload.text);
+    return previous(method,payload,signal);
+  });
+  try {
+    await after.update({text:'/setup'});
+    await after.callback(choice!,{...panel!,forward_origin:{type:'hidden_user',sender_user_name:'Someone',date:1}});
+    assert.deepEqual(answers,[]);
+    await after.callback(choice!,panel!);
+    assert.deepEqual(answers,['This settings button expired. Open /settings again.']);
+    assert.deepEqual(after.store.listSessions(botId),[]);
+  } finally { await after.close(); }
 });

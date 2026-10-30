@@ -67,6 +67,8 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, bot-wide administrators, and shared session capacity. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
 
+Settings catalog failures preserve the displayed controls so administrators can retry or close the panel. Panels lost after a service restart explicitly direct users to reopen `/settings`. Invalid administrator input produces a new bound reply prompt; corrections remain settings input and never become agent tasks.
+
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |

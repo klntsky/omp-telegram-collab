@@ -241,12 +241,11 @@ export class BotService {
     const assigned = findInstance(config, this.id, panel.chatId)!;
     const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
     const rows: {text: string; callback_data: string}[][] = [];
-    panel.choices = [];
-    delete panel.adminReply;
-    panel.revision++;
+    const choices: SettingsAction[] = [];
+    const revision = panel.revision + 1;
     const button = (text: string, action: SettingsAction) => {
-      const index = panel.choices.push(action) - 1;
-      rows.push([{text: text.slice(0, 100), callback_data: `settings:${panel.token}:${panel.revision}:${index}`}]);
+      const index = choices.push(action) - 1;
+      rows.push([{text: text.slice(0, 100), callback_data: `settings:${panel.token}:${revision}:${index}`}]);
     };
     let text = 'Settings\nForum defaults apply to this forum, not the current topic. Existing topic skills and running models are unchanged.';
     if (page === 'root') {
@@ -286,6 +285,9 @@ export class BotService {
     button('Close', {kind:'close'});
     try {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
+      panel.choices = choices;
+      panel.revision = revision;
+      delete panel.adminReply;
     } catch (error) {
       this.settingsPanels.delete(panel.token);
       throw error;
@@ -295,9 +297,14 @@ export class BotService {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
     const panel = match ? this.settingsPanels.get(match[1]!) : undefined;
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-    if (!panel || !message || !ctx.chat || ctx.chat.type !== 'supergroup' || ctx.chat.id !== panel.chatId ||
-        message.message_id !== panel.messageId || !sameTopicDestination(contextDestination(ctx), panel.destination) ||
+    if (!match || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
+    if (!panel) {
+      await ctx.answerCallbackQuery('This settings button expired. Open /settings again.');
+      return;
+    }
+    if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
+        !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
     if (panel.expires <= Date.now() || Number(match![2]) !== panel.revision) {
       await ctx.answerCallbackQuery('This settings button expired. Open /settings again.');
       return;
@@ -368,7 +375,10 @@ export class BotService {
     const text = messageText(message)?.trim() ?? '';
     if (text === '/cancel') { delete panel.adminReply; return true; }
     if (!/^@?[A-Za-z0-9_]{1,32}$/.test(text) || !/[A-Za-z]/.test(text)) {
-      await replyTo(ctx,panel.destination,'Reply to the admin prompt with a valid @username, or /cancel.');
+      const prompt = await replyTo(ctx,panel.destination,'Settings\nReply with a valid @username to add a global bot admin, or /cancel.',{reply_markup:{force_reply:true,selective:true},reply_parameters:{message_id:message!.message_id,allow_sending_without_reply:true}});
+      panel.adminReply = {messageId:prompt.message_id,userId:ctx.from.id};
+      this.settingsMessages.add(`${panel.chatId}:${prompt.message_id}`);
+      if (this.settingsMessages.size > 4096) this.settingsMessages.delete(this.settingsMessages.values().next().value!);
       return true;
     }
     await this.settingsAccess(ctx,panel,true);
