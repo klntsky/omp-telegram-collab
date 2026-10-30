@@ -34,6 +34,7 @@ export interface RuntimeLike {
   availableModelPresets(instancePath: string): Promise<string[]>;
   listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
+  setSessionLimit(limit: number): void;
   increaseSessionLimit(expectedLimit: number): boolean;
   observeFrame(sessionId: string, frame: HostFrame): void;
   markPrompt(sessionId: string): void;
@@ -104,7 +105,7 @@ type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'c
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
   | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
-  | { kind: 'capacity'; limit: number; confirm: boolean }
+  | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
 interface SettingsPanel {
   token: string;
@@ -115,9 +116,10 @@ interface SettingsPanel {
   expires: number;
   revision: number;
   choices: SettingsAction[];
+  capacityLimit?: number;
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and shared capacity (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
-const settingsHelp = '/settings — forum defaults and shared capacity (group admin)';
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
 const cliHelp = '/cli — copy a local terminal session join command (group admin)';
@@ -127,7 +129,7 @@ const groupCommands = [
   { command: 'worktree', description: 'Move session to an OMP worktree; new topic in General' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
-  { command: 'settings', description: 'Forum defaults and shared capacity (group admin)' },
+  { command: 'settings', description: 'Forum defaults and live session count limit (group admin)' },
   { command: 'setup', description: 'Request or enroll this forum, then open settings' },
   { command: 'list_admins', description: 'List current human group owner and administrators' },
   { command: 'attach', description: 'Attach a local OMP host (group admin)' },
@@ -259,8 +261,8 @@ export class BotService {
     };
     let text = 'Settings\nForum defaults apply to this forum, not the current topic. Existing topic skills and running models are unchanged.';
     if (page === 'root') {
-      text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nShared capacity: ${config.omp.maxSessions} sessions across all instances`;
-      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Shared capacity','capacity']] as const) {
+      text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nLive session count limit: ${config.omp.maxSessions} sessions across all instances`;
+      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Live session count limit','capacity']] as const) {
         button(label, {kind:'page',page:target});
       }
     } else if (page === 'prompts' || page === 'proposals') {
@@ -280,8 +282,7 @@ export class BotService {
       if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
     } else {
       const limit = this.options.runtime.getSessionLimit();
-      text = `Shared capacity: ${limit} sessions.\nThis limit applies to all bots and instances in this service, not just this forum. Increasing it does not submit or retry any tasks.`;
-      if (Number.isSafeInteger(limit * 2)) button(`Increase to ${limit * 2}`, {kind:'capacity',limit,confirm:false});
+      text = `Live session count limit: ${limit}.\nThis limit applies to all bots and instances in this service, not just this forum. Reply to this message with a whole number ≥1. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
     }
     if (page !== 'root') button('Back', {kind:'page',page:'root'});
     button('Close', {kind:'close'});
@@ -289,6 +290,7 @@ export class BotService {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
       panel.choices = choices;
       panel.revision = revision;
+      panel.capacityLimit = page === 'capacity' ? this.options.runtime.getSessionLimit() : undefined;
     } catch (error) {
       this.settingsPanels.delete(panel.token);
       throw error;
@@ -312,7 +314,7 @@ export class BotService {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
-    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || (action.kind === 'capacity' && action.confirm));
+    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'capacity');
     if (action.kind === 'close') {
       this.settingsPanels.delete(panel.token);
       await this.bot.api.editMessageText(panel.chatId,panel.messageId,'Settings closed.',{reply_markup:{inline_keyboard:[]}});
@@ -320,22 +322,11 @@ export class BotService {
     }
     if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
     if (action.kind === 'capacity') {
-      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The shared session limit changed. Open Shared capacity again.');
-      if (!action.confirm) {
-        panel.revision++;
-        panel.choices = [{kind:'capacity',limit:action.limit,confirm:true},{kind:'page',page:'capacity'},{kind:'close'}];
-        try {
-          await this.bot.api.editMessageText(panel.chatId,panel.messageId,`Settings\nIncrease shared capacity from ${action.limit} to ${action.limit * 2} for every bot and instance?`,{reply_markup:{inline_keyboard:panel.choices.map((_,index) => [{text:['Confirm increase','Back','Close'][index]!,callback_data:`settings:${panel.token}:${panel.revision}:${index}`}])}});
-        } catch (error) {
-          this.settingsPanels.delete(panel.token);
-          throw error;
-        }
-        return;
-      }
-      config.omp.maxSessions = action.limit * 2;
+      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
+      config.omp.maxSessions = action.target;
       writeConfig(config);
-      this.options.config.omp.maxSessions = config.omp.maxSessions;
-      if (!this.options.runtime.increaseSessionLimit(action.limit)) throw new Error('The shared runtime session limit changed before the increase could be applied.');
+      this.options.config.omp.maxSessions = action.target;
+      this.options.runtime.setSessionLimit(action.target);
     } else {
       if (action.kind === 'default' && action.value !== undefined) {
         const names = action.field === 'default_new_topic_skill'
@@ -362,6 +353,28 @@ export class BotService {
     const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
     if (!reply || !ctx.chat || !(this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
         (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return false;
+    const panel = [...this.settingsPanels.values()].find(value => value.chatId === ctx.chat!.id && value.messageId === reply.message_id);
+    if (!panel || panel.capacityLimit === undefined || panel.expires <= Date.now() ||
+        reply.from?.id !== this.id || !sameTopicDestination(contextDestination(ctx), panel.destination)) return true;
+    const config = await this.settingsAccess(ctx, panel);
+    const text = message && 'text' in message ? (message.text ?? '').trim() : '';
+    const target = Number(text);
+    if (!/^\d+$/.test(text) || !Number.isSafeInteger(target) || target < 1) {
+      await replyTo(ctx, panel.destination, 'Enter a whole number ≥1 within the supported safe integer range.');
+      return true;
+    }
+    if (config.omp.maxSessions !== panel.capacityLimit || this.options.runtime.getSessionLimit() !== panel.capacityLimit) {
+      throw new Error('The live session count limit changed. Open Live session count limit again.');
+    }
+    panel.revision++;
+    panel.choices = [{kind:'capacity',limit:panel.capacityLimit,target},{kind:'page',page:'capacity'},{kind:'close'}];
+    panel.capacityLimit = undefined;
+    try {
+      await this.bot.api.editMessageText(panel.chatId,panel.messageId,`Settings\nChange Live session count limit from ${config.omp.maxSessions} to ${target} for every bot and instance?`,{reply_markup:{inline_keyboard:panel.choices.map((_,index) => [{text:['Confirm change','Back','Close'][index]!,callback_data:`settings:${panel.token}:${panel.revision}:${index}`}])}});
+    } catch (error) {
+      this.settingsPanels.delete(panel.token);
+      throw error;
+    }
     return true;
   }
   private readonly skills: SkillPicker;

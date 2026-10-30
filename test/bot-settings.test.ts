@@ -164,17 +164,24 @@ test('settings replies remain control input rather than session prompts', async 
   } finally { await app.close(); }
 });
 
-test('shared capacity requires confirmation and does not submit work', async () => {
-  const app = await createSmokeApp({maxSessions:2});
+test('live session limits accept granular increases and decreases without submitting work', async () => {
+  const app = await createSmokeApp({maxSessions:8});
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app, 4);
-    await clickSettings(app, 0);
-    assert.equal(saved(app).config.omp.maxSessions,2);
-    assert.equal(app.runtime.getSessionLimit(),2);
-    await clickSettings(app, 0);
-    assert.equal(saved(app).config.omp.maxSessions,4);
-    assert.equal(app.runtime.getSessionLimit(),4);
+    for (const target of [11,1]) {
+      const panel = await clickSettings(app, 4);
+      const previous = app.runtime.getSessionLimit();
+      for (const text of ['0','-1','1.5','9007199254740992','no']) {
+        await app.update({text,reply_to_message:panel});
+        assert.equal(saved(app).config.omp.maxSessions,previous);
+        assert.equal(app.runtime.getSessionLimit(),previous);
+      }
+      await app.update({text:String(target),reply_to_message:panel});
+      assert.equal(saved(app).config.omp.maxSessions,previous);
+      await clickSettings(app, 0, panel);
+      assert.equal(saved(app).config.omp.maxSessions,target);
+      assert.equal(app.runtime.getSessionLimit(),target);
+    }
     assert.deepEqual(app.accepted,[]);
     assert.equal(app.connectionCount,0);
   } finally { await app.close(); }

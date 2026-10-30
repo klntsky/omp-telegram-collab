@@ -61,6 +61,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     async listSkills() { return []; },
     async modelPresets(): Promise<never> { throw new Error('No model preset command expected in lifecycle check'); },
     getSessionLimit() { return 5; },
+    setSessionLimit() { throw new Error('No session limit change expected in lifecycle check'); },
     increaseSessionLimit() { return false; },
     observeFrame() {},
     markPrompt() {},

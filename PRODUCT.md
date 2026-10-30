@@ -22,7 +22,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
-| `/settings` | Open interactive forum settings, defaults, and shared session capacity. Requires the current supergroup owner or an administrator. |
+| `/settings` | Open interactive forum settings, defaults, and the live session count limit. Requires the current supergroup owner or an administrator. |
 | `/session` | Get the current topic's Mini App link when the Mini App is enabled. |
 | `/cli` | Get a copyable terminal join command for the current open session topic. Requires the current supergroup owner or an administrator. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
@@ -74,7 +74,9 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, and shared session capacity. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, and Live session count limit. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
+
+Live session count limit applies across all bots and instances. Administrators reply to its panel with any whole number ≥1 within JavaScript's safe integer range, then confirm the change. Both increases and decreases are supported. Lowering the limit leaves existing sessions running and prevents new starts until usage falls below the limit. Settings changes do not submit or retry tasks.
 
 Settings catalog failures preserve the displayed controls so administrators can retry or close the panel. Panels lost after a service restart explicitly direct users to reopen `/settings`. Replies to settings panels remain control input and never become agent tasks.
 

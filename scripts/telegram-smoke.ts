@@ -229,6 +229,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     },
     async modelPresets(_session: TopicSession, _name?: string): Promise<string> { throw new Error('No model preset host configured in the Telegram fixture'); },
     getSessionLimit() { return sessionLimit; },
+    setSessionLimit(limit: number) { sessionLimit = limit; },
     increaseSessionLimit(expectedLimit: number) {
       if (sessionLimit !== expectedLimit) return false;
       sessionLimit *= 2;
