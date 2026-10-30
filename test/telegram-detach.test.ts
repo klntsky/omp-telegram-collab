@@ -110,9 +110,10 @@ test('/detach keeps the conversation icon after a rate-limited activity edit', a
     await app.update({text:'/setup'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Pending icon'}});
     const session = app.store.listSessions(botId)[0]!;
+    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
     const limited = once(app.events,'rate-limit');
     app.rateLimitNext('editForumTopic',1);
-    await app.service.ensureMirroring(session,await app.runtime.ensure(session));
+    app.emit({t:'event',event:{type:'agent_start'}});
     await limited;
     await app.update({text:'/detach',message_thread_id:42});
     assert.equal(app.store.getSession(session.id)?.status,'detached');
