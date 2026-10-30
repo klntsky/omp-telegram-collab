@@ -88,7 +88,10 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 ## Setup
 
 1. Install Node.js, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
-2. Create a Telegram bot with [BotFather](https://t.me/BotFather). Keep the token private.
+2. Open [BotFather](https://t.me/BotFather) in Telegram and send `/newbot`.
+   1. Enter a display name for your bot.
+   2. Enter an available username ending in `bot`.
+   3. Save the API token BotFather returns. Keep it private. You will enter it in `pnpm cli bot add`.
 3. Clone and build this project.
 
    ```sh
@@ -110,8 +113,19 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
 
 5. Expose the service over HTTPS so Telegram can open the Mini App. You can use a reverse proxy. If you do, forward WebSocket upgrades for `/api/socket` and keep the loopback bind address when the proxy runs on the same machine.
-6. In BotFather, use `/newapp` to create a direct-link Mini App with the short name `app`. Set its web URL to the per-bot URL printed at startup.
-7. Add the bot to a Telegram supergroup with Topics enabled. Give it Manage Topics and Pin Messages permissions.
+6. In BotFather, send `/newapp` to register the Mini App.
+   1. Select the bot you created, or send its `@username`.
+   2. Enter an app title, such as `OMP Telegram Collab`.
+   3. Enter a description, such as `Run coding sessions from Telegram`.
+   4. Upload a 640 × 360 photo for the app.
+   5. Send `/empty` to skip the optional GIF.
+   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`. It looks like `https://your-host.example/?bot=123456789`. Keep the `?bot=...` part. Do not enter a `t.me` link here.
+   7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
+   8. BotFather returns a link like `https://t.me/your_bot/app`. This is the Telegram launch link, not the web URL.
+
+   Use `/newapp`, not just the bot profile's Main Mini App or menu-button settings. The topic buttons use the named app's direct link to select the session.
+
+7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Administrator bots receive ordinary group messages without disabling privacy mode in BotFather.
 8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
 
    ```sh
