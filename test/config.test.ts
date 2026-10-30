@@ -56,6 +56,21 @@ test('draft YAML roundtrips without a serialized configPath and starts only once
   validateStart(readConfig(path));
 });
 
+test('Telegram-only configurations start without Mini App names while enabled configurations require them', t => {
+  const { path } = fixture(t);
+  const config = emptyConfig(path);
+  config.bots = [{ id: botId, token: botToken }];
+  writeConfig(config);
+  validateStart(readConfig(path));
+  config.publicUrl = 'https://collab.example.com';
+  assertInvalid(path, () => writeConfig(config), 'bots');
+  config.bots[0]!.miniAppShortName = 'app';
+  writeConfig(config);
+  validateStart(readConfig(path));
+  config.bots[0]!.miniAppShortName = 'not valid';
+  assertInvalid(path, () => writeConfig(config));
+});
+
 test('missing config is never an implicit empty draft', t => {
   const { path } = fixture(t);
   assertInvalid(path, () => readConfig(path));

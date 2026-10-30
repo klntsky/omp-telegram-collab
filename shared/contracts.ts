@@ -3,7 +3,7 @@ import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
 export interface BotConfig {
   id: number;
   token: string;
-  miniAppShortName: string;
+  miniAppShortName?: string;
 }
 
 export interface InstanceConfig {

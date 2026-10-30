@@ -124,6 +124,50 @@ test('bot addition verifies identity without polling and supports stdin and envi
   assert.equal(readConfig(f.configPath).bots.length, 1);
 });
 
+test('Telegram-only bot addition skips Mini App prompts and names', async t => {
+  const f = fixture(t);
+  const answers = [token];
+  await f.run(['bot', 'add'], {interactive: true, question: async () => {
+    assert.ok(answers.length);
+    return answers.shift()!;
+  }});
+  assert.deepEqual(answers, []);
+  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, undefined);
+});
+
+test('changing Mini App mode preserves registered names and fills only missing names', async t => {
+  const f = fixture(t);
+  await f.run(['configure', '--public-url', 'https://collab.example']);
+  await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN', '--mini-app-short-name', 'workspace']);
+  await f.run(['configure', '--public-url', '']);
+  assert.equal(readConfig(f.configPath).publicUrl, '');
+  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'workspace');
+  await f.run(['bot', 'add', '--token-env', 'SECOND_TOKEN']);
+  assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, undefined);
+  await f.run(['configure', '--public-url', 'https://collab.example']);
+  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'workspace');
+  assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, 'app');
+});
+
+test('interactive configure defaults to Telegram-only and preserves the current mode', async t => {
+  const f = fixture(t);
+  await f.run(['configure'], {interactive: true, question: async () => ''});
+  assert.equal(readConfig(f.configPath).publicUrl, '');
+  await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN']);
+  await f.run(['configure'], {interactive: true, question: async prompt => {
+    if (prompt.startsWith('Enable Mini App?')) return 'yes';
+    if (prompt.startsWith('Public HTTPS origin')) return 'https://collab.example';
+    return '';
+  }});
+  assert.equal(readConfig(f.configPath).publicUrl, 'https://collab.example');
+  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'app');
+  await f.run(['configure'], {interactive: true, question: async () => ''});
+  assert.equal(readConfig(f.configPath).publicUrl, 'https://collab.example');
+  await f.run(['configure'], {interactive: true, question: async prompt => prompt.startsWith('Enable Mini App?') ? 'no' : ''});
+  assert.equal(readConfig(f.configPath).publicUrl, '');
+  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'app');
+});
+
 test('Telegram transport errors preserve original multiline diagnostics without a partial config', async t => {
   const f = fixture(t);
   f.state.fail = 'getMe';
@@ -408,7 +452,7 @@ test('readonly file and readonly parent reject mutations but permit inspection',
 
 test('setup wizard completes service, bot, instance and chat workflows', async t => {
   const f = fixture(t);
-  const answers = ['service', 'https://wizard.example', '127.0.0.1', '4555', join(f.root, 'wizard-data'), 'omp', '["--model","literal model"]', '9', '34567', 'wss://relay.example', 'bot', token, 'wizardapp', 'create', f.project, 'connect', f.project, '-1001', 'false', 'true', 'inspect', 'done'];
+  const answers = ['service', 'yes', 'https://wizard.example', '127.0.0.1', '4555', join(f.root, 'wizard-data'), 'omp', '["--model","literal model"]', '9', '34567', 'wss://relay.example', 'bot', token, 'wizardapp', 'create', f.project, 'connect', f.project, '-1001', 'false', 'true', 'inspect', 'done'];
   const hidden: boolean[] = [];
   await f.run(['setup'], {interactive: true, question: async (_prompt, secret) => { hidden.push(Boolean(secret)); const next = answers.shift(); assert.notEqual(next, undefined); return next!; }});
   assert.deepEqual(answers, []);

@@ -187,6 +187,7 @@ export class BotService {
   private readonly topicIcons = new Map<string, { status?: TopicActivity; revision: number; tail: Promise<void> }>();
   private readonly sessionKillHandlers = new Set<(sessionId: string) => void>();
   private readonly commandMenus = new Map<number, string>();
+  private globalCommandMenu?: string;
   private readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
   private menuTimer?: NodeJS.Timeout;
   private readonly background = new AbortController();
@@ -514,12 +515,8 @@ export class BotService {
   }
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
-    await this.bot.api.setMyCommands(
-      groupCommands,
-      { scope: { type: 'all_group_chats' } },
-      this.apiAbort.signal,
-    );
     await this.syncCommandMenus();
+    await this.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
   }
   startBackground(): void {
@@ -858,12 +855,21 @@ export class BotService {
       ? 'Non-admin prompts require approval by a group administrator.'
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
+  private commandHelp(): string {
+    return this.options.config.publicUrl ? help : help.split('\n').filter(line => !line.startsWith('/session ')).join('\n');
+  }
   private syncCommandMenus(): Promise<void> {
     const operation = this.menuTail.then(() => this.publishCommandMenus());
     this.menuTail = operation.catch(() => {});
     return operation;
   }
   private async publishCommandMenus(): Promise<void> {
+    const baseCommands = this.options.config.publicUrl ? groupCommands : groupCommands.filter(command => command.command !== 'session');
+    const globalFingerprint = JSON.stringify(baseCommands);
+    if (this.globalCommandMenu !== globalFingerprint) {
+      await this.bot.api.setMyCommands(baseCommands, {scope:{type:'all_group_chats'}}, this.apiAbort.signal);
+      this.globalCommandMenu = globalFingerprint;
+    }
     const current = new Set<number>();
     for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
       const chats = instance.chats.filter(chat => chat.botId === this.id);
@@ -871,8 +877,8 @@ export class BotService {
       for (const chat of chats) current.add(chat.chatId);
       const skills = this.options.store.getSkillCatalog(instancePath) ?? [];
       if (this.stopped) return;
-      const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - groupCommands.length));
-      const commands = [...groupCommands, ...[...aliases].map(([command, skill]) => ({
+      const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - baseCommands.length));
+      const commands = [...baseCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];
       const fingerprint = JSON.stringify([instancePath, commands]);
@@ -935,8 +941,36 @@ export class BotService {
     if (this.options.config.terminated) { await this.applyTermination(); return; }
     this.termination = undefined;
     await this.syncCommandMenus();
+    await this.syncSessionEntries();
     this.restoreSessions();
     void this.refreshSkillCatalogs();
+  }
+  private async syncSessionEntries(): Promise<void> {
+    for (const session of this.options.store.listSessions(this.id)) {
+      if (!this.sessionAssigned(session)) continue;
+      const entry = this.options.store.getSessionEntry(session.id);
+      if (!entry) continue;
+      const reply_markup = this.sessionMarkup(session);
+      const markup = JSON.stringify(reply_markup);
+      if (entry.markup === markup) continue;
+      try {
+        await this.bot.api.editMessageReplyMarkup(session.chatId, entry.messageId, {reply_markup});
+      } catch (error) {
+        if (!(error instanceof GrammyError)) throw error;
+        if (error.description === 'Bad Request: message to edit not found') {
+          console.warn(`Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`,error);
+          this.options.store.clearSessionEntry(session.id);
+          continue;
+        }
+        if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
+        console.warn(`Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`,error);
+      }
+      this.options.store.setSessionEntry(session.id,entry.messageId,markup);
+    }
+  }
+  private sessionMarkup(session: TopicSession) {
+    return {inline_keyboard: this.options.config.publicUrl && this.config.miniAppShortName
+      ? [[{text:'OPEN AGENT',url:this.link(session)}]] : []};
   }
   private link(session: TopicSession): string {
     return `https://t.me/${this.bot.botInfo!.username}/${this.config.miniAppShortName}?startapp=s_${session.id}`;
@@ -1063,7 +1097,8 @@ export class BotService {
   private async announce(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
     const text = this.allMessagesArePrompts(session.chatId) ? 'Send a message to prompt the agent' : 'Use /p to submit a prompt';
-    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text, { reply_markup: { inline_keyboard: [[{ text: 'OPEN AGENT', url: this.link(session) }]] } });
+    const message = await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text, {reply_markup:this.sessionMarkup(session)});
+    this.options.store.setSessionEntry(session.id,message.message_id,JSON.stringify(this.sessionMarkup(session)));
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
@@ -1477,13 +1512,13 @@ export class BotService {
       return;
     }
     if (ctx.chat.type === 'private') {
-      await replyTo(ctx, contextDestination(ctx), 'Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup. Configure the Mini App URL in BotFather for this bot.', {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
+      await replyTo(ctx, contextDestination(ctx), `Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup.${this.options.config.publicUrl ? ' Configure the Mini App URL in BotFather for this bot.' : ''}`, {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
     }
     if (command?.[1]?.toLowerCase() === 'setup') { await this.setup(ctx); return; }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
       if (command?.[1]?.toLowerCase() === 'help') {
-        await replyTo(ctx, contextDestination(ctx), `${help}\n${settingsHelp}\n${adminHelp}\n${this.promptHelp(ctx.chat.id)}`);
+        await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
     }
@@ -1644,10 +1679,12 @@ export class BotService {
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
         await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
-      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${help}\n${settingsHelp}\n${adminHelp}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
       if (action === 'session') {
+        if (!this.options.config.publicUrl) { await replyTo(ctx, contextDestination(ctx), 'The Mini App is disabled. Continue using this topic to interact with the agent in Telegram.'); return; }
         if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }
-        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:{inline_keyboard:[[{text:'OPEN AGENT',url:this.link(session)}]]}}); return;
+        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:this.sessionMarkup(session)});
+        return;
       }
       if (action === 'model_preset' || action === 'list_model_presets') {
         if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }

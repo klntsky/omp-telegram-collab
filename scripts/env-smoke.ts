@@ -44,6 +44,11 @@ export async function verifyEnvironmentCli(): Promise<void> {
     await assert.rejects(run('--config', configPath, 'configure', '--max-sessions', '50'));
     await run('--config', configPath, 'show', '.');
     assert.equal(await readFile(configPath, 'utf8'), before);
+    await chmod(configPath, 0o600);
+    await run('--config', configPath, 'configure', '--public-url', '');
+    assert.equal(readConfig(configPath).publicUrl, '');
+    await run('--config', configPath, 'configure', '--public-url', 'https://cli.example');
+    assert.equal(readConfig(configPath).publicUrl, 'https://cli.example');
     const missing = join(cwd, 'missing.yaml');
     await assert.rejects(run('start', '--config', missing));
     console.log('PASS compiled CLI configuration, canonical path identities, protected-file reads/write rejection, and atomic refusal.');

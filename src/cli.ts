@@ -140,19 +140,21 @@ async function launch(config: AppConfig, onPollingFailure: () => void, initialLa
       await bot.initialize();
       timing(`bot ${bot.id} initialization`, phaseAt);
       if (bot.id !== botConfig.id) throw new Error(`Telegram bot identity does not match configured bot ${botConfig.id}`);
-      stdout.write(`Verified @${bot.bot.botInfo!.username} (bot ${bot.id}). Set the BotFather Mini App web URL to ${new URL(`/?bot=${bot.id}`, config.publicUrl).href}\n`);
+      stdout.write(`Verified @${bot.bot.botInfo!.username} (bot ${bot.id}).${config.publicUrl ? ` Set the BotFather Mini App web URL to ${new URL(`/?bot=${bot.id}`, config.publicUrl).href}` : ' Telegram-only mode.'}\n`);
     }
     if (config.terminated) await Promise.all(bots.map(bot => bot.applyTermination()));
-    server = createServer({ config, bots, store, runtime });
-    phaseAt = performance.now();
-    const listening = Promise.withResolvers<void>();
-    server.once('error', listening.reject);
-    server.listen(config.port, config.host, () => {
-      server!.off('error', listening.reject);
-      listening.resolve();
-    });
-    await listening.promise;
-    timing('HTTP bind', phaseAt);
+    if (config.publicUrl) {
+      server = createServer({ config, bots, store, runtime });
+      phaseAt = performance.now();
+      const listening = Promise.withResolvers<void>();
+      server.once('error', listening.reject);
+      server.listen(config.port, config.host, () => {
+        server!.off('error', listening.reject);
+        listening.resolve();
+      });
+      await listening.promise;
+      timing('HTTP bind', phaseAt);
+    }
     await Promise.all(bots.map(bot => {
       const pollAt = performance.now();
       const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -186,7 +188,7 @@ async function launch(config: AppConfig, onPollingFailure: () => void, initialLa
       if (onlineController.signal.aborted) return;
       await notifyGroups(config, bots, store!, `OMP bot service is back online (restarting took ${((Date.now() - marker.startedAt) / 1000).toFixed(2)} seconds).`, onlineController.signal);
     })().catch(error => console.error('Online notification failed:', error)).finally(() => timing('ready-to-notification', readyAt));
-    stdout.write(`OMP Telegram listening on ${config.host}:${config.port}. Configuration: ${config.configPath}\n`);
+    stdout.write(`OMP Telegram ${config.publicUrl ? `listening on ${config.host}:${config.port}` : 'running in Telegram-only mode'}. Configuration: ${config.configPath}\n`);
     return { config, store, runtime, bots, close };
   } catch (error) {
     await close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));

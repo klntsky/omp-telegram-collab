@@ -261,14 +261,17 @@ class Administration {
       token = (await this.ask('Bot token (hidden): ', true)).trim();
     }
     if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) throw new Error('Invalid Telegram bot token.');
-    const candidate: BotConfig = {id: integer(token.split(':')[0]!, 'Bot ID'), token, miniAppShortName: one(options, 'mini-app-short-name') ?? (this.interactive ? (await this.ask('BotFather Mini App short name [app]: ')).trim() || 'app' : 'app')};
-    if (!/^[A-Za-z0-9_]+$/.test(candidate.miniAppShortName)) throw new Error('Mini App short name must use only letters, numbers, or underscores.');
+    const candidate: BotConfig = {id: integer(token.split(':')[0]!, 'Bot ID'), token};
+    if (config.publicUrl) {
+      candidate.miniAppShortName = one(options, 'mini-app-short-name') ?? (this.interactive ? (await this.ask('BotFather Mini App short name [app]: ')).trim() || 'app' : 'app');
+      if (!/^[A-Za-z0-9_]+$/.test(candidate.miniAppShortName)) throw new Error('Mini App short name must use only letters, numbers, or underscores.');
+    }
     if (config.bots.some(bot => bot.id === candidate.id)) throw new Error(`Bot ${candidate.id} is already configured. Remove it before replacing its credentials.`);
     const me = record(await this.api(candidate).getMe());
     if (me.id !== candidate.id || me.is_bot !== true) throw new Error('Telegram token identity did not match the bot ID.');
     config.bots.push(candidate);
     await this.save(config);
-    this.print(`Added @${String(me.username ?? candidate.id)} (${candidate.id}), Mini App ${candidate.miniAppShortName}.`);
+    this.print(`Added @${String(me.username ?? candidate.id)} (${candidate.id})${candidate.miniAppShortName ? `, Mini App ${candidate.miniAppShortName}` : ''}.`);
   }
   async configure(options: Options): Promise<void> {
     const config = this.load(true);
@@ -281,9 +284,24 @@ class Administration {
       if (specified !== undefined) return specified;
       return interactive ? (await this.ask(`${label} [${current}]: `)).trim() || current : current;
     };
-    config.publicUrl = await value('public-url', 'Public HTTPS origin', config.publicUrl);
-    config.host = await value('host', 'Listen host', config.host);
-    config.port = integer(await value('port', 'Listen port', String(config.port)), 'Port', 0, 65535);
+    if (interactive) {
+      this.print('The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.');
+      const answer = (await this.ask(`Enable Mini App? [${config.publicUrl ? 'Y/n' : 'y/N'}]: `)).trim().toLowerCase();
+      if (answer && !['y', 'yes', 'n', 'no'].includes(answer)) throw new Error('Answer yes or no to enable Mini App.');
+      const enabled = answer ? ['y', 'yes'].includes(answer) : config.publicUrl !== '';
+      config.publicUrl = enabled ? await value('public-url', 'Public HTTPS origin', config.publicUrl) : '';
+      if (enabled && !config.publicUrl) throw new Error('Mini App requires a public HTTPS origin.');
+    } else config.publicUrl = await value('public-url', 'Public HTTPS origin', config.publicUrl);
+    if (config.publicUrl) {
+      for (const bot of config.bots) bot.miniAppShortName ??= 'app';
+    }
+    if (config.publicUrl) {
+      config.host = await value('host', 'Listen host', config.host);
+      config.port = integer(await value('port', 'Listen port', String(config.port)), 'Port', 0, 65535);
+    } else {
+      if (options.has('host')) config.host = one(options, 'host')!;
+      if (options.has('port')) config.port = integer(one(options, 'port')!, 'Port', 0, 65535);
+    }
     config.dataDir = resolve(await value('data-dir', 'Data directory (existing histories stay in their current directory)', config.dataDir));
     const executable = await value('omp-executable', 'OMP executable', config.omp.executable);
     config.omp.executable = executable.includes('/') ? resolve(executable) : executable;
@@ -379,7 +397,7 @@ class Administration {
       }
       if (action === 'list') {
         count(rest, 0, 'bot list'); const config = this.load();
-        for (const bot of config.bots) this.print(`${bot.id}\tMini App: ${bot.miniAppShortName}`);
+        for (const bot of config.bots) this.print(`${bot.id}\t${config.publicUrl ? `Mini App: ${bot.miniAppShortName}` : 'Telegram-only'}`);
         if (!config.bots.length) this.print('No bots configured.'); return true;
       }
       if (action === 'remove') {

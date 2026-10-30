@@ -1,6 +1,6 @@
 # OMP Telegram Collab
 
-Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram forum topics on your own machine. Telegram, the Mini App, and the local OMP terminal connect to the same session.
+Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram forum topics on your own machine. Telegram, the optional Mini App, and the local OMP terminal connect to the same session.
 
 ![OMP Telegram Collab conversations organized into Telegram forum topics](assets/telegram-topics.jpg)
 
@@ -103,7 +103,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
 
-   Choose the public HTTPS address you will use for the Mini App, such as `https://omp.example.com`. Enter it at the `Public HTTPS origin` prompt in `pnpm cli configure`. Set the listen host and port for your reverse proxy or tunnel.
+   `pnpm cli configure` explains the Mini App and asks whether to enable it. Telegram-only is the default. You can send prompts and images, read replies, and answer agent questions in Telegram. Enable the Mini App if you also want a live transcript, tool details, and subagent controls.
+
+   If you enable it, enter your public HTTPS address, such as `https://omp.example.com`, at the `Public HTTPS origin` prompt. Set the listen host and port for your reverse proxy or tunnel.
 
    ```sh
    pnpm cli configure
@@ -112,9 +114,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    pnpm start
    ```
 
-   Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
+   Enter the BotFather token when `bot add` asks. If you enabled the Mini App, keep the default short name, `app`.
 
-5. Choose how to expose the service over HTTPS.
+5. If you enabled the Mini App, choose how to expose the service over HTTPS.
 
    <details>
    <summary>Option 1: Use cloudflared</summary>
@@ -156,7 +158,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    </details>
 
-6. In BotFather, send `/newapp` to register the Mini App.
+6. If you enabled the Mini App, send `/newapp` in BotFather to register it.
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
    3. Enter a description, such as `Run coding sessions from Telegram`.
@@ -177,10 +179,10 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    Select the project directory and prompt settings when asked.
 
-9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do. Select **OPEN AGENT** in the new topic to open the Mini App.
+9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do.
 10. Verify the connection in Telegram.
-    1. On your phone, switch to mobile data and open the topic's **OPEN AGENT** button. Confirm that the Mini App loads the session transcript.
-    2. Send a prompt asking the agent to reply with a short greeting. Confirm that its reply appears in both the Mini App and the topic.
-    3. Keep the Mini App open and send another prompt from a second Telegram client. Confirm that the new reply appears in the open Mini App. This checks live updates through the WebSocket connection.
+    1. Send a prompt asking the agent to reply with a short greeting. Confirm that its reply appears in the topic.
+    2. If you enabled the Mini App, switch your phone to mobile data and open the topic's **OPEN AGENT** button. Confirm that the Mini App loads the session transcript and the greeting.
+    3. If you enabled the Mini App, keep it open and send another prompt from a second Telegram client. Confirm that the new reply appears in the open Mini App. This checks live updates through the WebSocket connection.
 
 

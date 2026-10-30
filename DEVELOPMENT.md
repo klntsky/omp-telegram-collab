@@ -20,10 +20,10 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    pnpm start
    ```
 
-   `configure` asks for service settings. `bot add` verifies the token and asks for the Mini App short name, which defaults to `app`. `create` registers an existing directory. It does not create or clone a project. Use `pnpm cli setup` for a guided configuration wizard.
+   `configure` explains the optional Mini App and asks whether to enable it. Choose Telegram-only for prompts, images, replies, and agent questions in Telegram. Enable the Mini App for live transcripts, tool details, and subagent controls, then enter your public HTTPS origin. `bot add` verifies the token and asks for the Mini App short name only when enabled, defaulting to `app`. `create` registers an existing directory. Use `pnpm cli setup` for a guided configuration wizard.
 
-4. Put the HTTP service behind an HTTPS reverse proxy. Forward WebSocket upgrades for `/api/socket`. Keep the loopback bind address if the proxy runs on the same machine. Telegram uses long polling, so no webhook is needed.
-5. In BotFather, use `/newapp` to create a direct-link Mini App. Match the short name configured above. Set its web URL to the per-bot URL printed at startup, such as `https://your-host.example/?bot=YOUR_NUMERIC_BOT_ID`.
+4. If you enabled the Mini App, expose the HTTP service over HTTPS with WebSocket support. Keep the loopback bind address if the proxy or tunnel runs on the same machine. Telegram-only operation uses long polling and needs outbound Telegram access.
+5. If you enabled the Mini App, use `/newapp` in BotFather to create a direct-link Mini App. Match the configured short name. Set its web URL to the per-bot URL printed at startup, such as `https://omp.example.com/?bot=YOUR_NUMERIC_BOT_ID`. See the [README setup steps](README.md#setup) for the BotFather prompts and Cloudflare Tunnel instructions.
 
    Optionally enable inline mode for this bot with BotFather's `/setinline` to use Search in the `/skills` picker. Choose a search placeholder when prompted. Inline mode is not required: the picker's normal skill buttons remain available without it. Inline search is bound to the user and topic that opened the picker and expires after ten minutes; reopening `/skills` refreshes the search context without clearing persisted pending selections.
 
@@ -41,7 +41,7 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    ```
 
    Approval verifies the group and the requester's current owner or administrator status, asks for the project directory and prompt settings, and confirms the assignment. The requester does not need a username. Requests expire after ten minutes. Adding the bot alone does not assign a project or enable Topics.
-8. Send `/new Implement authentication` in the group, then select OPEN AGENT in the new topic.
+8. Send `/new <your task>` in the group. If you enabled the Mini App, select OPEN AGENT in the new topic to open it.
 
 Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
 
@@ -107,7 +107,9 @@ Configuration updates notify the running service and await acknowledgement. Proj
 
 `configure` accepts `--public-url`, `--host`, `--port`, `--data-dir`, `--omp-executable`, repeated `--omp-arg`, `--clear-omp-args`, `--max-sessions`, `--startup-timeout-ms`, and `--relay-url`. Use `--relay-url -` to clear the relay. OMP arguments are literal strings, not shell commands.
 
-Defaults are loopback, port 3000, executable `omp`, eight resident managed hosts, and a 60000 ms startup timeout. The public URL must be an HTTPS origin without credentials, path, query, or fragment.
+Defaults are Telegram-only operation, loopback, port 3000, executable `omp`, eight resident managed hosts, and a 60000 ms startup timeout. An empty `publicUrl` selects Telegram-only operation. To enable the Mini App, configure an HTTPS origin without credentials, path, query, or fragment. Each bot then needs a `miniAppShortName` matching its BotFather registration. Reconfigure with `pnpm cli configure` to change modes.
+
+For scripts, use `pnpm cli configure --public-url ''` for Telegram-only operation or `pnpm cli configure --public-url https://omp.example.com` to enable the Mini App. Enabling supplies `app` as the short name for existing bots that have none; register that name in BotFather. Existing short names are retained when changing modes so registered launch links keep working when re-enabled.
 
 ### Run under PM2
 
@@ -178,7 +180,7 @@ timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use
 
 `test:one` accepts Node test-runner flags and one or more paths without adding the full-suite glob. Run the disposable real-process kill check with `timeout 180s pnpm exec tsx scripts/runtime-kill-smoke.ts`.
 
-Live Telegram verification requires a BotFather token, configured Mini App, HTTPS deployment, and forum groups. Local fixtures cannot verify BotFather settings or Telegram client behavior. Do not stop a service that owns an active coding session solely to test lifecycle notices.
+Live Telegram verification requires a BotFather token and forum groups. Mini App verification also requires its BotFather registration and HTTPS deployment. Local fixtures cannot verify BotFather settings or Telegram client behavior. Keep services that own active coding sessions running while testing lifecycle notices elsewhere.
 
 ## Debugging
 

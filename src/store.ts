@@ -49,6 +49,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
@@ -174,6 +175,16 @@ export class Store {
   getInitialUser(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);
     return row ? Number(row.user_id) : undefined;
+  }
+  getSessionEntry(id: string): {messageId: number; markup: string} | undefined {
+    const row = this.db.prepare('SELECT message_id,markup FROM session_entries WHERE session_id=?').get(id);
+    return row ? {messageId:Number(row.message_id),markup:String(row.markup)} : undefined;
+  }
+  setSessionEntry(id: string, messageId: number, markup: string): void {
+    this.db.prepare('INSERT INTO session_entries VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET message_id=excluded.message_id,markup=excluded.markup').run(id,messageId,markup);
+  }
+  clearSessionEntry(id: string): void {
+    this.db.prepare('DELETE FROM session_entries WHERE session_id=?').run(id);
   }
   setReplyTarget(id: string, messageId: number | undefined): void {
     if (messageId === undefined) this.db.prepare('DELETE FROM reply_targets WHERE session_id=?').run(id);

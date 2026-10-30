@@ -4,11 +4,13 @@ This document describes ownership and boundaries. User-visible requirements belo
 
 ## Service composition
 
-The CLI owns configuration management and starts the service. The running service composes Telegram bot adapters, persistent session storage, the OMP runtime manager, and the HTTP and WebSocket gateway. Bot adapters and the gateway share the runtime and session store, so Telegram and Mini App clients reach the same OMP conversation rather than maintaining independent agent state.
+The CLI owns configuration management and starts the service. The running service composes Telegram bot adapters, persistent session storage, and the OMP runtime manager. A configured public HTTPS origin also enables the HTTP and WebSocket gateway. Bot adapters and the gateway share the runtime and session store, so Telegram and Mini App clients reach the same OMP conversation rather than maintaining independent agent state.
 
 Configuration is the authority for project directories, bot identities, chat assignments, and service settings. Telegram owns group administrator roles. Neither roles nor runtime storage can override configured project assignments. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
 
-The service owns the readiness boundary: mandatory runtime and history checks, initialized bot identities and cached menus, bound HTTP listener, and a successful first poll for every bot. Only after that boundary does it start adapter maintenance and the separately tracked online notification. Notification delivery is not a readiness dependency. Shutdown cancels the online task, drains input with update acknowledgements intact, and closes component-owned work before storage.
+The service configuration owns the Mini App mode. An empty public origin keeps the gateway stopped; a configured origin enables it. The bot adapter uses the same configuration to publish Mini App commands and launch controls. Network availability does not change this choice.
+
+The service owns the readiness boundary: mandatory runtime and history checks, initialized bot identities and cached menus, a bound HTTP listener when the Mini App is enabled, and a successful first poll for every bot. Only after that boundary does it start adapter maintenance and the separately tracked online notification. Notification delivery is not a readiness dependency. Shutdown cancels the online task, drains input with update acknowledgements intact, and closes component-owned work before storage.
 
 The bot adapter owns lifecycle-notice topic creation and delivery; the store preserves its per-bot, per-forum destination across restarts. The inbound adapter excludes that reserved destination before reactions, command dispatch, or prompt admission, so lifecycle notices cannot become session input.
 
@@ -100,4 +102,4 @@ Telegram's signature establishes the caller's numeric identity and launch contex
 
 The operating-system account is the filesystem and credential boundary. Project directories, chat assignments, and Telegram roles organize access inside the application but do not sandbox OMP processes. Isolation between mutually untrusted users requires an account or container boundary outside the application.
 
-The reverse proxy provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.
+When the Mini App is enabled, the reverse proxy or tunnel provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.

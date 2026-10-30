@@ -2,6 +2,10 @@
 
 This document defines current user-visible behavior. See [Development](DEVELOPMENT.md) for setup and operations.
 
+The Mini App is optional. Setup explains that it adds a live transcript, tool details, and subagent controls before asking whether to enable it. New services default to Telegram-only.
+
+An empty public HTTPS origin selects Telegram-only operation for every bot in the service. Prompts, images, replies, agent questions, and Telegram session commands remain available. Mini App launch buttons and `/session` menu entries appear when an HTTPS origin is configured. Enabling the Mini App requires a named app registered in BotFather for each bot. A network failure leaves the configured mode unchanged.
+
 ## 1. Telegram sessions
 
 
@@ -15,7 +19,7 @@ This document defines current user-visible behavior. See [Development](DEVELOPME
 | `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/settings` | Open interactive forum settings, defaults, and shared session capacity. Requires the current supergroup owner or an administrator. |
-| `/session` | Get the current topic's Mini App link. |
+| `/session` | Get the current topic's Mini App link when the Mini App is enabled. |
 | `/stop` | Interrupt the current agent turn without terminating OMP. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
 | `/terminate` | Supergroup owner or administrator service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |

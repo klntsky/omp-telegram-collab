@@ -49,7 +49,7 @@ const configSchema = z.object({
   bots: z.array(z.object({
     id: positiveInteger,
     token: z.string().regex(tokenPattern),
-    miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/),
+    miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/).optional(),
   }).strict().refine(bot => Number(bot.token.split(':')[0]) === bot.id)),
   instances: z.record(absolutePath, z.object({
     chats: z.array(z.object({
@@ -92,6 +92,7 @@ function validate(value: unknown, configPath: string): AppConfig {
   const ids = new Set<number>();
   const tokens = new Set<string>();
   for (const bot of config.bots) {
+    if (config.publicUrl && !bot.miniAppShortName) throw failure(configPath, ['bots'], 'Every bot requires a Mini App short name when a public HTTPS origin is configured.');
     if (ids.has(bot.id) || tokens.has(bot.token)) throw failure(configPath, ['bots'], 'Every bot must have a distinct ID and token.');
     ids.add(bot.id);
     tokens.add(bot.token);
@@ -255,8 +256,7 @@ export function writeConfig(config: AppConfig): void {
 export function validateStart(config: AppConfig): void {
   const { configPath, ...value } = config;
   const checked = validate(value, configPath);
-  const missing = [!checked.bots.length ? 'bots' : '', !checked.publicUrl ? 'publicUrl' : ''].filter(Boolean);
-  if (missing.length) throw failure(configPath, missing, 'Configure at least one bot and an HTTPS public origin before starting.');
+  if (!checked.bots.length) throw failure(configPath, ['bots'], 'Configure at least one bot before starting.');
 }
 
 export function findInstance(config: AppConfig, botId: number, chatId: number): { path: string; instance: InstanceConfig } | undefined {

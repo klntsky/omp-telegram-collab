@@ -318,6 +318,29 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   };
 }
 
+test('Telegram-only startup polls without binding the Mini App port and shuts down cleanly', { timeout: 30_000 }, async t => {
+  const fixture = await lifecycleFixture(t);
+  const occupied = createServer();
+  occupied.listen(0, '127.0.0.1');
+  await once(occupied, 'listening');
+  t.after(async () => {
+    const closed = Promise.withResolvers<void>();
+    occupied.close(error => error ? closed.reject(error) : closed.resolve());
+    await closed.promise;
+  });
+  const address = occupied.address();
+  assert.ok(address && typeof address !== 'string');
+  fixture.config.port = address.port;
+  fixture.config.publicUrl = '';
+  for (const bot of fixture.config.bots) delete bot.miniAppShortName;
+  writeConfig(fixture.config);
+  const service = await fixture.start();
+  assert.equal(fixture.ready.size, 2);
+  await service.close();
+  assert.equal(fixture.runtimeCloses, 1);
+  assert.equal(fixture.storeCloses, 1);
+});
+
 test('CLI posts online and winding-down notices once per bot and enrolled group in Bot status', { timeout: 30_000 }, async t => {
   const fixture = await lifecycleFixture(t);
   const service = await fixture.start();
