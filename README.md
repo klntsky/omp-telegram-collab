@@ -103,6 +103,8 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
 
+   Choose the public HTTPS address you will use for the Mini App, such as `https://your-host.example`. Enter it at the `Public HTTPS origin` prompt in `pnpm cli configure`. Set the listen host and port for your reverse proxy or tunnel.
+
    ```sh
    pnpm cli configure
    pnpm cli bot add
@@ -112,7 +114,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
 
-5. Expose the service over HTTPS so Telegram can open the Mini App. You can use a reverse proxy. If you do, forward WebSocket upgrades for `/api/socket` and keep the loopback bind address when the proxy runs on the same machine.
+5. Point that HTTPS address at the configured listen host and port using a reverse proxy or tunnel with WebSocket support. `pnpm start` uses your configured address to print the BotFather web URL.
 6. In BotFather, send `/newapp` to register the Mini App.
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
