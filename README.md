@@ -12,7 +12,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 ## OMP feature coverage
 
-✅ Available in Telegram · 📱 Mini-app only · ⚠️ Partial support · ❌ No remote equivalent.
+✅ Available in Telegram · 📱 Mini-app only · ❌ No remote equivalent.
 
 | Support level | OMP feature | Use from Telegram |
 | --- | --- | --- |
