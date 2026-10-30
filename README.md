@@ -10,6 +10,43 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 - Share project directories across groups with configurable prompt approval.
 - Edit the included Collab Web client without an iframe.
 
+## Setup
+
+1. Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+2. Create a Telegram bot with [BotFather](https://t.me/BotFather). Keep the token private.
+3. Clone and build this project.
+
+   ```sh
+   git clone https://github.com/klntsky/omp-telegram-collab.git
+   cd omp-telegram-collab
+   pnpm install
+   pnpm build
+   ```
+
+4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
+
+   ```sh
+   pnpm cli configure
+   pnpm cli bot add
+   pnpm cli create /path/to/project
+   pnpm start
+   ```
+
+   Enter the BotFather token when `bot add` asks. Keep the default Mini App short name, `app`.
+
+5. Put the HTTP service behind an HTTPS reverse proxy. Forward WebSocket upgrades for `/api/socket`. Keep the loopback bind address if the proxy runs on the same machine.
+6. In BotFather, use `/newapp` to create a direct-link Mini App with the short name `app`. Set its web URL to the per-bot URL printed at startup.
+7. Add the bot to a Telegram supergroup with Topics enabled. Give it Manage Topics and Pin Messages permissions.
+8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
+
+   ```sh
+   pnpm cli approve REQUEST_CODE
+   ```
+
+   Select the project directory and prompt settings when asked.
+
+9. Send `/new Implement authentication` in the group to start a session. Select **OPEN AGENT** in the new topic to open the Mini App.
+
 ## OMP feature coverage
 
 ✅ Available in Telegram · 📱 Mini-app only · ⚠️ Partial support · ❌ No remote equivalent.
