@@ -20,8 +20,9 @@
     "dev": "node --import tsx src/cli.ts start",
     "start": "node dist/cli.js start",
     "cli": "node dist/cli.js",
-    "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs && vite build --config web/vite.config.ts",
-    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
+    "generate:commands": "node scripts/generate-commands.mjs",
+    "build": "pnpm generate:commands && tsc --noEmit -p tsconfig.json && node scripts/build.mjs && vite build --config web/vite.config.ts",
+    "check": "pnpm generate:commands && tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
     "test": "tsx --test --test-concurrency=5 test/*.test.ts",
     "test:one": "tsx --test --test-concurrency=5",
     "test:integration": "pnpm build && pnpm smoke",
@@ -33,6 +34,7 @@
     "smoke:runtime": "tsx scripts/smoke.ts runtime"
   },
   "dependencies": {
+    "@lezer/lr": "^1.4.12",
     "@lydell/node-pty": "1.2.0-beta.18",
     "@oh-my-pi/pi-wire": "16.3.6",
     "abort-controller": "^3.0.0",
@@ -46,6 +48,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@lezer/generator": "^1.8.1",
     "@types/katex": "^0.16.7",
     "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",

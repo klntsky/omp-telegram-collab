@@ -1,22 +1,23 @@
 import type { Context } from 'grammy';
 import type { Message, RichBlock, RichText } from 'grammy/types';
+import { parseTelegramCommand, type PromptExtension } from './telegram-commands.js';
 
 export interface TelegramImage { fileId: string; mimeType: string }
 export interface TelegramContent { text: string; images: TelegramImage[] }
 export type InputIntent =
   | { kind: 'ignore' }
   | { kind: 'event' }
+  | { kind: 'invalid'; error: Error }
   | { kind: 'command'; action: string; argument: string }
   | { kind: 'skill-selection'; text: string }
   | { kind: 'question-answer'; token: string; text: string }
   | { kind: 'ended-question' }
-  | { kind: 'new-task' | 'session-prompt'; content: TelegramContent; skill?: string };
+  | { kind: 'new-task' | 'session-prompt'; content: TelegramContent; extensions?: PromptExtension[] };
 
 export interface InputContext {
   botId: number;
   username: string;
   allMessagesArePrompts: boolean;
-  commands: ReadonlySet<string>;
   skillAliases: ReadonlyMap<string, { name: string }>;
   question?: string;
   endedQuestion: boolean;
@@ -109,17 +110,23 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
     return {...content,text:quoted ? text ? `${quoted}\n\n${text}` : quoted : text};
   };
   if (content.text.startsWith('/')) {
-    if (/^\/skill:[^\s]+$/.test(content.text)) return {kind:'skill-selection',text:content.text};
-    const command = content.text.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
-    if (!command || (command[2] && command[2].toLowerCase() !== context.username.toLowerCase())) return {kind:'ignore'};
-    const action = command[1]!.toLowerCase();
-    const argument = command[3]?.trim() ?? '';
-    const skill = context.skillAliases.get(action);
-    if (!context.commands.has(action) && !skill) return {kind:'ignore'};
-    if (action === 'new' || action === 'p' || (skill && (argument || content.images.length))) {
-      return {kind:action === 'new' ? 'new-task' : 'session-prompt',content:withContext(argument),...(skill ? {skill:skill.name} : {})};
+    const parsed = parseTelegramCommand(content.text, context.username, context.skillAliases);
+    if (parsed.kind === 'ignore') return parsed;
+    if (parsed.kind === 'invalid') return parsed;
+    if (parsed.kind === 'selection') {
+      if (content.images.length) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:parsed.name}]};
+      return {kind:'skill-selection',text:`/skill:${parsed.name}`};
     }
-    return {kind:'command',action,argument};
+    if (parsed.kind === 'prompt') return {
+      kind:parsed.action === 'new' ? 'new-task' : 'session-prompt',
+      content:withContext(parsed.text),
+      ...(parsed.extensions.length ? {extensions:parsed.extensions} : {}),
+    };
+    if (parsed.kind === 'command' && content.images.length) {
+      const skill = context.skillAliases.get(parsed.action);
+      if (skill) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:skill.name}]};
+    }
+    return parsed;
   }
   if (!content.text.trim() && !content.images.length) return {kind:'ignore'};
   if (context.question) return {kind:'question-answer',token:context.question,text:content.text};

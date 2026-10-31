@@ -4,9 +4,10 @@ import { dirname } from 'node:path';
 import { readConfig, writeConfig } from '../src/config.js';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
-import { botId, chatId, ownerUsername } from './telegram-data.js';
+import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 import { capacityRequest, waitingForCapacity } from './bot-capacity-helpers.js';
+import type { TopicSession } from '../shared/contracts.js';
 
 test('capacity approval requires a current native group administrator', async () => {
   const app = await waitingForCapacity();
@@ -223,3 +224,132 @@ for (const change of ['limit', 'role', 'assignment'] as const) {
     }
   });
 }
+
+for (const existing of [false,true]) {
+  for (const order of ['worktree-first','preset-first']) {
+    test(`composed ${existing ? 'existing' : 'new'} target waits before every ${order} consumer effect`, async t => {
+      const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
+      try {
+        await app.update({text:'/setup'});
+        await app.update({text:'/new Running'});
+        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+        if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Waiting'}});
+        t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+        const effects:string[] = [];
+        let preset = 'Fallback';
+        t.mock.method(app.runtime,'worktree',async (session: TopicSession) => {
+          effects.push('worktree');
+          await app.runtime.stop(session);
+          await assert.rejects(app.runtime.reserveSession('competitor'), /OMP session limit/);
+          preset = 'Fallback';
+          return 'Worktree switched';
+        });
+        t.mock.method(app.runtime,'modelPresets',async (_session: TopicSession,name?: string) => {
+          effects.push(`preset:${name}`);
+          preset = name!;
+          return 'Preset applied';
+        });
+        const before = app.store.listSessions(botId).length;
+        const chain = order === 'worktree-first' ? '/worktree /model_preset Fast' : '/model_preset Fast /worktree';
+        await app.update({text:`/${existing ? 'p' : 'new'} ${chain} Frozen task`,...(existing ? {message_thread_id:42} : {})});
+        assert.deepEqual(effects,[]);
+        assert.equal(app.store.listSessions(botId).length,before);
+        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').map(frame => frame.text),['Running']);
+        const request = capacityRequest(app);
+        await app.callback(request.approve,request.message);
+        await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Frozen task'));
+        assert.deepEqual(effects,order === 'worktree-first' ? ['worktree','preset:Fast'] : ['preset:Fast','worktree','preset:Fast']);
+        assert.equal(preset,'Fast');
+        assert.equal(app.store.listSessions(botId).length,before+(existing ? 0 : 1));
+        await app.callback(request.approve,request.message);
+        assert.equal(app.accepted.filter(frame => frame.t === 'prompt' && frame.text === 'Frozen task').length,1);
+      } finally { await app.close(); }
+    });
+  }
+}
+
+test('cancelled composed capacity admission never creates a target or executes preparations', async t => {
+  const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/new Running'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+    const prepare = t.mock.method(app.runtime,'modelPresets',async () => 'Applied');
+    await app.update({text:'/new /model_preset Fast Never execute'});
+    const request = capacityRequest(app);
+    await app.callback(request.cancel,request.message);
+    await app.callback(request.approve,request.message);
+    assert.equal(prepare.mock.callCount(),0);
+    assert.equal(app.store.listSessions(botId).length,1);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').map(frame => frame.text),['Running']);
+  } finally { await app.close(); }
+});
+
+for (const invalidation of ['demotion','generation','termination'] as const) {
+  test(`composed capacity approval discards frozen execution after ${invalidation}`, async t => {
+    const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      await app.update({text:'/new Running'});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      await app.update({message_thread_id:42,forum_topic_created:{name:'Waiting'}});
+      const session = app.store.listSessions(botId).find(value => value.threadId === 42)!;
+      t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+      const prepare = t.mock.method(app.runtime,'modelPresets',async () => 'Applied');
+      await app.update({message_thread_id:42,text:'/p /model_preset Fast Must not execute'});
+      const request = capacityRequest(app);
+      if (invalidation === 'generation') app.store.advanceSessionGeneration(session.id);
+      else if (invalidation === 'termination') {
+        app.config.terminated = true;
+        writeConfig(app.config);
+      } else app.setCurrentMember({status:'member'});
+      await app.callback(request.approve,request.message);
+      assert.equal(prepare.mock.callCount(),0);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').map(frame => frame.text),['Running']);
+      assert.equal(app.runtime.getSessionLimit(),1);
+    } finally { await app.close(); }
+  });
+}
+
+test('failed composed preparation releases capacity without replaying or submitting a fallback task', async t => {
+  const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+    const prepare = t.mock.method(app.runtime,'modelPresets',async () => { throw new Error('Native preset rejected'); });
+    await app.update({text:'/new /model_preset Fast Must not submit'});
+    const failed = app.store.listSessions(botId)[0]!;
+    assert.equal(app.store.hasPendingInitialTask(failed.id),false);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    await app.runtime.stop(failed);
+    const next = await app.runtime.reserveSession('next-target');
+    next.release();
+    assert.equal(prepare.mock.callCount(),1);
+  } finally { await app.close(); }
+});
+
+test('composed capacity approval rechecks a distinct approver after sender authorization', async t => {
+  const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/new Running'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const prepare = t.mock.method(app.runtime,'modelPresets',async () => 'Applied');
+    await app.update({text:'/new /model_preset Fast Must not execute'});
+    const request = capacityRequest(app);
+    const approver = {id:77,is_bot:false,first_name:'Approver'};
+    app.setUserRole(approver,'administrator');
+    const getMember = app.bot.api.getChatMember.bind(app.bot.api);
+    t.mock.method(app.bot.api,'getChatMember',async (targetChat: number | string, userId: number, signal?: Parameters<typeof getMember>[2]) => {
+      if (userId === ownerId) app.setUserRole(approver,'member');
+      return getMember(targetChat,userId,signal);
+    });
+    await app.callback(request.approve,request.message,approver);
+    assert.equal(app.runtime.getSessionLimit(),1);
+    assert.equal(readConfig(app.config.configPath).omp.maxSessions,1);
+    assert.equal(prepare.mock.callCount(),0);
+    assert.equal(app.store.listSessions(botId).length,1);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Running'}]);
+  } finally { await app.close(); }
+});

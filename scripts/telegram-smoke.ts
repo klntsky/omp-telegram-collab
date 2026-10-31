@@ -211,12 +211,29 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   };
   let sessionLimit = config.omp.maxSessions;
   const managedSessions = new Set<string>();
+  const reservations = new Map<symbol,string>();
+  let runtimeClosed = false;
   const attachedHosts = new Map<string, { instancePath: string; binding: HostBinding }>();
   const sessionTitles = new Map<string,string>();
   const titleChanges: {sessionId:string;title:string}[] = [];
   const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
   const connectionSessions = new Map<CollabHandlers,string>();
   const runtime = {
+    async reserveSession(sessionId: string = randomUUID(), beforeMutation?: () => Promise<void>) {
+      if (runtimeClosed) throw new Error('OMP runtime is stopping');
+      await beforeMutation?.();
+      if (!managedSessions.has(sessionId) && ![...reservations.values()].includes(sessionId) &&
+          new Set([...managedSessions,...reservations.values()]).size >= sessionLimit) throw new SessionCapacityError(sessionLimit);
+      const token = Symbol();
+      reservations.set(token,sessionId);
+      return {
+        bind(id:string) {
+          if (runtimeClosed || !reservations.has(token)) throw new Error('OMP reservation expired');
+          reservations.set(token,id);
+        },
+        release() { reservations.delete(token); },
+      };
+    },
     async topicTitleStatus(session: TopicSession): Promise<{worktree:boolean;branch?:string}> {
       return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.worktreePath};
     },
@@ -235,9 +252,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         return host.binding;
       }
       if (!managedSessions.has(session.id)) {
-        await beforeMutation?.();
-        if (managedSessions.size >= sessionLimit) throw new SessionCapacityError(sessionLimit);
+        if (![...reservations.values()].includes(session.id) &&
+            new Set([...managedSessions,...reservations.values()]).size >= sessionLimit) throw new SessionCapacityError(sessionLimit);
         managedSessions.add(session.id);
+        try { await beforeMutation?.(); }
+        catch (error) { managedSessions.delete(session.id); throw error; }
       }
       return { instanceId: session.id, sessionId: session.id, generation: 1, url: 'server-only-secret-capability' };
     },
@@ -296,7 +315,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     async stop(session: TopicSession) {
       if (session.runtime.kind === 'managed') managedSessions.delete(session.id);
       return true;
-    }, async close() {},
+    }, async close() { runtimeClosed = true; reservations.clear(); },
     async kill(session: TopicSession) {
       if (session.runtime.kind === 'attached') attachedHosts.delete(session.runtime.instanceId);
       else managedSessions.delete(session.id);

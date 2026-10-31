@@ -9,7 +9,7 @@ function message(fields: Record<string, unknown>) {
   return {message_id:20,date:1,chat:{id:-100,type:'supergroup',title:'Forum'},from,...fields} as NonNullable<Context['message']>;
 }
 function context(overrides: Partial<InputContext> = {}): InputContext {
-  return {botId,username:'FixtureOmpBot',allMessagesArePrompts:true,commands:new Set(['new','p','settings']),skillAliases:new Map(),endedQuestion:false,...overrides};
+  return {botId,username:'FixtureOmpBot',allMessagesArePrompts:true,skillAliases:new Map(),endedQuestion:false,...overrides};
 }
 const replies = [
   undefined,

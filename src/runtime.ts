@@ -194,6 +194,7 @@ export class OmpRuntime {
   readonly #config: AppConfig;
   readonly #pending = new Map<string, Promise<HostBinding>>();
   readonly #managed = new Map<string, ManagedHost | null>();
+  readonly #reservations = new Map<symbol, string>();
   readonly #stopping = new Map<string, Promise<void>>();
   readonly #killing = new Map<string, Promise<void>>();
   readonly #skillProcesses = new Set<ChildProcess>();
@@ -232,6 +233,7 @@ export class OmpRuntime {
   }
   #assertActive(): void {
     if (refreshTermination(this.#config)) {
+      this.#reservations.clear();
       throw new Error('The service got terminated, only admin can resume it (remove terminated: true from the config)');
     }
   }
@@ -245,6 +247,25 @@ export class OmpRuntime {
     if (this.#closed || this.#sessionLimit !== expectedLimit || !Number.isSafeInteger(expectedLimit * 2)) return false;
     this.#sessionLimit = expectedLimit * 2;
     return true;
+  }
+  async reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{ bind(id: string): void; release(): void }> {
+    const originalId = sessionId ?? randomUUID();
+    const token = Symbol();
+    await this.#claimManaged(originalId, beforeMutation, token);
+    return {
+      bind: id => {
+        this.#assertActive();
+        if (this.#closed || !this.#reservations.has(token)) throw new Error('OMP reservation expired');
+        if (sessionId !== undefined && id !== sessionId) throw new Error('OMP reservation target cannot change');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Invalid managed session identifier');
+        this.#reservations.set(token, id);
+        sessionId = id;
+      },
+      release: () => { this.#reservations.delete(token); },
+    };
+  }
+  #capacityUsed(): number {
+    return new Set([...this.#managed.keys(), ...this.#reservations.values()]).size;
   }
   async topicTitleStatus(session: TopicSession): Promise<{ worktree: boolean; branch?: string }> {
     let cwd = this.#sessionCwd(session);
@@ -294,6 +315,13 @@ export class OmpRuntime {
   }
 
   async worktree(session: TopicSession, branch?: string): Promise<string> {
+    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
+    if (!Object.hasOwn(this.#config.instances, session.instancePath)) throw new Error('Instance path is not configured');
+    const reservation = await this.reserveSession(session.id);
+    try { return await this.#switchWorktree(session, branch); }
+    finally { reservation.release(); }
+  }
+  async #switchWorktree(session: TopicSession, branch?: string): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
@@ -487,7 +515,7 @@ export class OmpRuntime {
     const candidates = [...this.#managed.entries()].sort(([a],[b]) => this.#hostActivity(a).lastUsed-this.#hostActivity(b).lastUsed);
     for (const [id,host] of candidates) {
       const activity = this.#hostActivity(id);
-      if (!host || this.#pending.has(id) || (!host.retiring && (activity.busy || activity.leases || Date.now()-activity.lastUsed < idleMs))) continue;
+      if (!host || this.#pending.has(id) || [...this.#reservations.values()].includes(id) || (!host.retiring && (activity.busy || activity.leases || Date.now()-activity.lastUsed < idleMs))) continue;
       await this.#stop(id, 'idle');
       if (host.exited) retired++;
     }
@@ -515,14 +543,14 @@ export class OmpRuntime {
     }
     this.#discovered = true;
   }
-  async #admitManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
-    const id = session.id;
+  async #claimManaged(id: string, beforeMutation?: () => Promise<void>, reservation?: symbol): Promise<void> {
     const previous = this.#admission;
     const {promise,resolve} = Promise.withResolvers<void>();
     this.#admission = promise;
     await previous;
     try {
       this.#assertActive();
+      if (this.#closed) throw new Error('OMP runtime is stopping');
       await this.#acquire();
       const hosts = await this.#list(Date.now()+this.#config.omp.startupTimeoutMs);
       await this.#discoverManaged(hosts);
@@ -553,16 +581,24 @@ export class OmpRuntime {
           this.#activity.delete(other);
         }
       }
-      if (!this.#managed.has(id)) {
-        await beforeMutation?.();
-        if (this.#managed.size >= this.#sessionLimit) await this.retireIdle(0);
-        if (this.#managed.size >= this.#sessionLimit) throw new SessionCapacityError(this.#sessionLimit);
-        this.#managed.set(id,null);
+      await beforeMutation?.();
+      this.#assertActive();
+      if (this.#closed) throw new Error('OMP runtime is stopping');
+      if (!this.#managed.has(id) && ![...this.#reservations.values()].includes(id)) {
+        if (this.#capacityUsed() >= this.#sessionLimit) await this.retireIdle(0);
+        if (this.#capacityUsed() >= this.#sessionLimit) throw new SessionCapacityError(this.#sessionLimit);
       }
-      this.#hostActivity(id).lastUsed = Date.now();
+      this.#assertActive();
+      if (this.#closed) throw new Error('OMP runtime is stopping');
+      if (reservation) this.#reservations.set(reservation, id);
+      else if (!this.#managed.has(id)) this.#managed.set(id,null);
+      if (!reservation) this.#hostActivity(id).lastUsed = Date.now();
     } finally {
       resolve();
     }
+  }
+  async #admitManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
+    await this.#claimManaged(session.id, beforeMutation);
     return this.#ensureManaged(session,beforeMutation);
   }
   async isRunning(session: TopicSession): Promise<boolean> {
@@ -1180,6 +1216,7 @@ export class OmpRuntime {
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
+    this.#reservations.clear();
     clearInterval(this.#idleTimer);
     this.#closing = (async () => {
       for (const child of this.#skillProcesses) this.#killSkillProcess(child);
