@@ -16,6 +16,8 @@
     "cli": "node dist/cli.js",
     "build": "tsc --noEmit -p tsconfig.json && node scripts/build.mjs && vite build --config web/vite.config.ts",
     "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "tsx --test --test-concurrency=5 test/*.test.ts",
     "test:one": "tsx --test --test-concurrency=5",
     "test:integration": "pnpm build && pnpm smoke",
@@ -46,6 +48,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/ws": "^8.5.14",
     "esbuild": "^0.25.12",
+    "prettier": "^3.9.10",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",
     "vite": "^6.4.0"
