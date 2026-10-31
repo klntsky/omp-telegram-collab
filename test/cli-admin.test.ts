@@ -8,9 +8,16 @@ import { test, type TestContext } from 'node:test';
 import { notifyReload, runAdmin, type AdminDependencies } from '../src/cli-admin.js';
 import { canonicalPath, emptyConfig, readConfig, writeConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
+import type { InstanceConfig } from '../shared/contracts.js';
 
 const token = '123456789:fixture_token_never_live';
 const secondToken = '987654321:second_fixture_token_never_live';
+
+function assignmentPolicies(chats: InstanceConfig['chats']) {
+  return chats.map(({botId, chatId, all_messages_are_prompts, users_can_propose_prompts}) => ({
+    botId, chatId, all_messages_are_prompts, users_can_propose_prompts,
+  }));
+}
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'omp-cli-admin-'));
@@ -186,7 +193,7 @@ test('multiple bots require a selector and one path can bind multiple bot/chat p
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--bot', '123456789']);
   await f.run(['chat', 'add', f.project, '--chat', '-1002', '--bot', '123456789', '--all-messages-are-prompts', 'false', '--users-can-propose-prompts', 'true']);
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--bot', '987654321', '--all-messages-are-prompts', 'true', '--users-can-propose-prompts', 'true']);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
     {botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false},
     {botId: 123456789, chatId: -1002, all_messages_are_prompts: false, users_can_propose_prompts: true},
     {botId: 987654321, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: true},
@@ -196,9 +203,12 @@ test('multiple bots require a selector and one path can bind multiple bot/chat p
   store.close();
   await f.run(['chat', 'list', f.project]);
   await f.run(['chat', 'remove', f.project, '--chat', '-1002', '--bot', '123456789']);
-  assert.equal(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats.length, 2);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
+    {botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false},
+    {botId: 987654321, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: true},
+  ]);
   await f.run(['bot', 'remove', '987654321']);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
 });
 
 test('chat add updates matching options independently and omissions preserve them', async t => {
@@ -209,7 +219,7 @@ test('chat add updates matching options independently and omissions preserve the
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'true']);
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false']);
   await f.run(['chat', 'add', f.project, '--chat', '-1001']);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
     {botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true},
     {botId: 123456789, chatId: -1002, all_messages_are_prompts: true, users_can_propose_prompts: false},
   ]);
@@ -218,7 +228,7 @@ test('chat add updates matching options independently and omissions preserve the
   assert.equal(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats[0]!.all_messages_are_prompts, true);
   assert.equal(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats[0]!.users_can_propose_prompts, true);
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'false']);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
     {botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false},
     {botId: 123456789, chatId: -1002, all_messages_are_prompts: true, users_can_propose_prompts: false},
   ]);
@@ -264,14 +274,14 @@ test('interactive chat add selects both options with current defaults and flags 
   await f.run(['chat', 'add', f.project, '--chat', '-1001'], interactive);
   answers = ['', ''];
   await f.run(['chat', 'add', f.project, '--chat', '-1001'], interactive);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'true', '--users-can-propose-prompts', 'false'], interactive);
   assert.equal(prompts.length, 6);
   answers = ['true'];
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false'], interactive);
   answers = [''];
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'true'], interactive);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
 });
 
 test('invalid interactive proposal choices leave assignments and approval requests unchanged', async t => {
@@ -339,7 +349,7 @@ test('approval verifies live numeric identity, enrolls, confirms, then consumes'
   await assert.rejects(f.run(['approve', pending.code, '--path', f.project]), /requires --yes/);
   await f.run(['approve', pending.code, '--path', f.project, '--yes']);
   const config = readConfig(f.configPath);
-  assert.deepEqual(config.instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
+  assert.deepEqual(assignmentPolicies(config.instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
   const approved = f.store();
   assert.equal(approved.getSetupRequest(pending.code), undefined);
   assert.equal(approved.isEnrolled(123456789, -1001), true);
@@ -361,7 +371,7 @@ test('approval flags independently update existing options without duplicates an
     const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
     store.close();
     await f.run(['approve', pending.code, '--path', f.project, '--yes', ...(mode === undefined ? [] : ['--all-messages-are-prompts', mode]), ...(proposals === undefined ? [] : ['--users-can-propose-prompts', proposals])]);
-    assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [
+    assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
       {botId: 123456789, chatId: -1001, all_messages_are_prompts: expectedMode, users_can_propose_prompts: expectedProposals},
     ]);
   }
@@ -381,7 +391,7 @@ test('guided approval defaults to the current mode and explicit approval flags s
     question: async prompt => { prompts.push(prompt); const next = answers.shift(); assert.notEqual(next, undefined); return next!; },
   });
   assert.deepEqual(answers, []);
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
   const nextStore = f.store();
   const next = nextStore.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   nextStore.close();
@@ -389,7 +399,7 @@ test('guided approval defaults to the current mode and explicit approval flags s
     interactive: true,
     question: async () => '',
   });
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: true}]);
   const explicitStore = f.store();
   const explicit = explicitStore.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   explicitStore.close();
@@ -397,7 +407,7 @@ test('guided approval defaults to the current mode and explicit approval flags s
     interactive: true,
     question: async () => { assert.fail('An explicit prompt mode must not ask a question.'); },
   });
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
 });
 
 test('approval preserves requests when requester or bot permissions fail', async t => {
@@ -461,7 +471,7 @@ test('setup wizard completes service, bot, instance and chat workflows', async t
   assert.equal(config.publicUrl, 'https://wizard.example');
   assert.equal(config.bots[0]!.miniAppShortName, 'wizardapp');
   assert.deepEqual(config.omp.args, ['--model', 'literal model']);
-  assert.deepEqual(config.instances[canonicalPath(f.project)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(config.instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
 });
 
 test('interactive approval can register an existing directory and cancel without consuming', async t => {
@@ -479,7 +489,7 @@ test('interactive approval can register an existing directory and cancel without
   preserved.close();
   answers = [f.other, 'false', 'true', 'yes'];
   await f.run(['approve', pending.code], {interactive: true, question});
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats, [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
 });
 
 test('local approval registers a selected directory for a creator or administrator without a username', async t => {
@@ -492,7 +502,7 @@ test('local approval registers a selected directory for a creator or administrat
     const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
     store.close();
     await f.run(['approve', pending.code, '--path', f.other, '--yes']);
-    assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.other)], {chats: [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]});
+    assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
   }
 });
 
@@ -588,7 +598,7 @@ test('interactive multi-bot chat connection selects the requested bot without st
   f.seed(true);
   const answers = ['987654321', '', ''];
   await f.run(['chat', 'add', f.project, '--chat', '-1001'], {interactive: true, question: async () => answers.shift()!});
-  assert.deepEqual(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats, [{botId: 987654321, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 987654321, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
   assert.equal(f.calls.every(call => call.botId === 987654321), true);
   assert.equal(f.calls.some(call => call.method === 'getUpdates'), false);
 });

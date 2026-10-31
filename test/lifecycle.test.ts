@@ -182,6 +182,12 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   seed.close();
 
   const topics = new Map<string, number>();
+  const persistedTopics = new Map<string, number>();
+  const setBotStatusTopic = Store.prototype.setBotStatusTopic;
+  t.mock.method(Store.prototype, 'setBotStatusTopic', function (this: Store, id: number, group: number, threadId: number) {
+    setBotStatusTopic.call(this, id, group, threadId);
+    persistedTopics.set(`${id}:${group}`, threadId);
+  });
   const notices: { botId: number; payload: Record<string, unknown> }[] = [];
   const ready = new Set<number>();
   const noticeEvents = new EventEmitter();
@@ -201,7 +207,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
     if (method === 'getMe') result = { id, is_bot: true, first_name: 'OMP', username: `Fixture${id}Bot` };
     else if (method === 'createForumTopic') {
       const key = `${id}:${payload.chat_id}`;
-      assert.equal(topics.has(key), false, 'lifecycle notices reuse the persisted status topic');
+      assert.equal(persistedTopics.has(key), false, 'lifecycle notices reuse the persisted status topic');
       const threadId = 100 + topics.size;
       topics.set(key, threadId);
       result = { message_thread_id: threadId, name: 'Bot status', icon_color: 7322096 };
