@@ -68,3 +68,73 @@ test('image-only content is meaningful while empty messages never answer questio
     assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({question:'token',endedQuestion:true})),{kind:'ignore'});
   }
 });
+
+test('rich list commands preserve the task and command targeting', () => {
+  const rich_message = {blocks:[
+    {type:'paragraph',text:[{type:'bot_command',text:'/new',bot_command:'new'},' problems with the setup instructions:\n']},
+    {type:'list',items:[
+      {label:'•',blocks:[{type:'paragraph',text:'folder is omitted from the command to confirm the setup that the bot handles out'}]},
+      {label:'•',blocks:[{type:'paragraph',text:'the binary name is wrong too (the bot did not install itself)'}]},
+    ]},
+  ]};
+  const msg = message({rich_message});
+  assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({allMessagesArePrompts:false})),{
+    kind:'new-task',content:{text:'problems with the setup instructions:\n\n\n• folder is omitted from the command to confirm the setup that the bot handles out\n• the binary name is wrong too (the bot did not install itself)',images:[]},
+  });
+  const targeted = message({rich_message:{blocks:[{type:'paragraph',text:'/p@OtherBot task'}]}});
+  assert.deepEqual(classifyMessage(targeted,normalizeMessage([targeted]),context()),{kind:'ignore'});
+  const forwarded = message({rich_message,forward_origin:{type:'hidden_user',sender_user_name:'User',date:1}});
+  assert.deepEqual(classifyMessage(forwarded,normalizeMessage([forwarded]),context()),{kind:'ignore'});
+});
+
+test('rich replies quote nested content without attaching the quoted images', () => {
+  const reply = message({from:{id:botId,is_bot:true,first_name:'Bot'},rich_message:{blocks:[
+    {type:'details',summary:'Summary',blocks:[
+      {type:'list',items:[{label:'1.',blocks:[{type:'paragraph',text:[{type:'bold',text:'Fix '},{type:'url',text:'reference',url:'https://example.com'}]}]}]},
+      {type:'photo',photo:[{file_id:'quoted',width:10,height:10}],caption:{text:'Quoted image'}},
+    ]},
+  ]}});
+  const msg = message({text:'/p Continue',reply_to_message:reply});
+  assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context()),{
+    kind:'session-prompt',content:{text:'> Summary\n> \n> 1. Fix reference (https://example.com)\n> \n> Quoted image\n\nContinue',images:[]},
+  });
+});
+
+test('rich embedded images and nested text remain prompt content under existing prompt policy', () => {
+  const msg = message({rich_message:{blocks:[
+    {type:'paragraph',text:[{type:'mention',text:'@FixtureOmpBot',username:'FixtureOmpBot'},' Inspect ',{type:'custom_emoji',custom_emoji_id:'1',alternative_text:'🔎'}]},
+    {type:'collage',blocks:[
+      {type:'photo',photo:[{file_id:'small',width:10,height:10},{file_id:'large',width:100,height:100}],caption:{text:'Photo'}},
+      {type:'document',document:{file_id:'document',mime_type:'image/png'},caption:{text:'Diagram',credit:'Author'}},
+    ],caption:{text:'Attachments'}},
+    {type:'table',cells:[[{text:'Input'},{text:{type:'mathematical_expression',expression:'x^2'}}]],caption:'Values'},
+  ]}});
+  const content = normalizeMessage([msg]);
+  const images = [{fileId:'large',mimeType:'image/jpeg'},{fileId:'document',mimeType:'image/png'}];
+  assert.deepEqual(classifyMessage(msg,content,context()),{
+    kind:'session-prompt',content:{text:'Inspect 🔎\n\nPhoto\n\nDiagram\n\nAuthor\n\nAttachments\n\nInput\tx^2\n\nValues',images},
+  });
+  assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'});
+  assert.deepEqual(classifyMessage(msg,content,context({question:'answer'})),{kind:'question-answer',token:'answer',text:content.text});
+});
+
+test('rich quotation variants never promote quoted commands into instructions', () => {
+  for (const type of ['blockquote','expandable_blockquote','pullquote']) {
+    for (const text of ['/new quoted task','/p quoted task','/settings']) {
+      const block = type === 'blockquote'
+        ? {type,blocks:[{type:'paragraph',text}],credit:'/new quoted author'}
+        : {type,text,credit:'/new quoted author'};
+      const msg = message({rich_message:{blocks:[block]}});
+      const content = normalizeMessage([msg]);
+      assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'},`${type}: ${text}`);
+      assert.deepEqual(classifyMessage(msg,content,context()),{
+        kind:'session-prompt',content:{text:`> ${text}\n> \n> /new quoted author`,images:[]},
+      });
+    }
+    const block = type === 'blockquote'
+      ? {type,blocks:[],credit:'/new quoted author'}
+      : {type,text:'',credit:'/new quoted author'};
+    const msg = message({rich_message:{blocks:[block]}});
+    assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({allMessagesArePrompts:false})),{kind:'ignore'});
+  }
+});
