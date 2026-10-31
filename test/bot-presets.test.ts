@@ -1,4 +1,4 @@
-import { eventually, setForumSetting } from './bot-test-helpers.js';
+import { eventually, setForumSetting, settingsButton } from './bot-test-helpers.js';
 import assert from 'node:assert/strict';
 import { readConfig } from '../src/config.js';
 import { test } from 'node:test';
@@ -301,5 +301,144 @@ test('failed preset restoration after worktree replacement never admits the task
     const session = app.store.listSessions(botId)[0]!;
     assert.equal(app.store.hasPendingInitialTask(session.id),false);
     assert.deepEqual(app.accepted,[]);
+  } finally { await app.close(); }
+});
+
+test('preset browsing, Back, session use and forum defaults have separate effects', async t => {
+  const app = await createSmokeApp();
+  const switches = t.mock.method(app.runtime, 'modelPresets', async (..._args: Parameters<typeof app.runtime.modelPresets>) => 'applied');
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset panel'}});
+    const session = app.store.listSessions(botId)[0]!;
+    const panel = () => app.messages.findLast(message =>
+      (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
+        ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
+    const click = async (index: number) => {
+      const message = panel();
+      const data = settingsButton(message, index);
+      assert.ok(Buffer.byteLength(data) <= 64);
+      await app.callback(data, message);
+    };
+    await app.update({text:'/model_preset',message_thread_id:42});
+    await click(0);
+    const staleUse = settingsButton(panel(), 0);
+    await click(2);
+    await app.callback(staleUse, panel());
+    assert.equal(switches.mock.callCount(), 0);
+    assert.equal(await app.runtime.isRunning(session), false);
+    await click(1);
+    await click(1);
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, 'Slow');
+    assert.equal(await app.runtime.isRunning(session), false);
+    await click(2);
+    await click(0);
+    await click(0);
+    assert.equal(switches.mock.callCount(), 1);
+    assert.equal(switches.mock.calls[0]!.arguments[1], 'Fast');
+    assert.equal(await app.runtime.isRunning(session), true);
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, 'Slow');
+    assert.deepEqual(app.accepted, []);
+  } finally { await app.close(); }
+});
+
+test('preset actions refresh administration after discovery and host startup', async t => {
+  const app = await createSmokeApp();
+  const switches = t.mock.method(app.runtime, 'modelPresets', async (..._args: Parameters<typeof app.runtime.modelPresets>) => 'applied');
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset write authorization'}});
+    const session = app.store.listSessions(botId)[0]!;
+    const panel = () => app.messages.findLast(message =>
+      (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
+        ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
+    await app.update({text:'/model_preset',message_thread_id:42});
+    await app.callback(settingsButton(panel(), 0), panel());
+    const details = app.runtime.modelPresetDetails.bind(app.runtime);
+    app.runtime.modelPresetDetails = async (...args) => {
+      const result = await details(...args);
+      app.setCurrentMember({username:'removed_admin',status:'member'});
+      return result;
+    };
+    await app.callback(settingsButton(panel(), 1), panel());
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+    app.runtime.modelPresetDetails = details;
+    app.setCurrentMember({username:ownerUsername,status:'creator'});
+    const ensure = app.runtime.ensure.bind(app.runtime);
+    app.runtime.ensure = async target => {
+      const binding = await ensure(target);
+      app.setCurrentMember({username:'removed_admin',status:'member'});
+      return binding;
+    };
+    await app.callback(settingsButton(panel(), 0), panel());
+    assert.equal(switches.mock.callCount(), 0);
+    assert.deepEqual(app.accepted, []);
+  } finally { await app.close(); }
+});
+
+test('expired panels, changed sessions and adversarial cross-topic callbacks cannot switch or save presets', async t => {
+  const app = await createSmokeApp();
+  const switches = t.mock.method(app.runtime, 'modelPresets', async (..._args: Parameters<typeof app.runtime.modelPresets>) => 'applied');
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset lifetime'}});
+    const session = app.store.listSessions(botId)[0]!;
+    const panel = () => app.messages.findLast(message =>
+      (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
+        ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
+    await app.update({text:'/model_preset',message_thread_id:42});
+    await app.callback(settingsButton(panel(), 0), panel());
+    const selected = structuredClone(panel());
+    await app.callback(settingsButton(selected, 1), {...selected, message_thread_id:99});
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+    const now = Date.now();
+    const clock = t.mock.method(Date, 'now', () => now + 31 * 60_000);
+    await app.callback(settingsButton(selected, 0), selected);
+    clock.mock.restore();
+    await app.update({text:'/model_preset',message_thread_id:42});
+    await app.callback(settingsButton(panel(), 0), panel());
+    const archived = structuredClone(panel());
+    await app.update({message_thread_id:42,forum_topic_closed:{}});
+    await app.callback(settingsButton(archived, 1), archived);
+    assert.equal(switches.mock.callCount(), 0);
+    assert.equal(await app.runtime.isRunning(session), false);
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+  } finally { await app.close(); }
+});
+
+test('preset pagination keeps later choices and detail-page default actions reachable', async () => {
+  const app = await createSmokeApp();
+  const names = Array.from({length: 17}, (_, index) => `Preset${index}`);
+  app.runtime.availableModelPresets = async () => names;
+  app.runtime.modelPresetDetails = async () => ({
+    modelRoles: Object.fromEntries(Array.from({length: 120}, (_, index) =>
+      [`role${index}`, `provider/model-${index}-${'long-model-name'.repeat(5)}#high`])),
+    defaultThinkingLevel: 'high',
+  });
+  const panel = () => app.messages.findLast(message =>
+    (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
+      ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
+  const click = async (index: number) => {
+    const message = panel();
+    await app.callback(settingsButton(message, index), message);
+  };
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset pages'}});
+    await app.update({text:'/model_preset',message_thread_id:42});
+    await click(8);
+    await click(9);
+    await click(0);
+    await click(3);
+    await click(4);
+    await click(1);
+    const session = app.store.listSessions(botId)[0]!;
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[16]);
+    assert.equal(await app.runtime.isRunning(session), false);
+    await click(2);
+    await click(1);
+    await click(0);
+    await click(1);
+    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[8]);
   } finally { await app.close(); }
 });

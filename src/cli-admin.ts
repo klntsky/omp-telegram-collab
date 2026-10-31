@@ -6,7 +6,7 @@ import { request } from 'node:http';
 import { Api } from 'grammy';
 import { z } from 'zod';
 import type { AppConfig, BotConfig, InstanceConfig } from '../shared/contracts.js';
-import { canonicalPath, configWritable, emptyConfig, findInstance, readConfig, writeConfig } from './config.js';
+import { canonicalPath, configWritable, defaultConfigPath, emptyConfig, findInstance, readConfig, writeConfig } from './config.js';
 import { Store } from './store.js';
 
 export interface AdminTelegram {
@@ -77,7 +77,7 @@ function one(options: Options, name: string): string | undefined {
   return values?.[0];
 }
 function count(args: string[], required: number, usage: string): void {
-  if (args.length !== required) throw new Error(`Usage: omp-telegram ${usage}`);
+  if (args.length !== required) throw new Error(`Usage: omp-telegram-collab ${usage}`);
 }
 function integer(value: string, label: string, min = 1, max = Number.MAX_SAFE_INTEGER): number {
   if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new Error(`${label} must be an integer from ${min} through ${max}.`);
@@ -220,15 +220,16 @@ class Administration {
       let target = input;
       if (!target && this.interactive) {
         this.show(config);
-        target = await this.ask('Instance directory (an existing directory may be registered now): ');
+        target = await this.ask('Project directory where OMP will run: ');
       }
       if (!target) throw new Error('Approval requires --path PATH.');
       const path = canonicalPath(target);
       this.historySafe(config, store, path, bot.id, pending.chatId);
       const instance = config.instances[path] ?? {chats: []};
       const assignment = instance.chats.find(value => value.botId === bot.id && value.chatId === pending.chatId);
-      const all_messages_are_prompts = await this.selectPromptMode(assignment?.all_messages_are_prompts, specifiedMode);
-      const users_can_propose_prompts = await this.selectProposalMode(assignment?.users_can_propose_prompts, specifiedProposals);
+      const all_messages_are_prompts = specifiedMode ?? assignment?.all_messages_are_prompts ?? true;
+      const users_can_propose_prompts = specifiedProposals ?? assignment?.users_can_propose_prompts ?? false;
+      this.print(`Project directory where OMP will run: ${path}\nThe agent will have the service account's filesystem and credential access on the agent's computer.`);
       if (!yes && !/^(y|yes)$/i.test((await this.ask(`Connect this forum to ${path}? [y/N] `)).trim())) { this.print('Approval cancelled; request preserved.'); return; }
       await this.verifyForum(bot, pending.chatId);
       await this.requesterAdmin(bot, pending.chatId, pending.userId);
@@ -240,7 +241,7 @@ class Administration {
         store.enrollGroup(bot.id, pending.chatId);
         store.consumeSetupRequest(code);
       });
-      await this.api(bot).sendMessage(pending.chatId, 'Setup approved. This forum is connected to OMP. Create a topic to start a coding session.');
+      await this.api(bot).sendMessage(pending.chatId, 'Setup approved. This forum is connected to OMP. Use /settings to choose prompt permissions and the session limit. Send /new <task> to start a coding session.');
       this.print(`Approved ${code}: ${path}`);
     } finally { store.close(); }
   }
@@ -273,12 +274,12 @@ class Administration {
     await this.save(config);
     this.print(`Added @${String(me.username ?? candidate.id)} (${candidate.id})${candidate.miniAppShortName ? `, Mini App ${candidate.miniAppShortName}` : ''}.`);
   }
-  async configure(options: Options): Promise<void> {
+  async setup(options: Options): Promise<void> {
     const config = this.load(true);
     this.writable(config);
     const previousDataDir = config.dataDir;
     const interactive = options.size === 0;
-    if (interactive && !this.interactive) throw new Error('Configure requires service setting options or an interactive terminal.');
+    if (interactive && !this.interactive) throw new Error('Setup requires service setting options or an interactive terminal.');
     const value = async (flag: string, label: string, current: string): Promise<string> => {
       const specified = one(options, flag);
       if (specified !== undefined) return specified;
@@ -312,36 +313,25 @@ class Administration {
       if (!Array.isArray(parsed) || !parsed.every(arg => typeof arg === 'string')) throw new Error('OMP arguments must be a JSON array of strings.');
       config.omp.args = parsed;
     } else if (options.has('omp-arg') || options.has('clear-omp-args')) config.omp.args = options.get('omp-arg') ?? [];
-    config.omp.maxSessions = integer(await value('max-sessions', 'Maximum simultaneous sessions', String(config.omp.maxSessions)), 'Maximum sessions');
+    if (options.has('max-sessions')) config.omp.maxSessions = integer(one(options, 'max-sessions')!, 'Maximum sessions');
     config.omp.startupTimeoutMs = integer(await value('startup-timeout-ms', 'OMP startup timeout in milliseconds', String(config.omp.startupTimeoutMs)), 'Startup timeout');
     const relay = await value('relay-url', 'OMP relay URL (enter - to clear)', config.omp.relayUrl ?? '');
     if (relay === '-' || relay === '') delete config.omp.relayUrl;
     else config.omp.relayUrl = relay;
     await this.save(config, previousDataDir);
     this.print(`Service configuration saved to ${config.configPath}.`);
-  }
-  async setup(): Promise<void> {
-    if (!this.interactive) throw new Error('Setup requires an interactive terminal; use the flat commands for automation.');
-    for (;;) {
-      const action = (await this.ask('Setup: create, connect, inspect, service, bot, approve, done: ')).trim().toLowerCase();
-      if (action === 'done' || action === 'quit' || action === '') return;
-      if (action === 'create') await this.create(await this.ask('Existing instance directory: '));
-      else if (action === 'connect') await this.addChat(await this.ask('Registered instance directory: '), await this.ask('Forum chat ID: '));
-      else if (action === 'inspect') this.show(this.load());
-      else if (action === 'service') await this.configure(new Map());
-      else if (action === 'bot') await this.botAdd(new Map());
-      else if (action === 'approve') await this.approve((await this.ask('Setup request code: ')).trim(), undefined, false);
-      else this.print('Choose create, connect, inspect, service, bot, approve, or done.');
-    }
+    const configOption = config.configPath === defaultConfigPath() ? '' : ` --config '${config.configPath.replaceAll("'", "'\\''")}'`;
+    this.print(config.bots.length
+      ? `Next on the agent's computer: run omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
+      : `Next on the agent's computer: run omp-telegram-collab${configOption} bot add, then omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
   }
   async run(argv: string[]): Promise<boolean> {
     const [command, ...args] = argv;
-    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'configure', 'bot'].includes(command ?? '')) return false;
-    if (command === 'setup') { count(args, 0, 'setup'); await this.setup(); return true; }
-    if (command === 'configure') {
+    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'bot'].includes(command ?? '')) return false;
+    if (command === 'setup') {
       const parsed = parse(args, ['public-url', 'host', 'port', 'data-dir', 'omp-executable', 'omp-arg', 'max-sessions', 'startup-timeout-ms', 'relay-url'], ['clear-omp-args']);
-      count(parsed.positional, 0, 'configure [--public-url URL --host HOST --port PORT --data-dir PATH --omp-executable FILE --omp-arg ARG --max-sessions N --startup-timeout-ms N --relay-url URL]');
-      await this.configure(parsed.options); return true;
+      count(parsed.positional, 0, 'setup [--public-url URL --host HOST --port PORT --data-dir PATH --omp-executable FILE --omp-arg ARG --max-sessions N --startup-timeout-ms N --relay-url URL]');
+      await this.setup(parsed.options); return true;
     }
     if (command === 'create') {
       const parsed = parse(args, []); count(parsed.positional, 1, 'create PATH');
@@ -363,10 +353,10 @@ class Administration {
       const parsed = parse(args, ['chat', 'bot', 'all-messages-are-prompts', 'users-can-propose-prompts']); count(parsed.positional, 2, 'chat add|list|remove PATH [--chat ID] [--bot ID] [--all-messages-are-prompts true|false] [--users-can-propose-prompts true|false]');
       const [action, input] = parsed.positional;
       if (action === 'list') {
-        if (parsed.options.size) throw new Error('Usage: omp-telegram chat list PATH');
+        if (parsed.options.size) throw new Error('Usage: omp-telegram-collab chat list PATH');
         this.show(this.load(), input); return true;
       }
-      if (!['add', 'remove'].includes(action!)) throw new Error('Usage: omp-telegram chat add|list|remove PATH [--chat ID] [--bot ID]');
+      if (!['add', 'remove'].includes(action!)) throw new Error('Usage: omp-telegram-collab chat add|list|remove PATH [--chat ID] [--bot ID]');
       const chat = one(parsed.options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
       if (action === 'add') {
         const mode = one(parsed.options, 'all-messages-are-prompts');
@@ -406,7 +396,7 @@ class Administration {
         for (const instance of Object.values(config.instances)) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
         await this.save(config); this.print(`Removed bot ${bot.id} and its chat assignments. Histories were retained.`); return true;
       }
-      throw new Error('Usage: omp-telegram bot add|list|remove');
+      throw new Error('Usage: omp-telegram-collab bot add|list|remove');
     }
     return false;
   }

@@ -1,16 +1,22 @@
 {
   "name": "omp-telegram-collab",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "bin": {
-    "omp-telegram": "dist/cli.js"
+    "omp-telegram-collab": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "web/dist/",
+    "web/LICENSE.upstream",
+    "assets/"
+  ],
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
+    "prepack": "pnpm build",
     "dev": "node --import tsx src/cli.ts start",
     "start": "node dist/cli.js start",
     "cli": "node dist/cli.js",

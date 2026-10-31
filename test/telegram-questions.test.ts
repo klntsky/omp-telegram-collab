@@ -16,7 +16,8 @@ async function eventually(predicate: () => boolean) {
 }
 
 test('select answers preserve protocol values and cannot be submitted twice', async () => {
-  const app = await createSmokeApp();
+  for (const ackUiResponses of [false,true]) {
+  const app = await createSmokeApp({ackUiResponses});
   try {
     await app.update({ text: '/setup' });
     await app.update({ text: '/new Start' });
@@ -31,12 +32,25 @@ test('select answers preserve protocol values and cannot be submitted twice', as
     const question = messages.at(-1)!;
     const { inline_keyboard: keyboard } = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(question.reply_markup);
     const count = app.accepted.length;
+    const reactionValues = () => app.reactions.filter(reaction => reaction.message_id === question.message_id).map(reaction => reaction.reaction);
     await app.callback(keyboard[0]![0]!.callback_data, question);
     assert.deepEqual(app.accepted.slice(count), [{ t: 'ui-response', reqId: 71, value: label }]);
-    assert.deepEqual(question.reply_markup, {inline_keyboard:[]});
+    if (!ackUiResponses) {
+      assert.deepEqual(reactionValues(),[[{type:'emoji',emoji:'👀'}]]);
+      app.emit({t:'ui-request-end',reqId:70});
+      await delay(20);
+      assert.deepEqual(reactionValues(),[[{type:'emoji',emoji:'👀'}]]);
+      app.emit({t:'ui-request-end',reqId:71});
+    }
+    await eventually(() => reactionValues().length === 2);
+    assert.deepEqual(reactionValues(),[[{type:'emoji',emoji:'👀'}],[{type:'emoji',emoji:'🤝'}]]);
     await app.callback(keyboard[0]![0]!.callback_data, question);
     assert.equal(app.accepted.length, count + 1);
+    app.emit({t:'ui-request-end',reqId:71});
+    await delay(20);
+    assert.deepEqual(reactionValues(),[[{type:'emoji',emoji:'👀'}],[{type:'emoji',emoji:'🤝'}]]);
   } finally { await app.close(); }
+  }
 });
 
 test('custom choices submit multiline answers in both prompt modes', async () => {

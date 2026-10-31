@@ -771,6 +771,22 @@ export class OmpRuntime {
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
     return Object.keys(presets).filter(name => presets[name] !== null && presets[name] !== undefined).sort((a, b) => a.localeCompare(b));
   }
+  async modelPresetDetails(instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}> {
+    const presets = await this.#nativeSetting(instancePath, 'modelPresets');
+    if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
+    const preset = Object.hasOwn(presets, name) ? presets[name] : undefined;
+    if (preset === undefined || preset === null) throw new Error(`Unknown model preset: ${name}`);
+    if (!record(preset) || !record(preset.modelRoles)) throw new Error(`Invalid model preset "${name}": modelRoles must be a mapping`);
+    const roles: Record<string, string> = {};
+    for (const [role, selector] of Object.entries(preset.modelRoles)) {
+      if (typeof selector !== 'string' || !selector.trim()) throw new Error(`Invalid model preset "${name}": role "${role}" is not a model selector`);
+      roles[role] = selector;
+    }
+    if (preset.defaultThinkingLevel !== undefined &&
+        (typeof preset.defaultThinkingLevel !== 'string' || !preset.defaultThinkingLevel.trim()))
+      throw new Error(`Invalid model preset "${name}": defaultThinkingLevel is not a thinking level`);
+    return {modelRoles: roles, ...(preset.defaultThinkingLevel === undefined ? {} : {defaultThinkingLevel: preset.defaultThinkingLevel})};
+  }
   async listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     this.#assertActive();
@@ -1314,6 +1330,7 @@ export class OmpRuntime {
     const id = session.id;
     let owned = this.#managed.get(id);
     let spawned: ManagedHost | undefined;
+    let discoveryFailure: Error | undefined;
     const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
     let prepared: { dir: string; pin: DurableBinding };
     try { prepared = await this.#prepare(session); }
@@ -1426,7 +1443,6 @@ export class OmpRuntime {
         record.exited = true;
         if (this.#managed.get(id) === record) this.#managed.delete(id);
       });
-      let discoveryFailure: Error | undefined;
       while (Date.now() < deadline) {
         if (this.#closed || this.#stopping.has(id)) throw new Error('OMP runtime is stopping');
         this.#assertActive();
@@ -1458,6 +1474,19 @@ export class OmpRuntime {
       }
       throw discoveryFailure ?? new Error('Managed OMP startup timed out');
     } catch (error) {
+      if (
+        discoveryFailure &&
+        error instanceof Error &&
+        error !== discoveryFailure &&
+        Date.now() >= deadline &&
+        (error.message === 'OMP discovery timed out' ||
+          ('killed' in error && error.killed === true &&
+            'code' in error && error.code === null &&
+            'signal' in error && error.signal === 'SIGKILL'))
+      ) {
+        Object.defineProperty(discoveryFailure, 'cause', { value: error, configurable: true });
+        error = discoveryFailure;
+      }
       if (spawned && !spawned.exited && !this.#killing.has(id)) {
         const cleanup = this.#shutdown(id, spawned);
         if (!this.#stopping.has(id)) this.#stopping.set(id, cleanup);

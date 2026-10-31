@@ -24,7 +24,7 @@ import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from '
 import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
-import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
+import { configWritable, defaultConfigPath, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 import { installTelegramRetry } from './telegram-retry.js';
@@ -53,6 +53,7 @@ export interface RuntimeLike {
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
   availableModelPresets(instancePath: string): Promise<string[]>;
+  modelPresetDetails(instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
   providerUsage(instancePath: string): Promise<{ heading: string; table: string }[]>;
   listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
@@ -189,8 +190,6 @@ type SettingsAction =
     }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
-  | { kind: 'propose-capacity'; limit: number; target: number }
-  | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
 interface SettingsPanel {
   token: string;
@@ -201,9 +200,26 @@ interface SettingsPanel {
   revision: number;
   offset: number;
   choices: SettingsAction[];
+  capacityInput?: boolean;
   changes: Map<SettingsKey, {label: string; before: string; after: string}>;
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default'};
+interface PresetPanel {
+  token: string;
+  chatId: number;
+  destination: TopicDestination;
+  messageId: number;
+  instancePath: string;
+  sessionId: string;
+  generation: number;
+  revision: number;
+  expires: number;
+  selected?: string;
+  listOffset: number;
+  detailOffset: number;
+  choices: PresetAction[];
+}
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — 🌳 move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — browse presets, use one, or make it the forum default; a name switches this idle session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
@@ -211,7 +227,7 @@ const cliHelp = '/cli — copy a local terminal session join command (group admi
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
-  { command: 'worktree', description: 'Move session to an OMP worktree; new topic in General' },
+  { command: 'worktree', description: '🌳 Move session to an OMP worktree; new topic in General' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
   { command: 'settings', description: 'Forum defaults and live session count limit (group admin)' },
@@ -225,7 +241,7 @@ const groupCommands = [
   { command: 'stop', description: 'Interrupt the current turn in this session topic' },
   { command: 'kill', description: 'Force-kill this session’s host; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
-  { command: 'model_preset', description: 'List presets; /model_preset <name> switches an idle session' },
+  { command: 'model_preset', description: 'Browse and use presets or set default; <name> switches idle session' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
@@ -288,6 +304,7 @@ export class BotService {
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
   private readonly promptProposals = new Map<string, PromptProposal>();
+  private readonly presetPanels = new Map<string, PresetPanel>();
   private readonly inputIntents = new WeakMap<Context, InputIntent>();
   private readonly albums = new Map<string, {contexts:Context[];ready:Promise<void>;resolve:()=>void;timer?:NodeJS.Timeout}>();
   private readonly albumPrompts = new WeakMap<Context, {contexts:Context[]}>();
@@ -295,7 +312,7 @@ export class BotService {
     this.options.store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?) ON CONFLICT(bot_id,token) DO UPDATE SET panel=excluded.panel')
       .run(this.id, panel.token, JSON.stringify({...panel, changes: [...panel.changes]}));
   }
-  private async settingsAccess(ctx: Context, panel: SettingsPanel, writable = false): Promise<AppConfig> {
+  private async settingsAccess(ctx: Context, panel: Pick<SettingsPanel, 'chatId' | 'instancePath'>, writable = false): Promise<AppConfig> {
     await this.authorize(panel.chatId, ctx.from!.id);
     if (writable && !(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
       throw new Error('Configuration is read-only. Ask the local operator to change its source or permissions. No settings were saved.');
@@ -308,6 +325,41 @@ export class BotService {
       throw new Error('The configured instance assignment or administrator access changed. No settings were saved.');
     }
     return persisted;
+  }
+  private settingsReplyPanel(ctx: Context): SettingsPanel | undefined {
+    const message = ctx.message;
+    const reply = message?.reply_to_message;
+    if (!message || !ctx.chat || !ctx.from || ctx.from.is_bot || !reply || reply.from?.id !== this.id ||
+        'forward_origin' in reply || 'forward_date' in reply ||
+        'forward_origin' in message || 'forward_date' in message) return;
+    const stored = this.options.store.db.prepare(
+      "SELECT panel FROM settings_panels WHERE bot_id=? AND json_extract(panel,'$.chatId')=? AND json_extract(panel,'$.messageId')=?",
+    ).get(this.id, ctx.chat.id, reply.message_id);
+    if (!stored) return;
+    const decoded = JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
+      changes: [SettingsKey, { label: string; before: string; after: string }][];
+    };
+    if (!decoded.capacityInput || !sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    return { ...decoded, changes: new Map(decoded.changes) };
+  }
+  private async saveCapacityReply(ctx: Context, panel: SettingsPanel): Promise<void> {
+    const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
+    const target = Number(input);
+    if (!/^[0-9]+$/.test(input) || !Number.isSafeInteger(target) || target < 1)
+      throw new Error('The live session count limit must be a positive safe integer.');
+    const config = await this.settingsAccess(ctx, panel, true);
+    const before = String(config.omp.maxSessions);
+    config.omp.maxSessions = target;
+    writeConfig(config);
+    this.options.config.omp.maxSessions = target;
+    this.options.runtime.setSessionLimit(target);
+    const original = panel.changes.get('capacity')?.before ?? before;
+    if (original === String(target)) panel.changes.delete('capacity');
+    else panel.changes.set('capacity', {
+      label: 'Maximum live sessions (service-wide)', before: original, after: String(target),
+    });
+    this.saveSettingsPanel(panel);
+    await this.renderSettings(panel, config, 'capacity');
   }
   private async openSettings(ctx: Context): Promise<void> {
     if (!(await this.currentAdmin(ctx))) {
@@ -327,7 +379,6 @@ export class BotService {
     config: AppConfig,
     page: SettingsPage = 'root',
     offset = 0,
-    proposal?: { limit: number; target: number },
   ): Promise<void> {
     const assigned = findInstance(config, this.id, panel.chatId)!;
     const chat = assigned.instance.chats.find(
@@ -375,7 +426,7 @@ export class BotService {
         kind: 'page',
         page: 'capacity',
       });
-      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
+      button(`🌳 Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
         kind: 'set',
         field: 'create_topic_worktrees',
         value: chat.create_topic_worktrees !== true,
@@ -415,36 +466,14 @@ export class BotService {
       if (offset > 0) button('Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
       if (offset + 8 < names.length) button('Next', { kind: 'page', page, offset: offset + 8 });
     } else {
-      const limit = this.options.runtime.getSessionLimit();
-      if (proposal) {
-        text = `Maximum live sessions: ${proposal.limit} → ${proposal.target}?\nService-wide.`;
-        button(`Set limit to ${proposal.target}`, {
-          kind: 'capacity',
-          limit: proposal.limit,
-          target: proposal.target,
-        });
-      } else {
-        text = `Maximum live sessions: ${limit}\nService-wide.`;
-        for (const [label, target] of [
-          ['−', limit - 1],
-          ['+', limit + 1],
-        ] as const) {
-          button(
-            label,
-            Number.isSafeInteger(target) && target >= 1 && target !== limit
-              ? { kind: 'propose-capacity', limit, target }
-              : { kind: 'page', page: 'capacity' },
-          );
-        }
-        rows.splice(0, 2, [...rows[0]!, ...rows[1]!]);
-      }
+      text = `Maximum live sessions: ${this.options.runtime.getSessionLimit()}\nService-wide.\nReply to this message with a positive whole number to save the limit immediately.`;
     }
     if (page !== 'root')
-      button(proposal ? 'Cancel' : 'Back to settings', {
+      button(page === 'capacity' ? '⬅️ Back' : 'Back to settings', {
         kind: 'page',
-        page: proposal ? 'capacity' : 'root',
+        page: 'root',
       });
-    button('Close', { kind: 'close' });
+    if (page !== 'capacity') button('⬅️ Back', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
     const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
@@ -456,7 +485,120 @@ export class BotService {
     panel.choices = choices;
     panel.revision = revision;
     panel.offset = offset;
+    panel.capacityInput = page === 'capacity';
     this.saveSettingsPanel(panel);
+  }
+  private presetSession(panel: PresetPanel): TopicSession {
+    const session = this.options.store.getTopic({botId: this.id, destination: panel.destination});
+    if (!session || session.id !== panel.sessionId || session.status !== 'open' ||
+        this.options.store.getSessionGeneration(session.id) !== panel.generation)
+      throw new Error('The session changed before the model preset command could run');
+    this.requireSessionAssignment(session);
+    return session;
+  }
+  private async renderPresetPanel(panel: PresetPanel): Promise<void> {
+    this.presetSession(panel);
+    const choices: PresetAction[] = [];
+    const rows: Array<Array<{text: string; callback_data: string}>> = [];
+    const revision = panel.revision + 1;
+    const button = (text: string, action: PresetAction) => {
+      rows.push([{text: text.slice(0, 100), callback_data: `preset:${panel.token}:${revision}:${choices.length}`}]);
+      choices.push(action);
+    };
+    let text = 'Model presets are pre-defined groups of models and their effort levels that map to various agent roles';
+    if (panel.selected !== undefined) {
+      const preset = await this.options.runtime.modelPresetDetails(panel.instancePath, panel.selected);
+      text = `${panel.selected}\n\n${Object.entries(preset.modelRoles).map(([role, selector]) => `${role}: ${selector}`).join('\n')}${preset.defaultThinkingLevel === undefined ? '' : `\nDefault effort: ${preset.defaultThinkingLevel}`}`;
+      button('Use', {kind: 'use'});
+      button('Make default', {kind: 'default'});
+      button('Back', {kind: 'back'});
+      if (panel.detailOffset >= text.length) panel.detailOffset = 0;
+      let end = Math.min(panel.detailOffset + 4000, text.length);
+      if (end < text.length && text.charCodeAt(end - 1) >= 0xD800 && text.charCodeAt(end - 1) <= 0xDBFF) end--;
+      if (panel.detailOffset > 0) button('First page', {kind: 'page', offset: 0});
+      if (end < text.length) button('Next', {kind: 'page', offset: end});
+      text = text.slice(panel.detailOffset, end);
+    } else {
+      const names = await this.options.runtime.availableModelPresets(panel.instancePath);
+      if (panel.listOffset >= names.length) panel.listOffset = 0;
+      for (const name of names.slice(panel.listOffset, panel.listOffset + 8))
+        button(name, {kind: 'select', name});
+      if (panel.listOffset > 0) button('Previous', {kind: 'page', offset: Math.max(0, panel.listOffset - 8)});
+      if (panel.listOffset + 8 < names.length) button('Next', {kind: 'page', offset: panel.listOffset + 8});
+    }
+    this.presetSession(panel);
+    if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
+    const extra = {reply_markup: {inline_keyboard: rows}};
+    if (panel.messageId === 0) {
+      const message = await sendTo(this.bot.api, panel.destination, text, extra);
+      panel.messageId = message.message_id;
+    } else {
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, text, extra);
+    }
+    panel.choices = choices;
+    panel.revision = revision;
+    for (const [token, entry] of this.presetPanels) if (entry.expires <= Date.now()) this.presetPanels.delete(token);
+    this.presetPanels.set(panel.token, panel);
+  }
+  private async presetCallback(ctx: Context, data: string): Promise<void> {
+    const match = /^preset:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/.exec(data);
+    const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+    if (!match || !message || ctx.chat?.type !== 'supergroup' || !('from' in message) ||
+        message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
+    const panel = this.presetPanels.get(match[1]!);
+    if (!panel || panel.expires <= Date.now()) {
+      if (panel) this.presetPanels.delete(panel.token);
+      await ctx.answerCallbackQuery({text: 'This model preset panel expired. Open /model_preset again.'});
+      return;
+    }
+    if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
+        !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
+    await this.settingsAccess(ctx, panel);
+    this.presetSession(panel);
+    if (Number(match[2]) !== panel.revision) {
+      await ctx.answerCallbackQuery({text: 'This selection is stale. Use the current buttons.'});
+      return;
+    }
+    const action = panel.choices[Number(match[3])];
+    if (!action) return;
+    if (action.kind === 'select') {
+      panel.selected = action.name;
+      panel.detailOffset = 0;
+    } else if (action.kind === 'back') delete panel.selected;
+    else if (action.kind === 'page') {
+      if (panel.selected === undefined) panel.listOffset = action.offset;
+      else panel.detailOffset = action.offset;
+    }
+    else {
+      const name = panel.selected;
+      if (name === undefined) return;
+      await this.options.runtime.modelPresetDetails(panel.instancePath, name);
+      if (action.kind === 'default') {
+        const config = await this.settingsAccess(ctx, panel, true);
+        this.presetSession(panel);
+        const chat = findInstance(config, this.id, panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+        chat.default_model_preset = name;
+        writeConfig(config);
+        const live = this.options.config.instances[panel.instancePath]!.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+        live.default_model_preset = name;
+      } else {
+        const session = this.presetSession(panel);
+        const release = this.options.runtime.retain(session.id);
+        try {
+          await this.options.runtime.ensure(session);
+          await this.settingsAccess(ctx, panel);
+          this.presetSession(panel);
+          await this.options.runtime.modelPresets(session, name);
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
+          await replyTo(ctx, panel.destination, "Can't change model preset while busy. /stop first");
+        } finally {
+          release();
+        }
+      }
+    }
+    await this.renderPresetPanel(panel);
+    await ctx.answerCallbackQuery();
   }
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
@@ -522,8 +664,7 @@ export class BotService {
       panel,
       action.kind === 'set' ||
         action.kind === 'default' ||
-        action.kind === 'typing' ||
-        action.kind === 'capacity',
+        action.kind === 'typing',
     );
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
@@ -541,6 +682,7 @@ export class BotService {
         reply_markup: { inline_keyboard: [] },
       });
       panel.choices = [];
+      panel.capacityInput = false;
       this.saveSettingsPanel(panel);
       return;
     }
@@ -548,41 +690,7 @@ export class BotService {
       await this.renderSettings(panel, config, action.page, action.offset);
       return;
     }
-    if (action.kind === 'propose-capacity') {
-      if (
-        this.options.runtime.getSessionLimit() !== action.limit ||
-        config.omp.maxSessions !== action.limit
-      )
-        throw new Error(
-          'The live session count limit changed. Open Live session count limit again.',
-        );
-      if (!Number.isSafeInteger(action.target) || action.target < 1)
-        throw new Error('The live session count limit must be a positive safe integer.');
-      await this.renderSettings(panel, config, 'capacity', 0, action);
-      return;
-    }
-    if (action.kind === 'capacity') {
-      if (!Number.isSafeInteger(action.target) || action.target < 1)
-        throw new Error('The live session count limit must be a positive safe integer.');
-      if (
-        this.options.runtime.getSessionLimit() !== action.limit ||
-        config.omp.maxSessions !== action.limit
-      )
-        throw new Error(
-          'The live session count limit changed. Open Live session count limit again.',
-        );
-      config.omp.maxSessions = action.target;
-      writeConfig(config);
-      this.options.config.omp.maxSessions = action.target;
-      this.options.runtime.setSessionLimit(action.target);
-      recordChange(
-        'capacity',
-        'Maximum live sessions (service-wide)',
-        String(action.limit),
-        String(action.target),
-      );
-      this.saveSettingsPanel(panel);
-    } else {
+    {
       if (action.kind === 'default' && action.value !== undefined) {
         const names =
           action.field === 'default_new_topic_skill'
@@ -614,7 +722,7 @@ export class BotService {
         proposals: 'Who can send requests',
         skills: 'Default skill',
         presets: 'Default model preset',
-        worktrees: 'Worktrees',
+        worktrees: '🌳 Worktrees',
         typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
@@ -665,7 +773,6 @@ export class BotService {
       );
       return;
     }
-    await this.renderSettings(panel, config, 'capacity');
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
@@ -791,6 +898,7 @@ export class BotService {
   private classifyInput(ctx: Context): InputIntent {
     const message = ctx.message;
     if (!message || !ctx.chat) return {kind:'event'};
+    if (this.settingsReplyPanel(ctx)) return {kind:'event'};
     const reply = message.reply_to_message;
     const question = reply?.from?.id === this.id ? [...this.questions.entries()].find(([,pending]) =>
       pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
@@ -2108,7 +2216,7 @@ export class BotService {
       const text = await this.options.runtime.worktree(session, task?.text || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);
       task = undefined;
-      await replyTo(ctx, topicDestination(session.chatId, session.threadId), text);
+      await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
     }
     if (worktree) {
       const sourceKey = this.skills.key(ctx);
@@ -2161,6 +2269,10 @@ export class BotService {
     await this.listen(session);
     await this.sendInitial(session);
   }
+  private localCliCommand(): string {
+    const configPath = this.options.config.configPath;
+    return configPath === defaultConfigPath() ? 'omp-telegram-collab' : `omp-telegram-collab --config '${configPath.replaceAll("'", "'\\''")}'`;
+  }
   private async setup(ctx: Context): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
     const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
@@ -2177,9 +2289,10 @@ export class BotService {
         return;
       }
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
-      const quotedPath = "'" + this.options.config.configPath.replaceAll("'", "'\\''") + "'";
-      const command = `omp-telegram --config ${quotedPath} approve ${request.code}`;
-      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
+      const quotedInstancePath = "'" + process.cwd().replaceAll("'", "'\\''") + "'";
+      const command = `${this.localCliCommand()} approve ${request.code} --path ${quotedInstancePath}`;
+      const prefix = "Setup requested. On the agent's computer, approve within 10 minutes:\n";
+      await replyTo(ctx, contextDestination(ctx), `${prefix}${command}\nThe project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.`, { entities: [{ type: 'code', offset: prefix.length, length: command.length }] });
       return;
     }
     if (!(await this.currentAdmin(ctx))) {
@@ -2195,7 +2308,7 @@ export class BotService {
   async requestCapacity(session: TopicSession, limit: number): Promise<void> {
     if (!this.sessionAssigned(session)) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `${this.localCliCommand()} setup`;
       await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
@@ -2261,7 +2374,7 @@ export class BotService {
     const session = this.options.store.getSession(request.sessionId);
     if (!session || !this.sessionAssigned(session) || session.status !== 'open' || session.chatId !== request.chatId || session.threadId !== request.threadId) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `${this.localCliCommand()} setup`;
       await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
@@ -2535,6 +2648,11 @@ export class BotService {
       return;
     }
     this.termination = undefined;
+    const settingsPanel = this.settingsReplyPanel(ctx);
+    if (settingsPanel) {
+      await this.saveCapacityReply(ctx, settingsPanel);
+      return;
+    }
     if (ctx.inlineQuery) {
       await this.skills.inline(ctx);
       return;
@@ -2557,6 +2675,10 @@ export class BotService {
           return;
         const session = this.options.store.getTopic({ botId: this.id, destination });
         await this.skills.callback(ctx, ctx.callbackQuery.data, session);
+        return;
+      }
+      if (ctx.callbackQuery.data.startsWith('preset:')) {
+        await this.presetCallback(ctx, ctx.callbackQuery.data);
         return;
       }
       if (ctx.callbackQuery.data.startsWith('settings:')) {
@@ -2990,12 +3112,12 @@ export class BotService {
           await replyTo(
             ctx,
             destination,
-            'Use /worktree inside an active session topic, or General to create one.',
+            '🌳 Use /worktree inside an active session topic, or General to create one.',
           );
           return;
         }
         if (!(await this.currentAdmin(ctx))) {
-          await replyTo(ctx, destination, 'Worktree commands require a group administrator.');
+          await replyTo(ctx, destination, '🌳 Worktree commands require a group administrator.');
           return;
         }
         await this.authorize(ctx.chat.id, ctx.from.id);
@@ -3010,7 +3132,7 @@ export class BotService {
           this.dropListener(session.id);
         }
         await this.listen(session);
-        await replyTo(ctx, destination, text);
+        await replyTo(ctx, destination, `🌳 ${text}`);
         return;
       }
       if (action === 'attach') {
@@ -3059,26 +3181,11 @@ export class BotService {
           return;
         }
         this.requireSessionAssignment(session);
-        if (session.status !== 'open') {
-          await replyTo(
-            ctx,
-            destination,
-            'This session is archived. Reopen the topic before joining.',
-          );
-          return;
-        }
-        const command = `omp-telegram session join --chat ${destination.chatId} --topic ${destination.threadId}`;
-        await replyTo(
-          ctx,
-          destination,
-          `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`,
-          {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[{ text: 'Copy command', copy_text: { text: command } }]],
-            },
-          },
-        );
+        if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return; }
+        const command = `omp-telegram-collab session join --chat ${destination.chatId} --topic ${destination.threadId}`;
+        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
+          parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
+        });
         return;
       }
       if (action === 'session') {
@@ -3132,6 +3239,16 @@ export class BotService {
           await this.replyPresetUsage(ctx, session.instancePath);
           return;
         }
+        if (!arg) {
+          const panel: PresetPanel = {
+            token: randomBytes(16).toString('base64url'), chatId: ctx.chat.id,
+            destination, messageId: 0, instancePath: session.instancePath,
+            sessionId: session.id, generation: this.options.store.getSessionGeneration(session.id),
+            revision: 0, expires: Date.now() + 30 * 60_000, choices: [], listOffset: 0, detailOffset: 0,
+          };
+          await this.renderPresetPanel(panel);
+          return;
+        }
         if (!session) return;
         if (arg) {
           const names = await this.options.runtime.availableModelPresets(session.instancePath);
@@ -3159,18 +3276,7 @@ export class BotService {
             this.options.store.getSession(session.id)?.status !== 'open'
           )
             throw new Error('The session changed before the model preset command could run');
-          let text = await this.options.runtime.modelPresets(session, arg || undefined);
-          if (!arg) {
-            const preset = findInstance(
-              this.options.config,
-              this.id,
-              ctx.chat.id,
-            )!.instance.chats.find(
-              (chat) => chat.botId === this.id && chat.chatId === ctx.chat!.id,
-            )?.default_model_preset;
-            text += `\nDefault model preset: ${preset ?? '(not set)'}`;
-            text = `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\n${text}`;
-          }
+          const text = await this.options.runtime.modelPresets(session, arg);
           await this.replyPresetText(ctx, text);
         } catch (error) {
           if (
@@ -3706,8 +3812,13 @@ export class BotService {
     else if (question.request.kind === 'select') {
       const option = question.request.options[Number(choice)];
       if (option === undefined) return;
+      await this.delivery.run(question.session.chatId,
+        () => this.bot.api.setMessageReaction(question.session.chatId,message.message_id,[{type:'emoji',emoji:'👀'}]),
+        () => !this.stopped && this.sessionAssigned(question.session) &&
+          this.listeners.get(question.session.id) === question.listener && this.questions.get(token) === question)
+        .catch(error => { console.warn(`Could not show question selection receipt (${question.session.id}).`, error); });
       const value = typeof option === 'string' ? option : option.label;
-      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`);
+      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
     await ctx.answerCallbackQuery();
   }

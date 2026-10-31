@@ -1,6 +1,7 @@
 import { createServer as createHttpServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
@@ -44,7 +45,7 @@ export function createServer(options: ServerOptions): GatewayServer {
   const sockets = new WebSocketServer({noServer:true,maxPayload:0,perMessageDeflate:false});
   const botMap = new Map(options.bots.map(bot => [bot.id,bot]));
   if (botMap.has(0) || botMap.size !== options.bots.length) throw new Error('Initialize each distinct bot before creating the server');
-  const root = resolve(options.staticDir ?? 'web/dist');
+  const root = resolve(options.staticDir ?? fileURLToPath(new URL('../web/dist/', import.meta.url)));
   const publicOrigin = new URL(options.config.publicUrl).origin;
   let closing = false;
   let pendingRequests = 0;
