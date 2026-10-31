@@ -348,3 +348,29 @@ test('a removed catalog choice preserves the saved default', async t => {
   } finally { await app.close(); }
 });
 
+test('successful settings saves retain durable change history when catalog rendering fails', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await clickSettings(app,3);
+    const panel = app.messages.at(-1)!;
+    const token = settingsButton(panel,0).split(':')[1]!;
+    const load = () => JSON.parse(String(app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(botId,token)!.panel));
+    const before = load();
+    let queries = 0;
+    t.mock.method(app.runtime,'availableModelPresets',async()=>{
+      if (++queries === 2) throw new Error('Catalog failed after save');
+      return ['Fast','Slow'];
+    });
+    await clickSettings(app,0);
+    assert.equal(saved(app).chat.default_model_preset,'Fast');
+    const after = load();
+    const changes = new Map<string,{before:string;after:string}>(after.changes);
+    assert.equal(changes.get('presets')!.after,'Fast');
+    assert.equal(after.revision,before.revision);
+    assert.deepEqual(after.choices,before.choices);
+    await app.callback(settingsButton(panel,-1),panel);
+    assert.deepEqual(load().choices,[]);
+    assert.deepEqual(load().changes,after.changes);
+  } finally { await app.close(); }
+});

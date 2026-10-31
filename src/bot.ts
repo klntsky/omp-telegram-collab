@@ -386,6 +386,7 @@ export class BotService {
       this.options.config.omp.maxSessions = action.target;
       this.options.runtime.setSessionLimit(action.target);
       recordChange('capacity', 'Maximum live sessions (service-wide)', String(action.limit), String(action.target));
+      this.saveSettingsPanel(panel);
     } else {
       if (action.kind === 'default' && action.value !== undefined) {
         const names = action.field === 'default_new_topic_skill'
@@ -418,6 +419,7 @@ export class BotService {
       else chat[action.field] = action.value;
       writeConfig(current);
       recordChange(page, labels[page], before, value(chat[action.field]));
+      this.saveSettingsPanel(panel);
       Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
       if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
       await this.syncCommandMenus();
