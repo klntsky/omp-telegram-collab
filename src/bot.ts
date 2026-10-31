@@ -451,7 +451,7 @@ export class BotService {
         kind: 'page',
         page: 'root',
       });
-    button('✖️ Close', { kind: 'close' });
+    button('⬅️ Back', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
     const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
