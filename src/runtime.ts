@@ -1081,6 +1081,7 @@ export class OmpRuntime {
     if (pending) return pending;
     const operation = (async () => {
       await this.#pending.get(id)?.catch(() => undefined);
+      if (!this.#discovered) await this.#discoverManaged(await this.#list(Date.now() + this.#config.omp.startupTimeoutMs));
       const host = this.#managed.get(id);
       if (host) await this.#shutdown(id,host,guard);
     })().finally(() => {
