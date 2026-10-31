@@ -21,7 +21,6 @@ interface DeliveryLane {
 }
 
 interface TypingJob extends DeliveryJob {
-  threadId: number;
   expiresAt: number;
 }
 
@@ -30,28 +29,28 @@ interface TypingTopic {
   refreshedAt: number;
   nextStartAt: number;
   visibleUntil: number;
+  pending?: TypingJob;
 }
 
 interface ChatDelivery {
   lanes: Record<LaneName, DeliveryLane>;
-  typing: TypingJob[];
+  ordinary: DeliveryJob[];
   typingRunning?: TypingJob;
   topics: Map<number, TypingTopic>;
-  typingStarts: Map<number, number>;
   nextStartAt: number;
   timer?: NodeJS.Timeout;
-  admission: { kind: 'idle' } | { kind: 'running'; requested: boolean };
+  pumpQueued: boolean;
 }
 
 const laneNames: readonly LaneName[] = ['ordinary', 'name', 'icon'];
 
+// Eligibility callbacks are pure state queries. Scheduling runs in a coalesced microtask.
 export class TelegramDelivery {
   private readonly chats = new Map<number, ChatDelivery>();
   private closed = false;
-  private sequence = 0;
 
   run<T>(chatId: number, action: () => Promise<T>, active: () => boolean): Promise<T | undefined> {
-    return this.enqueue(chatId, 'ordinary', String(this.sequence++), action, active);
+    return this.enqueue(chatId, 'ordinary', undefined, action, active);
   }
 
   runTopic<T>(
@@ -73,21 +72,7 @@ export class TelegramDelivery {
     if (this.closed) return Promise.resolve(undefined);
     const chat = this.getChat(chatId);
     const now = Date.now();
-    for (const [id, nextStartAt] of chat.typingStarts) {
-      if (nextStartAt <= now) chat.typingStarts.delete(id);
-    }
-    for (const [id, topic] of chat.topics) {
-      try {
-        if (topic.visibleUntil > now || (topic.active() && now - topic.refreshedAt < 4000))
-          continue;
-      } catch (error) {
-        for (const job of [...chat.typing]) {
-          if (job.threadId === id) job.reject(error);
-        }
-      }
-      this.invalidateTyping(chatId, id);
-      chat.topics.delete(id);
-    }
+    this.expireTyping(chat, now);
     try {
       if (!active()) return Promise.resolve(undefined);
     } catch (error) {
@@ -100,7 +85,7 @@ export class TelegramDelivery {
       topic = {
         active,
         refreshedAt: now,
-        nextStartAt: chat.typingStarts.get(threadId) ?? 0,
+        nextStartAt: 0,
         visibleUntil: 0,
       };
       chat.topics.set(threadId, topic);
@@ -110,20 +95,14 @@ export class TelegramDelivery {
     }
     this.invalidateTyping(chatId, threadId);
     const { promise, resolve, reject } = Promise.withResolvers<void | undefined>();
-    let timer: NodeJS.Timeout;
     const remove = () => {
-      clearTimeout(timer);
-      const index = chat.typing.indexOf(job);
-      if (index !== -1) chat.typing.splice(index, 1);
+      if (topic.pending === job) topic.pending = undefined;
     };
     const job: TypingJob = {
-      threadId,
       expiresAt: now + 4000,
       execute: async () => {
-        clearTimeout(timer);
         topic.nextStartAt = Date.now() + 4000;
         topic.visibleUntil = Date.now() + 5000;
-        chat.typingStarts.set(threadId, topic.nextStartAt);
         resolve(
           await withTelegramDeliveryRetry(async () => {
             await action();
@@ -140,11 +119,9 @@ export class TelegramDelivery {
         reject(error);
       },
     };
-    timer = setTimeout(() => {
-      job.cancel();
-      this.admit(chat);
-    }, 4000);
-    chat.typing.push(job);
+    topic.pending = job;
+    chat.topics.delete(threadId);
+    chat.topics.set(threadId, topic);
     this.admit(chat);
     return promise;
   }
@@ -152,9 +129,7 @@ export class TelegramDelivery {
   invalidateTyping(chatId: number, threadId: number): void {
     const chat = this.chats.get(chatId);
     if (!chat) return;
-    for (const job of [...chat.typing]) {
-      if (job.threadId === threadId) job.cancel();
-    }
+    chat.topics.get(threadId)?.pending?.cancel();
     this.admit(chat);
   }
 
@@ -162,13 +137,17 @@ export class TelegramDelivery {
     this.closed = true;
     for (const chat of this.chats.values()) {
       clearTimeout(chat.timer);
+      for (const job of chat.ordinary) {
+        if (job !== chat.lanes.ordinary.running) job.cancel();
+      }
+      chat.ordinary.length = 0;
       for (const name of laneNames) {
         const lane = chat.lanes[name];
         for (const job of lane.pending.values()) job.cancel();
         lane.pending.clear();
         lane.running?.abort?.();
       }
-      for (const job of [...chat.typing]) job.cancel();
+      for (const topic of chat.topics.values()) topic.pending?.cancel();
       chat.topics.clear();
     }
     this.chats.clear();
@@ -183,11 +162,10 @@ export class TelegramDelivery {
           name: { pending: new Map() },
           icon: { pending: new Map() },
         },
-        typing: [],
+        ordinary: [],
         topics: new Map(),
-        typingStarts: new Map(),
         nextStartAt: 0,
-        admission: { kind: 'idle' },
+        pumpQueued: false,
       };
       this.chats.set(chatId, chat);
     }
@@ -197,7 +175,7 @@ export class TelegramDelivery {
   private enqueue<T>(
     chatId: number,
     name: LaneName,
-    key: string,
+    key: string | undefined,
     action: (signal: TelegramAbortSignal) => Promise<T>,
     active: () => boolean,
   ): Promise<T | undefined> {
@@ -249,9 +227,12 @@ export class TelegramDelivery {
         resolve(await finished.promise);
       },
     };
-    const lane = chat.lanes[name];
-    lane.pending.get(key)?.cancel();
-    lane.pending.set(key, job);
+    if (name === 'ordinary') chat.ordinary.push(job);
+    else {
+      const lane = chat.lanes[name];
+      lane.pending.get(key!)?.cancel();
+      lane.pending.set(key!, job);
+    }
     this.admit(chat);
     return promise;
   }
@@ -265,103 +246,110 @@ export class TelegramDelivery {
   }
 
   private admit(chat: ChatDelivery): void {
-    if (this.closed) return;
-    if (chat.admission.kind === 'running') {
-      chat.admission.requested = true;
-      return;
+    if (this.closed || chat.pumpQueued) return;
+    chat.pumpQueued = true;
+    queueMicrotask(() => {
+      chat.pumpQueued = false;
+      if (!this.closed) this.pump(chat);
+    });
+  }
+
+  private expireTyping(chat: ChatDelivery, now: number): void {
+    for (const [id, topic] of chat.topics) {
+      if (topic.pending && topic.pending.expiresAt <= now) topic.pending.cancel();
+      if (topic.visibleUntil > now) continue;
+      try {
+        if (topic.active() && now - topic.refreshedAt < 4000) continue;
+      } catch (error) {
+        topic.pending?.reject(error);
+      }
+      topic.pending?.cancel();
+      chat.topics.delete(id);
     }
-    const pass: { kind: 'running'; requested: boolean } = { kind: 'running', requested: false };
-    chat.admission = pass;
+  }
+
+  private pump(chat: ChatDelivery): void {
     clearTimeout(chat.timer);
     chat.timer = undefined;
-    try {
-      for (const name of laneNames) {
-        const lane = chat.lanes[name];
-        if (lane.running) continue;
-        for (const [key, job] of lane.pending) {
-          let active: boolean;
-          try {
-            active = job.active();
-          } catch (error) {
-            if (lane.pending.get(key) === job) lane.pending.delete(key);
-            job.reject(error);
-            continue;
-          }
-          if (lane.pending.get(key) !== job) continue;
-          if (!active) {
-            lane.pending.delete(key);
-            job.cancel();
-            continue;
-          }
-          if (this.closed) return;
-          const wait = chat.nextStartAt - Date.now();
-          if (wait > 0) {
-            chat.timer = setTimeout(() => this.admit(chat), wait);
-            return;
-          }
-          lane.pending.delete(key);
-          lane.running = job;
-          void withTelegramDeliveryRetry(job.execute)
-            .catch((error) => {
-              if (name === 'ordinary' && this.observeRateLimit(chat, error)) {
-                if (this.closed) job.cancel();
-                else lane.pending = new Map([[key, job], ...lane.pending]);
-              } else {
-                job.reject(error);
-              }
-            })
-            .finally(() => {
-              lane.running = undefined;
-              this.admit(chat);
-            });
-          break;
-        }
-      }
-      if (
-        chat.typingRunning ||
-        laneNames.some((name) => chat.lanes[name].running || chat.lanes[name].pending.size)
-      )
-        return;
-      chat.typing.sort(
-        (a, b) =>
-          (chat.topics.get(a.threadId)?.nextStartAt ?? 0) -
-          (chat.topics.get(b.threadId)?.nextStartAt ?? 0),
-      );
-      for (const job of [...chat.typing]) {
-        if (job.expiresAt <= Date.now()) {
-          job.cancel();
-          continue;
-        }
+    const now = Date.now();
+    this.expireTyping(chat, now);
+    let wakeAt = Infinity;
+    for (const topic of chat.topics.values()) {
+      if (topic.pending) wakeAt = Math.min(wakeAt, topic.pending.expiresAt);
+    }
+    for (const name of laneNames) {
+      const lane = chat.lanes[name];
+      if (lane.running) continue;
+      while (true) {
+        const entry = name === 'ordinary' ? undefined : lane.pending.entries().next().value;
+        const job = name === 'ordinary' ? chat.ordinary[0] : entry?.[1];
+        if (!job) break;
+        const remove = () => {
+          if (name === 'ordinary') chat.ordinary.shift();
+          else lane.pending.delete(entry![0]);
+        };
         let active: boolean;
         try {
           active = job.active();
         } catch (error) {
+          remove();
           job.reject(error);
           continue;
         }
-        if (!chat.typing.includes(job)) continue;
         if (!active) {
+          remove();
           job.cancel();
           continue;
         }
-        if (
-          this.closed ||
-          laneNames.some((name) => chat.lanes[name].running || chat.lanes[name].pending.size)
-        )
-          return;
-        const wait =
-          Math.max(chat.nextStartAt, chat.topics.get(job.threadId)?.nextStartAt ?? 0) - Date.now();
-        if (wait > 0) {
-          chat.timer = setTimeout(
-            () => this.admit(chat),
-            Math.min(wait, job.expiresAt - Date.now()),
-          );
-          return;
+        if (chat.nextStartAt > now) {
+          wakeAt = Math.min(wakeAt, chat.nextStartAt);
+          break;
         }
-        chat.typing.splice(chat.typing.indexOf(job), 1);
+        if (name !== 'ordinary') remove();
+        lane.running = job;
+        let retry = false;
+        void withTelegramDeliveryRetry(job.execute)
+          .catch((error) => {
+            if (name === 'ordinary' && this.observeRateLimit(chat, error)) {
+              retry = !this.closed;
+              if (this.closed) job.cancel();
+            } else job.reject(error);
+          })
+          .finally(() => {
+            if (name === 'ordinary' && !retry && chat.ordinary[0] === job)
+              chat.ordinary.shift();
+            lane.running = undefined;
+            this.admit(chat);
+          });
+        break;
+      }
+    }
+    const realBusy =
+      chat.ordinary.length > 0 ||
+      laneNames.some((name) => chat.lanes[name].running || chat.lanes[name].pending.size);
+    if (!chat.typingRunning && !realBusy) {
+      let ready: TypingTopic | undefined;
+      for (const topic of chat.topics.values()) {
+        const job = topic.pending;
+        if (!job) continue;
+        try {
+          if (!job.active()) {
+            job.cancel();
+            continue;
+          }
+        } catch (error) {
+          job.reject(error);
+          continue;
+        }
+        const startsAt = Math.max(chat.nextStartAt, topic.nextStartAt);
+        if (startsAt > now) wakeAt = Math.min(wakeAt, startsAt);
+        else if (!ready || topic.nextStartAt < ready.nextStartAt) ready = topic;
+      }
+      if (ready) {
+        const job = ready.pending!;
+        ready.pending = undefined;
         chat.typingRunning = job;
-        void job
-          .execute()
+        void job.execute()
           .catch((error) => {
             this.observeRateLimit(chat, error);
             job.reject(error);
@@ -370,12 +358,9 @@ export class TelegramDelivery {
             chat.typingRunning = undefined;
             this.admit(chat);
           });
-        break;
       }
-    } finally {
-      chat.admission = { kind: 'idle' };
-      if (pass.requested && !this.closed && chat.timer === undefined)
-        queueMicrotask(() => this.admit(chat));
     }
+    if (Number.isFinite(wakeAt))
+      chat.timer = setTimeout(() => this.admit(chat), Math.max(0, wakeAt - Date.now()));
   }
 }

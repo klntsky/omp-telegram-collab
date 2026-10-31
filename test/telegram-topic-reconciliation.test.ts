@@ -144,8 +144,9 @@ test(
   },
 );
 
+for (const replacement of [false, true]) {
 test(
-  'consecutive native renames cannot apply an older host title after the newer intent',
+  `coalesced native renames write only initial and latest targets${replacement ? ' across generation replacement' : ''}`,
   { timeout: 15000 },
   async (t) => {
     const app = await createSmokeApp();
@@ -171,11 +172,20 @@ test(
       );
       await app.update({ message_thread_id: 42, forum_topic_edited: { name: 'First edit' } });
       await entered.promise;
+      if (replacement) app.store.advanceSessionGeneration(session.id);
       await app.update({ message_thread_id: 42, forum_topic_edited: { name: 'Second edit' } });
+      await app.update({ message_thread_id: 42, forum_topic_edited: { name: 'Latest edit' } });
+      for (let i = 0; i < 10; i++) app.emit({ t: 'state', state: idle });
       release.resolve();
       await appliedFirst.promise;
-      await eventually(() => app.sessionTitles.get(session.id) === 'Second edit');
-      await eventually(() => app.remoteTopics.get(remoteKey)?.name === 'Second edit');
+      if (replacement) await app.service.ensureMirroring(session, await app.runtime.ensure(session));
+      await eventually(() => app.sessionTitles.get(session.id) === 'Latest edit');
+      await eventually(() => app.remoteTopics.get(remoteKey)?.name === 'Latest edit');
+      assert.deepEqual(
+        app.titleChanges.filter(change => ['First edit', 'Second edit', 'Latest edit'].includes(change.title))
+          .map(change => change.title),
+        ['First edit', 'Latest edit'],
+      );
       assert.equal(app.store.getPendingSessionTitle(session.id), undefined);
       assert.deepEqual(app.accepted, []);
     } finally {
@@ -184,6 +194,7 @@ test(
     }
   },
 );
+}
 
 test(
   'native rename is adopted before outgoing edits when Git metadata lookup fails',
@@ -268,3 +279,55 @@ test(
     }
   },
 );
+
+test('supergroup attribution is independent of usernames and chat-attributed edits do not replace intent', async () => {
+  const app = await createSmokeApp();
+  try {
+    const session = await liveTopic(app);
+    app.setCurrentMember({ username: undefined, status: 'administrator' });
+    await app.update({
+      message_thread_id: 42,
+      forum_topic_edited: { name: 'Identified editor', icon_custom_emoji_id: 'identified-finish' },
+    });
+    await eventually(() => app.sessionTitles.get(session.id) === 'Identified editor');
+    await eventually(() => app.store.getTopicFinishIcon(session.id) === 'identified-finish');
+    app.remoteTopics.set(remoteKey, { name: 'Chat-attributed edit', icon_custom_emoji_id: 'chat-finish' });
+    await app.update({
+      message_thread_id: 42,
+      sender_chat: { id: chatId, type: 'supergroup', title: 'Fixture supergroup', is_forum: true },
+      forum_topic_edited: { name: 'Chat-attributed edit', icon_custom_emoji_id: 'chat-finish' },
+    }, { id: 1087968824, is_bot: true, first_name: 'GroupAnonymousBot' });
+    await eventually(() =>
+      app.remoteTopics.get(remoteKey)?.name === 'Identified editor' &&
+      app.remoteTopics.get(remoteKey)?.icon_custom_emoji_id === 'identified-finish',
+    );
+    assert.equal(app.store.getTopicFinishIcon(session.id), 'identified-finish');
+    assert.equal(app.sessionTitles.get(session.id), 'Identified editor');
+    assert.equal(app.store.getPendingSessionTitle(session.id), undefined);
+  } finally {
+    await app.close();
+  }
+});
+
+test('native-title worker is installed before synchronous host state ingress', async () => {
+  const app = await createSmokeApp();
+  try {
+    const session = await liveTopic(app);
+    const setTitle = app.runtime.setSessionTitle.bind(app.runtime);
+    const writes: string[] = [];
+    app.runtime.setSessionTitle = async (current, title) => {
+      if (title === 'Single native mutation') {
+        writes.push(title);
+        if (writes.length === 1)
+          app.emit({ t: 'state', state: { ...idle, sessionName: 'Reconciliation probe' } });
+      }
+      await setTitle(current, title);
+    };
+    await app.update({ message_thread_id: 42, forum_topic_edited: { name: 'Single native mutation' } });
+    await eventually(() => app.sessionTitles.get(session.id) === 'Single native mutation');
+    await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    assert.deepEqual(writes, ['Single native mutation']);
+  } finally {
+    await app.close();
+  }
+});

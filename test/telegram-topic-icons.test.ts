@@ -41,6 +41,32 @@ function lastIcon(app: {topicEdits: Record<string,unknown>[]}) {
   return app.topicEdits.findLast(edit => edit.icon_custom_emoji_id !== undefined)?.icon_custom_emoji_id;
 }
 
+test('icon cooldown release rejects expired activity without maintenance and fresh activity restores pending delivery', {timeout:15000}, async t => {
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date, 'now', () => now() + offset);
+  const app = await createSmokeApp();
+  try {
+    await liveTopic(app);
+    t.mock.timers.enable({apis:['setTimeout']});
+    const limited = Promise.withResolvers<void>();
+    app.events.once('rate-limit', () => limited.resolve());
+    app.rateLimitNext('editForumTopic', 1);
+    app.emit({t:'event',event:{type:'agent_start'}});
+    await limited.promise;
+    offset = 61_000;
+    await setImmediate();
+    t.mock.timers.tick(61_000);
+    await setImmediate();
+    assert.equal(lastIcon(app), finishIcon);
+    app.emit({t:'state',state:{...idle,isStreaming:true}});
+    await eventually(() => lastIcon(app) === runningIcon);
+  } finally {
+    t.mock.timers.reset();
+    await app.close();
+  }
+});
+
 test('idle restart repairs an applied icon whose acknowledgement was lost and retains the finish preference', {timeout:15000}, async () => {
   const app = await createSmokeApp({persistentStore:true});
   let restarted: BotService | undefined;

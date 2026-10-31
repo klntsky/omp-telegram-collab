@@ -78,6 +78,16 @@ interface HostActivityObservation {
   probe?: Promise<void>;
   controller?: AbortController;
 }
+interface SessionMetadataOwner {
+  generation: number;
+  disposed: boolean;
+  controller: AbortController;
+  activity: HostActivityObservation;
+  title: TopicTitleSource;
+  metadata?: TopicMetadata;
+  recovery?: Promise<void>;
+  titleWrite?: Promise<void>;
+}
 interface StatusFailure { operation: string; at: number; error: unknown }
 interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
 interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
@@ -237,11 +247,7 @@ export class BotService {
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
   private readonly telegramRetry = new AbortController();
-  private readonly metadataWriters = new Map<string, TopicMetadata>();
-  private readonly topicTitles = new Map<string, TopicTitleSource>();
-  private readonly hostActivity = new Map<string, HostActivityObservation>();
-  private readonly mirrorRecoveries = new Map<string, Promise<void>>();
-  private readonly hostTitleWrites = new Map<string, Promise<void>>();
+  private readonly metadataOwners = new Map<string, SessionMetadataOwner>();
   private readonly sessionInvalidationHandlers = new Set<(sessionId: string, reason?: string) => void>();
   private readonly closedSessions = new Map<string, { generation: number; settled: boolean; pending?: Promise<void> }>();
   private readonly commandMenus = new Map<number, string>();
@@ -960,24 +966,25 @@ export class BotService {
     signal = this.background.signal,
   ): Promise<void> {
     if (this.stopped || this.options.config.terminated || signal.aborted) return Promise.resolve();
-    const existing = this.mirrorRecoveries.get(session.id);
+    const metadataOwner = this.metadataOwner(session);
+    const existing = metadataOwner.recovery;
     if (existing) return existing;
-    const generation = this.options.store.getSessionGeneration(session.id);
-    const owner = this.activityObservation(session);
+    const generation = metadataOwner.generation;
+    const owner = metadataOwner.activity;
     const active = () =>
       !this.stopped &&
       !this.options.config.terminated &&
       this.sessionAssigned(session) &&
       this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation &&
-      this.hostActivity.get(session.id) === owner;
+      this.metadataOwners.get(session.id)?.activity === owner;
     if (
       !active() ||
       this.listeners.has(session.id) ||
       this.options.store.hasPendingInitialTask(session.id)
     )
       return Promise.resolve();
-    const deadline = AbortSignal.any([signal, AbortSignal.timeout(5000)]);
+    const deadline = AbortSignal.any([signal, metadataOwner.controller.signal, AbortSignal.timeout(5000)]);
     const recovery = (async () => {
       const binding = await withCancellation(
         this.options.runtime.resolveExisting(session),
@@ -993,10 +1000,9 @@ export class BotService {
         throw error;
       }
     })().finally(() => {
-      if (this.mirrorRecoveries.get(session.id) === recovery)
-        this.mirrorRecoveries.delete(session.id);
+      if (metadataOwner.recovery === recovery) metadataOwner.recovery = undefined;
     });
-    this.mirrorRecoveries.set(session.id, recovery);
+    metadataOwner.recovery = recovery;
     return recovery;
   }
   refreshSkillCatalogs(): Promise<void> {
@@ -1180,7 +1186,12 @@ export class BotService {
   async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
-    for (const id of this.metadataWriters.keys()) this.invalidateActivity(id);
+    const metadataCompletions = [...this.metadataOwners.values()].flatMap(owner => [
+      owner.metadata?.name.completion,
+      owner.metadata?.icon.completion,
+      owner.titleWrite,
+    ]);
+    for (const id of this.metadataOwners.keys()) this.disposeMetadataOwner(id);
     this.background.abort(new Error('Bot background maintenance stopped'));
     this.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
     this.apiAbort.abort();
@@ -1211,12 +1222,7 @@ export class BotService {
     await Promise.all(listeners.map((listener) => listener.tail));
     await Promise.all(this.backgroundTasks);
     await this.menuTail;
-    await Promise.all(
-      [...this.metadataWriters.values()].flatMap((metadata) => [
-        metadata.name.completion,
-        metadata.icon.completion,
-      ]),
-    );
+    await Promise.all(metadataCompletions);
   }
   private sessionObservation(id: string): SessionObservation {
     let observation = this.sessionObservations.get(id);
@@ -1476,9 +1482,7 @@ export class BotService {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
         this.closedSessions.delete(session.id);
-        this.metadataWriters.delete(session.id);
-        this.topicTitles.delete(session.id);
-        this.hostActivity.delete(session.id);
+        this.disposeMetadataOwner(session.id);
         for (const [token, request] of this.capacityRequests)
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
@@ -1548,7 +1552,7 @@ export class BotService {
     return this.iconIds;
   }
   private invalidateActivity(id: string): void {
-    const activity = this.hostActivity.get(id);
+    const activity = this.metadataOwners.get(id)?.activity;
     if (activity) {
       activity.controller?.abort(
         new Error('Activity observation canceled because its listener closed'),
@@ -1559,27 +1563,66 @@ export class BotService {
       ++activity.revision;
     }
   }
-  private activityObservation(session: TopicSession): HostActivityObservation {
-    const generation = this.options.store.getSessionGeneration(session.id);
-    let observation = this.hostActivity.get(session.id);
-    if (!observation || observation.generation !== generation) {
-      observation?.controller?.abort(new Error('Session activity ownership changed'));
-      observation = { generation, value: 'unknown', suspect: false, revision: 0 };
-      this.hostActivity.set(session.id, observation);
-    }
-    return observation;
+  private disposeMetadataOwner(id: string): void {
+    const owner = this.metadataOwners.get(id);
+    if (!owner) return;
+    this.invalidateActivity(id);
+    owner.disposed = true;
+    owner.controller.abort(new Error('Session metadata ownership changed'));
+    owner.metadata = undefined;
+    owner.recovery = undefined;
+    if (!owner.titleWrite) this.metadataOwners.delete(id);
   }
-  private titleSource(session: TopicSession): TopicTitleSource {
-    let source = this.topicTitles.get(session.id);
-    if (!source) {
-      source = {
+  private metadataOwner(session: TopicSession): SessionMetadataOwner {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    let owner = this.metadataOwners.get(session.id);
+    if (!owner) {
+      owner = {
+        generation,
+        disposed: false,
+        controller: new AbortController(),
+        activity: { generation, value: 'unknown', suspect: false, revision: 0 },
+        title: {
+          prefix: this.options.store.getTopicTitlePrefix(session.id) ?? '',
+          prefixes: new Set(),
+          revision: 0,
+        },
+      };
+      this.metadataOwners.set(session.id, owner);
+    } else if (owner.disposed || owner.generation !== generation) {
+      this.disposeMetadataOwner(session.id);
+      owner.generation = generation;
+      owner.disposed = false;
+      owner.controller = new AbortController();
+      owner.activity = { generation, value: 'unknown', suspect: false, revision: 0 };
+      owner.title = {
         prefix: this.options.store.getTopicTitlePrefix(session.id) ?? '',
         prefixes: new Set(),
         revision: 0,
       };
-      this.topicTitles.set(session.id, source);
+      this.metadataOwners.set(session.id, owner);
     }
-    return source;
+    return owner;
+  }
+  private activityObservation(session: TopicSession): HostActivityObservation {
+    return this.metadataOwner(session).activity;
+  }
+  private titleSource(session: TopicSession): TopicTitleSource {
+    return this.metadataOwner(session).title;
+  }
+  private activityAtUse(session: TopicSession): TopicActivity {
+    const owner = this.metadataOwners.get(session.id);
+    if (!owner || owner.disposed ||
+        owner.generation !== this.options.store.getSessionGeneration(session.id)) return 'unknown';
+    const status = this.options.store.getSession(session.id)?.status;
+    if (status === 'open' && this.options.store.hasPendingInitialTask(session.id)) return 'running';
+    const activity = owner.activity;
+    const closed = this.closedSessions.get(session.id);
+    if (activity.value === 'finished' &&
+        status === 'closed' &&
+        closed?.generation === owner.generation && closed.settled) return 'finished';
+    return activity.observedAt !== undefined && Date.now() - activity.observedAt < 60_000
+      ? activity.value : 'unknown';
   }
   private formatTopicTitle(source: TopicTitleSource): { name: string; prefix: string } {
     const title = source.humanTitle ?? '';
@@ -1598,25 +1641,26 @@ export class BotService {
   }
   private topicMetadata(session: TopicSession): TopicMetadata {
     const generation = this.options.store.getSessionGeneration(session.id);
-    let metadata = this.metadataWriters.get(session.id);
+    const owner = this.metadataOwner(session);
+    let metadata = owner.metadata;
     if (metadata?.generation === generation) return metadata;
     const owned = () =>
       !this.stopped &&
       !this.options.config.terminated &&
-      this.metadataWriters.get(session.id) === metadata &&
+      !owner.disposed && owner.metadata === metadata &&
       this.sessionAssigned(session) &&
       this.options.store.getSessionGeneration(session.id) === generation;
     const writer = (field: 'name' | 'icon'): TopicWriter => {
       const eligible = () => {
         if (!owned()) return false;
-        if (field === 'icon' && this.hostActivity.get(session.id)?.value === 'unknown')
+        if (field === 'icon' && this.activityAtUse(session) === 'unknown')
           return false;
         const status = this.options.store.getSession(session.id)?.status;
         return (
           status === 'open' ||
           (field === 'icon' &&
             status === 'closed' &&
-            this.hostActivity.get(session.id)?.value === 'finished' &&
+            this.activityAtUse(session) === 'finished' &&
             this.closedSessions.get(session.id)?.settled === true)
         );
       };
@@ -1648,7 +1692,7 @@ export class BotService {
               if (owned()) {
                 void result.observe(value);
                 if (field === 'name') {
-                  const source = this.topicTitles.get(session.id);
+                  const source = owner.title;
                   if (source) {
                     const current = this.formatTopicTitle(source);
                     if (current.name === value)
@@ -1676,7 +1720,7 @@ export class BotService {
       return result;
     };
     metadata = { generation, name: writer('name'), icon: writer('icon') };
-    this.metadataWriters.set(session.id, metadata);
+    owner.metadata = metadata;
     return metadata;
   }
   private setTopicStatus(
@@ -1697,7 +1741,7 @@ export class BotService {
     session: TopicSession,
     ids: Record<KnownTopicActivity, string>,
   ): string | undefined {
-    const activity = this.activityObservation(session).value;
+    const activity = this.activityAtUse(session);
     if (activity === 'unknown') return undefined;
     let preference = this.options.store.getTopicFinishIcon(session.id);
     if (preference === ids.running) {
@@ -1709,12 +1753,12 @@ export class BotService {
   private async publishTopicIcon(session: TopicSession): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
     const metadata = this.topicMetadata(session);
-    if (this.activityObservation(session).value === 'unknown') return;
+    if (this.activityAtUse(session) === 'unknown') return;
     try {
       const ids = await this.getIconIds();
       if (
         this.stopped ||
-        this.metadataWriters.get(session.id) !== metadata ||
+        this.metadataOwners.get(session.id)?.metadata !== metadata ||
         !this.sessionAssigned(session) ||
         this.options.store.getSessionGeneration(session.id) !== metadata.generation
       )
@@ -1744,7 +1788,7 @@ export class BotService {
     const active = () =>
       !this.stopped &&
       !this.options.config.terminated &&
-      this.hostActivity.get(session.id) === observation &&
+      this.metadataOwners.get(session.id)?.activity === observation &&
       observation.revision === revision &&
       this.sessionAssigned(session) &&
       this.options.store.getSessionGeneration(session.id) === observation.generation &&
@@ -1832,7 +1876,7 @@ export class BotService {
           this.sessionAssigned(session) &&
           this.options.store.getSession(session.id)?.status === 'open' &&
           this.options.store.getSessionGeneration(session.id) === generation &&
-          this.topicTitles.get(session.id) === source &&
+          this.metadataOwners.get(session.id)?.title === source &&
           source.revision === revision,
       );
     }
@@ -1903,11 +1947,9 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
-    const metadata = this.metadataWriters.get(session.id);
+    const metadata = this.metadataOwners.get(session.id)?.metadata;
     await metadata?.icon.completion;
-    this.metadataWriters.delete(session.id);
-    this.topicTitles.delete(session.id);
-    this.hostActivity.delete(session.id);
+    this.disposeMetadataOwner(session.id);
     if (session.status === 'detached') return;
     try {
       await this.delivery.run(
@@ -2468,7 +2510,7 @@ export class BotService {
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
       const attributable =
-        ctx.from !== undefined && ctx.from.id !== this.id && !message.sender_chat;
+        ctx.from !== undefined && !ctx.from.is_bot && !message.sender_chat;
       const metadata = this.topicMetadata(session);
       if (attributable) {
         if (edited.name !== undefined) {
@@ -2511,7 +2553,7 @@ export class BotService {
               if (
                 this.stopped ||
                 this.options.config.terminated ||
-                this.metadataWriters.get(session.id) !== metadata ||
+                this.metadataOwners.get(session.id)?.metadata !== metadata ||
                 !this.sessionAssigned(session) ||
                 this.options.store.getSessionGeneration(session.id) !== metadata.generation
               )
@@ -3079,7 +3121,7 @@ export class BotService {
         (chat) => chat.botId === this.id && chat.chatId === session.chatId,
       )?.typing_indicators ?? 'disabled';
     return mode === 'inference'
-      ? this.hostActivity.get(session.id)?.value === 'running'
+      ? this.activityAtUse(session) === 'running'
       : mode === 'streaming' && listener.typingText === true;
   }
 
@@ -3452,52 +3494,55 @@ export class BotService {
     }).finally(() => { listener.queued--; });
   }
   private applySessionTitle(session: TopicSession): Promise<void> {
+    const owner = this.metadataOwner(session);
+    if (owner.titleWrite) return owner.titleWrite;
     const write = async () => {
-      if (
-        this.stopped ||
-        refreshTermination(this.options.config) ||
-        !this.sessionAssigned(session) ||
-        this.options.store.getSession(session.id)?.status !== 'open'
-      )
-        return;
-      const title = this.options.store.getPendingSessionTitle(session.id);
-      if (title === undefined) return;
-      const generation = this.options.store.getSessionGeneration(session.id);
-      try {
-        await this.options.runtime.setSessionTitle(session, title);
-      } catch (error) {
-        this.sessionObservation(session.id).failure = {
-          operation: 'Session title synchronization',
-          at: Date.now(),
-          error,
-        };
-        if (
-          !this.stopped &&
-          error instanceof SessionTitleUnsupportedError &&
-          this.options.store.getPendingSessionTitle(session.id) === title &&
-          this.options.store.getSessionGeneration(session.id) === generation &&
-          this.sessionAssigned(session) &&
-          this.options.store.getSession(session.id)?.status === 'open'
-        ) {
-          this.options.store.setPendingSessionTitle(session.id, undefined);
+      let attempted: { title: string; generation: number } | undefined;
+      while (!this.stopped && !refreshTermination(this.options.config) && !owner.disposed) {
+        const current = this.options.store.getSession(session.id);
+        if (!current || current.status !== 'open' || !this.sessionAssigned(current)) return;
+        const generation = this.options.store.getSessionGeneration(session.id);
+        const title = this.options.store.getPendingSessionTitle(session.id);
+        if (title === undefined ||
+            (attempted?.title === title && attempted.generation === generation)) return;
+        attempted = { title, generation };
+        const source = owner.title;
+        try {
+          await this.options.runtime.setSessionTitle(current, title);
+        } catch (error) {
+          if (!owner.disposed && owner.generation === generation && owner.title === source) {
+            this.sessionObservation(session.id).failure = {
+              operation: 'Session title synchronization',
+              at: Date.now(),
+              error,
+            };
+            if (
+              !this.stopped &&
+              error instanceof SessionTitleUnsupportedError &&
+              this.options.store.getPendingSessionTitle(session.id) === title &&
+              this.options.store.getSessionGeneration(session.id) === generation &&
+              this.sessionAssigned(current) &&
+              this.options.store.getSession(session.id)?.status === 'open'
+            ) {
+              this.options.store.setPendingSessionTitle(session.id, undefined);
+            }
+          }
         }
       }
     };
-    const previous = this.hostTitleWrites.get(session.id);
-    const pending: Promise<void> = (previous ? previous.then(write, write) : write()).finally(
-      () => {
-        if (this.hostTitleWrites.get(session.id) === pending)
-          this.hostTitleWrites.delete(session.id);
-      },
-    );
-    this.hostTitleWrites.set(session.id, pending);
+    const pending = Promise.resolve().then(write).finally(() => {
+      if (owner.titleWrite === pending) owner.titleWrite = undefined;
+      if (owner.disposed && this.metadataOwners.get(session.id) === owner)
+        this.metadataOwners.delete(session.id);
+    });
+    owner.titleWrite = pending;
     return pending;
   }
   private stripTopicStatus(session: TopicSession, title: string): string {
     const savedPrefix = this.options.store.getTopicTitlePrefix(session.id);
     if (savedPrefix && title.startsWith(`${savedPrefix} `))
       return title.slice(savedPrefix.length + 1);
-    for (const prefix of this.topicTitles.get(session.id)?.prefixes ?? []) {
+    for (const prefix of this.metadataOwners.get(session.id)?.title.prefixes ?? []) {
       if (title.startsWith(`${prefix} `)) return title.slice(prefix.length + 1);
     }
     if (title.startsWith('🌳 ')) return title.slice('🌳 '.length);
@@ -3526,7 +3571,7 @@ export class BotService {
         this.options.runtime.topicTitleStatus(session),
         AbortSignal.any([this.background.signal, AbortSignal.timeout(5000)]),
       );
-      if (!active() || this.topicTitles.get(session.id) !== source) return;
+      if (!active() || this.metadataOwners.get(session.id)?.title !== source) return;
       const topicBranch = `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`;
       const branch = status.branch === topicBranch ? '' : (status.branch ?? '');
       source.prefix = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
@@ -3599,7 +3644,7 @@ export class BotService {
       (frame.t === 'state' &&
         (!frame.state.isStreaming ||
           (frame.state.sessionName !== undefined &&
-            frame.state.sessionName !== this.topicTitles.get(session.id)?.humanTitle)))
+            frame.state.sessionName !== this.metadataOwners.get(session.id)?.title.humanTitle)))
     ) {
       this.syncTopicTitle(session, listener, frame.state.sessionName);
     }

@@ -7,6 +7,7 @@ import { TelegramDelivery } from '../src/telegram-delivery.js';
 function clock(t: TestContext) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   return async (ms: number) => {
+    await settle();
     t.mock.timers.tick(ms);
     await settle();
   };
@@ -39,6 +40,7 @@ test('delivery serializes each chat without delaying starts or blocking other ch
     starts.push(['other', Date.now()]);
     return 3;
   }, () => true);
+  await settle();
   assert.deepEqual(starts, [['first', 0], ['other', 0]]);
   assert.equal(await other, 3);
   await advance(1500);
@@ -252,6 +254,7 @@ test('close during an in-flight 429 does not requeue or leave its promise unreso
   let attempts = 0;
   const pending = delivery.run(1, () => { attempts++; return gate.promise; }, () => true);
   const queued = delivery.run(1, async () => assert.fail('closed job must not run'), () => true);
+  await settle();
   delivery.close();
   assert.equal(await queued, undefined);
   gate.reject(limited(60));
@@ -486,6 +489,7 @@ test('topic timeout aborts locally and observes late 429 before admitting any la
     () => true,
   );
   const timeout = assert.rejects(pending, /timed out after 5000ms/);
+  await settle();
   await advance(5000);
   await timeout;
   assert.equal(aborted, true);
@@ -548,6 +552,7 @@ test('close aborts running topic requests and cancels coalesced work without rep
     async () => assert.fail('closed side effect'),
     () => true,
   );
+  await settle();
   delivery.close();
   assert.deepEqual(await Promise.all([pending, queued]), [undefined, undefined]);
   assert.equal(aborted, true);
@@ -610,124 +615,6 @@ test('ordinary 429 cooldown gates both metadata lanes without blocking another c
   await Promise.all([ordinary, name, icon]);
   assert.equal(attempts, 2);
   assert.deepEqual(calls, ['other', 'name', 'icon']);
-});
-
-for (const outcome of ['true', 'false', 'throw'] as const) {
-  test(`reentrant same-key replacement survives an eligibility callback returning ${outcome}`, async (t) => {
-    const delivery = new TelegramDelivery();
-    t.after(() => delivery.close());
-    const calls: string[] = [];
-    let replacement: Promise<string | undefined> | undefined;
-    const old = delivery.runTopic(
-      1,
-      'icon',
-      'same',
-      async () => {
-        calls.push('obsolete');
-      },
-      () => {
-        replacement = delivery.runTopic(
-          1,
-          'icon',
-          'same',
-          async () => {
-            calls.push('replacement');
-            return 'sent';
-          },
-          () => true,
-        );
-        if (outcome === 'throw') throw new Error('Replaced eligibility failed');
-        return outcome === 'true';
-      },
-    );
-    await settle();
-    assert.deepEqual(calls, ['replacement']);
-    assert.equal(await old, undefined);
-    assert.equal(await replacement, 'sent');
-  });
-}
-
-for (const outcome of ['false', 'throw'] as const) {
-  test(`reentrant admission revisits earlier lanes after eligibility returns ${outcome}`, async (t) => {
-    const delivery = new TelegramDelivery();
-    t.after(() => delivery.close());
-    const calls: string[] = [];
-    const failure = new Error('Eligibility failed after enqueue');
-    let ordinary: Promise<string | undefined> | undefined;
-    const icon = delivery.runTopic(
-      1,
-      'icon',
-      'same',
-      async () => assert.fail('Ineligible icon dispatched'),
-      () => {
-        ordinary = delivery.run(
-          1,
-          async () => {
-            calls.push('ordinary');
-            return 'sent';
-          },
-          () => true,
-        );
-        if (outcome === 'throw') throw failure;
-        return false;
-      },
-    );
-    if (outcome === 'throw') await assert.rejects(icon, (error) => error === failure);
-    else assert.equal(await icon, undefined);
-    await settle();
-    assert.deepEqual(calls, ['ordinary']);
-    assert.equal(await ordinary, 'sent');
-  });
-}
-
-test('reentrant eligibility yields to a shared cooldown before both lanes resume', async (t) => {
-  const advance = clock(t);
-  const delivery = new TelegramDelivery();
-  t.after(() => delivery.close());
-  await assert.rejects(
-    delivery.runTopic(
-      1,
-      'name',
-      'limited',
-      async () => {
-        throw limited(1);
-      },
-      () => true,
-    ),
-  );
-  const calls: string[] = [];
-  let budget = 100;
-  let icon: Promise<void | undefined> | undefined;
-  const ordinary = delivery.run(
-    1,
-    async () => {
-      calls.push('ordinary');
-      return 'sent';
-    },
-    () => {
-      if (--budget === 0) throw new Error('Eligibility spun without yielding to the cooldown');
-      icon = delivery.runTopic(
-        1,
-        'icon',
-        'same',
-        async () => {
-          calls.push('icon');
-        },
-        () => true,
-      );
-      return true;
-    },
-  );
-  const outcome = ordinary.then(
-    (value) => ({ value }),
-    (error) => ({ error }),
-  );
-  await settle();
-  assert.deepEqual(calls, []);
-  await advance(1000);
-  assert.deepEqual(await outcome, { value: 'sent' });
-  await icon;
-  assert.deepEqual(calls, ['ordinary', 'icon']);
 });
 
 test('typing waits for ordinary, name, and icon lanes and replaces queued same-topic refreshes', async (t) => {
@@ -819,6 +706,7 @@ test('in-flight typing does not block newly arriving ordinary, name, or icon out
     },
     () => true,
   );
+  await settle();
   const nextTyping = delivery.typing(
     1,
     20,
@@ -1200,4 +1088,39 @@ test('typing rechecks queued activity and preserves staggering across inactive a
   await advance(1);
   await refreshed;
   assert.deepEqual(starts, [0, 4000]);
+});
+
+test('pure eligibility failures preserve the original exception and release each real lane', async (t) => {
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const failure = new Error('eligibility diagnostic');
+  for (const lane of ['ordinary', 'name', 'icon'] as const) {
+    const active = () => { throw failure; };
+    const action = async () => assert.fail('ineligible request');
+    const rejected = lane === 'ordinary'
+      ? delivery.run(1, action, active)
+      : delivery.runTopic(1, lane, 'failed', action, active);
+    await assert.rejects(rejected, (error) => error === failure);
+    const following = lane === 'ordinary'
+      ? delivery.run(1, async () => 'sent', () => true)
+      : delivery.runTopic(1, lane, 'next', async () => 'sent', () => true);
+    assert.equal(await following, 'sent');
+  }
+});
+
+test('coalesced admission gives real output priority over pending typing in the same turn', async (t) => {
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const held = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const typing = delivery.typing(1, 10, async () => { calls.push('typing'); }, () => true);
+  const output = delivery.run(1, () => {
+    calls.push('ordinary');
+    return held.promise;
+  }, () => true);
+  await settle();
+  assert.deepEqual(calls, ['ordinary']);
+  held.resolve();
+  await Promise.all([output, typing]);
+  assert.deepEqual(calls, ['ordinary', 'typing']);
 });
