@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
@@ -26,6 +26,11 @@ function session(row: Row | undefined): TopicSession | undefined {
   if (!row) return undefined;
   return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instancePath: String(row.instance_path), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
 }
+function promptFingerprint(content: PromptContent): string {
+  return createHash('sha256')
+    .update(JSON.stringify([content.text, (content.images ?? []).map(image => [image.mimeType, image.data])]))
+    .digest('hex');
+}
 export class Store {
   readonly db: DatabaseSync;
   constructor(filename: string) {
@@ -45,6 +50,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,message_id));
+      CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,entry_id));
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
@@ -277,6 +284,86 @@ export class Store {
   getReplyTarget(id: string): number | undefined {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
+  }
+  recordPromptSubmission(sessionId: string, sender: string, content: PromptContent, messageId?: number): number {
+    const result = this.db.prepare(
+      "INSERT INTO prompt_submissions (session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
+    ).run(sessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
+    return Number(result.lastInsertRowid);
+  }
+  rejectPromptSubmission(submissionId: number): void {
+    this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(submissionId);
+  }
+  markPromptSubmissionUncertain(submissionId: number): void {
+    this.db.prepare(
+      "UPDATE prompt_submissions SET state='uncertain' WHERE id=? AND state='pending'",
+    ).run(submissionId);
+  }
+  beginPromptReceiptSnapshot(sessionId: string): number {
+    this.db.prepare(
+      "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND state='pending'",
+    ).run(sessionId);
+    const row = this.db.prepare(
+      'SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=?',
+    ).get(sessionId);
+    return Number(row?.boundary ?? 0);
+  }
+  recordPromptReceipt(
+    sessionId: string,
+    entryId: string,
+    sender: string | undefined,
+    content: PromptContent,
+    snapshotBoundary?: number,
+  ): { fresh: boolean; messageId?: number; submissionId?: number } {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.db.prepare(
+        'SELECT message_id FROM prompt_receipts WHERE session_id=? AND entry_id=?',
+      ).get(sessionId, entryId);
+      if (previous) {
+        this.db.exec('COMMIT');
+        return {
+          fresh: false,
+          ...(previous.message_id === null ? {} : { messageId: Number(previous.message_id) }),
+        };
+      }
+      const column = content.images === undefined ? 'text' : 'fingerprint';
+      const value = column === 'text' ? content.text : promptFingerprint(content);
+      let condition = `session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
+      let parameters = [sessionId, sender ?? '', value, snapshotBoundary ?? null, snapshotBoundary ?? null];
+      let candidates = sender === undefined ? [] : this.db.prepare(
+        `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+      ).all(...parameters);
+      let uncorrelated = false;
+      if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
+        condition = 'session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
+        parameters = [sessionId, sender, content.text, snapshotBoundary ?? null, snapshotBoundary ?? null];
+        candidates = this.db.prepare(
+          `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+        ).all(...parameters);
+        uncorrelated = candidates.length > 0;
+      }
+      const pending = candidates[0];
+      const conflicting = uncorrelated || (candidates.length > 1 && candidates.some(row => row.state !== 'pending'));
+      if (conflicting) this.db.prepare(
+        `UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`,
+      ).run(...parameters);
+      const ambiguous = conflicting || pending?.state === 'ambiguous';
+      const messageId = ambiguous ? undefined : pending?.message_id;
+      this.db.prepare('INSERT INTO prompt_receipts VALUES (?,?,?)').run(
+        sessionId, entryId, messageId ?? null,
+      );
+      if (pending) this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(pending.id);
+      this.db.exec('COMMIT');
+      return {
+        fresh: true,
+        ...(messageId === undefined || messageId === null ? {} : { messageId: Number(messageId) }),
+        ...(pending && !ambiguous ? { submissionId: Number(pending.id) } : {}),
+      };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   getTopicFinishIcon(id: string): string | undefined {
     const row = this.db.prepare('SELECT icon_id FROM session_topic_finish_icons WHERE session_id=?').get(id);

@@ -3,7 +3,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
-import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
+import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame, CustomMessageEntry } from '@oh-my-pi/pi-wire';
 import type {
   AppConfig,
   BotConfig,
@@ -89,7 +89,7 @@ interface SessionMetadataOwner {
   titleWrite?: Promise<void>;
 }
 interface StatusFailure { operation: string; at: number; error: unknown }
-interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
+interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown'; submissionId?: number }
 interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
 interface Listener {
   sessionId: string;
@@ -99,9 +99,10 @@ interface Listener {
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
+  receiptBoundary: number;
+  snapshotReplyTarget?: number;
   pendingPrompts: {
-    content: PromptContent;
-    messageId?: number;
+    submissionId: number;
     onStartupRejected?: () => void;
     observation: TaskObservation;
   }[];
@@ -3197,6 +3198,8 @@ export class BotService {
       tail: Promise.resolve(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
+      receiptBoundary: this.options.store.beginPromptReceiptSnapshot(session.id),
+      snapshotReplyTarget: this.options.store.getReplyTarget(session.id),
       pendingPrompts: [],
       pendingAnswers: new Map(),
       pendingStops: [],
@@ -3288,9 +3291,12 @@ export class BotService {
     if (session.status !== 'open') throw new Error('This topic is closed. Reopen it before submitting work.');
     if (this.listeners.get(session.id) !== listener ||
         listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
-    const observation: TaskObservation = {state:'waiting for acceptance'};
+    const submissionId = this.options.store.recordPromptSubmission(
+      session.id, `Telegram @${this.bot.botInfo!.username}`, content, messageId,
+    );
+    const observation: TaskObservation = {state:'waiting for acceptance', submissionId};
     this.sessionObservation(session.id).task = observation;
-    const pending = {content,messageId,onStartupRejected,observation};
+    const pending = {submissionId,onStartupRejected,observation};
     listener.pendingPrompts.push(pending);
     let attempted = false;
     try {
@@ -3299,6 +3305,8 @@ export class BotService {
       listener.connection!.send({t:'prompt',text:content.text,...(content.images?.length ? {images:content.images} : {})});
     } catch (error) {
       observation.state = attempted ? 'acceptance unknown' : 'not accepted';
+      if (attempted) this.options.store.markPromptSubmissionUncertain(submissionId);
+      else this.options.store.rejectPromptSubmission(submissionId);
       const index = listener.pendingPrompts.indexOf(pending);
       if (index !== -1) listener.pendingPrompts.splice(index,1);
       throw error;
@@ -3341,8 +3349,43 @@ export class BotService {
     listener.initial.timer.unref();
     this.sendPrompt(listener,task,messageId);
   }
+  private reconcilePromptReceipt(
+    session: TopicSession,
+    listener: Listener,
+    entry: CustomMessageEntry,
+    replay: boolean,
+  ): void {
+    const text = typeof entry.content === 'string'
+      ? entry.content
+      : entry.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+    const images = typeof entry.content === 'string'
+      ? undefined
+      : entry.content.filter(part => part.type === 'image');
+    const details = entry.details;
+    const sender = details && typeof details === 'object' && 'from' in details &&
+      typeof details.from === 'string' ? details.from : undefined;
+    const receipt = this.options.store.recordPromptReceipt(
+      session.id, entry.id, sender,
+      { text, ...(images === undefined ? {} : { images }) },
+      replay ? listener.receiptBoundary : undefined,
+    );
+    if (replay) listener.snapshotReplyTarget = receipt.messageId;
+    else if (receipt.fresh) this.options.store.setReplyTarget(session.id, receipt.messageId);
+    if (!receipt.fresh) return;
+    const index = listener.pendingPrompts.findIndex(pending => pending.submissionId === receipt.submissionId);
+    const pending = index === -1 ? undefined : listener.pendingPrompts.splice(index, 1)[0];
+    const task = pending?.observation ?? this.sessionObservation(session.id).task;
+    if (receipt.submissionId !== undefined && task?.submissionId === receipt.submissionId)
+      task.state = 'accepted; completion unknown';
+    if (pending && listener.initial?.phase === 'sent' &&
+        listener.initial.messageId === receipt.messageId) {
+      clearTimeout(listener.initial.timer);
+      listener.initial = undefined;
+    }
+    if (receipt.messageId !== undefined)
+      this.acknowledgeMessage(session, receipt.messageId, listener);
+  }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
-    this.options.store.setReplyTarget(session.id, messageId);
     void this.delivery.run(session.chatId,
       () => this.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.stopped && this.sessionAssigned(session) && (listener === undefined || this.listeners.get(session.id) === listener)).catch(() => undefined);
@@ -3735,7 +3778,15 @@ export class BotService {
       observation.suspect = true;
       ++observation.revision;
       const pending = listener.pendingPrompts.shift();
-      if (pending) pending.observation.state = 'not accepted';
+      if (pending) {
+        if (isStartupRejection(frame)) {
+          this.options.store.rejectPromptSubmission(pending.submissionId);
+          pending.observation.state = 'not accepted';
+        } else {
+          this.options.store.markPromptSubmissionUncertain(pending.submissionId);
+          pending.observation.state = 'acceptance unknown';
+        }
+      }
       this.sessionObservation(session.id).failure = {
         operation: 'OMP instruction',
         at: Date.now(),
@@ -3786,93 +3837,35 @@ export class BotService {
       }
       return;
     }
-    if (
-      frame.t === 'entry' &&
-      frame.entry.type === 'custom_message' &&
-      frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE &&
-      !replay
-    ) {
-      const details = frame.entry.details;
-      if (
-        details &&
-        typeof details === 'object' &&
-        'from' in details &&
-        typeof details.from === 'string' &&
-        details.from !== `Telegram @${this.bot.botInfo!.username}`
-      ) {
-        this.options.store.setReplyTarget(session.id, undefined);
-      }
-    }
-    if (
-      frame.t === 'entry' &&
-      frame.entry.type === 'custom_message' &&
-      frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE &&
-      !replay
-    ) {
-      const entry = frame.entry;
-      const content =
-        typeof entry.content === 'string'
-          ? entry.content
-          : entry.content
-              .filter((part) => part.type === 'text')
-              .map((part) => part.text)
-              .join('\n');
-      const images =
-        typeof entry.content === 'string'
-          ? undefined
-          : entry.content.filter((part) => part.type === 'image');
-      const matchesContent = (prompt: PromptContent): boolean =>
-        prompt.text === content &&
-        (images === undefined ||
-          ((prompt.images?.length ?? 0) === images.length &&
-            images.every(
-              (image, index) =>
-                image.data === prompt.images![index]!.data &&
-                image.mimeType === prompt.images![index]!.mimeType,
-            )));
-      const details = entry.details;
-      if (
-        details &&
-        typeof details === 'object' &&
-        'from' in details &&
-        details.from === `Telegram @${this.bot.botInfo!.username}`
-      ) {
-        const index = listener.pendingPrompts.findIndex((pending) =>
-          matchesContent(pending.content),
-        );
-        if (index !== -1) {
-          const [pending] = listener.pendingPrompts.splice(index, 1);
-          pending!.observation.state = 'accepted; completion unknown';
-          if (pending!.messageId !== undefined) {
-            this.acknowledgeMessage(session, pending!.messageId, listener);
-          }
-        }
-        if (listener.initial?.phase === 'sent' && matchesContent(listener.initial.content)) {
-          clearTimeout(listener.initial.timer);
-          listener.initial = undefined;
-        }
-      }
-    }
+    if (frame.t === 'entry' && frame.entry.type === 'custom_message' &&
+        frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
+      this.reconcilePromptReceipt(session, listener, frame.entry, replay);
     if (frame.t === 'error') {
       listener.pendingAnswers.clear();
       listener.pendingStops.length = 0;
-      const text = isStartupRejection(frame)
-        ? 'The host is still starting. Your instruction was not accepted. Resend it after startup.'
-        : 'OMP rejected an instruction. OPEN AGENT for details before resending.';
-      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text).catch(
-        () => undefined,
-      );
+      const prefix = isStartupRejection(frame)
+        ? 'The host has not accepted this instruction during startup.\n\n'
+        : 'OMP reported an error. Acceptance of a pending instruction is uncertain; inspect OPEN AGENT before submitting again.\n\n';
+      void sendTo(
+        this.bot.api, topicDestination(session.chatId, session.threadId), prefix + frame.message,
+        { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
+      ).catch(() => undefined);
       return;
     }
     if (frame.t === 'snapshot-chunk') {
       for (const entry of frame.entries) {
-        if (listener.recovering) this.onFrame(session, listener, { t: 'entry', entry }, true);
+        if (listener.recovering ||
+            (entry.type === 'custom_message' && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE))
+          this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
           if (result) this.options.store.rememberReply(session.id, result.fingerprint);
         }
       }
-      if (frame.final) this.options.store.markSnapshot(session.id);
+      if (frame.final) {
+        this.options.store.markSnapshot(session.id);
+        this.options.store.setReplyTarget(session.id, listener.snapshotReplyTarget);
+      }
       return;
     }
     const result =
@@ -3882,7 +3875,7 @@ export class BotService {
           ? assistantText(frame.entry.message)
           : undefined;
     if (!result || !this.options.store.rememberReply(session.id, result.fingerprint)) return;
-    const replyTarget = this.options.store.getReplyTarget(session.id);
+    const replyTarget = replay ? listener.snapshotReplyTarget : this.options.store.getReplyTarget(session.id);
     if (++listener.queued > 128) {
       this.dropListener(session.id);
       return;
