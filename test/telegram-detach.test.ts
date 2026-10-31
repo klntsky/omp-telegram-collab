@@ -86,10 +86,7 @@ test('a detached topic can request a separate session without reattaching itself
     const detached = app.store.listSessions(botId)[0]!;
     await app.update({text:'/detach',message_thread_id:42});
     const icons = app.topicEdits.filter(edit=>edit.message_thread_id === 42).length;
-    await app.update({text:'/new',message_thread_id:42});
-    const question = app.messages.at(-1)!;
-    await app.update({text:'Separate task',message_thread_id:42,
-      reply_to_message:{message_id:question.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+    await app.update({text:'/new Separate task',message_thread_id:42});
     const separate = app.store.listSessions(botId).find(session=>session.id !== detached.id);
     assert.equal(separate?.name,'Separate task');
     assert.equal(separate?.status,'open');

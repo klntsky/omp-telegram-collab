@@ -49,7 +49,6 @@ export class Store {
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS task_requests (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,user_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS skill_catalogs (instance_path TEXT PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
@@ -233,16 +232,6 @@ export class Store {
   }
   markSnapshot(id: string): void {
     this.db.prepare('INSERT OR IGNORE INTO snapshot_baselines VALUES (?)').run(id);
-  }
-  addTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): void {
-    this.db.prepare('DELETE FROM task_requests WHERE created_at<?').run(Date.now() - 3600000);
-    this.db.prepare('INSERT OR REPLACE INTO task_requests VALUES (?,?,?,?,?,?)').run(botId, destination.chatId, messageId, userId, storedThreadId(destination), Date.now());
-  }
-  hasTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM task_requests WHERE bot_id=? AND chat_id=? AND thread_id=? AND message_id=? AND user_id=? AND created_at>?').get(botId, destination.chatId, storedThreadId(destination), messageId, userId, Date.now() - 3600000));
-  }
-  takeTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): boolean {
-    return Number(this.db.prepare('DELETE FROM task_requests WHERE bot_id=? AND chat_id=? AND thread_id=? AND message_id=? AND user_id=? AND created_at>? RETURNING message_id').get(botId, destination.chatId, storedThreadId(destination), messageId, userId, Date.now() - 3600000)?.message_id) === messageId;
   }
   createSetupRequest(input: Omit<SetupRequest, 'code' | 'expiresAt'>): SetupRequest {
     const request: SetupRequest = { ...input, code: randomBytes(9).toString('base64url'), expiresAt: Date.now() + 600000 };

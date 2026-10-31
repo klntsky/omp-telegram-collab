@@ -9,7 +9,7 @@ function message(fields: Record<string, unknown>) {
   return {message_id:20,date:1,chat:{id:-100,type:'supergroup',title:'Forum'},from,...fields} as NonNullable<Context['message']>;
 }
 function context(overrides: Partial<InputContext> = {}): InputContext {
-  return {botId,username:'FixtureOmpBot',allMessagesArePrompts:true,commands:new Set(['new','p','settings']),skillAliases:new Map(),endedQuestion:false,taskRequest:false,...overrides};
+  return {botId,username:'FixtureOmpBot',allMessagesArePrompts:true,commands:new Set(['new','p','settings']),skillAliases:new Map(),endedQuestion:false,...overrides};
 }
 const replies = [
   undefined,
@@ -22,7 +22,7 @@ const replies = [
 for (const allMessagesArePrompts of [true,false]) {
   for (const thread of [undefined,1,42]) {
     for (const reply of replies) {
-      for (const state of [{},{question:'active'},{endedQuestion:true},{taskRequest:true}]) {
+      for (const state of [{},{question:'active'},{endedQuestion:true}]) {
         test(`commands precede reply interpretation: mode=${allMessagesArePrompts}, thread=${thread}, reply=${reply?.message_id}, state=${JSON.stringify(state)}`, () => {
           const ctx = context({allMessagesArePrompts,...state});
           for (const [text,kind] of [['/new Task','new-task'],['/new','new-task'],['/p','session-prompt'],['/p@fixtureompbot Task','session-prompt'],['/settings','command'],['/unknown Task','ignore'],['/p@OtherBot Task','ignore'],['/p! Task','ignore'],['/','ignore']] as const) {
@@ -49,12 +49,11 @@ for (const allMessagesArePrompts of [true,false]) {
   }
 }
 
-test('only non-command content enters question precedence before task requests and prompts', () => {
+test('only non-command content enters question precedence before prompts', () => {
   const msg = message({text:'Answer',reply_to_message:replies[2]});
   const content = normalizeMessage([msg]);
-  assert.deepEqual(classifyMessage(msg,content,context({question:'token',endedQuestion:true,taskRequest:true})),{kind:'question-answer',token:'token',text:'Answer'});
-  assert.deepEqual(classifyMessage(msg,content,context({endedQuestion:true,taskRequest:true})),{kind:'ended-question'});
-  assert.deepEqual(classifyMessage(msg,content,context({taskRequest:true})),{kind:'new-task',content,requestId:11});
+  assert.deepEqual(classifyMessage(msg,content,context({question:'token',endedQuestion:true})),{kind:'question-answer',token:'token',text:'Answer'});
+  assert.deepEqual(classifyMessage(msg,content,context({endedQuestion:true})),{kind:'ended-question'});
 });
 
 test('image-only content is meaningful while empty messages never answer questions', () => {
@@ -66,6 +65,6 @@ test('image-only content is meaningful while empty messages never answer questio
   assert.deepEqual(classifyMessage(image,content,context({question:'token'})),{kind:'question-answer',token:'token',text:''});
   for (const text of ['', ' \n\t ']) {
     const msg = message({text});
-    assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({question:'token',endedQuestion:true,taskRequest:true})),{kind:'ignore'});
+    assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({question:'token',endedQuestion:true})),{kind:'ignore'});
   }
 });

@@ -9,7 +9,7 @@ export type InputIntent =
   | { kind: 'skill-selection'; text: string }
   | { kind: 'question-answer'; token: string; text: string }
   | { kind: 'ended-question' }
-  | { kind: 'new-task' | 'session-prompt'; content: TelegramContent; skill?: string; requestId?: number };
+  | { kind: 'new-task' | 'session-prompt'; content: TelegramContent; skill?: string };
 
 export interface InputContext {
   botId: number;
@@ -19,7 +19,6 @@ export interface InputContext {
   skillAliases: ReadonlyMap<string, { name: string }>;
   question?: string;
   endedQuestion: boolean;
-  taskRequest: boolean;
 }
 
 export function normalizeMessage(messages: NonNullable<Context['message']>[]): TelegramContent {
@@ -65,7 +64,6 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
   if (!content.text.trim() && !content.images.length) return {kind:'ignore'};
   if (context.question) return {kind:'question-answer',token:context.question,text:content.text};
   if (context.endedQuestion) return {kind:'ended-question'};
-  if (context.taskRequest && reply) return {kind:'new-task',content,requestId:reply.message_id};
   const directed = reply?.from?.id === context.botId && !('forum_topic_created' in reply) && reply.message_id !== message.message_thread_id;
   if (!context.allMessagesArePrompts && !directed) return {kind:'ignore'};
   if (directed) return {kind:'session-prompt',content:withContext(content.text)};

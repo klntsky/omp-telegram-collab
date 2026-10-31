@@ -526,7 +526,6 @@ export class BotService {
       skillAliases:this.skillAliases.get(ctx.chat.id) ?? new Map(),
       question:question?.[0],
       endedQuestion:Boolean(reply?.from?.id === this.id && this.endedQuestionReplies.has(`${ctx.chat.id}:${reply.message_id}`)),
-      taskRequest:Boolean(reply && ctx.from && this.options.store.hasTaskRequest(this.id,contextDestination(ctx),reply.message_id,ctx.from.id)),
     });
     this.inputIntents.set(ctx,intent);
     return intent;
@@ -1028,7 +1027,7 @@ export class BotService {
     const input = this.allMessagesArePrompts(chatId)
       ? 'Text messages in a session topic are treated as prompts.'
       : 'Use /p <prompt> or reply to my messages in a session topic. Ordinary messages and mentions are ignored.';
-    return `${input}\nIn General, /p works like /new (with a task or an interactive reply).\n${this.usersCanProposePrompts(chatId)
+    return `${input}\nIn General, /p works like /new: include the task in the command or reply to a message with text.\n${this.usersCanProposePrompts(chatId)
       ? 'Non-admin prompts require approval by a group administrator.'
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
@@ -1454,8 +1453,7 @@ export class BotService {
     });
     await this.announce(session);
     const source = ctx.message;
-    const intent = this.inputIntents.get(ctx);
-    if (task !== undefined && source?.reply_to_message && !(intent?.kind === 'new-task' && intent.requestId !== undefined)) {
+    if (task !== undefined && source?.reply_to_message) {
       await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
     }
@@ -1466,16 +1464,6 @@ export class BotService {
     await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown', initialIcon);
     await this.listen(session);
     await this.sendInitial(session);
-  }
-  private async askTask(ctx: Context): Promise<void> {
-    if (!(await this.currentAdmin(ctx)) && !this.usersCanProposePrompts(ctx.chat!.id)) return;
-    await this.authorize(ctx.chat!.id, ctx.from!.id);
-    const name = ctx.from!.first_name;
-    const message = await replyTo(ctx, contextDestination(ctx), `${name}, what should we work on? Reply to this message with the initial task.`, {
-      entities: [{type:'text_mention',offset:0,length:name.length,user:ctx.from!}],
-      reply_markup: {force_reply:true,selective:true,input_field_placeholder:'Describe the coding task'},
-    });
-    this.options.store.addTaskRequest(this.id, contextDestination(ctx), message.message_id, ctx.from!.id);
   }
   private async setup(ctx: Context): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
@@ -1737,7 +1725,6 @@ export class BotService {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (message && 'from' in message && message.from?.id === this.id && !('forward_origin' in message) && !('forward_date' in message)) await this.setup(ctx);
       }
-      if (ctx.callbackQuery.data === 'session:new') await this.askTask(ctx);
       const proposal = ctx.callbackQuery.data.match(/^prompt:approve:([A-Za-z0-9_-]{22})$/);
       if (proposal) await this.approvePrompt(ctx,proposal[1]!);
       const capacity = ctx.callbackQuery.data.match(/^capacity:(approve|cancel):([A-Za-z0-9_-]{22})$/);
@@ -1895,12 +1882,10 @@ export class BotService {
       }
       if (!this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
       if (!intent.content.text.trim() && !intent.content.images.length) {
-        if (intent.kind === 'new-task' || destination.kind === 'general') await this.askTask(ctx);
-        else await replyTo(ctx,destination,'Usage: /p <prompt>');
+        if (intent.kind === 'session-prompt' && destination.kind !== 'general') await replyTo(ctx,destination,'Usage: /p <prompt>');
         return;
       }
       await this.authorize(ctx.chat.id,ctx.from.id);
-      if (intent.requestId !== undefined && !this.options.store.takeTaskRequest(this.id,destination,intent.requestId,ctx.from.id)) return;
       const instancePath = this.assignedPath(ctx.chat.id);
       const generation = session && this.options.store.getSessionGeneration(session.id);
       const images = await this.promptImages(intent.content.images);

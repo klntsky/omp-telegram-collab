@@ -11,7 +11,7 @@ import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
 
-test('General stays outside sessions while task requests and pending selections enforce destination identities', () => {
+test('General stays outside sessions while pending selections enforce destination identities', () => {
   const store = new Store(':memory:');
   const general = topicDestination(chatId);
   const destination = topicDestination(chatId, topic.threadId);
@@ -26,27 +26,6 @@ test('General stays outside sessions while task requests and pending selections 
     store.clearPendingSkills({botId,destination:general,userId:42});
     assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
     assert.equal(store.getTopic({botId,destination})?.id, created.id);
-    store.addTaskRequest(botId, general, 10, 42);
-    assert.equal(store.db.prepare('SELECT thread_id FROM task_requests WHERE message_id=10').get()?.thread_id, 1);
-    assert.equal(store.hasTaskRequest(botId, general, 10, 42), true);
-    assert.equal(store.hasTaskRequest(botId, general, 10, 42), true);
-    assert.equal(store.hasTaskRequest(botId, destination, 10, 42), false);
-    assert.equal(store.hasTaskRequest(botId + 1, general, 10, 42), false);
-    assert.equal(store.hasTaskRequest(botId, general, 10, 43), false);
-    assert.equal(store.takeTaskRequest(botId, destination, 10, 42), false);
-    assert.equal(store.takeTaskRequest(botId + 1, general, 10, 42), false);
-    assert.equal(store.takeTaskRequest(botId, general, 10, 43), false);
-    assert.equal(store.takeTaskRequest(botId, general, 10, 42), true);
-    assert.equal(store.takeTaskRequest(botId, general, 10, 42), false);
-    assert.equal(store.hasTaskRequest(botId, general, 10, 42), false);
-    store.addTaskRequest(botId, general, 12, 42);
-    store.db.prepare('UPDATE task_requests SET created_at=? WHERE message_id=12').run(Date.now()-3600001);
-    assert.equal(store.hasTaskRequest(botId, general, 12, 42), false);
-    assert.equal(store.db.prepare('SELECT message_id FROM task_requests WHERE message_id=12').get()?.message_id,12);
-    assert.equal(store.takeTaskRequest(botId, general, 12, 42), false);
-    store.addTaskRequest(botId, destination, 11, 42);
-    assert.equal(store.takeTaskRequest(botId, general, 11, 42), false);
-    assert.equal(store.takeTaskRequest(botId, destination, 11, 42), true);
   } finally {
     store.close();
   }

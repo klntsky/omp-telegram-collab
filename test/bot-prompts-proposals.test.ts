@@ -137,17 +137,12 @@ for (const allMessagesArePrompts of [true, false]) {
 }
 
 for (const allMessagesArePrompts of [true, false]) {
-  for (const interactive of [true, false]) {
-    test(`/p in General creates a session like /new (all messages: ${allMessagesArePrompts}, interactive: ${interactive})`, async () => {
+    test(`/p in General creates a session like /new (all messages: ${allMessagesArePrompts})`, async () => {
       const app = await createSmokeApp();
       try {
         await app.update({text:'/setup'});
         if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
-        await app.update({text:interactive ? '/p@FixtureOmpBot' : '/p@FixtureOmpBot Create from General',message_thread_id:1});
-        if (interactive) {
-          assert.equal(app.store.listSessions(botId).length,0);
-          await app.update({text:'Create from General',reply_to_message:app.messages.at(-1)!,message_thread_id:1});
-        }
+        await app.update({text:'/p@FixtureOmpBot Create from General',message_thread_id:1});
         await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
         const session = app.store.listSessions(botId)[0]!;
         assert.notEqual(session.threadId,1);
@@ -155,17 +150,19 @@ for (const allMessagesArePrompts of [true, false]) {
         assert.equal(app.store.getTopic({botId,destination:{kind:'general',chatId}}),undefined);
       } finally { await app.close(); }
     });
-  }
 }
 
-test('explicit mode preserves the interactive /new task reply', async () => {
+test('empty new-session commands do not create sessions or request replies', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
     await setForumSetting(app, 0, 1);
-    await app.update({text:'/new'});
-    const request = app.messages.at(-1)!;
-    await app.update({text:'Create this explicit-mode session',reply_to_message:request});
+    const before = app.messages.slice();
+    for (const text of ['/new','/new@FixtureOmpBot','/p','/p@FixtureOmpBot']) await app.update({text});
+    assert.deepEqual(app.messages,before);
+    assert.deepEqual(app.store.listSessions(botId),[]);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    await app.update({text:'/new Create this explicit-mode session'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
       {t:'prompt',text:'Create this explicit-mode session'},
