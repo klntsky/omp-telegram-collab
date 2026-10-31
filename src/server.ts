@@ -199,10 +199,10 @@ export function createServer(options: ServerOptions): GatewayServer {
     let connectedSession: TopicSession | undefined;
     let hostReadOnly = true;
     const readAccess = identity.access;
-    let closed = false, queued = 0, queuedBytes = 0;
+    let closed = false;
     let tail: Promise<void> = Promise.resolve();
     let outgoing: { frame: HostFrame; payload: string }[] = [];
-    let outgoingScheduled = false, outgoingCount = 0, outgoingBytes = 0, pendingBytes = 0;
+    let outgoingScheduled = false;
     const unsubscribeKill = botMap.get(identity.botId)!.onSessionInvalidated((sessionId,reason) => {
       if (sessionId !== identity.sessionId) return;
       try { checkTermination(); }
@@ -235,10 +235,8 @@ export function createServer(options: ServerOptions): GatewayServer {
       } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
-    function enqueue(bytes: number, action: () => Promise<void>): void {
+    function enqueue(action: () => Promise<void>): void {
       if (closed) return;
-      queued++; queuedBytes += bytes;
-      if (queued > 128 || queuedBytes > 8*1024*1024) { fail(4008,'Connection overloaded'); return; }
       tail = tail.then(async () => { if (!closed) await action(); }).catch(async error => {
         if (error instanceof ServiceTerminatedError) fail(4003,error.message);
         else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
@@ -247,17 +245,15 @@ export function createServer(options: ServerOptions): GatewayServer {
           const session = options.store.getSession(identity.sessionId);
           if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(() => undefined);
         } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
-      }).finally(() => { queued--; queuedBytes-=bytes; });
+      });
     }
     function flushOutgoing(): void {
       if (closed || outgoingScheduled || !outgoing.length) return;
       outgoingScheduled = true;
-      enqueue(0,async () => {
+      enqueue(async () => {
         // Frames arriving during this local check belong to the next batch.
         const batch = outgoing;
-        const batchBytes = pendingBytes;
         outgoing = [];
-        pendingBytes = 0;
         try {
           const current = await authorize(identity,connectedSession,readAccess);
           for (const {frame,payload} of batch) {
@@ -270,8 +266,6 @@ export function createServer(options: ServerOptions): GatewayServer {
             await sent.promise;
           }
         } finally {
-          outgoingCount -= batch.length;
-          outgoingBytes -= batchBytes;
           outgoingScheduled = false;
           flushOutgoing();
         }
@@ -286,7 +280,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       let frame;
       try { frame = validateGuestFrame(JSON.parse(data.toString())); }
       catch { fail(4002,'Invalid action'); return; }
-      enqueue(Buffer.byteLength(data.toString()),async () => {
+      enqueue(async () => {
         const {bot,session,canControl} = await authorize(identity,connectedSession,frame.t === 'fetch-transcript' ? readAccess : undefined);
         switch (frame.t) {
           case 'fetch-transcript': break;
@@ -308,7 +302,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         if (frame.t === 'ui-response' && frame.value !== undefined) await bot.relayAnswer(session,identity,frame.value);
       });
     });
-    enqueue(0,async () => {
+    enqueue(async () => {
       const {bot,session} = await authorize(identity,readAccess.session,readAccess);
       connectedSession = session;
       if (closed) return;
@@ -331,11 +325,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           options.runtime.observeFrame(session.id,frame);
           let payload: string;
           try { payload = JSON.stringify(frame); } catch { fail(1011,'Invalid host frame'); return; }
-          const bytes = Buffer.byteLength(payload);
-          outgoingCount++; outgoingBytes += bytes;
-          if (outgoingCount > 128 || outgoingBytes > 8*1024*1024) { fail(4008,'Connection overloaded'); return; }
           outgoing.push({frame,payload});
-          pendingBytes += bytes;
           flushOutgoing();
         },
         onClose: () => fail(1011,'Host disconnected'),
