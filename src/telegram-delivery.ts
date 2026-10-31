@@ -1,4 +1,5 @@
 import { GrammyError } from 'grammy';
+import { withTelegramDeliveryRetry } from './telegram-retry.js';
 
 interface DeliveryJob {
   execute(): Promise<void>;
@@ -27,7 +28,7 @@ export class TelegramDelivery {
     }
     const { promise, resolve, reject } = Promise.withResolvers<T | undefined>();
     const job: DeliveryJob = {
-      execute: async () => { resolve(await action()); },
+      execute: async () => { resolve(await withTelegramDeliveryRetry(action)); },
       active,
       cancel: () => resolve(undefined),
       reject,
