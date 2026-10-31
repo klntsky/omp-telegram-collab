@@ -64,8 +64,6 @@ The stored topic lifecycle gates bot execution, mirroring, and gateway host admi
 
 The bot adapter owns two-way session-title reconciliation between Telegram topic updates and OMP's published session state. It separates the readable session title from the generated topic prefix. The runtime owns Git metadata discovery for the session's working directory; the adapter projects and restores that prefix without renaming the underlying OMP session. The store preserves pending readable Telegram renames and commits display names with their matching prefixes atomically. The adapter serializes native host-title mutations per session and reads current pending intent at dispatch without blocking frame ingestion. Telegram delivery does not acknowledge a pending host rename; the runtime boundary performs that mutation without submitting agent prompts.
 
-The [formal protocol specification](formal/topic-reconciliation.tla) records the assumed environment and the limits of its field-level abstraction. Model checking establishes properties within that finite scope, not Telegram compatibility, persistence behavior, scheduling fairness, or exhaustive implementation refinement. Representative implementation traces and integration checks exercise those separate boundaries.
-
 ## OMP execution and lifecycle
 
 The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.

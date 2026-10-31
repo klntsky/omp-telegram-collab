@@ -55,3 +55,62 @@ test('topic reducer copies targets and retains explicit empty icon values', () =
   input.value = 'changed';
   assert.deepEqual(state, { kind: 'dirty', target: { generation: 1, value: '' }, retryAt: 0 });
 });
+
+test('late topic success does not acknowledge an abandoned edit', () => {
+  const state = replay([
+    ...send,
+    { type: 'failure', ticket: 1, retryAt: 0 },
+    { type: 'success', ticket: 1, now: 0, lifetime: 10 },
+  ]);
+  assert.deepEqual(state, { kind: 'dirty', target: a, retryAt: 0 });
+});
+
+for (const disabled of [false, true]) {
+  test(`conflicting topic notices survive ${disabled ? 'disabled publication' : 'a changed target'}`, () => {
+    const state = replay([
+      ...send,
+      { type: 'failure', ticket: 1, retryAt: 0 },
+      { type: 'publish', target: b },
+      { type: 'queue', ticket: 2, now: 0 },
+      { type: 'dispatch', ticket: 2 },
+      disabled ? { type: 'publish' } : { type: 'publish', target: a },
+      { type: 'notice', value: a.value },
+      { type: 'publish', target: b },
+      { type: 'notice', value: b.value },
+      { type: 'success', ticket: 2, now: 0, lifetime: 10 },
+    ]);
+    assert.deepEqual(state, { kind: 'dirty', target: b, retryAt: 0 });
+    const repair: TopicFieldEvent[] = [
+      { type: 'queue', ticket: 3, now: 0 },
+      { type: 'dispatch', ticket: 3 },
+      { type: 'success', ticket: 3, now: 0, lifetime: 10 },
+    ];
+    const completed = repair.reduce<TopicFieldState>(transitionTopicField, state);
+    assert.deepEqual(completed, { kind: 'confirmed', target: b, expiresAt: 10 });
+  });
+}
+
+test('older session generation cannot acknowledge identical metadata', () => {
+  const target = { ...a, generation: 2 };
+  const state = replay([
+    ...send,
+    { type: 'publish', target },
+    { type: 'success', ticket: 1, now: 0, lifetime: 10 },
+  ]);
+  assert.deepEqual(state, { kind: 'dirty', target, retryAt: 0 });
+});
+
+test('obsolete topic jobs cannot replace newer pending edits', () => {
+  const state = replay([
+    ...send,
+    { type: 'failure', ticket: 1, retryAt: 0 },
+    { type: 'publish', target: b },
+    { type: 'queue', ticket: 2, now: 0 },
+    { type: 'dispatch', ticket: 1 },
+    { type: 'failure', ticket: 1, retryAt: 30 },
+    { type: 'dispatch', ticket: 2 },
+    { type: 'failure', ticket: 1, retryAt: 30 },
+    { type: 'success', ticket: 2, now: 0, lifetime: 10 },
+  ]);
+  assert.deepEqual(state, { kind: 'confirmed', target: b, expiresAt: 10 });
+});
