@@ -100,7 +100,7 @@ interface PendingQuestion {
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];
-  answer?: string;
+  answer?: {kind:'answer' | 'discussion'; text:string};
 }
 interface CapacityRequest {
   sessionId: string;
@@ -201,7 +201,7 @@ export class BotService {
   private readonly reconnects = new Map<string, NodeJS.Timeout>();
   private readonly capacityRequests = new Map<string, CapacityRequest>();
   private readonly questions = new Map<string, PendingQuestion>();
-  private readonly endedQuestionReplies = new Set<string>();
+  private readonly endedQuestionReplies = new Map<string,{sessionId:string;generation:number} | undefined>();
   private readonly delivery: TelegramDelivery;
   private readonly telegramRetry = new AbortController();
   private readonly topicIcons = new Map<string, TopicIconProjection>();
@@ -522,6 +522,11 @@ export class BotService {
     const question = reply?.from?.id === this.id ? [...this.questions.entries()].find(([,pending]) =>
       pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
       pending.messageIds.includes(reply.message_id)) : undefined;
+    const replyKey = reply?.from?.id === this.id ? `${ctx.chat.id}:${reply.message_id}` : undefined;
+    const discussion = replyKey === undefined ? undefined : this.endedQuestionReplies.get(replyKey);
+    const discussionSession = discussion && this.options.store.getSession(discussion.sessionId);
+    const canDiscuss = discussionSession?.chatId === ctx.chat.id && discussionSession.threadId === message.message_thread_id &&
+      this.options.store.getSessionGeneration(discussionSession.id) === discussion?.generation;
     const messages = (this.albumPrompts.get(ctx)?.contexts ?? [ctx]).flatMap(part => part.message ? [part.message] : []);
     const intent = classifyMessage(message,normalizeMessage(messages),{
       botId:this.id,username:this.bot.botInfo!.username,
@@ -529,7 +534,7 @@ export class BotService {
       commands:new Set([...groupCommands.map(command => command.command),'cli']),
       skillAliases:this.skillAliases.get(ctx.chat.id) ?? new Map(),
       question:question?.[0],
-      endedQuestion:Boolean(reply?.from?.id === this.id && this.endedQuestionReplies.has(`${ctx.chat.id}:${reply.message_id}`)),
+      endedQuestion:replyKey !== undefined && this.endedQuestionReplies.has(replyKey) && !canDiscuss,
     });
     this.inputIntents.set(ctx,intent);
     return intent;
@@ -2302,10 +2307,12 @@ export class BotService {
     if (!question) return;
     this.questions.delete(token);
     for (const messageId of question.messageIds) {
-      this.endedQuestionReplies.add(`${question.session.chatId}:${messageId}`);
+      this.endedQuestionReplies.set(`${question.session.chatId}:${messageId}`,question.answer?.kind === 'discussion'
+        ? {sessionId:question.session.id,generation:this.options.store.getSessionGeneration(question.session.id)}
+        : undefined);
     }
-    while (this.endedQuestionReplies.size > 512) this.endedQuestionReplies.delete(this.endedQuestionReplies.values().next().value!);
-    const answer = question.answer;
+    while (this.endedQuestionReplies.size > 512) this.endedQuestionReplies.delete(this.endedQuestionReplies.keys().next().value!);
+    const answer = question.answer?.text;
     const receiptId = answer === undefined ? undefined : question.buttonIds[0];
     for (const messageId of question.buttonIds) {
       if (messageId !== receiptId) {
@@ -2342,7 +2349,10 @@ export class BotService {
     if (!question || this.stopped || this.listeners.get(question.session.id) !== question.listener ||
         !this.sessionAssigned(question.session) || this.options.store.getSession(question.session.id)?.status !== 'open') return;
     this.requireSessionAssignment(question.session);
-    question.answer = receipt ?? (value === undefined ? 'Question cancelled.' : 'Custom answer sent.');
+    const discussion = question.request.kind === 'select' && value === 'Chat about this';
+    question.answer = {kind:discussion ? 'discussion' : 'answer',text:discussion
+      ? 'Chat about this selected. OMP will discuss the question. Reply to this message or the question to continue the discussion.'
+      : receipt ?? (value === undefined ? 'Question cancelled.' : 'Custom answer sent.')};
     if (messageId !== undefined) question.listener.pendingAnswers.set(question.request.reqId,messageId);
     try {
       question.listener.connection!.send({t:'ui-response',reqId:question.request.reqId,value});

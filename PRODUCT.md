@@ -103,7 +103,7 @@ Settings buttons do not expire with time, additional panels, or service restarts
 
 Reply quotes never attach the quoted message's photos or image documents to the AI prompt. Only images uploaded in the new prompt message or its album are attached. Forwarding the quoted message into a newly created topic does not submit its media to the AI.
 
-Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Active or expired agent-question replies retain their dedicated handling; detached topics remain conversation-only.
+Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Active or expired agent-question replies retain their dedicated handling, except for discussion handoffs described in section 1.3. Detached topics remain conversation-only.
 
 Telegram's implicit reply to a topic's creation message is topic-routing metadata, not an intentional reply to the bot. Ordinary messages with that metadata remain ignored when `all_messages_are_prompts` is `false`, including topics created by this bot.
 
@@ -154,6 +154,8 @@ The bot mirrors agent replies into the topic using Telegram rich messages with n
 Mini App prompts and text answers to agent questions also appear in the topic with the sender's Telegram username, or their display name and numeric ID if they have no username. Text answers preserve multiline content and go to the question, not the prompt queue.
 
 Agent questions include the full text, option descriptions, and numbered option buttons in compact rows of up to five, with Cancel separate. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the Mini App or terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
+
+Choosing Chat about this in Telegram returns control to OMP to discuss the question instead of answering it. The receipt explains how to continue. Replies to the question or its receipt become session prompts in either prompt mode, with the usual quote, authorization, and proposal approval. This exception applies only to recent discussion handoffs in the original topic and session generation. Replies to other completed questions remain rejected.
 
 | Indicator | Meaning |
 | --- | --- |
