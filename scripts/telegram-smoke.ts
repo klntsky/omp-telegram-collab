@@ -40,6 +40,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const reopenedTopics: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
   const topicEdits: Record<string, unknown>[] = [];
+  const remoteTopics = new Map<string, { name: string; icon_custom_emoji_id: string }>();
   const deletedMessages: Record<string, unknown>[] = [];
   const commandMenus = new Map<string, { command: string; description: string }[]>();
   const inlineAnswers: Record<string, unknown>[] = [];
@@ -128,6 +129,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     else if (method === 'createForumTopic') {
       createdTopics.push(params);
       result = { message_thread_id: ++thread, name: params.name, icon_color: 7322096 };
+      remoteTopics.set(`${params.chat_id}:${thread}`, { name: String(params.name), icon_custom_emoji_id: String(params.icon_custom_emoji_id ?? '') });
     }
     else if (method === 'reopenForumTopic') {
       reopenedTopics.push(params);
@@ -140,6 +142,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     ];
     else if (method === 'editForumTopic') {
       topicEdits.push(params);
+      const key = `${params.chat_id}:${params.message_thread_id}`;
+      const topic = remoteTopics.get(key) ?? { name: '', icon_custom_emoji_id: '' };
+      if (typeof params.name === 'string') topic.name = params.name;
+      if (typeof params.icon_custom_emoji_id === 'string') topic.icon_custom_emoji_id = params.icon_custom_emoji_id;
+      remoteTopics.set(key, topic);
       events.emit('topic');
       result = true;
     }
@@ -346,6 +353,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const server = createServer({ config, bots: [service], store, runtime, connect });
   const url = await listen(server, port);
   async function update(message: Record<string, unknown>, from = user) {
+    const created = message.forum_topic_created as { name: string; icon_custom_emoji_id?: string } | undefined;
+    const key = `${group.id}:${message.message_thread_id}`;
+    if (created) remoteTopics.set(key, { name: created.name, icon_custom_emoji_id: created.icon_custom_emoji_id ?? '' });
     if (from.id !== ownerId && !roles.has(from.id)) roles.set(from.id, { user: from, status: 'member' });
     await bot.handleUpdate({ update_id: ++updateId, message: { message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: group, from, ...message } } as Parameters<typeof bot.handleUpdate>[0]);
   }
@@ -364,6 +374,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics, reopenedTopics,
+    remoteTopics,
     sessionTitles, titleChanges, topicTitleStatuses,
     fileRequests,
     pollRequests,
