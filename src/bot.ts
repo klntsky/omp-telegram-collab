@@ -32,7 +32,7 @@ export interface RuntimeLike {
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
   availableModelPresets(instancePath: string): Promise<string[]>;
-  providerUsage(instancePath: string): Promise<string>;
+  providerUsage(instancePath: string): Promise<{ heading: string; table: string }[]>;
   listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
   setSessionLimit(limit: number): void;
@@ -1702,12 +1702,20 @@ export class BotService {
       if (action === 'usage') {
         if (arg) { await replyTo(ctx, destination, 'Usage: /usage'); return; }
         const usage = await this.options.runtime.providerUsage(assigned.path);
-        for (let offset = 0; offset < usage.length;) {
-          let end = Math.min(offset + 4000, usage.length);
-          if (end < usage.length && /[\uD800-\uDBFF]/.test(usage[end - 1]!)) --end;
-          const chunk = usage.slice(offset, end);
-          await replyTo(ctx, destination, chunk, { entities: [{ type: 'pre', offset: 0, length: chunk.length }] });
-          offset = end;
+        for (const section of usage) {
+          for (let offset = 0; offset < section.table.length;) {
+            const prefix = section.heading ? `${section.heading}\n\n` : '';
+            let end = Math.min(offset + 4000 - prefix.length, section.table.length);
+            if (end < section.table.length && /[\uD800-\uDBFF]/.test(section.table[end - 1]!)) --end;
+            const chunk = section.table.slice(offset, end);
+            await replyTo(ctx, destination, prefix + chunk, {
+              entities: [
+                ...(section.heading ? [{ type: 'bold' as const, offset: 0, length: section.heading.length }] : []),
+                { type: 'pre', offset: prefix.length, length: chunk.length },
+              ],
+            });
+            offset = end;
+          }
         }
         return;
       }

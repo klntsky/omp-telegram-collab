@@ -615,7 +615,7 @@ export class OmpRuntime {
     return result.value;
   }
 
-  async providerUsage(instancePath: string): Promise<string> {
+  async providerUsage(instancePath: string): Promise<{ heading: string; table: string }[]> {
     this.#assertActive();
     if (!Object.hasOwn(this.#config.instances, instancePath)) throw new Error('Instance path is not configured');
     const args: string[] = [];
