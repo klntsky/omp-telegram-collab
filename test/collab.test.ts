@@ -62,6 +62,23 @@ test('live host broadcasts before welcome do not reject an authenticated session
   }
 });
 
+test('Collab delivers a snapshot frame beyond the former payload cap', { timeout: 15_000 }, async () => {
+  const largeState = { ...state, cwd: 'x'.repeat(17 * 1024 * 1024) };
+  const frames: HostFrame[] = [
+    { ...welcome, state: largeState },
+    { t: 'snapshot-chunk', entries: [], final: true },
+  ];
+  const host = await hostFrames(frames);
+  const received: HostFrame[] = [];
+  try {
+    const connection = await connectCollab(host.binding, 'Guest', { onFrame: frame => received.push(frame), onClose() {} });
+    assert.deepEqual(received, frames);
+    connection.close();
+  } finally {
+    await host.close();
+  }
+});
+
 for (const [name, frames, reason] of [
   ['snapshot without welcome', [{ t: 'snapshot-chunk', entries: [], final: true }], /snapshot arrived before welcome/],
   ['different session identity', [{ ...welcome, header: { ...welcome.header, id: 'another-session' } }], /session identity mismatch/],

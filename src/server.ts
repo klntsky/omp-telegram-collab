@@ -41,7 +41,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
 }
 export function createServer(options: ServerOptions): GatewayServer {
   const tickets = new TicketStore<TicketIdentity & {access: {session: TopicSession; canControl: boolean}}>();
-  const sockets = new WebSocketServer({noServer:true,maxPayload:6*1024*1024,perMessageDeflate:false});
+  const sockets = new WebSocketServer({noServer:true,maxPayload:0,perMessageDeflate:false});
   const botMap = new Map(options.bots.map(bot => [bot.id,bot]));
   if (botMap.has(0) || botMap.size !== options.bots.length) throw new Error('Initialize each distinct bot before creating the server');
   const root = resolve(options.staticDir ?? 'web/dist');
@@ -259,7 +259,6 @@ export function createServer(options: ServerOptions): GatewayServer {
           for (const {frame,payload} of batch) {
             if (closed || ws.readyState !== WebSocket.OPEN) return;
             checkTermination();
-            if (ws.bufferedAmount > 4*1024*1024) { fail(4008,'Slow connection'); return; }
             const value = frame.t === 'welcome' ? JSON.stringify({...frame,readOnly:Boolean(frame.readOnly || current.session.status === 'closed' || !current.canControl)}) : payload;
             const sent = Promise.withResolvers<void>();
             ws.send(value,error => error ? sent.reject(error) : sent.resolve());

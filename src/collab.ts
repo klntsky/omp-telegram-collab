@@ -5,9 +5,6 @@ import { importRoomKey, open, seal } from './vendor/codec.js';
 import { encodeBase64Url, packEnvelope, parseCollabLink, unpackEnvelope } from './vendor/link.js';
 
 const SETUP_TIMEOUT_MS = 60_000;
-const MAX_BACKLOG_FRAMES = 256;
-const MAX_BACKLOG_BYTES = 32 * 1024 * 1024;
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const HOST_TYPES: Record<string, true> = {
   welcome: true, 'snapshot-chunk': true, entry: true, event: true, state: true, bus: true, agents: true,
   'ui-request': true, 'ui-request-end': true, transcript: true, bye: true, error: true,
@@ -64,7 +61,7 @@ async function openCollab(
   signal?.throwIfAborted();
   const ws = new WebSocket(`${link.wsUrl}?role=guest`, {
     handshakeTimeout: SETUP_TIMEOUT_MS,
-    maxPayload: MAX_FRAME_BYTES,
+    maxPayload: 0,
     perMessageDeflate: false,
   });
   let closed = false;
@@ -72,10 +69,6 @@ async function openCollab(
   let welcomed = false;
   let total = 0;
   let received = 0;
-  let sendCount = 0;
-  let sendBytes = 0;
-  let receiveCount = 0;
-  let receiveBytes = 0;
   let sendChain = Promise.resolve();
   let receiveChain = Promise.resolve();
   let resolveSetup!: (connection: CollabConnection) => void;
@@ -103,27 +96,17 @@ async function openCollab(
 
   function queueSend(frame: GuestFrame): void {
     if (closed || ws.readyState !== WebSocket.OPEN) throw new Error('Collab connection is closed');
-    const bytes = Buffer.byteLength(JSON.stringify(frame));
-    if (bytes > MAX_FRAME_BYTES || sendCount >= MAX_BACKLOG_FRAMES || sendBytes + bytes > MAX_BACKLOG_BYTES) {
-      finish('Collab send backlog exceeded');
-      throw new Error('Collab send backlog exceeded');
-    }
-    sendCount++;
-    sendBytes += bytes;
     sendChain = sendChain.then(async () => {
       if (closed) return;
       const envelope = packEnvelope(0, await seal(key, frame));
       if (closed) return;
-      if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount + envelope.byteLength > MAX_BACKLOG_BYTES) {
+      if (ws.readyState !== WebSocket.OPEN) {
         throw new Error('Collab transport cannot accept the frame');
       }
       await new Promise<void>((resolve, reject) => {
         ws.send(envelope, error => error ? reject(error) : resolve());
       });
-    }).catch(() => finish('Collab send failed; delivery may be uncertain')).finally(() => {
-      sendCount--;
-      sendBytes -= bytes;
-    });
+    }).catch(() => finish('Collab send failed; delivery may be uncertain'));
   }
 
   const connection: CollabConnection = {
@@ -202,12 +185,6 @@ async function openCollab(
       }
       return;
     }
-    if (receiveCount >= MAX_BACKLOG_FRAMES || receiveBytes + bytes.byteLength > MAX_BACKLOG_BYTES) {
-      finish('Collab receive backlog exceeded');
-      return;
-    }
-    receiveCount++;
-    receiveBytes += bytes.byteLength;
     receiveChain = receiveChain.then(async () => {
       if (closed) return;
       const envelope = unpackEnvelope(bytes);
@@ -218,9 +195,6 @@ async function openCollab(
       deliver(frame as HostFrame);
     }).catch(error => {
       finish(error instanceof Error ? error.message : 'Collab receive failed');
-    }).finally(() => {
-      receiveCount--;
-      receiveBytes -= bytes.byteLength;
     });
   });
   ws.on('error', () => finish('Collab transport error'));
