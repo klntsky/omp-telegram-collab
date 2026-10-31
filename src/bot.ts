@@ -447,11 +447,11 @@ export class BotService {
       text = `Maximum live sessions: ${this.options.runtime.getSessionLimit()}\nService-wide.\nReply to this message with a positive whole number to save the limit immediately.`;
     }
     if (page !== 'root')
-      button(page === 'capacity' ? '❌ Cancel' : 'Back to settings', {
+      button(page === 'capacity' ? '⬅️ Back' : 'Back to settings', {
         kind: 'page',
         page: 'root',
       });
-    button('⬅️ Back', { kind: 'close' });
+    if (page !== 'capacity') button('⬅️ Back', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
     const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
