@@ -149,6 +149,9 @@ test('maintenance restores a missing mirror without host admission or prompt rep
 
 test('maintenance retries a dirty icon while unrelated frames arrive during host lookup', {timeout:15000}, async t => {
   t.mock.timers.enable({apis:['setInterval']});
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date,'now',() => now()+offset);
   const app = await createSmokeApp();
   const failed = Promise.withResolvers<void>();
   const failure = new Error('Temporary icon delivery failure');
@@ -169,11 +172,12 @@ test('maintenance retries a dirty icon while unrelated frames arrive during host
     });
     app.emit({t:'event',event:{type:'agent_start'}});
     await failed.promise;
-    const isRunning = app.runtime.isRunning.bind(app.runtime);
-    t.mock.method(app.runtime,'isRunning',async (session: TopicSession) => {
+    const resolve = app.runtime.resolveExisting.bind(app.runtime);
+    t.mock.method(app.runtime,'resolveExisting',async (session: TopicSession) => {
       app.emit({t:'event',event:{type:'notice',level:'info',source:'fixture',message:'Unrelated host output'}});
-      return isRunning(session);
+      return resolve(session);
     });
+    offset = 30_000;
     t.mock.timers.tick(30000);
     await eventually(() => lastIcon(app) === runningIcon);
     assert.deepEqual(app.accepted,[]);

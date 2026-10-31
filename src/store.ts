@@ -136,6 +136,17 @@ export class Store {
   setTopicTitlePrefix(id: string, prefix: string): void {
     this.db.prepare('INSERT INTO session_topic_title_prefixes VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET prefix=excluded.prefix').run(id,prefix);
   }
+  setTopicTitle(id: string, name: string, prefix: string): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(name,id);
+      this.setTopicTitlePrefix(id,prefix);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
   getSessionGeneration(id: string): number {
     const row = this.db.prepare('SELECT generation FROM session_generations WHERE session_id=?').get(id);
     return Number(row?.generation ?? 0);

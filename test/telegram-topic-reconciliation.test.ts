@@ -91,3 +91,33 @@ test('matching self-attributed metadata echo neither changes intent nor starts a
     assert.deepEqual(app.accepted,[]);
   } finally { await app.close(); }
 });
+
+test('consecutive native renames cannot apply an older host title after the newer intent', {timeout:15000}, async t => {
+  const app = await createSmokeApp();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const appliedFirst = Promise.withResolvers<void>();
+  try {
+    const session = await liveTopic(app);
+    const setTitle = app.runtime.setSessionTitle.bind(app.runtime);
+    t.mock.method(app.runtime,'setSessionTitle',async (...args: Parameters<typeof setTitle>) => {
+      if (args[1] === 'First edit') {
+        entered.resolve();
+        await release.promise;
+        await setTitle(...args);
+        appliedFirst.resolve();
+        return;
+      }
+      await setTitle(...args);
+    });
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'First edit'}});
+    await entered.promise;
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Second edit'}});
+    release.resolve();
+    await appliedFirst.promise;
+    await eventually(() => app.sessionTitles.get(session.id) === 'Second edit');
+    await eventually(() => app.remoteTopics.get(remoteKey)?.name === 'Second edit');
+    assert.equal(app.store.getPendingSessionTitle(session.id),undefined);
+    assert.deepEqual(app.accepted,[]);
+  } finally { release.resolve(); await app.close(); }
+});

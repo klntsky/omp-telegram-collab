@@ -118,22 +118,23 @@ for (const blockAt of [1,2]) {
 }
 
 for (const source of ['startup','mirror retry']) {
-  test(`kill fences a background ${source} liveness check`, async t => {
+  test(`kill fences a background ${source} existing-host lookup`, {timeout:10000}, async t => {
     const {app,session} = await setup();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<boolean>();
     let restarted: BotService | undefined;
     try {
       await app.service.ensureMirroring(session,await app.runtime.ensure(session));
-      const original = app.runtime.isRunning.bind(app.runtime);
+      const original = app.runtime.resolveExisting.bind(app.runtime);
       let blockNext = source === 'startup';
-      t.mock.method(app.runtime,'isRunning',async (value: Parameters<typeof original>[0]) => {
+      t.mock.method(app.runtime,'resolveExisting',async (value: Parameters<typeof original>[0]) => {
+        const binding = await original(value);
         if (blockNext) {
           blockNext = false;
           entered.resolve();
-          return release.promise;
+          return await release.promise ? binding : undefined;
         }
-        return original(value);
+        return binding;
       });
       if (source === 'startup') {
         restarted = createBot({
