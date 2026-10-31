@@ -117,3 +117,24 @@ test('rich embedded images and nested text remain prompt content under existing 
   assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'});
   assert.deepEqual(classifyMessage(msg,content,context({question:'answer'})),{kind:'question-answer',token:'answer',text:content.text});
 });
+
+test('rich quotation variants never promote quoted commands into instructions', () => {
+  for (const type of ['blockquote','expandable_blockquote','pullquote']) {
+    for (const text of ['/new quoted task','/p quoted task','/settings']) {
+      const block = type === 'blockquote'
+        ? {type,blocks:[{type:'paragraph',text}],credit:'/new quoted author'}
+        : {type,text,credit:'/new quoted author'};
+      const msg = message({rich_message:{blocks:[block]}});
+      const content = normalizeMessage([msg]);
+      assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'},`${type}: ${text}`);
+      assert.deepEqual(classifyMessage(msg,content,context()),{
+        kind:'session-prompt',content:{text:`> ${text}\n> \n> /new quoted author`,images:[]},
+      });
+    }
+    const block = type === 'blockquote'
+      ? {type,blocks:[],credit:'/new quoted author'}
+      : {type,text:'',credit:'/new quoted author'};
+    const msg = message({rich_message:{blocks:[block]}});
+    assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),context({allMessagesArePrompts:false})),{kind:'ignore'});
+  }
+});

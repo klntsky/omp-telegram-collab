@@ -40,6 +40,11 @@ function richText(text: RichText, bot?: {id:number;username:string}): string {
 function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:number;username:string}): string {
   return blocks.map(block => {
     const parts: string[] = [];
+    if (block.type === 'blockquote' || block.type === 'expandable_blockquote' || block.type === 'pullquote') {
+      const content = block.type === 'blockquote' ? richBlocks(block.blocks,images,bot) : richText(block.text,bot);
+      const quote = [content,block.credit === undefined ? '' : richText(block.credit,bot)].filter(Boolean).join('\n\n');
+      return quote ? quote.split('\n').map(line => `> ${line}`).join('\n') : '';
+    }
     if (block.type === 'list') {
       return block.items.map(item => {
         const label = item.has_checkbox ? `${item.label} [${item.is_checked ? 'x' : ' '}]` : item.label;
@@ -52,10 +57,7 @@ function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:numb
     if (block.type === 'details') parts.push(richText(block.summary,bot));
     if ('text' in block) parts.push(richText(block.text,bot));
     if ('expression' in block) parts.push(block.expression);
-    if ('blocks' in block) {
-      const content = richBlocks(block.blocks,images,bot);
-      parts.push(block.type === 'blockquote' ? content.split('\n').map(line => `> ${line}`).join('\n') : content);
-    }
+    if ('blocks' in block) parts.push(richBlocks(block.blocks,images,bot));
     if (block.type === 'photo' && block.photo.length) {
       const photo = block.photo.reduce((largest,size) => size.width * size.height > largest.width * largest.height ? size : largest);
       images.push({fileId:photo.file_id,mimeType:'image/jpeg'});
@@ -70,7 +72,6 @@ function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:numb
       parts.push(richText(block.caption.text,bot));
       if ('credit' in block.caption && block.caption.credit) parts.push(richText(block.caption.credit,bot));
     }
-    if ('credit' in block && block.credit) parts.push(richText(block.credit,bot));
     return parts.filter(Boolean).join('\n\n');
   }).filter(Boolean).join('\n\n');
 }
