@@ -25,15 +25,27 @@ export interface TelegramLaunch {
 	initData: string;
 }
 
-export interface AuthorizedSession {
-	session: { id: string; name: string; status: "open" | "closed" };
+interface SessionAuthorization {
 	credential: string;
-	ticket: string;
 	generation: number;
 	displayName: string;
+	canReopen: boolean;
 }
 
-export class SessionAccessError extends Error {}
+export interface ClosedAuthorizedSession extends SessionAuthorization {
+	session: { id: string; name: string; status: "closed" };
+}
+
+export type AuthorizedSession = ClosedAuthorizedSession | (SessionAuthorization & {
+	session: { id: string; name: string; status: "open" };
+	ticket: string;
+});
+
+export class SessionAccessError extends Error {
+	constructor(message: string, readonly status?: number) {
+		super(message);
+	}
+}
 
 const sessionCredentials = new Map<string, { initData: string; credential: string }>();
 
@@ -79,13 +91,13 @@ export function readTelegramLaunch(): TelegramLaunch {
 	return { botId, sessionId: startParam.slice(2), initData: app.initData };
 }
 
-export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number): Promise<AuthorizedSession> {
+export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number, reopen = false): Promise<AuthorizedSession> {
 	const response = await fetch("/api/session", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		credentials: "same-origin",
 		cache: "no-store",
-		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation }),
+		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation, reopen }),
 		signal,
 	});
 	if (!response.ok) {
@@ -98,25 +110,43 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 			}
 		} catch {}
 		if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409) {
-			throw new SessionAccessError(message);
+			throw new SessionAccessError(message, response.status);
 		}
 		throw new Error(message);
 	}
 	const data: unknown = await response.json();
-	if (!data || typeof data !== "object") throw new Error("Invalid session response. Retry in a moment.");
-	const result = data as Partial<AuthorizedSession>;
 	if (
-		!result.session || result.session.id !== launch.sessionId || typeof result.session.name !== "string" ||
-		(result.session.status !== "open" && result.session.status !== "closed") ||
-		typeof result.ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(result.ticket) ||
-		typeof result.credential !== "string" || !result.credential ||
-		typeof result.generation !== "number" || !Number.isSafeInteger(result.generation) || result.generation < 0 ||
-		typeof result.displayName !== "string" || !result.displayName
+		!data || typeof data !== "object" ||
+		!("session" in data) || !data.session || typeof data.session !== "object" ||
+		!("id" in data.session) || data.session.id !== launch.sessionId ||
+		!("name" in data.session) || typeof data.session.name !== "string" ||
+		!("status" in data.session) || (data.session.status !== "open" && data.session.status !== "closed") ||
+		!("credential" in data) || typeof data.credential !== "string" || !data.credential ||
+		!("generation" in data) || typeof data.generation !== "number" || !Number.isSafeInteger(data.generation) || data.generation < 0 ||
+		!("displayName" in data) || typeof data.displayName !== "string" || !data.displayName ||
+		!("canReopen" in data) || typeof data.canReopen !== "boolean"
 	) {
 		throw new Error("Invalid session response. Retry in a moment.");
 	}
+	const common = {
+		credential: data.credential,
+		generation: data.generation,
+		displayName: data.displayName,
+		canReopen: data.canReopen,
+	};
+	let result: AuthorizedSession;
+	if (data.session.status === "closed") {
+		if ("ticket" in data) throw new Error("Invalid session response. Retry in a moment.");
+		result = { ...common, session: { id: data.session.id, name: data.session.name, status: "closed" } };
+	} else {
+		if (!("ticket" in data) || typeof data.ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(data.ticket)) {
+			throw new Error("Invalid session response. Retry in a moment.");
+		}
+		result = { ...common, session: { id: data.session.id, name: data.session.name, status: "open" }, ticket: data.ticket };
+	}
+	signal.throwIfAborted();
 	saveSessionCredential(launch, result.credential);
-	return result as AuthorizedSession;
+	return result;
 }
 
 export function mountTelegramEnvironment(): () => void {

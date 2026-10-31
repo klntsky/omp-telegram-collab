@@ -11,54 +11,79 @@ import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
 import { GatewaySocket } from "./lib/socket";
-import { authorizeSession, mountTelegramEnvironment, readTelegramLaunch } from "./lib/telegram";
+import { authorizeSession, mountTelegramEnvironment, readTelegramLaunch, SessionAccessError } from "./lib/telegram";
+import type { ClosedAuthorizedSession, TelegramLaunch } from "./lib/telegram";
 import { useGuestSnapshot } from "./lib/use-guest";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
 
+interface ClosedConnection {
+	authorization: ClosedAuthorizedSession;
+	launch: TelegramLaunch;
+}
+
+type ConnectionState =
+	| { kind: "authorizing" }
+	| { kind: "error"; message: string }
+	| ({ kind: "closed"; phase: "idle" | "reopening" | "stale"; error: string | null } & ClosedConnection);
+
 export function App(): ReactNode {
 	const [client, setClient] = useState<GuestClient | null>(null);
-	const [connectError, setConnectError] = useState<string | null>(null);
-	const [loading, setLoading] = useState(true);
+	const [connection, setConnection] = useState<ConnectionState>({ kind: "authorizing" });
 	const clientRef = useRef<GuestClient | null>(null);
 	const requestRef = useRef<AbortController | null>(null);
 	const attemptRef = useRef(0);
 
-	const connect = useCallback(async (): Promise<void> => {
+	const connect = useCallback(async (confirmation?: ClosedConnection): Promise<void> => {
+		if (confirmation && requestRef.current) return;
 		const attempt = ++attemptRef.current;
 		requestRef.current?.abort();
 		clientRef.current?.close();
 		clientRef.current = null;
 		setClient(null);
-		setConnectError(null);
-		setLoading(true);
+		setConnection(confirmation
+			? { kind: "closed", ...confirmation, phase: "reopening", error: null }
+			: { kind: "authorizing" });
 		const controller = new AbortController();
 		requestRef.current = controller;
 		const timeout = setTimeout(() => controller.abort(), 20_000);
 		try {
-			const launch = readTelegramLaunch();
-			const authorized = await authorizeSession(launch, controller.signal);
+			const launch = confirmation?.launch ?? readTelegramLaunch();
+			const authorized = await authorizeSession(launch, controller.signal, confirmation?.authorization.generation, !!confirmation);
 			if (attempt !== attemptRef.current) return;
+			if (!("ticket" in authorized)) {
+				setConnection({ kind: "closed", authorization: authorized, launch, phase: "idle", error: null });
+				return;
+			}
 			const next = new GuestClient(
 				new GatewaySocket(authorized.ticket, async signal => {
 					const refreshed = await authorizeSession(launch, signal, authorized.generation);
+					if (!("ticket" in refreshed)) {
+						throw new SessionAccessError("This Telegram topic is closed. Rejoin to check whether it can be reopened.");
+					}
 					return refreshed.ticket;
 				}),
 				authorized.displayName,
-				authorized.session.status === "closed",
 			);
 			clientRef.current = next;
 			setClient(next);
 			next.connect();
 		} catch (error) {
 			if (attempt === attemptRef.current) {
-				setConnectError(error instanceof Error ? error.message : "Could not join this session. Retry in a moment.");
+				const message = error instanceof Error ? error.message : "Could not join this session. Retry in a moment.";
+				setConnection(confirmation
+					? {
+						kind: "closed",
+						...confirmation,
+						phase: error instanceof SessionAccessError && error.status === 409 ? "stale" : "idle",
+						error: message,
+					}
+					: { kind: "error", message });
 			}
 		} finally {
 			clearTimeout(timeout);
 			if (attempt === attemptRef.current) {
 				requestRef.current = null;
-				setLoading(false);
 			}
 		}
 	}, []);
@@ -70,13 +95,24 @@ export function App(): ReactNode {
 		clientRef.current?.close();
 		clientRef.current = null;
 		setClient(null);
-		setLoading(false);
-		setConnectError("You left this session. Retry to authenticate and join again, or return to your Telegram topic.");
+		setConnection({ kind: "error", message: "You left this session. Retry to authenticate and join again, or return to your Telegram topic." });
 	}, []);
 
 	const rejoin = useCallback((): void => {
 		void connect();
 	}, [connect]);
+
+	const reopen = useCallback((): void => {
+		if (connection.kind !== "closed" || connection.phase !== "idle" || !connection.authorization.canReopen) return;
+		void connect(connection);
+	}, [connect, connection]);
+
+	const cancelReopen = useCallback((): void => {
+		++attemptRef.current;
+		requestRef.current?.abort();
+		requestRef.current = null;
+		setConnection({ kind: "error", message: "Reopening cancelled. Return to Telegram, or retry to check this topic again." });
+	}, []);
 
 	useEffect(() => mountTelegramEnvironment(), []);
 
@@ -94,6 +130,9 @@ export function App(): ReactNode {
 	}, [client]);
 
 	if (!client) {
+		const closed = connection.kind === "closed" ? connection : null;
+		const loading = connection.kind === "authorizing" || closed?.phase === "reopening";
+		const connectError = connection.kind === "error" ? connection.message : closed?.error;
 		return (
 			<div className="sh-connect">
 				<div className="sh-ambient" />
@@ -108,16 +147,36 @@ export function App(): ReactNode {
 				</div>
 				<section className="sh-connect-card" aria-busy={loading}>
 					<div className="sh-connect-head">
-						<h1 className="sh-connect-title">{loading ? "Opening your Telegram session…" : "Join from Telegram"}</h1>
+						<h1 className="sh-connect-title">
+							{closed ? "This Telegram topic is closed" : loading ? "Opening your Telegram session…" : "Join from Telegram"}
+						</h1>
 						<p className="sh-connect-sub">
-							Use the OPEN AGENT button in your group topic. Only current group members can access its conversation.
+							{closed
+								? "Reopening this topic in Telegram permits the agent to work again. No agent connection is made until you confirm."
+								: "Use the OPEN AGENT button in your group topic. Only current group members can access its conversation."}
 						</p>
 					</div>
-					{loading ? <p role="status">Checking Telegram authentication and group membership…</p> : (
+					{connectError && <div className="sh-connect-error" role="alert" style={{ whiteSpace: "pre-wrap" }}>{connectError}</div>}
+					{closed ? (
 						<>
-							{connectError && <div className="sh-connect-error" role="alert">{connectError}</div>}
-							<button type="button" className="sh-btn sh-btn-primary" onClick={rejoin}>Retry</button>
+							{!closed.authorization.canReopen && (
+								<p className="sh-connect-sub">An administrator must reopen the topic before you can connect.</p>
+							)}
+							{closed.phase === "reopening" && <p role="status">Reopening the Telegram topic…</p>}
+							{closed.phase === "stale" && (
+								<p className="sh-connect-sub">The session changed. Check the topic again before deciding whether to reopen it.</p>
+							)}
+							{closed.phase === "stale" || !closed.authorization.canReopen ? (
+								<button type="button" className="sh-btn sh-btn-primary" onClick={rejoin}>Check topic again</button>
+							) : (
+								<button type="button" className="sh-btn sh-btn-primary" onClick={reopen} disabled={loading}>
+									Reopen topic and connect
+								</button>
+							)}
+							<button type="button" className="sh-btn" onClick={cancelReopen} disabled={loading}>Cancel</button>
 						</>
+					) : loading ? <p role="status">Checking Telegram authentication and group membership…</p> : (
+						<button type="button" className="sh-btn sh-btn-primary" onClick={rejoin}>Retry</button>
 					)}
 				</section>
 			</div>

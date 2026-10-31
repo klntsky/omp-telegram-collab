@@ -51,7 +51,7 @@ test('assignment cleanup and acknowledgement do not wait for catalog discovery',
     const instancePath = Object.keys(app.config.instances)[0]!;
     const session = app.store.listSessions(botId)[0]!;
     const detached: string[] = [];
-    app.service.onSessionKill(id => detached.push(id));
+    app.service.onSessionInvalidated(id => detached.push(id));
     const before = app.store.getSkillCatalog(instancePath);
     const refresh = app.service.refreshSkillCatalogs();
     await entered.promise;

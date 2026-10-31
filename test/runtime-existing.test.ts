@@ -45,6 +45,13 @@ else if(args[1]==='link'){
 }else throw new Error('Unexpected registry command');
 `);
     await chmod(executable,0o700);
+    for (const runtimeKind of [session.runtime, {kind:'attached',instanceId:host.instanceId,sessionId:host.sessionId}] as const) {
+      await assert.rejects(runtime.ensure({...session,status:'closed',runtime:runtimeKind}),{message:'Session closed'});
+    }
+    assert.equal(await runtime.stop({...session,status:'closed'}),true);
+    assert.equal(await readFile(commandsPath,'utf8'),'');
+    await assert.rejects(stat(join(directory,'sessions',session.id)),{code:'ENOENT'});
+    await assert.rejects(stat(join(directory,'runtime-lock.sqlite')),{code:'ENOENT'});
     assert.equal(await runtime.resolveExisting(session),undefined);
     assert.equal(await readFile(commandsPath,'utf8'),'');
     const metadata = join(directory,'sessions',session.id,'binding.json');
@@ -82,6 +89,6 @@ else if(args[1]==='link'){
     await writeFile(join(directory,'sessions',session.id,'lifecycle.json'),JSON.stringify({
       pid:host.pid,sessionId:host.sessionId,socketPath:join(directory,'lifecycle.sock'),
     }));
-    await assert.rejects(runtime.stop(session.id),/does not support safe retirement/);
+    await assert.rejects(runtime.stop(session),/does not support safe retirement/);
   } finally { await runtime.close(); await rm(directory,{recursive:true,force:true}); }
 });

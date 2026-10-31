@@ -36,6 +36,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
+  const reopenedTopics: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
   const topicEdits: Record<string, unknown>[] = [];
   const deletedMessages: Record<string, unknown>[] = [];
@@ -127,6 +128,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       createdTopics.push(params);
       result = { message_thread_id: ++thread, name: params.name, icon_color: 7322096 };
     }
+    else if (method === 'reopenForumTopic') {
+      reopenedTopics.push(params);
+      result = true;
+    }
     else if (method === 'getForumTopicIconStickers') result = [
       { emoji: '⚡️', custom_emoji_id: '5312016608254762256' },
       { emoji: '✅', custom_emoji_id: '5237699328843200968' },
@@ -204,6 +209,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       return `Moved to worktree ${session.runtime.worktreePath}`;
     },
     async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
+      if (session.status !== 'open') throw new Error('Session closed');
       if (session.runtime.kind === 'attached') {
         const host = attachedHosts.get(session.runtime.instanceId);
         if (!host) throw new Error('OMP host is not available');
@@ -265,7 +271,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     observeFrame(_sessionId: string, _frame: HostFrame) {},
     markPrompt(_sessionId: string) {},
     retain(_sessionId: string) { return () => {}; },
-    async stop(id: string) { managedSessions.delete(id); }, async close() {},
+    async stop(session: TopicSession) {
+      if (session.runtime.kind === 'managed') managedSessions.delete(session.id);
+      return true;
+    }, async close() {},
     async kill(session: TopicSession) {
       if (session.runtime.kind === 'attached') attachedHosts.delete(session.runtime.instanceId);
       else managedSessions.delete(session.id);
@@ -344,7 +353,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   }
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
-    createdTopics,
+    createdTopics, reopenedTopics,
     sessionTitles, titleChanges, topicTitleStatuses,
     fileRequests,
     pollRequests,
@@ -363,6 +372,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       memberStatus = value.status ?? 'administrator';
     },
     get connectionCount() { return connectionCount; },
+    get activeConnectionCount() { return connections.size; },
     rejectNextPrompt() { rejectionCount = 1; },
     rateLimitNext(method: string, retryAfter = 1) {
       const pending = rateLimits.get(method) ?? [];

@@ -18,20 +18,31 @@ interface RetirementRequest {
   type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
 }
 
-async function fixture(mode: RetirementMode = 'busy', pid = process.pid) {
+async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-retirement-')));
+  const fixtureProcess = mode === 'cancel-failure' && pid === process.pid
+    ? spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] })
+    : undefined;
+  const fixtureExited = fixtureProcess ? once(fixtureProcess, 'exit') : undefined;
+  if (fixtureProcess) {
+    await once(fixtureProcess, 'spawn');
+    assert.ok(fixtureProcess.pid);
+    pid = fixtureProcess.pid;
+  }
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
   await mkdir(sessionDir, { recursive: true });
   const executable = join(directory, 'omp');
   const statePath = join(directory, 'registry.json');
   const startedPidPath = join(directory, 'started.pid');
+  const commandsPath = join(directory, 'commands.jsonl');
+  await writeFile(commandsPath, '');
   const socketPath = join(directory, 'host.sock');
   const lifecyclePath = join(sessionDir, 'lifecycle.json');
   const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
     pid, cwd: directory, access: 'control', relayConnected: true, busy: false };
   const url = `wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
-  const state: { host: typeof host | undefined; failLink: boolean; startupHost?: typeof host } = { host, failLink: false };
+  const state: { host: typeof host | undefined; failLink: boolean; startupHost?: typeof host; holdStartup?: boolean } = { host, failLink: false };
   const persistRegistry = () => writeFile(statePath, JSON.stringify(state));
   await persistRegistry();
   await writeFile(executable, `#!${process.execPath}
@@ -39,19 +50,42 @@ const fs = require('node:fs');
 const net = require('node:net');
 const statePath = ${JSON.stringify(statePath)};
 const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+fs.appendFileSync(${JSON.stringify(commandsPath)}, JSON.stringify(process.argv.slice(2))+'\\n');
 if (process.argv[2] !== 'collab') {
   if (!state.startupHost) throw new Error('Unexpected managed host startup');
   if (state.host) throw new Error('Managed host startup requires an empty host registry');
   const host = { ...state.startupHost, pid: process.pid };
   const socketPath = ${JSON.stringify(join(directory, 'started.sock'))};
-  const server = net.createServer(socket => socket.destroy());
+  const descriptor = {pid:process.pid,supervisorPid:Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
+    sessionId:host.sessionId,socketPath,retiring:false,worktree:true,retirement:1};
+  const server = net.createServer(socket => {
+    let input = '';
+    socket.on('data', data => {
+      input += data.toString();
+      if (!input.includes('\\n')) return;
+      const request = JSON.parse(input.trim());
+      if (request.type !== 'retire' || request.guard !== 'none' || request.pid !== process.pid ||
+          request.sessionId !== host.sessionId) throw new Error('Unexpected startup retirement request');
+      descriptor.retiring = true;
+      const grant = ${JSON.stringify(sessionDir)}+'/retirement-'+request.requestId+'.request';
+      fs.writeFileSync(grant, JSON.stringify(descriptor), {flag:'r+'});
+      fs.renameSync(grant, ${JSON.stringify(lifecyclePath)});
+      socket.end(JSON.stringify({requestId:request.requestId,sessionId:host.sessionId,pid:process.pid,outcome:'requested'})+'\\n');
+      server.close(() => process.exit(0));
+    });
+  });
   server.listen(socketPath, () => {
     fs.writeFileSync(${JSON.stringify(startedPidPath)}, String(process.pid));
-    fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify({
-      pid: process.pid, supervisorPid: Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
-      sessionId: host.sessionId, socketPath, retiring: false, worktree: true
-    }));
-    fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
+    const publish = () => {
+      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor));
+      fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
+    };
+    if (!state.holdStartup) publish();
+    else {
+      const control = net.createConnection(${JSON.stringify(socketPath)});
+      control.once('connect', () => control.write(JSON.stringify({type:'startup',pid:process.pid,supervisorPid:descriptor.supervisorPid})+'\\n'));
+      control.once('data', publish);
+    }
   });
 } else if (process.argv[3] === 'link') {
   if (state.failLink) { process.stderr.write('Original reconnect registry failure\\n'); process.exit(23); }
@@ -69,6 +103,8 @@ if (process.argv[2] !== 'collab') {
   const requests: RetirementRequest[] = [];
   const delayed = Promise.withResolvers<void>();
   const received = Promise.withResolvers<void>();
+  const startup = Promise.withResolvers<{ pid: number; supervisorPid: number }>();
+  let startupControl: Socket | undefined;
   const handled: Promise<void>[] = [];
   const failures: unknown[] = [];
   const grantPath = (requestId: string) => join(sessionDir, `retirement-${requestId}.request`);
@@ -95,13 +131,18 @@ if (process.argv[2] !== 'collab') {
     socket.on('data', data => {
       input += data.toString();
       if (!input.includes('\n')) return;
-      const request = JSON.parse(input.trim()) as RetirementRequest;
+      const request = JSON.parse(input.trim()) as RetirementRequest | { type: 'startup'; pid: number; supervisorPid: number };
+      if (request.type === 'startup') {
+        startupControl = socket;
+        startup.resolve({ pid: request.pid, supervisorPid: request.supervisorPid });
+        return;
+      }
       requests.push(request);
       received.resolve();
       handled.push((async () => {
         const respond = (outcome: 'requested' | 'busy' | 'expired') => socket.end(JSON.stringify({ requestId: request.requestId, sessionId: descriptor.sessionId, pid: descriptor.pid, outcome }) + '\n');
         assert.equal(request.type, 'retire');
-        assert.equal(request.guard, 'idle');
+        assert.equal(request.guard, guard);
         assert.match(request.requestId, /^[0-9a-f-]{36}$/);
         assert.equal(await readFile(grantPath(request.requestId), 'utf8'), '', 'runtime must close an empty exclusive grant before sending');
         if (mode === 'busy') { respond('busy'); return; }
@@ -131,11 +172,16 @@ if (process.argv[2] !== 'collab') {
   const runtime = new OmpRuntime(config);
   const session: TopicSession = { id: 'topic', botId: 1, chatId: -100, threadId: 2,
     instancePath: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
-  return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, grantPath, accept, received: received.promise,
+  return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
+    async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
+    async removeHost() { state.host = undefined; await persistRegistry(); },
+    waitForStartup() { return startup.promise; },
+    async publishStartup() { assert.ok(startupControl); startupControl.end('publish\n'); },
     async release() { delayed.resolve(); await Promise.all(handled); assert.deepEqual(failures, []); },
     async grants() { return (await readdir(sessionDir)).filter(name => /^retirement-.*\.request$/.test(name)); },
     async failLink(value: boolean) { state.failLink = value; await persistRegistry(); },
-    async prepareHostStartup() {
+    async prepareHostStartup(holdStartup = false) {
+      state.holdStartup = holdStartup;
       state.host = undefined;
       state.startupHost = { ...host, instanceId: 'replacement-host', generation: host.generation + 1 };
       await persistRegistry();
@@ -174,6 +220,10 @@ if (process.argv[2] !== 'collab') {
         try { process.kill(Number(startedPid), 'SIGKILL'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
       }
+      if (fixtureProcess) {
+        if (fixtureProcess.exitCode === null && fixtureProcess.signalCode === null) fixtureProcess.kill();
+        await fixtureExited;
+      }
       await writeFile(statePath, JSON.stringify({ ...state, host: undefined }));
       await rm(lifecyclePath, { force: true });
       await runtime.close();
@@ -188,6 +238,190 @@ if (process.argv[2] !== 'collab') {
     },
   };
 }
+
+test('closed stop recovers only its managed survivor without resolving a capability and tracks retirement until exit', async t => {
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  const exited = once(child, 'exit');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  });
+  await once(child, 'spawn');
+  assert.ok(child.pid);
+  const app = await fixture('accepted', child.pid, 'none');
+  t.after(() => app.close());
+  await app.failLink(true);
+  const unrelated = join(app.config.dataDir, 'sessions', 'unrelated');
+  await mkdir(unrelated, { mode: 0o700 });
+  await writeFile(join(unrelated, 'binding.json'), 'not valid metadata');
+  const binding = await readFile(join(app.sessionDir, 'binding.json'), 'utf8');
+  const history = await readFile(join(app.sessionDir, 'history.jsonl'), 'utf8');
+  const closed: TopicSession = { ...app.session, status: 'closed' };
+  const stopping = app.runtime.stop(closed);
+  const repeated = app.runtime.stop(closed);
+  await app.received;
+  await app.release();
+  assert.equal(await stopping, false, 'a live retiring host is not absent');
+  assert.equal(await repeated, false);
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0]?.guard, 'none');
+  await app.removeHost();
+  assert.equal(await app.runtime.stop(closed), false, 'unregistration alone does not prove process exit');
+  assert.equal(await app.runtime.retireIdle(0), 0);
+  assert.equal(app.requests.length, 1, 'maintenance and repeated stop must not send another request');
+  assert.throws(() => app.runtime.retain(closed.id), /Session is retiring/);
+  child.kill();
+  await exited;
+  await rm(app.lifecyclePath);
+  assert.equal(await app.runtime.stop(closed), true);
+  assert.equal(await app.runtime.stop(closed), true);
+  assert.equal(await readFile(join(app.sessionDir, 'binding.json'), 'utf8'), binding);
+  assert.equal(await readFile(join(app.sessionDir, 'history.jsonl'), 'utf8'), history);
+  assert.ok((await app.commands()).every(args => args[0] === 'collab' && args[1] === 'list'));
+});
+
+test('stop verifies an absent pinned host without recreating metadata, history, or a process', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.removeHost();
+  await rm(app.lifecyclePath);
+  const before = await readdir(app.sessionDir);
+  const binding = await readFile(join(app.sessionDir, 'binding.json'), 'utf8');
+  const history = await readFile(join(app.sessionDir, 'history.jsonl'), 'utf8');
+  assert.equal(await app.runtime.stop(app.session), true);
+  assert.deepEqual(await readdir(app.sessionDir), before);
+  assert.equal(await readFile(join(app.sessionDir, 'binding.json'), 'utf8'), binding);
+  assert.equal(await readFile(join(app.sessionDir, 'history.jsonl'), 'utf8'), history);
+  assert.deepEqual(app.requests, []);
+  assert.ok((await app.commands()).every(args => args[0] === 'collab' && args[1] === 'list'));
+});
+
+test('attached stop leaves terminal ownership and unrelated managed hosts untouched', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  const attached: TopicSession = { ...app.session, id: 'attached', status: 'closed',
+    runtime: { kind: 'attached', instanceId: app.host.instanceId, sessionId: app.host.sessionId } };
+  assert.equal(await app.runtime.stop(attached), true);
+  assert.deepEqual(await app.commands(), []);
+  assert.deepEqual(app.requests, []);
+  assert.equal(app.descriptor.retiring, false);
+  assert.equal((await app.runtime.ensure(app.session)).instanceId, app.host.instanceId);
+  assert.equal(await app.runtime.stop(attached), true);
+  assert.deepEqual(app.requests, []);
+  assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
+});
+
+for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', 'stale-cwd'] as const) {
+  test(`recovered stop refuses ${invalid} identity without unsafe fallback`, async t => {
+    const app = await fixture('accepted', process.pid, 'none');
+    t.after(() => app.close());
+    let diagnostic: RegExp = /does not support safe retirement/;
+    if (invalid === 'missing') await rm(app.lifecyclePath);
+    else if (invalid === 'unsupported') {
+      delete app.descriptor.retirement;
+      await app.persistLifecycle();
+    } else if (invalid === 'stale-pid') {
+      app.descriptor.pid = process.ppid;
+      await app.persistLifecycle();
+      diagnostic = /Managed OMP lifecycle identity changed/;
+    } else if (invalid === 'stale-history') {
+      await writeFile(join(app.sessionDir, 'history.jsonl'), JSON.stringify({
+        type: 'session', version: 3, id: 'another-history', cwd: app.session.instancePath,
+      }) + '\n');
+      diagnostic = /Managed OMP history identity changed/;
+    } else {
+      app.host.cwd = tmpdir();
+      await app.failLink(false);
+      diagnostic = /Managed host working directory changed/;
+    }
+    await assert.rejects(app.runtime.stop(app.session), diagnostic);
+    assert.deepEqual(app.requests, []);
+    assert.equal(app.descriptor.retiring, false);
+    assert.ok((await app.commands()).every(args => args[0] === 'collab' && args[1] === 'list'));
+  });
+}
+
+test('maintenance settles a recovered draining host after exact process exit without another request', async t => {
+  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+  const exited = once(child, 'exit');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exited;
+  });
+  await once(child, 'spawn');
+  assert.ok(child.pid);
+  const app = await fixture('accepted', child.pid, 'none');
+  t.after(() => app.close());
+  app.descriptor.retiring = true;
+  await app.persistLifecycle();
+  assert.equal(await app.runtime.stop(app.session), false);
+  assert.equal(await app.runtime.stop(app.session), false);
+  assert.deepEqual(app.requests, []);
+  child.kill();
+  await exited;
+  assert.equal(await app.runtime.retireIdle(0), 1);
+  assert.equal(await app.runtime.retireIdle(0), 0);
+  assert.equal(await app.runtime.stop(app.session), true, 'a stale registry PID must not keep an exited host alive');
+  assert.deepEqual(app.requests, []);
+});
+
+test('stop fences pending admission before it can launch a managed supervisor', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.prepareHostStartup();
+  await rm(app.lifecyclePath);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let callbacks = 0;
+  const starting = app.runtime.ensure(app.session, async () => {
+    callbacks++;
+    entered.resolve();
+    await release.promise;
+  });
+  const rejected = assert.rejects(starting, /stopping/);
+  await entered.promise;
+  const stopping = app.runtime.stop({ ...app.session, status: 'closed' });
+  release.resolve();
+  await rejected;
+  assert.equal(await stopping, true);
+  assert.equal(callbacks, 1);
+  assert.ok((await app.commands()).every(args => args[0] === 'collab'));
+});
+
+test('managed startup refreshes mutation authorization after admission and preserves its rejection', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.prepareHostStartup();
+  await rm(app.lifecyclePath);
+  const denied = new Error('Session closed while starting');
+  let callbacks = 0;
+  await assert.rejects(app.runtime.ensure(app.session, async () => {
+    callbacks++;
+    if (callbacks === 2) throw denied;
+  }), error => error === denied);
+  assert.equal(callbacks, 2);
+  assert.ok((await app.commands()).every(args => args[0] === 'collab'));
+});
+
+test('stop during managed startup waits for lifecycle publication and retires the host and supervisor', async t => {
+  const app = await fixture('accepted', process.pid, 'none');
+  t.after(() => app.close());
+  await app.prepareHostStartup(true);
+  await rm(app.lifecyclePath);
+  const starting = app.runtime.ensure(app.session);
+  const rejected = assert.rejects(starting, /stopping/);
+  const { pid, supervisorPid } = await app.waitForStartup();
+  const stopping = app.runtime.stop({ ...app.session, status: 'closed' });
+  await app.publishStartup();
+  await rejected;
+  assert.equal(await stopping, true);
+  await assert.rejects(readFile(`/proc/${pid}/stat`), { code: 'ENOENT' });
+  await assert.rejects(readFile(`/proc/${supervisorPid}/stat`), { code: 'ENOENT' });
+  assert.equal(await app.runtime.stop(app.session), true);
+  const commands = await app.commands();
+  assert.equal(commands.filter(args => args[0] !== 'collab').length, 1);
+  assert.equal(commands.filter(args => args[0] === 'collab' && args[1] === 'link').length, 0);
+});
 
 test('existing managed reconnect failure preserves its error without retiring the host, then retries the same host', async t => {
   const app = await fixture();
@@ -233,7 +467,7 @@ test('automatic idle retirement leaves unsupported hosts available without uncon
   assert.deepEqual(app.requests, []);
   assert.equal(app.descriptor.retiring, false);
   assert.deepEqual(await app.runtime.ensure(app.session), initial);
-  await assert.rejects(app.runtime.stop(app.session.id), /does not support safe retirement/);
+  await assert.rejects(app.runtime.stop(app.session), /does not support safe retirement/);
   assert.deepEqual(app.requests, [], 'explicit retirement must not fall back to an unsafe protocol');
   assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
 });
@@ -389,4 +623,30 @@ test('accepted retirement admits a validated replacement reusing its PID with a 
   const release = app.runtime.retain(app.session.id);
   release();
   assert.equal(app.requests.length, 1, 'replacement admission must not send another retirement request');
+});
+
+test('reopened admission keeps an adopted draining host fenced after it leaves the registry', async t => {
+  const app = await fixture('accepted');
+  t.after(() => app.close());
+  app.descriptor.retiring = true;
+  await app.persistLifecycle();
+  await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
+  await app.removeHost();
+  await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
+  await assert.rejects(app.runtime.ensure({ ...app.session, id: 'another-topic' }), /OMP session limit/);
+  assert.deepEqual(app.requests, []);
+  assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);
+});
+
+test('missing lifecycle and registry cannot make a known live host appear absent or launch a duplicate', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.runtime.ensure(app.session);
+  await rm(app.lifecyclePath);
+  await app.removeHost();
+  await assert.rejects(app.runtime.stop(app.session), /does not support safe retirement/);
+  await assert.rejects(app.runtime.ensure(app.session), /cannot safely start another process/);
+  await assert.rejects(app.runtime.ensure({ ...app.session, id: 'another-topic' }), /OMP session limit/);
+  assert.deepEqual(app.requests, []);
+  assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);
 });

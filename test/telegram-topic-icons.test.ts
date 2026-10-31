@@ -179,21 +179,6 @@ test('maintenance retries a dirty icon while unrelated frames arrive during host
   } finally { await app.close(); }
 });
 
-test('closing a topic does not assert idle when its host refuses to stop', {timeout:15000}, async t => {
-  const app = await createSmokeApp();
-  try {
-    const session = await liveTopic(app);
-    app.emit({t:'event',event:{type:'agent_start'}});
-    await eventually(() => lastIcon(app) === runningIcon);
-    t.mock.method(app.runtime,'stop',async () => {});
-    await app.update({message_thread_id:42,forum_topic_closed:{}});
-    assert.equal(app.store.getSession(session.id)?.status,'closed');
-    assert.equal(await app.runtime.isRunning(session),true);
-    assert.equal(lastIcon(app),runningIcon);
-    app.emit({t:'state',state:idle});
-    await eventually(() => lastIcon(app) === finishIcon);
-  } finally { await app.close(); }
-});
 
 test('maintenance retries pending initial authorization with an already connected listener', {timeout:15000}, async t => {
   t.mock.timers.enable({apis:['setInterval']});

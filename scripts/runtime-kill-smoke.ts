@@ -76,6 +76,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
   let terminalOutput = '';
   let attached: TopicSession | undefined;
   const startingSession = { ...managed, id: 'runtime-kill-started-process' };
+  const gracefulSession: TopicSession = { ...managed, id: 'runtime-stop-recovered' };
   try {
     const first = await runtime.ensure(managed);
     const managedDirectory = join(directory, 'sessions', managed.id);
@@ -83,9 +84,21 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     const lifecycle = JSON.parse(await readFile(join(managedDirectory, 'lifecycle.json'), 'utf8')) as { pid: number };
     const historyBefore = await readFile(join(managedDirectory, 'history.jsonl'), 'utf8');
     runtime.markPrompt(managed.id);
+    await runtime.ensure(gracefulSession);
+    const gracefulDirectory = join(directory, 'sessions', gracefulSession.id);
+    const gracefulLifecycle = JSON.parse(await readFile(join(gracefulDirectory, 'lifecycle.json'), 'utf8')) as { pid: number };
+    const gracefulHistory = await readFile(join(gracefulDirectory, 'history.jsonl'), 'utf8');
+    const gracefulBinding = await readFile(join(gracefulDirectory, 'binding.json'), 'utf8');
+    runtime.markPrompt(gracefulSession.id);
     await runtime.close();
     assert.equal(await alive(lifecycle.pid), true, 'service shutdown must preserve a protected host');
     runtime = new OmpRuntime(config);
+    assert.equal(await runtime.stop({ ...gracefulSession, status: 'closed' }), true, 'stop must gracefully retire a recovered host before reconnect');
+    assert.equal(await alive(gracefulLifecycle.pid), false, 'successful stop must confirm process exit');
+    assert.equal(await runtime.stop(gracefulSession), true, 'repeated stop must not launch an absent host');
+    assert.equal(await readFile(join(gracefulDirectory, 'history.jsonl'), 'utf8'), gracefulHistory, 'graceful stop must preserve history bytes');
+    assert.equal(await readFile(join(gracefulDirectory, 'binding.json'), 'utf8'), gracefulBinding, 'graceful stop must preserve the durable binding');
+    assert.equal(await alive(lifecycle.pid), true, 'recovered stop must leave an unrelated managed host alive');
     await runtime.kill(managed);
     assert.equal(await alive(lifecycle.pid), false, 'kill must terminate a recovered managed host without first ensuring it');
     assert.equal(await readFile(join(managedDirectory, 'history.jsonl'), 'utf8'), historyBefore, 'forceful kill must preserve managed history bytes');
@@ -122,7 +135,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     assert.equal(terminalExited, false, 'identity mismatch must never terminate the attached process');
     terminal.write('/kill-hold\r');
     await waitFor(() => exists(started), `Attached command did not start: ${terminalOutput}`);
-    await runtime.stop(attached.id);
+    assert.equal(await runtime.stop(attached), true);
     assert.equal(terminalExited, false, 'graceful managed retirement must not terminate an attached host');
     const killing = runtime.kill(attached);
     assert.equal(runtime.kill(attached), killing, 'concurrent kills must share one operation');
@@ -163,11 +176,11 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     await assert.rejects(startingProcess, /stopping/);
     await waitFor(async () => !await alive(supervisorPid!), 'Cancelled startup supervisor did not exit');
     assert.equal(await runtime.isRunning(startingSession), false, 'kill during process startup must leave no serving host');
-    const retiring = runtime.stop(managed.id);
+    const retiring = runtime.stop(managed);
     await runtime.kill(managed);
     await retiring;
     assert.equal(await alive(resumedLifecycle.pid), false, 'kill must safely supersede concurrent graceful retirement');
-    console.log('PASS actual OMP forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.');
+    console.log('PASS actual OMP recovered graceful stop, forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.');
   } finally {
     if (attached && !terminalExited) await runtime.kill(attached).catch(() => {});
     if (terminal && !terminalExited) {
@@ -175,6 +188,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
       await waitFor(() => terminalExited, 'Disposable attached host cleanup failed');
     }
     await runtime.kill(startingSession).catch(() => {});
+    await runtime.kill(gracefulSession).catch(() => {});
     await runtime.kill(managed).catch(() => {});
     await runtime.close();
   }

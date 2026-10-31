@@ -13,10 +13,10 @@ import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionKill'>;
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionInvalidated' | 'reopenSession'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
-const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
+const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional(),reopen:z.boolean().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
 class SessionGenerationError extends Error {}
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
@@ -62,6 +62,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
     if (!bot || !session || session.botId !== identity.botId) throw new Error('Access denied');
     if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
+    if (expected && session.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
     if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
         await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
     signal?.throwIfAborted();
@@ -71,6 +72,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     const current = options.store.getSession(identity.sessionId);
     if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
+    if (expected && current.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
     if (findInstance(options.config, current.botId, current.chatId)?.path !== current.instancePath) throw new Error('Instance assignment changed');
     if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instancePath !== session.instancePath) throw new Error('Instance assignment changed');
     if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instancePath !== expected.instancePath)) throw new Error('Instance assignment changed');
@@ -120,11 +122,16 @@ export function createServer(options: ServerOptions): GatewayServer {
               authDate:authentication.authDate,
             };
           }
-          const {session,canControl} = await withCancellation(authorize(identity,undefined,undefined,controller.signal),controller.signal);
+          let {session,canControl} = await withCancellation(authorize(identity,undefined,undefined,controller.signal),controller.signal);
+          if (parsed.reopen) {
+            if (parsed.generation === undefined) throw new SessionGenerationError('Reopen confirmation requires the current session generation');
+            session = await withCancellation(bot.reopenSession(session,identity.userId,() => checkGeneration(identity),controller.signal),controller.signal);
+            canControl = true;
+          }
           controller.signal.throwIfAborted();
           if (response.destroyed || response.writableEnded) return;
           checkGeneration(identity);
-          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),ticket:tickets.issue({...identity,access:{session,canControl}}),displayName:participantName(identity)});
+          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),...(session.status === 'open' ? {ticket:tickets.issue({...identity,access:{session,canControl}})} : {}),canReopen:canControl,displayName:participantName(identity)});
           return;
         } finally {
           request.removeListener('aborted',abort);
@@ -196,16 +203,16 @@ export function createServer(options: ServerOptions): GatewayServer {
     let tail: Promise<void> = Promise.resolve();
     let outgoing: { frame: HostFrame; payload: string }[] = [];
     let outgoingScheduled = false, outgoingCount = 0, outgoingBytes = 0, pendingBytes = 0;
-    const unsubscribeKill = botMap.get(identity.botId)!.onSessionKill(sessionId => {
+    const unsubscribeKill = botMap.get(identity.botId)!.onSessionInvalidated((sessionId,reason) => {
       if (sessionId !== identity.sessionId) return;
       try { checkTermination(); }
       catch (error) {
         fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable');
         return;
       }
-      fail(4003, options.store.getSession(sessionId)?.status === 'detached'
+      fail(4003,reason ?? (options.store.getSession(sessionId)?.status === 'detached'
         ? 'This topic is conversation-only; its session is detached'
-        : 'Session process killed. Reopen OPEN AGENT to restart.');
+        : 'Session process killed. Reopen OPEN AGENT to restart.'));
     });
     let refreshingAccess = false;
     const accessTimer = setInterval(() => {

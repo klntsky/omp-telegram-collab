@@ -175,19 +175,53 @@ for (const change of ['membership', 'generation'] as const) {
   });
 }
 
-test('archived topics deny admin mutations while retaining watch access', async () => {
+test('closed topics disconnect clients and require freshly authorized reopening before host admission', {timeout:15000}, async () => {
   const { app, session, connect } = await fixture();
   let socket: WebSocket | undefined;
+  const request = (extra: Record<string,unknown> = {}) => fetch(`${app.url}/api/session`, {
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({botId,sessionId:session.id,initData:app.initData(session.id),...extra}),
+  });
   try {
-    await app.update({ message_thread_id: session.threadId, forum_topic_closed: {} });
-    const reader = await connect(); socket = reader.socket;
-    assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
-    const before = app.accepted.length;
-    const closed = once(socket, 'close');
-    socket.send(JSON.stringify({ t: 'abort' }));
-    const [, reason] = await closed;
-    assert.equal(reason.toString(), 'Archived session');
-    assert.equal(app.accepted.length, before);
+    socket = (await connect()).socket;
+    const closed = once(socket,'close');
+    const oldGeneration = app.store.getSessionGeneration(session.id);
+    await app.update({message_thread_id:session.threadId,forum_topic_closed:{}});
+    assert.equal((await closed)[0],4003);
+    assert.equal(app.activeConnectionCount,0);
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.equal(app.store.getSessionGeneration(session.id),oldGeneration+1);
+    const response = await request();
+    const confirmation = await response.json() as {ticket?:string;generation:number;canReopen:boolean;credential:string};
+    assert.equal(response.status,200);
+    assert.equal(confirmation.ticket,undefined);
+    assert.equal(confirmation.canReopen,true);
+    assert.deepEqual(app.reopenedTopics,[]);
+    app.setCurrentMember({status:'member'});
+    const denied = await request({reopen:true,generation:confirmation.generation,credential:confirmation.credential});
+    assert.equal(denied.status,403);
+    assert.equal(app.store.getSession(session.id)?.status,'closed');
+    assert.deepEqual(app.reopenedTopics,[]);
+    const member = await (await request()).json() as {canReopen:boolean;ticket?:string};
+    assert.equal(member.canReopen,false);
+    assert.equal(member.ticket,undefined);
+    app.setCurrentMember({status:'creator'});
+    const stale = await request({reopen:true,generation:oldGeneration});
+    assert.equal(stale.status,409);
+    assert.deepEqual(app.reopenedTopics,[]);
+    const confirmed = await request({reopen:true,generation:confirmation.generation,credential:confirmation.credential});
+    const admitted = await confirmed.json() as {ticket:string;session:{status:string}};
+    assert.equal(confirmed.status,200);
+    assert.equal(admitted.session.status,'open');
+    assert.deepEqual(app.reopenedTopics,[{chat_id:session.chatId,message_thread_id:session.threadId}]);
+    assert.equal(await app.runtime.isRunning(session),false);
+    socket = (await connect()).socket;
+    assert.equal(await app.runtime.isRunning(session),true);
+    const closedAgain = once(socket,'close');
+    await app.update({message_thread_id:session.threadId,forum_topic_closed:{}});
+    await closedAgain;
+    assert.equal(app.activeConnectionCount,0);
+    assert.equal(await app.runtime.isRunning(session),false);
   } finally { socket?.terminate(); await app.close(); }
 });
 

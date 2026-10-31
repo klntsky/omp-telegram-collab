@@ -9,7 +9,7 @@ import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 
-test('anonymous-admin topic closure persists the gateway archive restriction', async () => {
+test('anonymous-admin topic closure cancels bot work without granting a host ticket', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
@@ -17,19 +17,18 @@ test('anonymous-admin topic closure persists the gateway archive restriction', a
     const session = app.store.listSessions(botId)[0]!;
     await app.update({ message_thread_id: session.threadId, forum_topic_closed: {}, sender_chat: { id: session.chatId, type: 'supergroup', title: 'Fixture project' } }, { id: 1087968824, first_name: 'Group', is_bot: true });
     assert.equal(app.store.getSession(session.id)?.status, 'closed');
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.equal(app.activeConnectionCount,0);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
     const before = app.accepted.length;
     const response = await fetch(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }) });
     assert.equal(response.status, 200);
-    const data = await response.json() as { ticket: string };
-    const socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${data.ticket}`, { origin: app.config.publicUrl });
-    const frames: { t: string; readOnly?: boolean }[] = [];
-    socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
-    await once(socket, 'open');
-    await eventually(() => frames.some(frame => frame.t === 'snapshot-chunk'));
-    assert.equal(frames.find(frame => frame.t === 'welcome')?.readOnly, true);
-    const closed = once(socket, 'close');
-    socket.send(JSON.stringify({ t: 'prompt', text: 'Cannot run in an archived topic' }));
-    await closed;
+    const data = await response.json() as { ticket?: string; canReopen: boolean; session: {status: string} };
+    assert.equal(data.ticket,undefined);
+    assert.equal(data.canReopen,true);
+    assert.equal(data.session.status,'closed');
+    await app.update({text:'/p Must not be admitted',message_thread_id:session.threadId});
+    assert.equal(await app.runtime.isRunning(session),false);
     assert.equal(app.accepted.length, before);
   } finally {
     await app.close();
@@ -170,6 +169,7 @@ test('pending Telegram title survives stale reconnect snapshots and archived or 
     const before = app.titleChanges.length;
     await app.update({message_thread_id:42,forum_topic_edited:{name:'Archived rename'}});
     assert.equal(app.titleChanges.length,before);
+    await app.update({message_thread_id:42,forum_topic_reopened:{}});
     await app.update({message_thread_id:42,text:'/detach'});
     await app.update({message_thread_id:42,forum_topic_edited:{name:'Conversation only'}});
     assert.equal(app.titleChanges.length,before);
@@ -191,7 +191,7 @@ test('removing an assignment disables output immediately and reconciliation deta
     const assigned = app.config.instances[session.instancePath]!;
     const chats = assigned.chats;
     const detached: string[] = [];
-    app.service.onSessionKill(id => detached.push(id));
+    app.service.onSessionInvalidated(id => detached.push(id));
     const before = app.messages.length;
     assigned.chats = [];
     app.emit({ t: 'event', event: { type: 'message_end', message: {

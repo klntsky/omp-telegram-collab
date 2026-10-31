@@ -68,7 +68,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     observeFrame() {},
     markPrompt() {},
     retain() { return () => {}; },
-    async stop() {}, async kill() {}, async close() {},
+    async stop() { return true; }, async kill() {}, async close() {},
   };
   const bot = new Bot(botToken, { client: { apiRoot: `http://127.0.0.1:${address.port}` } });
   const service = createBot({ config, botConfig: config.bots[0]!, token: botToken, store, runtime, bot });

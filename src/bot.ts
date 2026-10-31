@@ -30,7 +30,7 @@ export interface RuntimeLike {
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
   attach(instanceId: string, instancePath: string): Promise<HostBinding>;
-  stop(id: string): Promise<void>;
+  stop(session: TopicSession): Promise<boolean>;
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
   availableModelPresets(instancePath: string): Promise<string[]>;
@@ -205,7 +205,8 @@ export class BotService {
   private readonly delivery: TelegramDelivery;
   private readonly topicIcons = new Map<string, TopicIconProjection>();
   private readonly hostObservations = new Map<string, Promise<void>>();
-  private readonly sessionKillHandlers = new Set<(sessionId: string) => void>();
+  private readonly sessionInvalidationHandlers = new Set<(sessionId: string, reason?: string) => void>();
+  private readonly closedSessions = new Map<string, { generation: number; settled: boolean; pending?: Promise<void> }>();
   private readonly commandMenus = new Map<number, string>();
   private globalCommandMenu?: string;
   private readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
@@ -501,7 +502,8 @@ export class BotService {
     if (this.receivedMessages.has(ctx)) return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
-    if (this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)})?.status === 'detached') return;
+    const topic = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
+    if (topic && topic.status !== 'open') return;
     if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
     const promptInput = !text.startsWith('/') || /^\/(?:new|worktree|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
     if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
@@ -520,7 +522,7 @@ export class BotService {
         this.options.store.cancelInitialTask(session.id);
         this.options.store.advanceSessionGeneration(session.id);
         this.dropListener(session.id);
-        for (const handler of this.sessionKillHandlers) handler(session.id);
+        for (const handler of this.sessionInvalidationHandlers) handler(session.id);
       }
       const results = await Promise.allSettled(sessions.map(session => this.options.runtime.kill(session)));
       const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
@@ -683,9 +685,43 @@ export class BotService {
       offset = end;
     }
   }
-  onSessionKill(handler: (sessionId: string) => void): () => void {
-    this.sessionKillHandlers.add(handler);
-    return () => { this.sessionKillHandlers.delete(handler); };
+  onSessionInvalidated(handler: (sessionId: string, reason?: string) => void): () => void {
+    this.sessionInvalidationHandlers.add(handler);
+    return () => { this.sessionInvalidationHandlers.delete(handler); };
+  }
+  reopenSession(session: TopicSession, userId: number, beforeMutation: () => void, signal?: AbortSignal): Promise<TopicSession> {
+    const operation = this.updateTail.then(async () => {
+      if (!(await this.authorizeSession(session,userId,signal))) throw new Error('Administrator access required to reopen this topic');
+      signal?.throwIfAborted();
+      beforeMutation();
+      this.requireSessionAssignment(session);
+      const current = this.options.store.getSession(session.id)!;
+      if (current.status === 'detached') throw new Error('This topic is conversation-only; its session is detached');
+      if (current.status === 'closed') {
+        const deadline = new AbortController();
+        const timeoutReason = new DOMException('Telegram topic reopening timed out after 10 seconds','TimeoutError');
+        const cancellation = AbortSignal.any(signal ? [signal,this.background.signal,deadline.signal] : [this.background.signal,deadline.signal]);
+        const telegram = new TelegramAbortController();
+        const cancelTelegram = () => telegram.abort();
+        cancellation.addEventListener('abort',cancelTelegram,{once:true});
+        const timeout = setTimeout(() => deadline.abort(timeoutReason),10000);
+        try {
+          cancellation.throwIfAborted();
+          await withCancellation(this.bot.api.reopenForumTopic(current.chatId,current.threadId,telegram.signal),cancellation);
+        } finally {
+          clearTimeout(timeout);
+          cancellation.removeEventListener('abort',cancelTelegram);
+          telegram.abort();
+        }
+        beforeMutation();
+        this.requireSessionAssignment(current);
+        this.options.store.updateSession(current.id,{status:'open'});
+        this.closedSessions.delete(current.id);
+      }
+      return this.options.store.getSession(session.id)!;
+    });
+    this.updateTail = operation.then(() => undefined,() => undefined);
+    return operation;
   }
   async ensureMirroring(session: TopicSession, binding: HostBinding, beforeMutation?: () => Promise<void>): Promise<void> {
     this.requireSessionAssignment(session);
@@ -774,6 +810,7 @@ export class BotService {
     await this.polling?.done.catch(() => undefined);
     for (const timer of this.reconnects.values()) clearTimeout(timer);
     this.reconnects.clear();
+    this.closedSessions.clear();
     this.capacityRequests.clear();
     this.promptProposals.clear();
     for (const token of this.questions.keys()) this.endQuestion(token);
@@ -1035,9 +1072,10 @@ export class BotService {
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
+        this.closedSessions.delete(session.id);
         this.topicIcons.delete(session.id);
         for (const [token, request] of this.capacityRequests) if (request.sessionId === session.id) this.capacityRequests.delete(token);
-        for (const handler of this.sessionKillHandlers) handler(session.id);
+        for (const handler of this.sessionInvalidationHandlers) handler(session.id);
       }
     }
     if (this.options.config.terminated) { await this.applyTermination(); return; }
@@ -1108,7 +1146,8 @@ export class BotService {
     ++icon.revision;
   }
   private setTopicStatus(session: TopicSession, activity: TopicActivity, createdIcon?: string): Promise<void> {
-    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return Promise.resolve();
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
+        this.options.store.getSession(session.id)?.status !== 'open') return Promise.resolve();
     const generation = this.options.store.getSessionGeneration(session.id);
     let icon = this.topicIcons.get(session.id);
     if (!icon) {
@@ -1181,6 +1220,7 @@ export class BotService {
     if (existing) return existing;
     const generation = this.options.store.getSessionGeneration(session.id);
     const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
+      this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation && !this.listeners.has(session.id);
     const observation = (async () => {
       if (!active()) return;
@@ -1203,6 +1243,13 @@ export class BotService {
   }
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+    if (this.options.store.getSession(session.id)?.status === 'closed') {
+      const state = this.closedSessions.get(session.id);
+      if (!state || state.generation !== this.options.store.getSessionGeneration(session.id) || (!state.settled && !state.pending)) {
+        void this.runBackground(`close:${session.id}`,() => this.windDownClosedSession(session));
+      }
+      return;
+    }
     const generation = this.options.store.getSessionGeneration(session.id);
     let listener = this.listeners.get(session.id);
     if (listener && listener.generation !== generation) {
@@ -1260,19 +1307,45 @@ export class BotService {
         this.titleRevisions.get(session.id) === revision);
     }
   }
+  private windDownClosedSession(session: TopicSession): Promise<void> {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    let state = this.closedSessions.get(session.id);
+    if (!state || state.generation !== generation) {
+      state = {generation,settled:session.runtime.kind === 'attached'};
+      this.closedSessions.set(session.id,state);
+      this.options.store.cancelInitialTask(session.id);
+      this.dropListener(session.id);
+      for (const [token, request] of this.capacityRequests) {
+        if (request.sessionId === session.id) this.capacityRequests.delete(token);
+      }
+      for (const [token, proposal] of this.promptProposals) {
+        if (proposal.sessionId === session.id) this.promptProposals.delete(token);
+      }
+    }
+    if (state.settled) return Promise.resolve();
+    if (state.pending) return state.pending;
+    const current = state;
+    const pending = this.options.runtime.stop(session).then(settled => {
+      current.settled = settled;
+    }).finally(() => { current.pending = undefined; });
+    current.pending = pending;
+    return pending;
+  }
+
   private async detachSession(session: TopicSession): Promise<void> {
     this.options.store.setPendingSessionTitle(session.id,undefined);
     this.options.store.updateSession(session.id,{status:'detached'});
     this.options.store.advanceSessionGeneration(session.id);
     this.options.store.cancelInitialTask(session.id);
     this.dropListener(session.id);
+    this.closedSessions.delete(session.id);
     for (const [token, request] of this.capacityRequests) {
       if (request.sessionId === session.id) this.capacityRequests.delete(token);
     }
     for (const [token, proposal] of this.promptProposals) {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
-    for (const handler of this.sessionKillHandlers) handler(session.id);
+    for (const handler of this.sessionInvalidationHandlers) handler(session.id);
     const icon = this.topicIcons.get(session.id);
     await icon?.tail;
     this.topicIcons.delete(session.id);
@@ -1774,20 +1847,26 @@ export class BotService {
       return;
     }
     if (session && 'forum_topic_closed' in message) {
-      this.options.store.updateSession(session.id, {status:'closed'});
-      const listener = this.listeners.get(session.id);
-      clearTimeout(listener?.initial?.timer);
-      if (listener) listener.initial = undefined;
-      await this.options.runtime.stop(session.id);
-      await this.refreshTopicStatus(session);
+      if (this.options.store.getSession(session.id)?.status !== 'closed') {
+        this.options.store.updateSession(session.id,{status:'closed'});
+        this.options.store.advanceSessionGeneration(session.id);
+      }
+      this.options.store.cancelInitialTask(session.id);
+      this.dropListener(session.id);
+      for (const handler of this.sessionInvalidationHandlers) handler(session.id,'This topic is closed. Reopen it explicitly to connect.');
+      void this.runBackground(`close:${session.id}`,() => this.windDownClosedSession(session));
       return;
     }
     if (session && 'forum_topic_reopened' in message) {
       this.options.store.updateSession(session.id,{status:'open'});
-      await this.refreshTopicStatus(session);
+      this.closedSessions.delete(session.id);
       return;
     }
     if (!ctx.from || ctx.from.is_bot || !text || 'forward_origin' in message || 'forward_date' in message) return;
+    if (session?.status === 'closed' && !['status','help'].includes(command?.[1]?.toLowerCase() ?? '')) {
+      await replyTo(ctx,destination,'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.');
+      return;
+    }
     if (!detached && await this.skills.message(ctx, text, session)) return;
     const allMessagesArePrompts = this.allMessagesArePrompts(ctx.chat.id);
     let prompt = '';
@@ -1946,7 +2025,7 @@ export class BotService {
         if (action === 'kill') {
           this.options.store.advanceSessionGeneration(session.id);
           this.dropListener(session.id);
-          for (const handler of this.sessionKillHandlers) handler(session.id);
+          for (const handler of this.sessionInvalidationHandlers) handler(session.id);
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session,message.message_id);
           await this.setTopicStatus(session, 'finished');
@@ -2042,6 +2121,7 @@ export class BotService {
   private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly = false, recoverClosed = true): Promise<CollabConnection> {
     if (existingOnly && !binding) return Promise.reject(new Error('Existing host binding is required'));
     this.requireSessionAssignment(session);
+    if (this.options.store.getSession(session.id)?.status !== 'open') return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
     const generation = this.options.store.getSessionGeneration(session.id);
     const existing = this.listeners.get(session.id);
     if (existing?.promise && existing.generation === generation) return existing.promise;
@@ -2054,6 +2134,7 @@ export class BotService {
     this.listeners.set(session.id, listener);
     void this.setTopicStatus(session,listener.activity);
     const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
+      this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation && this.listeners.get(session.id) === listener;
     const closed = new Error('Session closed');
     listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session,beforeMutation)).then(async binding => {
@@ -2095,6 +2176,7 @@ export class BotService {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
+    if (session.status !== 'open') throw new Error('This topic is closed. Reopen it before submitting work.');
     if (this.listeners.get(session.id) !== listener ||
         listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     const observation: TaskObservation = {state:'waiting for acceptance'};
