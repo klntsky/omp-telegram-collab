@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
@@ -26,6 +26,16 @@ function session(row: Row | undefined): TopicSession | undefined {
   if (!row) return undefined;
   return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instancePath: String(row.instance_path), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
 }
+function promptFingerprint(content: PromptContent): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        content.text,
+        (content.images ?? []).map((image) => [image.mimeType, image.data]),
+      ]),
+    )
+    .digest('hex');
+}
 export class Store {
   readonly db: DatabaseSync;
   constructor(filename: string) {
@@ -43,9 +53,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,message_id));
+      CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,entry_id));
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_pending_close_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
@@ -55,8 +69,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
       COMMIT;`);
-    for (const row of this.db.prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics').all()) {
-      this.detachTopic({botId:Number(row.bot_id),chatId:Number(row.chat_id),threadId:Number(row.thread_id)});
+    for (const row of this.db
+      .prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics')
+      .all()) {
+      this.detachTopic({
+        botId: Number(row.bot_id),
+        chatId: Number(row.chat_id),
+        threadId: Number(row.thread_id),
+      });
     }
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
@@ -85,6 +105,7 @@ export class Store {
     const existing = this.getTopic({botId:key.botId,destination:topicDestination(key.chatId,key.threadId)});
     if (!existing) return;
     this.db.prepare("UPDATE sessions SET status='detached' WHERE id=?").run(existing.id);
+    this.completeCloseIcon(existing.id);
     this.setPendingSessionTitle(existing.id,undefined);
     this.db.prepare('DELETE FROM session_topic_title_prefixes WHERE session_id=?').run(existing.id);
     this.cancelInitialTask(existing.id);
@@ -156,9 +177,27 @@ export class Store {
     return rows.map(row => session(row as Row)!);
   }
   updateSession(id: string, value: { name?: string; status?: TopicSession['status'] }): TopicSession | undefined {
-    if (value.name !== undefined) this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(value.name, id);
-    if (value.status !== undefined) this.db.prepare('UPDATE sessions SET status=? WHERE id=?').run(value.status, id);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (value.name !== undefined) this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(value.name, id);
+      if (value.status !== undefined) {
+        if (value.status === 'closed') {
+          this.db.prepare("INSERT OR IGNORE INTO session_pending_close_icons SELECT id FROM sessions WHERE id=? AND status!='closed'").run(id);
+        } else this.completeCloseIcon(id);
+        this.db.prepare('UPDATE sessions SET status=? WHERE id=?').run(value.status, id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return this.getSession(id);
+  }
+  hasPendingCloseIcon(id: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM session_pending_close_icons WHERE session_id=?').get(id));
+  }
+  completeCloseIcon(id: string): void {
+    this.db.prepare('DELETE FROM session_pending_close_icons WHERE session_id=?').run(id);
   }
   getPendingSessionTitle(id: string): string | undefined {
     const row = this.db.prepare('SELECT title FROM session_pending_titles WHERE session_id=?').get(id);
@@ -174,6 +213,17 @@ export class Store {
   }
   setTopicTitlePrefix(id: string, prefix: string): void {
     this.db.prepare('INSERT INTO session_topic_title_prefixes VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET prefix=excluded.prefix').run(id,prefix);
+  }
+  setTopicTitle(id: string, name: string, prefix: string): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(name, id);
+      this.setTopicTitlePrefix(id, prefix);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   getSessionGeneration(id: string): number {
     const row = this.db.prepare('SELECT generation FROM session_generations WHERE session_id=?').get(id);
@@ -237,6 +287,17 @@ export class Store {
     const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);
     return row ? Number(row.user_id) : undefined;
   }
+  setInitialMessage(id: string, messageId: number): void {
+    this.db
+      .prepare(
+        'INSERT INTO initial_messages VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET message_id=excluded.message_id',
+      )
+      .run(id, messageId);
+  }
+  getInitialMessage(id: string): number | undefined {
+    const row = this.db.prepare('SELECT message_id FROM initial_messages WHERE session_id=?').get(id);
+    return row ? Number(row.message_id) : undefined;
+  }
   getSessionEntry(id: string): {messageId: number; markup: string} | undefined {
     const row = this.db.prepare('SELECT message_id,markup FROM session_entries WHERE session_id=?').get(id);
     return row ? {messageId:Number(row.message_id),markup:String(row.markup)} : undefined;
@@ -254,6 +315,117 @@ export class Store {
   getReplyTarget(id: string): number | undefined {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
+  }
+  recordPromptSubmission(
+    sessionId: string,
+    sender: string,
+    content: PromptContent,
+    messageId?: number,
+  ): number {
+    const result = this.db
+      .prepare(
+        "INSERT INTO prompt_submissions (session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
+      )
+      .run(sessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
+    return Number(result.lastInsertRowid);
+  }
+  rejectPromptSubmission(submissionId: number): void {
+    this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(submissionId);
+  }
+  markPromptSubmissionUncertain(submissionId: number): void {
+    this.db
+      .prepare("UPDATE prompt_submissions SET state='uncertain' WHERE id=? AND state='pending'")
+      .run(submissionId);
+  }
+  beginPromptReceiptSnapshot(sessionId: string): number {
+    this.db
+      .prepare(
+        "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND state='pending'",
+      )
+      .run(sessionId);
+    const row = this.db
+      .prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=?')
+      .get(sessionId);
+    return Number(row?.boundary ?? 0);
+  }
+  recordPromptReceipt(
+    sessionId: string,
+    entryId: string,
+    sender: string | undefined,
+    content: PromptContent,
+    snapshotBoundary?: number,
+  ): { fresh: boolean; messageId?: number; submissionId?: number } {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.db
+        .prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND entry_id=?')
+        .get(sessionId, entryId);
+      if (previous) {
+        this.db.exec('COMMIT');
+        return {
+          fresh: false,
+          ...(previous.message_id === null ? {} : { messageId: Number(previous.message_id) }),
+        };
+      }
+      const column = content.images === undefined ? 'text' : 'fingerprint';
+      const value = column === 'text' ? content.text : promptFingerprint(content);
+      let condition = `session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
+      let parameters = [
+        sessionId,
+        sender ?? '',
+        value,
+        snapshotBoundary ?? null,
+        snapshotBoundary ?? null,
+      ];
+      let candidates =
+        sender === undefined
+          ? []
+          : this.db
+              .prepare(
+                `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+              )
+              .all(...parameters);
+      let uncorrelated = false;
+      if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
+        condition = 'session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
+        parameters = [
+          sessionId,
+          sender,
+          content.text,
+          snapshotBoundary ?? null,
+          snapshotBoundary ?? null,
+        ];
+        candidates = this.db
+          .prepare(
+            `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+          )
+          .all(...parameters);
+        uncorrelated = candidates.length > 0;
+      }
+      const pending = candidates[0];
+      const conflicting =
+        uncorrelated ||
+        (candidates.length > 1 && candidates.some((row) => row.state !== 'pending'));
+      if (conflicting)
+        this.db
+          .prepare(`UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`)
+          .run(...parameters);
+      const ambiguous = conflicting || pending?.state === 'ambiguous';
+      const messageId = ambiguous ? undefined : pending?.message_id;
+      this.db
+        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?)')
+        .run(sessionId, entryId, messageId ?? null);
+      if (pending) this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(pending.id);
+      this.db.exec('COMMIT');
+      return {
+        fresh: true,
+        ...(messageId === undefined || messageId === null ? {} : { messageId: Number(messageId) }),
+        ...(pending && !ambiguous ? { submissionId: Number(pending.id) } : {}),
+      };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   getTopicFinishIcon(id: string): string | undefined {
     const row = this.db.prepare('SELECT icon_id FROM session_topic_finish_icons WHERE session_id=?').get(id);

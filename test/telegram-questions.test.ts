@@ -93,6 +93,37 @@ for (const allMessagesArePrompts of [true,false]) {
 }
 });
 
+test('chat handoff routes question replies as prompts without reopening completed answers', async () => {
+  for (const allMessagesArePrompts of [true,false]) {
+    const app = await createSmokeApp({skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      if (!allMessagesArePrompts) await setForumSetting(app,0);
+      await app.update({text:'/new Start'});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      const session = app.store.listSessions(botId)[0]!;
+      const before = app.messages.length;
+      app.emit({t:'ui-request',request:{kind:'select',reqId:85,title:'Choose handling',options:['Keep cleanup','Chat about this']}});
+      await eventually(() => app.messages.slice(before).some(message => JSON.stringify(message.reply_markup)?.includes('ask:')));
+      const questionMessages = app.messages.slice(before);
+      const control = questionMessages.at(-1)!;
+      const {inline_keyboard} = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(control.reply_markup);
+      await app.callback(inline_keyboard[0]![1]!.callback_data,control);
+      assert.deepEqual(app.accepted.at(-1),{t:'ui-response',reqId:85,value:'Chat about this'});
+      for (const [index,question] of questionMessages.entries()) {
+        const text = `Explain tradeoff ${index}\nKeep the operation reversible.`;
+        const count = app.accepted.length;
+        await app.update({message_id:8250+index,message_thread_id:session.threadId,text,reply_to_message:{message_id:question.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+        assert.deepEqual(app.accepted.slice(count),[{t:'prompt',text}]);
+      }
+      const count = app.accepted.length;
+      app.store.advanceSessionGeneration(session.id);
+      await app.update({message_thread_id:session.threadId,text:'Do not resume an old handoff',reply_to_message:{message_id:control.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+      assert.deepEqual(app.accepted.slice(count),[]);
+    } finally { await app.close(); }
+  }
+});
+
 test('question answers reject copied buttons, removed members, ended requests and disconnected listeners', async () => {
   const app = await createSmokeApp();
   try {

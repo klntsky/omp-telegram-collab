@@ -146,6 +146,29 @@ test('disk and in-memory stores reject missing instance paths and orphan reply t
   }
 });
 
+test('topic display and generated prefix commit together or both roll back', () => {
+  const store = new Store(':memory:');
+  try {
+    const session = store.createSession(topic, 'Initial title');
+    store.setTopicTitle(session.id, 'old-branch Readable title', 'old-branch');
+    store.db
+      .exec(`CREATE TEMP TRIGGER reject_topic_prefix BEFORE UPDATE ON session_topic_title_prefixes
+      BEGIN SELECT RAISE(ABORT,'Fixture prefix write failed'); END`);
+    assert.throws(
+      () => store.setTopicTitle(session.id, 'new-branch Readable title', 'new-branch'),
+      (error) => error instanceof Error && error.message === 'Fixture prefix write failed',
+    );
+    assert.equal(store.getSession(session.id)?.name, 'old-branch Readable title');
+    assert.equal(store.getTopicTitlePrefix(session.id), 'old-branch');
+    store.db.exec('DROP TRIGGER reject_topic_prefix');
+    store.setTopicTitle(session.id, 'new-branch Readable title', 'new-branch');
+    assert.equal(store.getSession(session.id)?.name, 'new-branch Readable title');
+    assert.equal(store.getTopicTitlePrefix(session.id), 'new-branch');
+  } finally {
+    store.close();
+  }
+});
+
 test('topic identity survives a service restart and closing preserves its history binding', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-store-'));
   const filename = join(dir, 'topics.sqlite');
@@ -175,6 +198,25 @@ test('topic identity survives a service restart and closing preserves its histor
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('initial task message provenance survives restart without acknowledging it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-initial-message-'));
+  const filename = join(directory, 'topics.sqlite');
+  let store = new Store(filename);
+  try {
+    const task = { text: 'Initial task awaiting admission' };
+    const session = store.createSession(topic, 'Pending task', { kind: 'managed' }, task, 42);
+    store.setInitialMessage(session.id, 7101);
+    store.close();
+    store = new Store(filename);
+    assert.equal(store.getInitialMessage(session.id), 7101);
+    assert.equal(store.getReplyTarget(session.id), undefined);
+    assert.deepEqual(store.claimInitialTask(session.id), task);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

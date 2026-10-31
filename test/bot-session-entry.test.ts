@@ -22,6 +22,30 @@ test('enrollment requires permission to pin the session entry', async () => {
   }
 });
 
+test('rich Telegram commands create a session and rich bot replies submit quoted followups', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({rich_message:{blocks:[
+      {type:'paragraph',text:[{type:'bot_command',text:'/new',bot_command:'new'},' Fix setup']},
+      {type:'list',items:[{label:'•',blocks:[{type:'paragraph',text:'Include the folder'}]}]},
+    ]}});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const session = app.store.listSessions(botId)[0]!;
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
+      {t:'prompt',text:'Fix setup\n\n• Include the folder'},
+    ]);
+    await app.update({message_thread_id:session.threadId,rich_message:{blocks:[{type:'paragraph',text:'Continue'}]},
+      reply_to_message:{message_id:900,from:{id:botId,is_bot:true,first_name:'Bot'},rich_message:{blocks:[{type:'paragraph',text:'Previous result'}]}}});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === '> Previous result\n\nContinue'));
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
+      {t:'prompt',text:'Fix setup\n\n• Include the folder'},
+      {t:'prompt',text:'> Previous result\n\nContinue'},
+    ]);
+  } finally { await app.close(); }
+});
+
 test('another participant starting work does not cancel an explicitly rejected initial task', async () => {
   const app = await createSmokeApp({ competingStartAfterRejection: true });
   try {

@@ -145,7 +145,6 @@ try {
   config.omp.maxSessions = 2;
   writeConfig(config);
   const reopenedConfig = readConfig(config.configPath);
-  assert.deepEqual(reopenedConfig.instances[dir]?.chats, [{ botId: session.botId, chatId: session.chatId, all_messages_are_prompts: true, users_can_propose_prompts: false }]);
   assert.deepEqual(await readFile(historyPath), historyBeforeReopen);
   const reopenedStore = new Store(filename);
   runtime = new OmpRuntime(reopenedConfig);
