@@ -27,7 +27,7 @@ for (const enabled of [true,false]) {
       const before = app.messages.length;
       await app.update({text:'/cli',message_thread_id:42});
       const replies = app.messages.slice(before);
-      const command = `omp-telegram session join --chat ${chatId} --topic 42`;
+      const command = `omp-telegram-collab session join --chat ${chatId} --topic 42`;
       assert.deepEqual(copies(replies),[command]);
       const reply = replies.find(message => copies([message]).length)!;
       assert.ok(!String(reply.text).includes(session.id));

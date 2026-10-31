@@ -24,7 +24,7 @@ import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from '
 import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
-import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
+import { configWritable, defaultConfigPath, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
 import { installTelegramRetry } from './telegram-retry.js';
@@ -2244,6 +2244,10 @@ export class BotService {
     await this.listen(session);
     await this.sendInitial(session);
   }
+  private localCliCommand(): string {
+    const configPath = this.options.config.configPath;
+    return configPath === defaultConfigPath() ? 'omp-telegram-collab' : `omp-telegram-collab --config '${configPath.replaceAll("'", "'\\''")}'`;
+  }
   private async setup(ctx: Context): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
     const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from.id);
@@ -2260,9 +2264,10 @@ export class BotService {
         return;
       }
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
-      const quotedPath = "'" + this.options.config.configPath.replaceAll("'", "'\\''") + "'";
-      const command = `omp-telegram --config ${quotedPath} approve ${request.code}`;
-      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
+      const quotedInstancePath = "'" + process.cwd().replaceAll("'", "'\\''") + "'";
+      const command = `${this.localCliCommand()} approve ${request.code} --path ${quotedInstancePath}`;
+      const prefix = "Setup requested. On the agent's computer, approve within 10 minutes:\n";
+      await replyTo(ctx, contextDestination(ctx), `${prefix}${command}\nThe project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.`, { entities: [{ type: 'code', offset: prefix.length, length: command.length }] });
       return;
     }
     if (!(await this.currentAdmin(ctx))) {
@@ -2278,7 +2283,7 @@ export class BotService {
   async requestCapacity(session: TopicSession, limit: number): Promise<void> {
     if (!this.sessionAssigned(session)) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `${this.localCliCommand()} setup`;
       await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
@@ -2322,7 +2327,7 @@ export class BotService {
     const session = this.options.store.getSession(request.sessionId);
     if (!session || !this.sessionAssigned(session) || session.status !== 'open' || session.chatId !== request.chatId || session.threadId !== request.threadId) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `${this.localCliCommand()} setup`;
       await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
@@ -3019,26 +3024,11 @@ export class BotService {
           return;
         }
         this.requireSessionAssignment(session);
-        if (session.status !== 'open') {
-          await replyTo(
-            ctx,
-            destination,
-            'This session is archived. Reopen the topic before joining.',
-          );
-          return;
-        }
-        const command = `omp-telegram session join --chat ${destination.chatId} --topic ${destination.threadId}`;
-        await replyTo(
-          ctx,
-          destination,
-          `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`,
-          {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[{ text: 'Copy command', copy_text: { text: command } }]],
-            },
-          },
-        );
+        if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return; }
+        const command = `omp-telegram-collab session join --chat ${destination.chatId} --topic ${destination.threadId}`;
+        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
+          parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
+        });
         return;
       }
       if (action === 'session') {
