@@ -24,11 +24,14 @@ test('setup opens current settings and navigation edits one panel with Back and 
     await clickSettings(app, 1);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
     await clickSettings(app, 0);
+    assert.equal(saved(app).chat.all_messages_are_prompts,true);
     await clickSettings(app, -2);
     await clickSettings(app, 1);
     await clickSettings(app, 0);
     assert.equal(saved(app).chat.users_can_propose_prompts,true);
     await clickSettings(app, 1);
+    assert.equal(saved(app).chat.users_can_propose_prompts,false);
+    await clickSettings(app, -2);
     await clickSettings(app, -1);
     assert.deepEqual(app.store.listSessions(botId),[]);
     assert.equal(app.connectionCount,0);
@@ -147,6 +150,8 @@ for (const catalog of ['skill','preset'] as const) {
       await clickSettings(app,9);
       await clickSettings(app,9);
       await clickSettings(app,10);
+      await clickSettings(app,1);
+      assert.equal(catalog === 'skill' ? saved(app).chat.default_new_topic_skill : saved(app).chat.default_model_preset,names[17]);
       await clickSettings(app,2);
       assert.equal(catalog === 'skill' ? saved(app).chat.default_new_topic_skill : saved(app).chat.default_model_preset,names[18]);
     } finally { await app.close(); }
@@ -290,9 +295,13 @@ for (const change of ['role','assignment','unrelated'] as const) {
       const instance = Object.values(updated.instances)[0]!;
       if (change === 'assignment') instance.chats = [];
       else if (change === 'unrelated') updated.port = 23456;
+      let changed = false;
       t.mock.method(app.runtime,'availableModelPresets',async()=>{
-        if (change === 'role') app.setCurrentMember({status:'member'});
-        writeConfig(updated);
+        if (!changed) {
+          changed = true;
+          if (change === 'role') app.setCurrentMember({status:'member'});
+          writeConfig(updated);
+        }
         return ['Fast','Slow'];
       });
       await app.callback(choice,panel);
@@ -311,7 +320,6 @@ test('a removed catalog choice preserves the saved default', async t => {
   try {
     await app.update({text:'/setup'});
     await setForumSetting(app, 3, 1);
-    await clickSettings(app, 3);
     const page = app.messages.at(-1)!;
     const choice = settingsButton(page, 0);
     t.mock.method(app.runtime,'availableModelPresets',async()=>['Slow']);

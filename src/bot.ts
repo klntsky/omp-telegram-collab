@@ -130,7 +130,9 @@ interface SettingsPanel {
   instancePath: string;
   expires: number;
   revision: number;
+  offset: number;
   choices: SettingsAction[];
+  changes: Map<SettingsPage, {label: string; before: string; after: string}>;
 }
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
@@ -245,7 +247,7 @@ export class BotService {
     const panel: SettingsPanel = {
       token: randomBytes(16).toString('base64url'), chatId: ctx.chat!.id,
       destination: contextDestination(ctx), messageId: 0, instancePath: this.assignedPath(ctx.chat!.id),
-      expires: Date.now() + 15 * 60_000, revision: 0, choices: [],
+      expires: Date.now() + 15 * 60_000, revision: 0, offset: 0, choices: [], changes: new Map(),
     };
     const persisted = await this.settingsAccess(ctx, panel);
     for (const [token, old] of this.settingsPanels) if (old.expires <= Date.now()) this.settingsPanels.delete(token);
@@ -261,55 +263,65 @@ export class BotService {
     const rows: {text: string; callback_data: string}[][] = [];
     const choices: SettingsAction[] = [];
     const revision = panel.revision + 1;
-    const button = (text: string, action: SettingsAction) => {
+    const button = (text: string, action: SettingsAction, current = false) => {
       const index = choices.push(action) - 1;
-      rows.push([{text: text.slice(0, 100), callback_data: `settings:${panel.token}:${revision}:${index}`}]);
+      rows.push([{text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100), callback_data: `settings:${panel.token}:${revision}:${index}`}]);
     };
-    let text = 'Settings\nForum defaults apply to this forum, not the current topic. Existing topic skills and running models are unchanged.';
+    let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
-      text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nLive session count limit: ${config.omp.maxSessions} sessions across all instances\nNew-topic worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`;
-      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Live session count limit','capacity'],['New-topic worktrees','worktrees']] as const) {
+      for (const [label, target] of [
+        [`Message handling · ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, 'prompts'],
+        [`Who can send requests · ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, 'proposals'],
+        [`Skill for new topics · ${chat.default_new_topic_skill ?? 'No default skill'}`, 'skills'],
+        [`Model preset for new sessions · ${chat.default_model_preset ?? 'Use host default'}`, 'presets'],
+        [`Maximum live sessions · ${config.omp.maxSessions} · Service-wide`, 'capacity'],
+        [`Worktrees for new topics · ${chat.create_topic_worktrees === true ? 'Create a worktree' : 'Use the instance directory'}`, 'worktrees'],
+      ] as const) {
         button(label, {kind:'page',page:target});
       }
-    } else if (page === 'prompts' || page === 'proposals') {
-      const prompts = page === 'prompts';
-      text = prompts ? `Forum prompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}` : `Forum user proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}`;
-      button(prompts ? 'All messages' : 'Allow user proposals', {kind:'set',field:prompts ? 'all_messages_are_prompts' : 'users_can_propose_prompts',value:true});
-      button(prompts ? 'Only /p' : 'Ignore non-admin prompts', {kind:'set',field:prompts ? 'all_messages_are_prompts' : 'users_can_propose_prompts',value:false});
+    } else if (page === 'prompts') {
+      text = 'Which messages go to the assistant?\nApplies to this group.\nCommands and replies only means using /p or replying to a bot message. Ordinary messages and mentions are ignored.';
+      button('All messages', {kind:'set',field:'all_messages_are_prompts',value:true}, chat.all_messages_are_prompts !== false);
+      button('Commands and replies only', {kind:'set',field:'all_messages_are_prompts',value:false}, chat.all_messages_are_prompts === false);
+    } else if (page === 'proposals') {
+      text = 'Who can send requests?\nApplies to this group.\nAdmin requests run directly. Member requests need admin approval.';
+      button('Members too, with admin approval', {kind:'set',field:'users_can_propose_prompts',value:true}, chat.users_can_propose_prompts === true);
+      button('Admins only', {kind:'set',field:'users_can_propose_prompts',value:false}, chat.users_can_propose_prompts !== true);
     } else if (page === 'worktrees') {
-      text = `Create worktrees for new managed topics: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`;
-      button('Enable', {kind:'set',field:'create_topic_worktrees',value:true});
-      button('Disable', {kind:'set',field:'create_topic_worktrees',value:false});
+      text = 'Give each new topic its own worktree?\nApplies to new managed topics in this group. Existing topics are unchanged.\nA worktree gives the topic a separate working directory and branch.';
+      button('Create a worktree', {kind:'set',field:'create_topic_worktrees',value:true}, chat.create_topic_worktrees === true);
+      button('Use the instance directory', {kind:'set',field:'create_topic_worktrees',value:false}, chat.create_topic_worktrees !== true);
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
       if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
-      text = `Forum ${skill ? 'new-topic skill' : 'model preset'} default: ${chat[field] ?? '(not set)'}\n${names.length ? `Choose a default (${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}).` : 'No choices available.'}\n${skill ? 'Future topics use this skill. Existing topics are unchanged.' : 'Managed hosts apply this default when they next start. Running hosts are unchanged.'}`;
-      for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name});
-      button('Clear default', {kind:'default',field});
+      text = `${skill ? 'Skill for new topics' : 'Model preset for new sessions'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
+      for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name}, chat[field] === name);
+      button(skill ? 'No default skill' : 'Use host default', {kind:'default',field}, chat[field] === undefined);
       if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
       if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
     } else {
       const limit = this.options.runtime.getSessionLimit();
       if (proposal) {
-        text = `Change Live session count limit from ${proposal.limit} to ${proposal.target} for every bot and instance?`;
-        button('Confirm change', {kind:'capacity',limit:proposal.limit,target:proposal.target});
+        text = `Change maximum live sessions from ${proposal.limit} to ${proposal.target}?\nService-wide. Affects every bot and instance.`;
+        button(`Set limit to ${proposal.target}`, {kind:'capacity',limit:proposal.limit,target:proposal.target});
       } else {
-        text = `Live session count limit: ${limit}.\nThis limit applies to all bots and instances in this service, not just this forum. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
-        for (const [label,target] of [['-1',Math.max(1,limit-1)],['+1',limit+1],['-10',Math.max(1,limit-10)],['+10',limit+10],['Double limit',limit*2]] as const) {
+        text = `Maximum live sessions\nCurrent limit: ${limit}.\nService-wide. Applies to every bot and instance, not just this group. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
+        for (const [label,target] of [[`Decrease to ${Math.max(1,limit-1)}`,Math.max(1,limit-1)],[`Increase to ${limit+1}`,limit+1],[`Decrease to ${Math.max(1,limit-10)}`,Math.max(1,limit-10)],[`Increase to ${limit+10}`,limit+10],[`Double to ${limit*2}`,limit*2]] as const) {
           button(label, Number.isSafeInteger(target) && target >= 1 && target !== limit
             ? {kind:'propose-capacity',limit,target}
             : {kind:'page',page:'capacity'});
         }
       }
     }
-    if (page !== 'root') button('Back', {kind:'page',page:proposal ? 'capacity' : 'root'});
+    if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
     button('Close', {kind:'close'});
     try {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
       panel.choices = choices;
       panel.revision = revision;
+      panel.offset = offset;
     } catch (error) {
       this.settingsPanels.delete(panel.token);
       throw error;
@@ -334,9 +346,16 @@ export class BotService {
     const action = panel.choices[Number(match![3])];
     if (!action) return;
     const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'capacity');
+    const recordChange = (page: SettingsPage, label: string, before: string, after: string) => {
+      const original = panel.changes.get(page)?.before ?? before;
+      if (original === after) panel.changes.delete(page);
+      else panel.changes.set(page, {label, before: original, after});
+    };
     if (action.kind === 'close') {
+      const changes = [...panel.changes.values()].map(({label,before,after}) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`);
+      const summary = changes.length ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}` : 'Settings closed.\nNo settings changed.';
+      await this.bot.api.editMessageText(panel.chatId,panel.messageId,summary,{reply_markup:{inline_keyboard:[]}});
       this.settingsPanels.delete(panel.token);
-      await this.bot.api.editMessageText(panel.chatId,panel.messageId,'Settings closed.',{reply_markup:{inline_keyboard:[]}});
       return;
     }
     if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
@@ -353,6 +372,7 @@ export class BotService {
       writeConfig(config);
       this.options.config.omp.maxSessions = action.target;
       this.options.runtime.setSessionLimit(action.target);
+      recordChange('capacity', 'Maximum live sessions (service-wide)', String(action.limit), String(action.target));
     } else {
       if (action.kind === 'default' && action.value !== undefined) {
         const names = action.field === 'default_new_topic_skill'
@@ -362,17 +382,37 @@ export class BotService {
       }
       const current = await this.settingsAccess(ctx,panel,true);
       const chat = findInstance(current,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+      const page: SettingsPage = action.kind === 'default'
+        ? action.field === 'default_new_topic_skill' ? 'skills' : 'presets'
+        : action.field === 'all_messages_are_prompts' ? 'prompts'
+        : action.field === 'users_can_propose_prompts' ? 'proposals' : 'worktrees';
+      const labels = {
+        prompts: 'Message handling',
+        proposals: 'Who can send requests',
+        skills: 'Skill for new topics',
+        presets: 'Model preset for new sessions',
+        worktrees: 'Worktrees for new topics',
+      };
+      const value = (setting: boolean | string | undefined): string => {
+        if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
+        if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
+        if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
+        return setting === true ? 'Create a worktree' : 'Use the instance directory';
+      };
+      const before = value(chat[action.field]);
       if (action.kind === 'set') chat[action.field] = action.value;
       else if (action.value === undefined) delete chat[action.field];
       else chat[action.field] = action.value;
       writeConfig(current);
+      recordChange(page, labels[page], before, value(chat[action.field]));
       Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
       if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
       await this.syncCommandMenus();
-      await this.renderSettings(panel,current);
+      const offset = action.kind === 'default' ? panel.offset : 0;
+      await this.renderSettings(panel,current,page,offset);
       return;
     }
-    await this.renderSettings(panel,config);
+    await this.renderSettings(panel,config,'capacity');
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
