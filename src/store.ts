@@ -28,7 +28,12 @@ function session(row: Row | undefined): TopicSession | undefined {
 }
 function promptFingerprint(content: PromptContent): string {
   return createHash('sha256')
-    .update(JSON.stringify([content.text, (content.images ?? []).map(image => [image.mimeType, image.data])]))
+    .update(
+      JSON.stringify([
+        content.text,
+        (content.images ?? []).map((image) => [image.mimeType, image.data]),
+      ]),
+    )
     .digest('hex');
 }
 export class Store {
@@ -63,8 +68,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
       COMMIT;`);
-    for (const row of this.db.prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics').all()) {
-      this.detachTopic({botId:Number(row.bot_id),chatId:Number(row.chat_id),threadId:Number(row.thread_id)});
+    for (const row of this.db
+      .prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics')
+      .all()) {
+      this.detachTopic({
+        botId: Number(row.bot_id),
+        chatId: Number(row.chat_id),
+        threadId: Number(row.thread_id),
+      });
     }
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
@@ -285,27 +296,36 @@ export class Store {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
   }
-  recordPromptSubmission(sessionId: string, sender: string, content: PromptContent, messageId?: number): number {
-    const result = this.db.prepare(
-      "INSERT INTO prompt_submissions (session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
-    ).run(sessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
+  recordPromptSubmission(
+    sessionId: string,
+    sender: string,
+    content: PromptContent,
+    messageId?: number,
+  ): number {
+    const result = this.db
+      .prepare(
+        "INSERT INTO prompt_submissions (session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
+      )
+      .run(sessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
     return Number(result.lastInsertRowid);
   }
   rejectPromptSubmission(submissionId: number): void {
     this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(submissionId);
   }
   markPromptSubmissionUncertain(submissionId: number): void {
-    this.db.prepare(
-      "UPDATE prompt_submissions SET state='uncertain' WHERE id=? AND state='pending'",
-    ).run(submissionId);
+    this.db
+      .prepare("UPDATE prompt_submissions SET state='uncertain' WHERE id=? AND state='pending'")
+      .run(submissionId);
   }
   beginPromptReceiptSnapshot(sessionId: string): number {
-    this.db.prepare(
-      "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND state='pending'",
-    ).run(sessionId);
-    const row = this.db.prepare(
-      'SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=?',
-    ).get(sessionId);
+    this.db
+      .prepare(
+        "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND state='pending'",
+      )
+      .run(sessionId);
+    const row = this.db
+      .prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=?')
+      .get(sessionId);
     return Number(row?.boundary ?? 0);
   }
   recordPromptReceipt(
@@ -317,9 +337,9 @@ export class Store {
   ): { fresh: boolean; messageId?: number; submissionId?: number } {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const previous = this.db.prepare(
-        'SELECT message_id FROM prompt_receipts WHERE session_id=? AND entry_id=?',
-      ).get(sessionId, entryId);
+      const previous = this.db
+        .prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND entry_id=?')
+        .get(sessionId, entryId);
       if (previous) {
         this.db.exec('COMMIT');
         return {
@@ -330,29 +350,51 @@ export class Store {
       const column = content.images === undefined ? 'text' : 'fingerprint';
       const value = column === 'text' ? content.text : promptFingerprint(content);
       let condition = `session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
-      let parameters = [sessionId, sender ?? '', value, snapshotBoundary ?? null, snapshotBoundary ?? null];
-      let candidates = sender === undefined ? [] : this.db.prepare(
-        `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
-      ).all(...parameters);
+      let parameters = [
+        sessionId,
+        sender ?? '',
+        value,
+        snapshotBoundary ?? null,
+        snapshotBoundary ?? null,
+      ];
+      let candidates =
+        sender === undefined
+          ? []
+          : this.db
+              .prepare(
+                `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+              )
+              .all(...parameters);
       let uncorrelated = false;
       if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
         condition = 'session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
-        parameters = [sessionId, sender, content.text, snapshotBoundary ?? null, snapshotBoundary ?? null];
-        candidates = this.db.prepare(
-          `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
-        ).all(...parameters);
+        parameters = [
+          sessionId,
+          sender,
+          content.text,
+          snapshotBoundary ?? null,
+          snapshotBoundary ?? null,
+        ];
+        candidates = this.db
+          .prepare(
+            `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+          )
+          .all(...parameters);
         uncorrelated = candidates.length > 0;
       }
       const pending = candidates[0];
-      const conflicting = uncorrelated || (candidates.length > 1 && candidates.some(row => row.state !== 'pending'));
-      if (conflicting) this.db.prepare(
-        `UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`,
-      ).run(...parameters);
+      const conflicting =
+        uncorrelated ||
+        (candidates.length > 1 && candidates.some((row) => row.state !== 'pending'));
+      if (conflicting)
+        this.db
+          .prepare(`UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`)
+          .run(...parameters);
       const ambiguous = conflicting || pending?.state === 'ambiguous';
       const messageId = ambiguous ? undefined : pending?.message_id;
-      this.db.prepare('INSERT INTO prompt_receipts VALUES (?,?,?)').run(
-        sessionId, entryId, messageId ?? null,
-      );
+      this.db
+        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?)')
+        .run(sessionId, entryId, messageId ?? null);
       if (pending) this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(pending.id);
       this.db.exec('COMMIT');
       return {

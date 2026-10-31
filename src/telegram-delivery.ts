@@ -317,8 +317,7 @@ export class TelegramDelivery {
           })
           .finally(() => {
             if (retry && this.closed) job.cancel();
-            if (name === 'ordinary' && !retry && chat.ordinary[0] === job)
-              chat.ordinary.shift();
+            if (name === 'ordinary' && !retry && chat.ordinary[0] === job) chat.ordinary.shift();
             lane.running = undefined;
             this.admit(chat);
           });
@@ -350,7 +349,8 @@ export class TelegramDelivery {
         const job = ready.pending!;
         ready.pending = undefined;
         chat.typingRunning = job;
-        void job.execute()
+        void job
+          .execute()
           .catch((error) => {
             this.observeRateLimit(chat, error);
             job.reject(error);

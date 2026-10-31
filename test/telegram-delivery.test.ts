@@ -22,37 +22,63 @@ function limited(seconds?: number) {
   }, 'sendMessage', {});
 }
 
-test('delivery serializes each chat without delaying starts or blocking other chats', async t => {
+test('delivery serializes each chat without delaying starts or blocking other chats', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const gate = Promise.withResolvers<string>();
   const starts: [string, number][] = [];
-  const first = delivery.run(1, () => {
-    starts.push(['first', Date.now()]);
-    return gate.promise;
-  }, () => true);
-  const second = delivery.run(1, async () => {
-    starts.push(['second', Date.now()]);
-    return 2;
-  }, () => true);
-  const other = delivery.run(2, async () => {
-    starts.push(['other', Date.now()]);
-    return 3;
-  }, () => true);
+  const first = delivery.run(
+    1,
+    () => {
+      starts.push(['first', Date.now()]);
+      return gate.promise;
+    },
+    () => true,
+  );
+  const second = delivery.run(
+    1,
+    async () => {
+      starts.push(['second', Date.now()]);
+      return 2;
+    },
+    () => true,
+  );
+  const other = delivery.run(
+    2,
+    async () => {
+      starts.push(['other', Date.now()]);
+      return 3;
+    },
+    () => true,
+  );
   await settle();
-  assert.deepEqual(starts, [['first', 0], ['other', 0]]);
+  assert.deepEqual(starts, [
+    ['first', 0],
+    ['other', 0],
+  ]);
   assert.equal(await other, 3);
   await advance(1500);
-  assert.deepEqual(starts, [['first', 0], ['other', 0]]);
+  assert.deepEqual(starts, [
+    ['first', 0],
+    ['other', 0],
+  ]);
   gate.resolve('sent');
   assert.equal(await first, 'sent');
   assert.equal(await second, 2);
-  assert.deepEqual(starts, [['first', 0], ['other', 0], ['second', 1500]]);
-  const third = delivery.run(1, async () => {
-    starts.push(['third', Date.now()]);
-    return 4;
-  }, () => true);
+  assert.deepEqual(starts, [
+    ['first', 0],
+    ['other', 0],
+    ['second', 1500],
+  ]);
+  const third = delivery.run(
+    1,
+    async () => {
+      starts.push(['third', Date.now()]);
+      return 4;
+    },
+    () => true,
+  );
   assert.equal(await third, 4);
   assert.deepEqual(starts.at(-1), ['third', 1500]);
 });
@@ -246,14 +272,25 @@ test('close aborts cooldown and resolves every pending job without waiting or la
   assert.deepEqual(calls, ['limited']);
 });
 
-test('close during an in-flight 429 does not requeue or leave its promise unresolved', async t => {
+test('close during an in-flight 429 does not requeue or leave its promise unresolved', async (t) => {
   clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const gate = Promise.withResolvers<string>();
   let attempts = 0;
-  const pending = delivery.run(1, () => { attempts++; return gate.promise; }, () => true);
-  const queued = delivery.run(1, async () => assert.fail('closed job must not run'), () => true);
+  const pending = delivery.run(
+    1,
+    () => {
+      attempts++;
+      return gate.promise;
+    },
+    () => true,
+  );
+  const queued = delivery.run(
+    1,
+    async () => assert.fail('closed job must not run'),
+    () => true,
+  );
   await settle();
   delivery.close();
   assert.equal(await queued, undefined);
@@ -1095,15 +1132,29 @@ test('pure eligibility failures preserve the original exception and release each
   t.after(() => delivery.close());
   const failure = new Error('eligibility diagnostic');
   for (const lane of ['ordinary', 'name', 'icon'] as const) {
-    const active = () => { throw failure; };
+    const active = () => {
+      throw failure;
+    };
     const action = async () => assert.fail('ineligible request');
-    const rejected = lane === 'ordinary'
-      ? delivery.run(1, action, active)
-      : delivery.runTopic(1, lane, 'failed', action, active);
+    const rejected =
+      lane === 'ordinary'
+        ? delivery.run(1, action, active)
+        : delivery.runTopic(1, lane, 'failed', action, active);
     await assert.rejects(rejected, (error) => error === failure);
-    const following = lane === 'ordinary'
-      ? delivery.run(1, async () => 'sent', () => true)
-      : delivery.runTopic(1, lane, 'next', async () => 'sent', () => true);
+    const following =
+      lane === 'ordinary'
+        ? delivery.run(
+            1,
+            async () => 'sent',
+            () => true,
+          )
+        : delivery.runTopic(
+            1,
+            lane,
+            'next',
+            async () => 'sent',
+            () => true,
+          );
     assert.equal(await following, 'sent');
   }
 });
@@ -1113,11 +1164,22 @@ test('coalesced admission gives real output priority over pending typing in the 
   t.after(() => delivery.close());
   const held = Promise.withResolvers<void>();
   const calls: string[] = [];
-  const typing = delivery.typing(1, 10, async () => { calls.push('typing'); }, () => true);
-  const output = delivery.run(1, () => {
-    calls.push('ordinary');
-    return held.promise;
-  }, () => true);
+  const typing = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push('typing');
+    },
+    () => true,
+  );
+  const output = delivery.run(
+    1,
+    () => {
+      calls.push('ordinary');
+      return held.promise;
+    },
+    () => true,
+  );
   await settle();
   assert.deepEqual(calls, ['ordinary']);
   held.resolve();
@@ -1129,14 +1191,18 @@ test('shutdown between rate-limit recovery and finalization settles the retained
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const rejected = Promise.withResolvers<void>();
-  const pending = delivery.run(1, () => rejected.promise, () => true);
+  const pending = delivery.run(
+    1,
+    () => rejected.promise,
+    () => true,
+  );
   await settle();
   rejected.reject(limited(60));
   await Promise.resolve();
   await Promise.resolve();
   delivery.close();
   const result = await Promise.race([
-    pending.then(value => ({ settled: true, value })),
+    pending.then((value) => ({ settled: true, value })),
     settle().then(() => ({ settled: false })),
   ]);
   assert.deepEqual(result, { settled: true, value: undefined });

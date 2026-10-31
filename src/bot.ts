@@ -3,7 +3,13 @@ import { realpathSync, statSync } from 'node:fs';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
-import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame, CustomMessageEntry } from '@oh-my-pi/pi-wire';
+import {
+  COLLAB_PROMPT_MESSAGE_TYPE,
+  type ImageContent,
+  type CollabUiRequest,
+  type HostFrame,
+  CustomMessageEntry,
+} from '@oh-my-pi/pi-wire';
 import type {
   AppConfig,
   BotConfig,
@@ -89,7 +95,14 @@ interface SessionMetadataOwner {
   titleWrite?: Promise<void>;
 }
 interface StatusFailure { operation: string; at: number; error: unknown }
-interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown'; submissionId?: number }
+interface TaskObservation {
+  state:
+    | 'waiting for acceptance'
+    | 'not accepted'
+    | 'acceptance unknown'
+    | 'accepted; completion unknown';
+  submissionId?: number;
+}
 interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
 interface Listener {
   sessionId: string;
@@ -985,7 +998,11 @@ export class BotService {
       this.options.store.hasPendingInitialTask(session.id)
     )
       return Promise.resolve();
-    const deadline = AbortSignal.any([signal, metadataOwner.controller.signal, AbortSignal.timeout(5000)]);
+    const deadline = AbortSignal.any([
+      signal,
+      metadataOwner.controller.signal,
+      AbortSignal.timeout(5000),
+    ]);
     const recovery = (async () => {
       const binding = await withCancellation(
         this.options.runtime.resolveExisting(session),
@@ -1187,7 +1204,7 @@ export class BotService {
   async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
-    const metadataCompletions = [...this.metadataOwners.values()].flatMap(owner => [
+    const metadataCompletions = [...this.metadataOwners.values()].flatMap((owner) => [
       owner.metadata?.name.completion,
       owner.metadata?.icon.completion,
       owner.titleWrite,
@@ -1613,17 +1630,26 @@ export class BotService {
   }
   private activityAtUse(session: TopicSession): TopicActivity {
     const owner = this.metadataOwners.get(session.id);
-    if (!owner || owner.disposed ||
-        owner.generation !== this.options.store.getSessionGeneration(session.id)) return 'unknown';
+    if (
+      !owner ||
+      owner.disposed ||
+      owner.generation !== this.options.store.getSessionGeneration(session.id)
+    )
+      return 'unknown';
     const status = this.options.store.getSession(session.id)?.status;
     if (status === 'open' && this.options.store.hasPendingInitialTask(session.id)) return 'running';
     const activity = owner.activity;
     const closed = this.closedSessions.get(session.id);
-    if (activity.value === 'finished' &&
-        status === 'closed' &&
-        closed?.generation === owner.generation && closed.settled) return 'finished';
+    if (
+      activity.value === 'finished' &&
+      status === 'closed' &&
+      closed?.generation === owner.generation &&
+      closed.settled
+    )
+      return 'finished';
     return activity.observedAt !== undefined && Date.now() - activity.observedAt < 60_000
-      ? activity.value : 'unknown';
+      ? activity.value
+      : 'unknown';
   }
   private formatTopicTitle(source: TopicTitleSource): { name: string; prefix: string } {
     const title = source.humanTitle ?? '';
@@ -1648,14 +1674,14 @@ export class BotService {
     const owned = () =>
       !this.stopped &&
       !this.options.config.terminated &&
-      !owner.disposed && owner.metadata === metadata &&
+      !owner.disposed &&
+      owner.metadata === metadata &&
       this.sessionAssigned(session) &&
       this.options.store.getSessionGeneration(session.id) === generation;
     const writer = (field: 'name' | 'icon'): TopicWriter => {
       const eligible = () => {
         if (!owned()) return false;
-        if (field === 'icon' && this.activityAtUse(session) === 'unknown')
-          return false;
+        if (field === 'icon' && this.activityAtUse(session) === 'unknown') return false;
         const status = this.options.store.getSession(session.id)?.status;
         return (
           status === 'open' ||
@@ -2510,8 +2536,7 @@ export class BotService {
     }
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
-      const attributable =
-        ctx.from !== undefined && !ctx.from.is_bot && !message.sender_chat;
+      const attributable = ctx.from !== undefined && !ctx.from.is_bot && !message.sender_chat;
       const metadata = this.topicMetadata(session);
       if (attributable) {
         if (edited.name !== undefined) {
@@ -3284,31 +3309,47 @@ export class BotService {
       });
     return listener.promise;
   }
-  private sendPrompt(listener: Listener, content: PromptContent, messageId?: number, onStartupRejected?: () => void): void {
+  private sendPrompt(
+    listener: Listener,
+    content: PromptContent,
+    messageId?: number,
+    onStartupRejected?: () => void,
+  ): void {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
-    if (session.status !== 'open') throw new Error('This topic is closed. Reopen it before submitting work.');
-    if (this.listeners.get(session.id) !== listener ||
-        listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+    if (session.status !== 'open')
+      throw new Error('This topic is closed. Reopen it before submitting work.');
+    if (
+      this.listeners.get(session.id) !== listener ||
+      listener.generation !== this.options.store.getSessionGeneration(session.id)
+    )
+      throw new Error('Session closed');
     const submissionId = this.options.store.recordPromptSubmission(
-      session.id, `Telegram @${this.bot.botInfo!.username}`, content, messageId,
+      session.id,
+      `Telegram @${this.bot.botInfo!.username}`,
+      content,
+      messageId,
     );
-    const observation: TaskObservation = {state:'waiting for acceptance', submissionId};
+    const observation: TaskObservation = { state: 'waiting for acceptance', submissionId };
     this.sessionObservation(session.id).task = observation;
-    const pending = {submissionId,onStartupRejected,observation};
+    const pending = { submissionId, onStartupRejected, observation };
     listener.pendingPrompts.push(pending);
     let attempted = false;
     try {
       this.options.runtime.markPrompt(listener.sessionId);
       attempted = true;
-      listener.connection!.send({t:'prompt',text:content.text,...(content.images?.length ? {images:content.images} : {})});
+      listener.connection!.send({
+        t: 'prompt',
+        text: content.text,
+        ...(content.images?.length ? { images: content.images } : {}),
+      });
     } catch (error) {
       observation.state = attempted ? 'acceptance unknown' : 'not accepted';
       if (attempted) this.options.store.markPromptSubmissionUncertain(submissionId);
       else this.options.store.rejectPromptSubmission(submissionId);
       const index = listener.pendingPrompts.indexOf(pending);
-      if (index !== -1) listener.pendingPrompts.splice(index,1);
+      if (index !== -1) listener.pendingPrompts.splice(index, 1);
       throw error;
     }
   }
@@ -3355,30 +3396,47 @@ export class BotService {
     entry: CustomMessageEntry,
     replay: boolean,
   ): void {
-    const text = typeof entry.content === 'string'
-      ? entry.content
-      : entry.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
-    const images = typeof entry.content === 'string'
-      ? undefined
-      : entry.content.filter(part => part.type === 'image');
+    const text =
+      typeof entry.content === 'string'
+        ? entry.content
+        : entry.content
+            .filter((part) => part.type === 'text')
+            .map((part) => part.text)
+            .join('\n');
+    const images =
+      typeof entry.content === 'string'
+        ? undefined
+        : entry.content.filter((part) => part.type === 'image');
     const details = entry.details;
-    const sender = details && typeof details === 'object' && 'from' in details &&
-      typeof details.from === 'string' ? details.from : undefined;
+    const sender =
+      details &&
+      typeof details === 'object' &&
+      'from' in details &&
+      typeof details.from === 'string'
+        ? details.from
+        : undefined;
     const receipt = this.options.store.recordPromptReceipt(
-      session.id, entry.id, sender,
+      session.id,
+      entry.id,
+      sender,
       { text, ...(images === undefined ? {} : { images }) },
       replay ? listener.receiptBoundary : undefined,
     );
     if (replay) listener.snapshotReplyTarget = receipt.messageId;
     else if (receipt.fresh) this.options.store.setReplyTarget(session.id, receipt.messageId);
     if (!receipt.fresh) return;
-    const index = listener.pendingPrompts.findIndex(pending => pending.submissionId === receipt.submissionId);
+    const index = listener.pendingPrompts.findIndex(
+      (pending) => pending.submissionId === receipt.submissionId,
+    );
     const pending = index === -1 ? undefined : listener.pendingPrompts.splice(index, 1)[0];
     const task = pending?.observation ?? this.sessionObservation(session.id).task;
     if (receipt.submissionId !== undefined && task?.submissionId === receipt.submissionId)
       task.state = 'accepted; completion unknown';
-    if (pending && listener.initial?.phase === 'sent' &&
-        listener.initial.messageId === receipt.messageId) {
+    if (
+      pending &&
+      listener.initial?.phase === 'sent' &&
+      listener.initial.messageId === receipt.messageId
+    ) {
       clearTimeout(listener.initial.timer);
       listener.initial = undefined;
     }
@@ -3546,8 +3604,11 @@ export class BotService {
         if (!current || current.status !== 'open' || !this.sessionAssigned(current)) return;
         const generation = this.options.store.getSessionGeneration(session.id);
         const title = this.options.store.getPendingSessionTitle(session.id);
-        if (title === undefined ||
-            (attempted?.title === title && attempted.generation === generation)) return;
+        if (
+          title === undefined ||
+          (attempted?.title === title && attempted.generation === generation)
+        )
+          return;
         attempted = { title, generation };
         const source = owner.title;
         try {
@@ -3573,11 +3634,13 @@ export class BotService {
         }
       }
     };
-    const pending = Promise.resolve().then(write).finally(() => {
-      if (owner.titleWrite === pending) owner.titleWrite = undefined;
-      if (owner.disposed && this.metadataOwners.get(session.id) === owner)
-        this.metadataOwners.delete(session.id);
-    });
+    const pending = Promise.resolve()
+      .then(write)
+      .finally(() => {
+        if (owner.titleWrite === pending) owner.titleWrite = undefined;
+        if (owner.disposed && this.metadataOwners.get(session.id) === owner)
+          this.metadataOwners.delete(session.id);
+      });
     owner.titleWrite = pending;
     return pending;
   }
@@ -3837,8 +3900,11 @@ export class BotService {
       }
       return;
     }
-    if (frame.t === 'entry' && frame.entry.type === 'custom_message' &&
-        frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
+    if (
+      frame.t === 'entry' &&
+      frame.entry.type === 'custom_message' &&
+      frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE
+    )
       this.reconcilePromptReceipt(session, listener, frame.entry, replay);
     if (frame.t === 'error') {
       listener.pendingAnswers.clear();
@@ -3847,15 +3913,19 @@ export class BotService {
         ? 'The host has not accepted this instruction during startup.\n\n'
         : 'OMP reported an error. Acceptance of a pending instruction is uncertain; inspect OPEN AGENT before submitting again.\n\n';
       void sendTo(
-        this.bot.api, topicDestination(session.chatId, session.threadId), prefix + frame.message,
+        this.bot.api,
+        topicDestination(session.chatId, session.threadId),
+        prefix + frame.message,
         { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
       ).catch(() => undefined);
       return;
     }
     if (frame.t === 'snapshot-chunk') {
       for (const entry of frame.entries) {
-        if (listener.recovering ||
-            (entry.type === 'custom_message' && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE))
+        if (
+          listener.recovering ||
+          (entry.type === 'custom_message' && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
+        )
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
@@ -3875,7 +3945,9 @@ export class BotService {
           ? assistantText(frame.entry.message)
           : undefined;
     if (!result || !this.options.store.rememberReply(session.id, result.fingerprint)) return;
-    const replyTarget = replay ? listener.snapshotReplyTarget : this.options.store.getReplyTarget(session.id);
+    const replyTarget = replay
+      ? listener.snapshotReplyTarget
+      : this.options.store.getReplyTarget(session.id);
     if (++listener.queued > 128) {
       this.dropListener(session.id);
       return;
