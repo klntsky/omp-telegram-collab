@@ -133,6 +133,7 @@ interface SettingsPanel {
   destination: TopicDestination;
   messageId: number;
   instancePath: string;
+  expires: number;
   revision: number;
   offset: number;
   choices: SettingsAction[];
@@ -228,10 +229,7 @@ export class BotService {
   private readonly inputIntents = new WeakMap<Context, InputIntent>();
   private readonly albums = new Map<string, {contexts:Context[];ready:Promise<void>;resolve:()=>void;timer?:NodeJS.Timeout}>();
   private readonly albumPrompts = new WeakMap<Context, {contexts:Context[]}>();
-  private saveSettingsPanel(panel: SettingsPanel): void {
-    this.options.store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?) ON CONFLICT(bot_id,token) DO UPDATE SET panel=excluded.panel')
-      .run(this.id, panel.token, JSON.stringify({...panel, changes: [...panel.changes]}));
-  }
+  private readonly settingsPanels = new Map<string, SettingsPanel>();
   private async settingsAccess(ctx: Context, panel: SettingsPanel, writable = false): Promise<AppConfig> {
     await this.authorize(panel.chatId, ctx.from!.id);
     if (writable && !(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
@@ -254,11 +252,14 @@ export class BotService {
     const panel: SettingsPanel = {
       token: randomBytes(16).toString('base64url'), chatId: ctx.chat!.id,
       destination: contextDestination(ctx), messageId: 0, instancePath: this.assignedPath(ctx.chat!.id),
-      revision: 0, offset: 0, choices: [], changes: new Map(),
+      expires: Date.now() + 15 * 60_000, revision: 0, offset: 0, choices: [], changes: new Map(),
     };
     const persisted = await this.settingsAccess(ctx, panel);
+    for (const [token, old] of this.settingsPanels) if (old.expires <= Date.now()) this.settingsPanels.delete(token);
+    if (this.settingsPanels.size >= 256) this.settingsPanels.delete(this.settingsPanels.keys().next().value!);
     const message = await replyTo(ctx, panel.destination, 'Opening settings…');
     panel.messageId = message.message_id;
+    this.settingsPanels.set(panel.token, panel);
     await this.renderSettings(panel, persisted);
   }
   private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
@@ -322,37 +323,30 @@ export class BotService {
     }
     if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
     button('Close', {kind:'close'});
-    await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
-    panel.choices = choices;
-    panel.revision = revision;
-    panel.offset = offset;
-    this.saveSettingsPanel(panel);
+    try {
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
+      panel.choices = choices;
+      panel.revision = revision;
+      panel.offset = offset;
+    } catch (error) {
+      this.settingsPanels.delete(panel.token);
+      throw error;
+    }
   }
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
-    const stored = match ? this.options.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(this.id, match[1]!) : undefined;
-    const decoded = stored ? JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {changes: [SettingsPage, {label: string; before: string; after: string}][]} : undefined;
-    const panel: SettingsPanel | undefined = decoded ? {...decoded, changes: new Map(decoded.changes)} : undefined;
+    const panel = match ? this.settingsPanels.get(match[1]!) : undefined;
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
     if (!match || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
         !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
     if (!panel) {
-      const recovered: SettingsPanel = {
-        token: match[1]!, chatId: ctx.chat.id, destination: contextDestination(ctx),
-        messageId: message.message_id, instancePath: this.assignedPath(ctx.chat.id),
-        revision: Number(match[2]), offset: 0, choices: [], changes: new Map(),
-      };
-      const config = await this.settingsAccess(ctx, recovered);
-      await this.renderSettings(recovered, config);
-      await ctx.answerCallbackQuery();
+      await ctx.answerCallbackQuery('This settings button expired. Open /settings again.');
       return;
     }
     if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
         !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
-    if (Number(match[2]) !== panel.revision) {
-      const config = await this.settingsAccess(ctx, panel);
-      await this.renderSettings(panel, config);
-      await ctx.answerCallbackQuery();
+    if (panel.expires <= Date.now() || Number(match![2]) !== panel.revision) {
+      await ctx.answerCallbackQuery('This settings button expired. Open /settings again.');
       return;
     }
     const action = panel.choices[Number(match![3])];
@@ -367,8 +361,7 @@ export class BotService {
       const changes = [...panel.changes.values()].map(({label,before,after}) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`);
       const summary = changes.length ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}` : 'Settings closed.\nNo settings changed.';
       await this.bot.api.editMessageText(panel.chatId,panel.messageId,summary,{reply_markup:{inline_keyboard:[]}});
-      panel.choices = [];
-      this.saveSettingsPanel(panel);
+      this.settingsPanels.delete(panel.token);
       return;
     }
     if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }

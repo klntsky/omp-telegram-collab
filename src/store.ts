@@ -52,7 +52,6 @@ export class Store {
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS skill_catalogs (instance_path TEXT PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
-      CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
       COMMIT;`);
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
