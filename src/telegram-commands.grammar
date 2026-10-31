@@ -1,0 +1,54 @@
+@top Request {
+  Prompt | SkillPrompt | Inspection | Configuration | Lifecycle | Guidance |
+  OptionalArgument | Attach | Skills
+}
+
+Prompt { (NewCommand | PromptCommand) Extension* Tail? }
+SkillPrompt { Skill Extension* Tail? }
+Extension { Preset | Worktree | Skill }
+Preset { PresetCommand Word }
+Worktree { WorktreeCommand }
+Skill { SkillCommand }
+
+Inspection { ListAdminsCommand | SessionCommand | StatusCommand | UsageCommand | CliCommand }
+Configuration { SettingsCommand | SetupCommand }
+Lifecycle { StopCommand | KillCommand | DetachCommand | TerminateCommand }
+Guidance { HelpCommand | StartCommand }
+OptionalArgument { (WorktreeCommand | PresetCommand) Word? }
+Attach { AttachCommand Word Any* }
+Skills { SkillsCommand Word? }
+
+Word { TextToken }
+Tail { Word Any* }
+Any {
+  TextToken | NewCommand | PromptCommand | WorktreeCommand | PresetCommand |
+  SkillsCommand | AttachCommand | SettingsCommand | SetupCommand |
+  ListAdminsCommand | DetachCommand | SessionCommand | StatusCommand |
+  UsageCommand | StopCommand | KillCommand | TerminateCommand |
+  HelpCommand | StartCommand | CliCommand | SkillCommand | UnknownCommand
+}
+
+@tokens {
+  NewCommand { "n" }
+  PromptCommand { "p" }
+  WorktreeCommand { "t" }
+  PresetCommand { "m" }
+  SkillsCommand { "s" }
+  AttachCommand { "a" }
+  SettingsCommand { "b" }
+  SetupCommand { "c" }
+  ListAdminsCommand { "d" }
+  DetachCommand { "e" }
+  SessionCommand { "f" }
+  StatusCommand { "g" }
+  UsageCommand { "h" }
+  StopCommand { "i" }
+  KillCommand { "j" }
+  TerminateCommand { "k" }
+  HelpCommand { "l" }
+  StartCommand { "o" }
+  CliCommand { "q" }
+  SkillCommand { "v" }
+  UnknownCommand { "u" }
+  TextToken { "w" }
+}

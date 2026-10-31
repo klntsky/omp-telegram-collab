@@ -122,7 +122,7 @@ export default async function hostLifecycle(pi) {
         ? await resolver.resolveModelScope(patterns, context.modelRegistry, resolver.getModelMatchPreferences(settings), settings)
         : [];
       const lookup = presets.getModelPreset(settings, request.name);
-      if (lookup.kind !== 'found') return presets.formatModelPresetSwitch(request.name, lookup);
+      if (lookup.kind !== 'found') throw new Error(presets.formatModelPresetSwitch(request.name, lookup));
       const preset = lookup.preset;
       const modelRoles = Object.fromEntries([
         ...Object.keys(modelSettings.cfgModelRoles.get(settings)).map(role => [role, null]),
@@ -144,10 +144,10 @@ export default async function hostLifecycle(pi) {
           ) };
       if (!resolved.model) {
         const reason = selector ? `default model \`${selector}\` is not available` : 'no model with configured credentials is available';
-        return presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason });
+        throw new Error(presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason }));
       }
       if (!context.modelRegistry.hasConfiguredAuth(resolved.model)) {
-        return presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason: `no credentials for ${resolved.model.provider}/${resolved.model.id}` });
+        throw new Error(presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason: `no credentials for ${resolved.model.provider}/${resolved.model.id}` }));
       }
       assertAvailable(request);
       if (!context.isIdle() || context.hasPendingMessages()) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching model presets');
@@ -164,9 +164,9 @@ export default async function hostLifecycle(pi) {
           kind: 'switched', model: resolved.model, thinkingLevel: level, shadowed: [], shadowedThinking: undefined,
         });
       } catch (error) {
-        return presets.formatModelPresetSwitch(request.name, {
+        throw new Error(presets.formatModelPresetSwitch(request.name, {
           kind: 'failed', reason: error instanceof Error ? error.message : String(error), shadowed: [],
-        });
+        }), { cause: error });
       } finally {
         if (!switched) {
           modelSettings.cfgModelRoles.override(settings, previousOverrides.modelRoles);

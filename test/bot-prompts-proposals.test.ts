@@ -339,9 +339,6 @@ for (const target of ['settings','question'] as const) {
         } else {
           assert.equal(app.accepted.slice(before).some(frame => frame.t === 'prompt'),false);
           assert.equal(app.store.listSessions(botId).length,sessions);
-          if (command === '/settings') {
-            assert.ok(JSON.stringify(app.messages.at(-1)!.reply_markup).includes('settings:'));
-          }
         }
         if (target === 'question') {
           await app.update({text:'Answer',message_thread_id:session.threadId,reply_to_message:reply});

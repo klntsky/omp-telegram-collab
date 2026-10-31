@@ -87,6 +87,21 @@ Closing records a pending finish-icon update atomically with the topic's closed 
 
 While terminated, prompts, callbacks, Mini App agent access, and commands other than read-only `/status` are blocked. Blocked commands receive “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Current human members may still inspect status for an assigned, enrolled forum; status does not resume the service or query suspended hosts. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
 
+#### 1.1.1. Composed prompt commands
+
+`/new` and `/p` accept a prefix of prompt extensions before the task. Skill shortcuts also accept this prefix when submitting a task. For example, `/new /worktree /model_preset openai Fix login` creates a session, prepares its worktree, selects the preset, and submits one task.
+
+- Session preparation extensions are `/model_preset <name>` and `/worktree`. Each may appear at most once. Their operations execute in written order before task submission and require a current group administrator.
+- Context extensions are registered `/skill_*` shortcuts and canonical `/skill:name` references. Multiple skills compose and duplicate names are removed.
+- Chained `/worktree` takes no branch argument and uses automatic branch naming. Standalone `/worktree [branch]` retains explicit branch selection.
+- If a later worktree operation replaces the host, the sequence reapplies its explicitly selected preset before submitting the task. A failure to restore that preset prevents task submission. This does not change the forum default.
+- `/skills`, `/settings`, `/setup`, `/list_admins`, `/attach`, `/detach`, `/session`, `/status`, `/usage`, `/stop`, `/kill`, `/terminate`, `/help`, `/start`, and `/cli` cannot extend a prompt. A second `/new` or `/p` is also invalid.
+- Required extension arguments are consumed first. The first ordinary text after complete extensions starts the task; all subsequent text is literal, including slash commands. A literal task cannot start with a slash. There is no separator or escape syntax.
+- Unknown, incomplete, repeated session-preparation, or disallowed prefix commands reject the sequence. Unknown root commands and commands addressed to another bot remain ignored. Quoted content and attachments never supply executable extensions.
+- Preset and skill names are validated before topic creation, preparation operations, pending-skill consumption, or task submission. An unknown preset requests a corrected sequence and lists available presets; it never falls back to another model.
+- Runtime failures stop the sequence before task submission. Already completed preparations are not rolled back or automatically replayed. Original failure diagnostics are preserved.
+
+
 ### 1.2. Prompts and permissions
 
 Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark the saved option with `(current)`, including named skills, model presets, and the options to use no default skill or the host's default model preset. Message handling distinguishes all messages from commands and replies only. Request permissions distinguish admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.

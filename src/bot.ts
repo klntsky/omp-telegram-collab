@@ -34,6 +34,7 @@ import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-desti
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
 import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
+import type { PromptExtension } from './telegram-commands.js';
 import { TopicWriter } from './topic-writer.js';
 
 class AuthorizationDeniedError extends Error {}
@@ -800,7 +801,6 @@ export class BotService {
     const intent = classifyMessage(message,normalizeMessage(messages),{
       botId:this.id,username:this.bot.botInfo!.username,
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat.id),
-      commands:new Set([...groupCommands.map(command => command.command),'cli']),
       skillAliases:this.skillAliases.get(ctx.chat.id) ?? new Map(),
       question:question?.[0],
       endedQuestion:replyKey !== undefined && this.endedQuestionReplies.has(replyKey) && !canDiscuss,
@@ -2031,6 +2031,7 @@ export class BotService {
     accepted?: () => void,
     worktree = false,
     authority = ctx,
+    extensions: readonly PromptExtension[] = [],
   ): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
@@ -2055,14 +2056,14 @@ export class BotService {
     );
     if (this.assignedPath(ctx.chat!.id) !== instancePath)
       throw new Error('The group instance assignment changed');
-    const automaticWorktree = !attached && !worktree && this.createsTopicWorktrees(ctx.chat!.id);
+    const automaticWorktree = !attached && !worktree && !extensions.some(extension => extension.kind === 'worktree') && this.createsTopicWorktrees(ctx.chat!.id);
     const session = this.options.store.createSession(
       { botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath },
       title,
       attached
         ? { kind: 'attached', instanceId: attached.instanceId, sessionId: attached.sessionId }
         : { kind: 'managed' },
-      attached || worktree || automaticWorktree ? undefined : task,
+      attached || worktree || automaticWorktree || extensions.length ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
     );
@@ -2071,10 +2072,26 @@ export class BotService {
       if (!(await this.currentAdmin(authority)))
         throw new Error('Administrator access changed before worktree creation.');
       await this.createTopicWorktree(session);
-      if (task !== undefined) {
+      if (task !== undefined && !extensions.length) {
         await this.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.currentAdmin(authority)))
           throw new Error('Administrator access changed before initial task submission.');
+        this.requireSessionAssignment(session);
+        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+      }
+    }
+    if (extensions.length) {
+      try {
+        await this.preparePrompt(ctx, session, extensions, authority);
+      } catch (error) {
+        await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
+          console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
+        });
+        throw error;
+      }
+      if (task !== undefined) {
+        await this.authorize(ctx.chat!.id, ctx.from!.id);
+        if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
         this.requireSessionAssignment(session);
         this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
       }
@@ -2251,9 +2268,57 @@ export class BotService {
     return findInstance(this.options.config,this.id,chatId)?.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
-  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, immediateSkill?: string, worktree = false): Promise<void> {
+  private async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    const checkSession = () => {
+      this.requireSessionAssignment(session);
+      if (this.options.store.getSessionGeneration(session.id) !== generation ||
+          this.options.store.getSession(session.id)?.status !== 'open') {
+        throw new Error('The session changed before prompt preparation could finish');
+      }
+    };
+    const applyPreset = async (name: string) => {
+      const release = this.options.runtime.retain(session.id);
+      try {
+        await this.options.runtime.ensure(session);
+        await this.authorize(ctx.chat!.id, ctx.from!.id);
+        if (!(await this.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+        checkSession();
+        await this.options.runtime.modelPresets(session, name);
+      } finally { release(); }
+    };
+    let selectedPreset: string | undefined;
+    for (const extension of extensions) {
+      if (extension.kind === 'skill') continue;
+      await this.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+      checkSession();
+      if (extension.kind === 'worktree') {
+        try {
+          await this.options.runtime.worktree(session);
+          checkSession();
+          this.options.store.setSessionRuntime(session.id, session.runtime);
+        } finally {
+          this.dropListener(session.id);
+        }
+        if (selectedPreset !== undefined) await applyPreset(selectedPreset);
+      } else {
+        await applyPreset(extension.name);
+        selectedPreset = extension.name;
+      }
+      await this.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+      checkSession();
+    }
+  }
+  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false): Promise<void> {
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
+    const preparations = extensions.filter(extension => extension.kind !== 'skill');
+    if (preparations.length && !admin) {
+      await replyTo(ctx, contextDestination(ctx), 'Prompt preparations require a group administrator.');
+      return;
+    }
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     if (session) {
       this.requireSessionAssignment(session);
@@ -2261,10 +2326,19 @@ export class BotService {
     }
     const instancePath = this.assignedPath(ctx.chat!.id);
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    if (extensions.some(extension => extension.kind === 'model-preset')) {
+      const names = await this.options.runtime.availableModelPresets(instancePath);
+      for (const extension of extensions) {
+        if (extension.kind === 'model-preset' && !names.includes(extension.name)) {
+          await this.replyPresetText(ctx, `Unknown model preset: ${extension.name}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
+          return;
+        }
+      }
+    }
     const skillKey = this.skills.key(ctx);
     const pendingSkills = this.options.store.getPendingSkills(skillKey);
     const topicSkill = worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
-    const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...(immediateSkill ? [immediateSkill] : [])])];
+    const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
       const available = await this.options.runtime.listSkills(instancePath, session);
       const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
@@ -2276,10 +2350,12 @@ export class BotService {
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (await this.currentAdmin(ctx)) {
       if (session) {
+        await this.preparePrompt(ctx, session, preparations);
         await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
-      } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
+      } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree, ctx, preparations);
       return;
     }
+    if (preparations.length) throw new Error('Prompt preparations require a group administrator.');
     if (!this.usersCanProposePrompts(ctx.chat!.id)) return;
     const now = Date.now();
     for (const [token, proposal] of this.promptProposals) if (proposal.expires <= now) this.promptProposals.delete(token);
@@ -2694,6 +2770,10 @@ export class BotService {
       );
       return;
     }
+    if (intent.kind === 'invalid') {
+      await replyTo(ctx, destination, intent.error.message);
+      return;
+    }
     if (intent.kind === 'skill-selection') {
       if (!detached) await this.skills.selection(ctx, intent.text, session);
       return;
@@ -2723,7 +2803,7 @@ export class BotService {
         ctx,
         { text: intent.content.text, ...(images.length ? { images } : {}) },
         intent.kind === 'new-task' ? undefined : session,
-        intent.skill,
+        intent.extensions,
       );
       return;
     }
@@ -2826,7 +2906,7 @@ export class BotService {
       }
       if (action === 'worktree') {
         if (destination.kind === 'general') {
-          await this.routePrompt(ctx, { text: arg }, undefined, undefined, true);
+          await this.routePrompt(ctx, { text: arg }, undefined, [], true);
           return;
         }
         if (!session || detached) {
@@ -2976,6 +3056,13 @@ export class BotService {
           return;
         }
         if (!session) return;
+        if (arg) {
+          const names = await this.options.runtime.availableModelPresets(session.instancePath);
+          if (!names.includes(arg)) {
+            await this.replyPresetText(ctx, `Unknown model preset: ${arg}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
+            return;
+          }
+        }
         const generation = this.options.store.getSessionGeneration(session.id);
         const release = this.options.runtime.retain(session.id);
         try {
