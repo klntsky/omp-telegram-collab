@@ -2,7 +2,7 @@
 
 This document defines current user-visible behavior. See the [README](README.md#setup) for consumer setup and operations, and [Development](DEVELOPMENT.md) for contributor operations.
 
-Consumer installation requires Node.js 22.13 or newer, pnpm, and OMP. Once a release is published, `pnpm add --global omp-telegram-collab` puts the `omp-telegram-collab` binary on `PATH`; consumers do not need to clone or build this repository. The package has not yet been published to the npm registry, so registry installation is not available until a release is published. The default configuration directory remains `omp-telegram`.
+Consumer installation requires the latest Node.js LTS selected through nvm, pnpm, and OMP. The minimum supported runtime is Node.js 26.13.0; older versions are unsupported. Once a release is published, `pnpm add --global omp-telegram-collab` puts the `omp-telegram-collab` binary on `PATH`; consumers do not need to clone or build this repository. The package has not yet been published to the npm registry, so registry installation is not available until a release is published. The default configuration directory remains `omp-telegram`.
 
 `omp-telegram-collab setup` edits service settings through interactive configuration prompts or command-line options. It does not ask for the session limit; configure that in Telegram `/settings`, or pass the explicit `--max-sessions` flag for automation. On completion, setup directs users to register a bot with `omp-telegram-collab bot add` when none are configured, then start the service; otherwise it directs users to start the service and send `/setup` in Telegram.
 

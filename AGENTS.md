@@ -20,6 +20,7 @@
 - When the user says "remember" a preference or instruction, update AGENTS.md with the durable rule rather than only acknowledging it in chat.
 - When the user asks why you did something, quote the literal relevant AGENTS.md lines and include their line numbers. If no AGENTS.md rule supports the decision, say so explicitly rather than attributing it to an instruction.
 - Use pnpm for package installation, dependency management, packaging, and package-script execution. Consumer instructions must use pnpm rather than the npm CLI; the npm registry remains the package distribution registry.
+- Use the current Node.js LTS through nvm for development and verification. Keep `.nvmrc`, the package engine requirement, Node.js types, and setup documentation synchronized. Do not add compatibility support for older runtimes.
 - Do not add temporary scripts, verification artifacts, or scratch files to `.gitignore`. Keep them outside the checkout or delete them when finished.
 - Keep README.md focused on a brief product introduction, useful features, and consumer setup. Consumer installation, configuration, credentials, deployment, upgrades, restarts, and other normal deployment lifecycle operations belong in README.md, not DEVELOPMENT.md. Link to the other documents for developer operations and detailed product requirements.
 - Keep current observable behavior and user-facing requirements in PRODUCT.md. Use meaningful numbered sections and bullets. Remove superseded requirements when behavior changes.

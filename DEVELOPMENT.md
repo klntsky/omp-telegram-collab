@@ -6,9 +6,11 @@ For consumer installation, setup, configuration, deployment, and normal service 
 
 ## Contributor setup
 
-Install Node.js 22.13 or newer, pnpm, and OMP. From a checkout, install dependencies and build:
+Install nvm, pnpm, and OMP. Use the Node.js LTS version pinned in `.nvmrc`; older runtimes are unsupported. From a checkout, select the runtime, install dependencies, and build:
 
 ```sh
+nvm install
+nvm use
 pnpm install --frozen-lockfile
 pnpm build
 ```

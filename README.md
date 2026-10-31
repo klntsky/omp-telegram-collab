@@ -93,7 +93,25 @@ Connect a Telegram group to a project on your computer. The agent runs on that c
 
 You can use the bot entirely through group messages. The optional **Mini App** lets you open a live transcript, inspect tool calls, and manage subagents inside Telegram. It needs a public HTTPS address and an extra registration with BotFather.
 
-1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model provider credentials for the account that will run the bot, following the [official provider setup guide](https://omp.sh/docs/providers#get-one-route-working).
+1. **Agent's computer:** Install the latest Node.js LTS with [nvm](https://github.com/nvm-sh/nvm), pnpm, and [OMP](https://github.com/can1357/oh-my-pi). The minimum supported runtime is Node.js 26.13.0. Older versions are unsupported. Configure OMP's model provider credentials for the account that will run the bot, following the [official provider setup guide](https://omp.sh/docs/providers#get-one-route-working).
+
+   <details>
+   <summary>Install and select Node.js LTS</summary>
+
+   Example after installing nvm. nvm's download progress is omitted.
+
+   ```text
+   $ nvm install --lts
+   Installing latest LTS version.
+   ...
+   $ nvm use --lts
+   Now using node v26.13.0 (npm v11.20.0)
+   $ node --version
+   v26.13.0
+   ```
+
+   </details>
+
 2. **Telegram:** Open [BotFather](https://t.me/BotFather) and send `/newbot`. Enter a display name and an available username ending in `bot`. Save the API token privately; you will enter it on the agent's computer.
 3. **Agent's computer:** Install the package globally. **The package has not yet been published to npm; this registry install requires a published release before it will work.**
 
