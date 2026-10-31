@@ -5,25 +5,177 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
 ## Set up
 
 
-1. Install Node.js 22.13 or newer, pnpm, and OMP. Configure OMP's model credentials for the account that will run the service.
-2. Create a bot with BotFather. Keep its token private.
-3. Clone this repository, build it, and register your bot and project directory.
+1. Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+2. Open [BotFather](https://t.me/BotFather) in Telegram and send `/newbot`.
+   1. Enter a display name for your bot.
+   2. Enter an available username ending in `bot`.
+   3. Save the API token BotFather returns. Keep it private. You will enter it in `pnpm cli bot add`.
+3. Clone and build this project.
 
    ```sh
    git clone https://github.com/klntsky/omp-telegram-collab.git
    cd omp-telegram-collab
    pnpm install
    pnpm build
+   ```
+
+4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
+
+   `pnpm cli configure` explains the Mini App and asks whether to enable it. Telegram-only is the default. You can send prompts and images, read replies, and answer agent questions in Telegram. Enable the Mini App if you also want a live transcript, tool details, and subagent controls.
+
+   If you enable it, enter your public HTTPS address, such as `https://omp.example.com`, at the `Public HTTPS origin` prompt. Set the listen host and port for your reverse proxy or tunnel.
+
+   ```sh
    pnpm cli configure
    pnpm cli bot add
-   pnpm cli create /srv/projects/backend
+   pnpm cli create /path/to/project
    pnpm start
    ```
 
-   `configure` explains the optional Mini App and asks whether to enable it. Choose Telegram-only for prompts, images, replies, and agent questions in Telegram. Enable the Mini App for live transcripts, tool details, and subagent controls, then enter your public HTTPS origin. `bot add` verifies the token and asks for the Mini App short name only when enabled, defaulting to `app`. `create` registers an existing directory. Use `pnpm cli setup` for a guided configuration wizard.
+   Enter the BotFather token when `bot add` asks. If you enabled the Mini App, keep the default short name, `app`.
 
-4. If you enabled the Mini App, expose the HTTP service over HTTPS with WebSocket support. Keep the loopback bind address if the proxy or tunnel runs on the same machine. Telegram-only operation uses long polling and needs outbound Telegram access.
-5. If you enabled the Mini App, use `/newapp` in BotFather to create a direct-link Mini App. Match the configured short name. Set its web URL to the per-bot URL printed at startup, such as `https://omp.example.com/?bot=YOUR_NUMERIC_BOT_ID`. See the [README setup steps](README.md#setup) for the BotFather prompts and Cloudflare Tunnel instructions.
+   <details>
+   <summary>Example CLI commands and output</summary>
+
+   These examples use filler values. Output excerpts omit package-manager headers and unrelated prompts. Never paste a real bot token into documentation.
+
+   ```text
+   $ pnpm cli configure
+   The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
+   Enable Mini App? [y/N]: n
+   Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
+
+   $ pnpm cli bot add
+   Bot token (hidden):
+   Added @example_omp_bot (123456789).
+
+   $ pnpm cli create /srv/projects/backend
+   Created /srv/projects/backend
+
+   $ pnpm cli list
+   /srv/projects/backend
+     chats: (none)
+   ```
+
+   </details>
+
+5. If you enabled the Mini App, choose how to expose the service over HTTPS.
+
+   <details>
+   <summary>Option 1: Use cloudflared</summary>
+
+   You need a Cloudflare account and at least one domain added to that account with DNS managed by Cloudflare. This example uses `omp.example.com`. Replace `example.com` with your domain.
+
+   1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Networking > Tunnels** and select **Create Tunnel**.
+   2. Name the tunnel `omp-telegram`.
+   3. Select your operating system and architecture. Follow the displayed commands to install `cloudflared` and run it as a service on the machine running the bot. On Linux, the service installation command looks like this:
+
+      ```sh
+      sudo cloudflared service install <TUNNEL_TOKEN>
+      ```
+
+      Use the token provided by Cloudflare and keep it private. The service starts the tunnel automatically after reboot.
+
+   4. Once the tunnel connects, select **Continue**.
+   5. Under the tunnel's **Routes**, select **Add route > Published application**.
+   6. Set the subdomain to `omp` and select your domain.
+   7. Set the service URL to `http://127.0.0.1:3000`, matching the bot's default listen address. If you configured another host or port, use that address.
+   8. Save the route. Cloudflare serves `https://omp.example.com` over HTTPS and forwards HTTP and WebSocket traffic to the bot.
+   9. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli configure`. Use the complete per-bot URL printed at startup for BotFather, such as `https://omp.example.com/?bot=123456789`.
+
+   The hostname stays the same across bot and tunnel restarts. Keep the bot and the `cloudflared` service running to make the Mini App available.
+
+   See [Cloudflare's tunnel setup guide](https://developers.cloudflare.com/tunnel/get-started/) for platform-specific installation commands.
+
+   </details>
+
+   <details>
+   <summary>Option 2: Set up HTTPS manually</summary>
+
+   1. Point your hostname, such as `omp.example.com`, at the server running your reverse proxy.
+   2. Configure the proxy to serve that hostname over HTTPS with a publicly trusted certificate.
+   3. Forward requests to the bot's configured listen address, which defaults to `http://127.0.0.1:3000`. Use an address reachable from the proxy if it runs on another machine.
+   4. Enable WebSocket forwarding for `/api/socket`, preserving the request path and query string.
+   5. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli configure`.
+   6. Open the complete per-bot URL printed at startup in a browser on your phone using mobile data. Confirm that the page loads over HTTPS with a valid certificate. Complete the Telegram connection check below after registering the Mini App.
+
+   </details>
+
+6. If you enabled the Mini App, send `/newapp` in BotFather to register it.
+   1. Select the bot you created, or send its `@username`.
+   2. Enter an app title, such as `OMP Telegram Collab`.
+   3. Enter a description, such as `Run coding sessions from Telegram`.
+   4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
+   5. Send `/empty` to skip the optional GIF.
+   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://omp.example.com/?bot=123456789`.
+   7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
+   8. BotFather returns the Telegram launch link, such as `https://t.me/your_bot/app`.
+
+   The topic buttons use this named app's direct link to select the session.
+
+7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting. Administrator bots receive ordinary group messages.
+8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
+
+   The command includes the service config path and defaults `--path` to the bot process's working directory. Change `--path` to your project directory if the bot runs from its own checkout. Approval asks for prompt settings and confirmation, not a directory when `--path` is supplied. Requests expire after ten minutes.
+
+   <details>
+   <summary>Example Telegram setup messages</summary>
+
+   All names, IDs, paths, and request codes below are filler values. This example assumes the bot runs in `/srv/projects/backend`.
+
+   When the bot joins the group:
+
+   ```text
+   A current group administrator can run /setup to request instance assignment from the local operator.
+   ```
+
+   If Topics or bot permissions are missing:
+
+   ```text
+   Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.
+   ```
+
+   After a group administrator sends `/setup` in an unassigned forum:
+
+   ```text
+   Setup requested. Ask the local operator to approve within 10 minutes:
+   omp-telegram --config '/home/operator/.config/omp-telegram/config.yaml' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   The command defaults to the bot's working directory. Change --path to use another instance directory.
+   ```
+
+   After local approval:
+
+   ```text
+   Setup approved. This forum is connected to OMP. Create a topic to start a coding session.
+   ```
+
+   </details>
+
+   <details>
+   <summary>Example local approval command and output</summary>
+
+   Run the command from the bot on the service machine. If `omp-telegram` is not on your shell's `PATH`, use `pnpm cli` from the built checkout instead. This example uses filler values and accepts the default prompt settings by pressing Enter.
+
+   ```text
+   $ pnpm cli --config '/home/operator/.config/omp-telegram/config.yaml' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   Verified bot @example_omp_bot (123456789)
+   Verified forum Example project (-1001234567890)
+   Verified requester 42, current group administrator.
+   Treat all session-topic messages as prompts? true = ordinary messages, false = /p only [true]:
+   Allow non-admin users to propose prompts for administrator approval? [false]:
+   Connect this forum to /srv/projects/backend? [y/N] yes
+   Approved EXAMPLE_CODE: /srv/projects/backend
+   ```
+
+   </details>
+
+9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do.
+10. Verify the connection in Telegram.
+    1. Send a prompt asking the agent to reply with a short greeting. Confirm that its reply appears in the topic.
+    2. If you enabled the Mini App, switch your phone to mobile data and open the topic's **OPEN AGENT** button. Confirm that the Mini App loads the session transcript and the greeting.
+    3. If you enabled the Mini App, keep it open and send another prompt from a second Telegram client. Confirm that the new reply appears in the open Mini App. This checks live updates through the WebSocket connection.
+
+Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
 
    Optionally enable inline mode for this bot with BotFather's `/setinline` to use Search in the `/skills` picker. Choose a search placeholder when prompted. Inline mode is not required: the picker's normal skill buttons remain available without it. Inline search is bound to the user and topic that opened the picker and expires after ten minutes; reopening `/skills` refreshes the search context without clearing persisted pending selections.
 
@@ -32,18 +184,6 @@ For behavior and permissions, see [Product](PRODUCT.md). For component ownership
    Managed sessions use their loaded skill catalogs; discovery does not reload them or restart active hosts automatically. Older managed hosts without skill-lifecycle support report that a host restart is required. Only when it is safe to interrupt the host, use `/kill`, then submit a prompt to start it again. Lifecycle-extension fixes take effect when a host starts; existing hosts retain their loaded extension code. Attached-host discovery uses the assigned instance settings, not terminal-private loaded skills.
 
    Two-way topic/session title synchronization uses OMP's native session-name API through the managed host's private lifecycle control socket. Hosts started before title-control support need a host restart before Telegram renames can apply; restarting only the bot does not reload a running host's extension. Terminal-owned attached hosts without that control extension cannot accept Telegram renames and report the original control diagnostic; their OMP titles can still be mirrored to Telegram.
-
-6. Create a Telegram supergroup with Topics enabled. Give the bot Manage Topics and Pin Messages permissions.
-7. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
-
-   ```sh
-   pnpm cli approve REQUEST_CODE
-   ```
-
-   Approval verifies the group and the requester's current owner or administrator status, asks for the project directory and prompt settings, and confirms the assignment. The requester does not need a username. Requests expire after ten minutes. Adding the bot alone does not assign a project or enable Topics.
-8. Send `/new <your task>` in the group. If you enabled the Mini App, select OPEN AGENT in the new topic to open it.
-
-Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
 
 ## Manage projects and chats
 

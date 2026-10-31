@@ -1570,8 +1570,9 @@ export class BotService {
       }
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
       const quotedPath = "'" + this.options.config.configPath.replaceAll("'", "'\\''") + "'";
-      const command = `omp-telegram --config ${quotedPath} approve ${request.code}`;
-      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe operator selects the instance directory locally.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
+      const quotedInstancePath = "'" + process.cwd().replaceAll("'", "'\\''") + "'";
+      const command = `omp-telegram --config ${quotedPath} approve ${request.code} --path ${quotedInstancePath}`;
+      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe command defaults to the bot's working directory. Change --path to use another instance directory.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
       return;
     }
     if (!(await this.currentAdmin(ctx))) {
