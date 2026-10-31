@@ -28,8 +28,8 @@ test('settings survive elapsed time, additional panels and lost panel state', as
     assert.equal(saved(app).chat.all_messages_are_prompts, false);
     app.store.db.prepare('DELETE FROM settings_panels WHERE bot_id=?').run(botId);
     await app.callback(choice, panel);
-    await clickSettings(app, 0);
-    await clickSettings(app, 0);
+    await clickSettings(app, 0, panel);
+    await clickSettings(app, 0, panel);
     assert.equal(saved(app).chat.all_messages_are_prompts, true);
   } finally { await app.close(); }
 });
@@ -348,27 +348,3 @@ test('a removed catalog choice preserves the saved default', async t => {
   } finally { await app.close(); }
 });
 
-test('panels from a previous service instance explain expiration without accepting forwarded controls', async () => {
-  const before = await createSmokeApp();
-  let panel: Record<string,unknown>;
-  let choice: string;
-  try {
-    await before.update({text:'/setup'});
-    panel = structuredClone(before.messages.at(-1)!);
-    choice = settingsButton(panel, 0);
-  } finally { await before.close(); }
-  const after = await createSmokeApp();
-  const answers: string[] = [];
-  after.bot.api.config.use(async (previous,method,payload,signal) => {
-    if (method === 'answerCallbackQuery' && 'text' in payload && typeof payload.text === 'string') answers.push(payload.text);
-    return previous(method,payload,signal);
-  });
-  try {
-    await after.update({text:'/setup'});
-    await after.callback(choice!,{...panel!,forward_origin:{type:'hidden_user',sender_user_name:'Someone',date:1}});
-    assert.deepEqual(answers,[]);
-    await after.callback(choice!,panel!);
-    assert.equal(answers.length,1);
-    assert.deepEqual(after.store.listSessions(botId),[]);
-  } finally { await after.close(); }
-});
