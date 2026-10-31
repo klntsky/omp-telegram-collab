@@ -130,7 +130,7 @@ test('managed startup preserves the last original not-found diagnostic at its or
   const started = Date.now();
   await assert.rejects(app.runtime.ensure(app.session), error => {
     assert.ok(error instanceof Error);
-    assert.equal((error as NodeJS.ErrnoException).code, 1);
+    assert.equal((error as NodeJS.ErrnoException).code, 1, error);
     assert.equal((error as Error & { signal: string | null }).signal, null);
     assert.ok(error.message.startsWith(`Command failed: ${app.executable} collab link fixture-host --json\nerror: no active Collab host matches fixture-host\n`));
     return true;

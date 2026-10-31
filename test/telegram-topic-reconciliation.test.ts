@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { setImmediate } from 'node:timers/promises';
+import { setImmediate, setTimeout as delay } from 'node:timers/promises';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { eventually } from './bot-test-helpers.js';
 import type { BotService, RuntimeLike } from '../src/bot.js';
@@ -23,6 +23,7 @@ interface ReconciliationApp {
   service: BotService;
   runtime: Pick<RuntimeLike, 'ensure'>;
   remoteTopics: Map<string, { name: string; icon_custom_emoji_id: string }>;
+  topicEdits: Record<string, unknown>[];
 }
 
 async function liveTopic(app: ReconciliationApp) {
@@ -33,7 +34,17 @@ async function liveTopic(app: ReconciliationApp) {
   });
   const session = app.store.listSessions(botId)[0]!;
   await app.service.ensureMirroring(session, await app.runtime.ensure(session));
-  await eventually(() => app.remoteTopics.get(remoteKey)?.icon_custom_emoji_id === finishIcon);
+  await eventually(
+    () =>
+      app.topicEdits.some(
+        (edit) => edit.message_thread_id === 42 && edit.icon_custom_emoji_id === finishIcon,
+      ) && app.remoteTopics.get(remoteKey)?.icon_custom_emoji_id === finishIcon,
+  );
+  await eventually(() =>
+    app.topicEdits.some(
+      (edit) => edit.message_thread_id === 42 && edit.name === 'Reconciliation probe',
+    ),
+  );
   await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
   return session;
 }
@@ -169,6 +180,90 @@ test(
       assert.deepEqual(app.accepted, []);
     } finally {
       release.resolve();
+      await app.close();
+    }
+  },
+);
+
+test(
+  'native rename is adopted before outgoing edits when Git metadata lookup fails',
+  { timeout: 15000 },
+  async (t) => {
+    const app = await createSmokeApp();
+    try {
+      const session = await liveTopic(app);
+      const edits: Record<string, unknown>[] = [];
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (method === 'editForumTopic') edits.push({ ...payload });
+        return previous(method, payload, signal);
+      });
+      const failure = new Error('Original Git metadata lookup failure');
+      let lookups = 0;
+      t.mock.method(app.runtime, 'topicTitleStatus', async () => {
+        lookups++;
+        throw failure;
+      });
+      app.remoteTopics.get(remoteKey)!.name = 'Human renamed topic';
+      await app.update({
+        message_thread_id: 42,
+        forum_topic_edited: { name: 'Human renamed topic' },
+      });
+      await eventually(() => lookups > 0);
+      await eventually(() => app.sessionTitles.get(session.id) === 'Human renamed topic');
+      app.emit({ t: 'state', state: idle });
+      await app.service.ensureMirroring(session, await app.runtime.ensure(session));
+      await delay(100);
+      assert.equal(app.store.getSession(session.id)?.name, 'Human renamed topic');
+      assert.equal(app.remoteTopics.get(remoteKey)?.name, 'Human renamed topic');
+      assert.ok(
+        edits.every((edit) => edit.name === undefined || edit.name === 'Human renamed topic'),
+      );
+      assert.deepEqual(app.accepted, []);
+    } finally {
+      await app.close();
+    }
+  },
+);
+
+test(
+  'unchanged host snapshots do not resend topic title or icon after eleven minutes',
+  { timeout: 15000 },
+  async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const now = Date.now.bind(Date);
+    let offset = 0;
+    t.mock.method(Date, 'now', () => now() + offset);
+    let reads = 0;
+    const app = await createSmokeApp({
+      readState: async () => {
+        reads++;
+        return { ...idle, sessionName: 'Reconciliation probe' };
+      },
+    });
+    try {
+      const session = await liveTopic(app);
+      await eventually(() =>
+        app.topicEdits.some(
+          (edit) => edit.message_thread_id === 42 && edit.name === 'Reconciliation probe',
+        ),
+      );
+      const metadata = { ...app.remoteTopics.get(remoteKey)! };
+      const requests: Record<string, unknown>[] = [];
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (method === 'editForumTopic') requests.push({ ...payload });
+        return previous(method, payload, signal);
+      });
+      const initialReads = reads;
+      offset = 11 * 60_000;
+      t.mock.timers.tick(30_000);
+      await eventually(() => reads > initialReads);
+      app.emit({ t: 'state', state: { ...idle, sessionName: 'Reconciliation probe' } });
+      await app.service.ensureMirroring(session, await app.runtime.ensure(session));
+      await delay(100);
+      assert.deepEqual(requests, []);
+      assert.deepEqual(app.remoteTopics.get(remoteKey), metadata);
+    } finally {
+      t.mock.timers.reset();
       await app.close();
     }
   },

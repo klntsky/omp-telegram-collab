@@ -103,21 +103,6 @@ test('an in-flight activity edit cannot swallow a later human preference and idl
   } finally { release.resolve(); await app.close(); }
 });
 
-test('expired confirmation repairs a late remote icon overwrite without a new activity transition', {timeout:15000}, async t => {
-  const app = await createSmokeApp();
-  try {
-    await liveTopic(app);
-    const edit = app.bot.api.editForumTopic.bind(app.bot.api);
-    await edit(chatId,42,{icon_custom_emoji_id:runningIcon});
-    assert.equal(lastIcon(app),runningIcon);
-    const now = Date.now();
-    t.mock.method(Date,'now',() => now+30*60*1000);
-    app.emit({t:'state',state:idle});
-    await eventually(() => lastIcon(app) === finishIcon);
-    assert.deepEqual(app.accepted,[]);
-  } finally { await app.close(); }
-});
-
 test('maintenance restores a missing mirror without host admission or prompt replay', {timeout:15000}, async t => {
   t.mock.timers.enable({apis:['setInterval']});
   const app = await createSmokeApp();

@@ -20,7 +20,7 @@ import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-desti
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
 import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
-import { transitionTopicField, topicGoal, type TopicFieldState } from './topic-projection.js';
+import { TopicWriter } from './topic-writer.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -50,19 +50,25 @@ export interface RuntimeLike {
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean }
 type TopicActivity = 'unknown' | 'running' | 'finished';
 type KnownTopicActivity = Exclude<TopicActivity, 'unknown'>;
-interface TopicProjection {
-  activity: TopicActivity;
+interface TopicMetadata {
   generation: number;
-  activityObservedAt?: number;
-  revision: number;
-  name: TopicFieldState;
-  icon: TopicFieldState;
-  lifetime: number;
-  completion: Record<'name' | 'icon', Promise<void>>;
-  currentPrefix: string;
-  titleRevision: number;
+  name: TopicWriter;
+  icon: TopicWriter;
+}
+interface TopicTitleSource {
   humanTitle?: string;
+  prefix: string;
   prefixes: Set<string>;
+  revision: number;
+}
+interface HostActivityObservation {
+  generation: number;
+  value: TopicActivity;
+  observedAt?: number;
+  suspect: boolean;
+  revision: number;
+  probe?: Promise<void>;
+  controller?: AbortController;
 }
 interface StatusFailure { operation: string; at: number; error: unknown }
 interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
@@ -70,22 +76,15 @@ interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; 
 interface Listener {
   sessionId: string;
   generation: number;
-  activityRevision: number;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
-  sessionTitle?: string;
   queued: number;
   recovering: boolean;
   pendingPrompts: { content: PromptContent; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
-  activity: TopicActivity;
-  activityObservedAt?: number;
-  activitySuspect?: boolean;
-  activityProbe?: Promise<void>;
-  activityProbeController?: AbortController;
   initial?: {
     content: PromptContent;
     userId: number;
@@ -204,11 +203,11 @@ export class BotService {
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
   private readonly telegramRetry = new AbortController();
-  private readonly topicProjections = new Map<string, TopicProjection>();
-  private readonly hostObservations = new Map<string, Promise<void>>();
+  private readonly metadataWriters = new Map<string, TopicMetadata>();
+  private readonly topicTitles = new Map<string, TopicTitleSource>();
+  private readonly hostActivity = new Map<string, HostActivityObservation>();
   private readonly mirrorRecoveries = new Map<string, Promise<void>>();
   private readonly hostTitleWrites = new Map<string, Promise<void>>();
-  private topicTicket = 0;
   private readonly sessionInvalidationHandlers = new Set<(sessionId: string, reason?: string) => void>();
   private readonly closedSessions = new Map<string, { generation: number; settled: boolean; pending?: Promise<void> }>();
   private readonly commandMenus = new Map<number, string>();
@@ -717,14 +716,14 @@ export class BotService {
     const existing = this.mirrorRecoveries.get(session.id);
     if (existing) return existing;
     const generation = this.options.store.getSessionGeneration(session.id);
-    const owner = this.topicProjection(session);
+    const owner = this.activityObservation(session);
     const active = () =>
       !this.stopped &&
       !this.options.config.terminated &&
       this.sessionAssigned(session) &&
       this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation &&
-      this.topicProjections.get(session.id) === owner;
+      this.hostActivity.get(session.id) === owner;
     if (
       !active() ||
       this.listeners.has(session.id) ||
@@ -934,7 +933,7 @@ export class BotService {
   async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
-    for (const id of this.topicProjections.keys()) this.invalidateTopicStatus(id);
+    for (const id of this.metadataWriters.keys()) this.invalidateActivity(id);
     this.background.abort(new Error('Bot background maintenance stopped'));
     this.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
     this.apiAbort.abort();
@@ -965,9 +964,10 @@ export class BotService {
     await Promise.all(this.backgroundTasks);
     await this.menuTail;
     await Promise.all(
-      [...this.topicProjections.values()].flatMap((projection) =>
-        Object.values(projection.completion),
-      ),
+      [...this.metadataWriters.values()].flatMap((metadata) => [
+        metadata.name.completion,
+        metadata.icon.completion,
+      ]),
     );
   }
   private sessionObservation(id: string): SessionObservation {
@@ -1228,7 +1228,9 @@ export class BotService {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
         this.closedSessions.delete(session.id);
-        this.topicProjections.delete(session.id);
+        this.metadataWriters.delete(session.id);
+        this.topicTitles.delete(session.id);
+        this.hostActivity.delete(session.id);
         for (const [token, request] of this.capacityRequests)
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
@@ -1297,236 +1299,212 @@ export class BotService {
     })().catch(error => { this.iconIds = undefined; throw error; });
     return this.iconIds;
   }
-  private invalidateTopicStatus(id: string): void {
-    const projection = this.topicProjections.get(id);
-    if (!projection) return;
-    projection.activity = 'unknown';
-    ++projection.revision;
-    for (const field of ['name', 'icon'] as const) {
-      projection[field] = transitionTopicField(projection[field], { type: 'publish' });
+  private invalidateActivity(id: string): void {
+    const activity = this.hostActivity.get(id);
+    if (activity) {
+      activity.controller?.abort(
+        new Error('Activity observation canceled because its listener closed'),
+      );
+      activity.value = 'unknown';
+      activity.observedAt = undefined;
+      activity.suspect = true;
+      ++activity.revision;
     }
   }
-  private topicProjection(session: TopicSession): TopicProjection {
-    let projection = this.topicProjections.get(session.id);
-    if (!projection) {
-      projection = {
-        activity: 'unknown',
-        generation: this.options.store.getSessionGeneration(session.id),
-        revision: 0,
-        titleRevision: 0,
+  private activityObservation(session: TopicSession): HostActivityObservation {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    let observation = this.hostActivity.get(session.id);
+    if (!observation || observation.generation !== generation) {
+      observation?.controller?.abort(new Error('Session activity ownership changed'));
+      observation = { generation, value: 'unknown', suspect: false, revision: 0 };
+      this.hostActivity.set(session.id, observation);
+    }
+    return observation;
+  }
+  private titleSource(session: TopicSession): TopicTitleSource {
+    let source = this.topicTitles.get(session.id);
+    if (!source) {
+      source = {
+        prefix: this.options.store.getTopicTitlePrefix(session.id) ?? '',
         prefixes: new Set(),
-        name: { kind: 'disabled' },
-        icon: { kind: 'disabled' },
-        lifetime:
-          10 * 60_000 + (createHash('sha256').update(session.id).digest().readUInt32BE(0) % 60_000),
-        completion: { name: Promise.resolve(), icon: Promise.resolve() },
-        currentPrefix: '',
+        revision: 0,
       };
-      this.topicProjections.set(session.id, projection);
+      this.topicTitles.set(session.id, source);
     }
-    return projection;
+    return source;
   }
-  private pumpTopicField(session: TopicSession, field: 'name' | 'icon'): void {
-    const projection = this.topicProjections.get(session.id);
-    if (!projection) return;
+  private formatTopicTitle(source: TopicTitleSource): { name: string; prefix: string } {
+    const title = source.humanTitle ?? '';
+    const prefixLimit = 127 - Math.min(Array.from(title).length, 64);
+    const characters = Array.from(source.prefix);
+    const prefix =
+      characters.length > prefixLimit
+        ? `${characters.slice(0, prefixLimit - 1).join('')}…`
+        : source.prefix;
+    return {
+      name: Array.from(`${prefix ? `${prefix} ` : ''}${title}`)
+        .slice(0, 128)
+        .join(''),
+      prefix,
+    };
+  }
+  private topicMetadata(session: TopicSession): TopicMetadata {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    let metadata = this.metadataWriters.get(session.id);
+    if (metadata?.generation === generation) return metadata;
     const owned = () =>
       !this.stopped &&
       !this.options.config.terminated &&
+      this.metadataWriters.get(session.id) === metadata &&
       this.sessionAssigned(session) &&
-      this.topicProjections.get(session.id) === projection;
-    const eligible = () => {
-      if (!owned()) return false;
-      const goal = topicGoal(projection[field]);
-      const status = this.options.store.getSession(session.id)?.status;
-      return (
-        goal !== undefined &&
-        goal.generation === this.options.store.getSessionGeneration(session.id) &&
-        (status === 'open' ||
+      this.options.store.getSessionGeneration(session.id) === generation;
+    const writer = (field: 'name' | 'icon'): TopicWriter => {
+      const eligible = () => {
+        if (!owned()) return false;
+        if (field === 'icon' && this.hostActivity.get(session.id)?.value === 'unknown')
+          return false;
+        const status = this.options.store.getSession(session.id)?.status;
+        return (
+          status === 'open' ||
           (field === 'icon' &&
             status === 'closed' &&
-            projection.activity === 'finished' &&
-            this.closedSessions.get(session.id)?.settled === true))
-      );
-    };
-    if (!eligible()) {
-      projection[field] = transitionTopicField(projection[field], { type: 'publish' });
-      return;
-    }
-    projection[field] = transitionTopicField(projection[field], {
-      type: 'expire',
-      now: Date.now(),
-    });
-    const ticket = ++this.topicTicket;
-    projection[field] = transitionTopicField(projection[field], {
-      type: 'queue',
-      ticket,
-      now: Date.now(),
-    });
-    const queued = projection[field];
-    if (queued.kind !== 'queued' || queued.ticket !== ticket) return;
-    const pending = this.delivery
-      .runTopic(
-        session.chatId,
-        field,
-        session.id,
-        async (signal) => {
-          if (!eligible()) return;
-          projection[field] = transitionTopicField(projection[field], { type: 'dispatch', ticket });
-          const sent = projection[field];
-          if (sent.kind !== 'sending' || sent.attempt.ticket !== ticket) return;
-          const value = sent.attempt.target.value;
-          try {
-            await this.bot.api
-              .editForumTopic(
-                session.chatId,
-                session.threadId,
-                field === 'name' ? { name: value } : { icon_custom_emoji_id: value },
-                signal,
-              )
-              .catch((error) => {
+            this.hostActivity.get(session.id)?.value === 'finished' &&
+            this.closedSessions.get(session.id)?.settled === true)
+        );
+      };
+      const result = new TopicWriter(
+        (take) =>
+          this.delivery.runTopic(
+            session.chatId,
+            field,
+            session.id,
+            async (signal) => {
+              if (!eligible()) return;
+              const value = take();
+              if (value === undefined) return;
+              try {
+                await this.bot.api.editForumTopic(
+                  session.chatId,
+                  session.threadId,
+                  field === 'name' ? { name: value } : { icon_custom_emoji_id: value },
+                  signal,
+                );
+              } catch (error) {
                 if (
                   !(
                     error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')
                   )
                 )
                   throw error;
-              });
-            projection[field] = transitionTopicField(projection[field], {
-              type: 'success',
-              ticket,
-              now: Date.now(),
-              lifetime: projection.lifetime,
-            });
-            if (eligible() && field === 'name' && projection[field].kind === 'confirmed') {
-              this.options.store.setTopicTitle(session.id, value, projection.currentPrefix);
-            }
-            if (owned()) this.pumpTopicField(session, field);
-          } catch (error) {
-            projection[field] = transitionTopicField(projection[field], {
-              type: 'failure',
-              ticket,
-              retryAt: Date.now() + 30_000,
-            });
-            throw error;
-          }
-        },
-        () => {
-          const queued = projection[field];
-          return eligible() && queued.kind === 'queued' && queued.ticket === ticket;
-        },
-      )
-      .catch((error) => {
-        projection[field] = transitionTopicField(projection[field], {
-          type: 'failure',
-          ticket,
-          retryAt: Date.now() + 30_000,
-        });
-        this.sessionObservation(session.id).failure = {
-          operation:
-            field === 'name' ? 'Topic title synchronization' : 'Topic icon synchronization',
-          at: Date.now(),
-          error,
-        };
-        if (field === 'icon')
-          console.warn(
-            `Could not update topic status (${session.id}, ${projection.activity}).`,
+              }
+              if (owned()) {
+                void result.observe(value);
+                if (field === 'name') {
+                  const source = this.topicTitles.get(session.id);
+                  if (source) {
+                    const current = this.formatTopicTitle(source);
+                    if (current.name === value)
+                      this.options.store.setTopicTitle(session.id, value, current.prefix);
+                  }
+                }
+              }
+              return value;
+            },
+            eligible,
+          ),
+        eligible,
+        (error) => {
+          if (!owned()) return;
+          this.sessionObservation(session.id).failure = {
+            operation:
+              field === 'name' ? 'Topic title synchronization' : 'Topic icon synchronization',
+            at: Date.now(),
             error,
-          );
-      });
-    projection.completion[field] = pending.then(() => undefined);
+          };
+          if (field === 'icon')
+            console.warn(`Could not update topic status (${session.id}).`, error);
+        },
+      );
+      return result;
+    };
+    metadata = { generation, name: writer('name'), icon: writer('icon') };
+    this.metadataWriters.set(session.id, metadata);
+    return metadata;
   }
-  private setTopicStatus(session: TopicSession, activity: TopicActivity): Promise<void> {
+  private setTopicStatus(
+    session: TopicSession,
+    activity: TopicActivity,
+    suspect = false,
+  ): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session))
       return Promise.resolve();
-    const status = this.options.store.getSession(session.id)?.status;
-    if (
-      status !== 'open' &&
-      !(
-        status === 'closed' &&
-        activity === 'finished' &&
-        this.closedSessions.get(session.id)?.settled === true
+    const observation = this.activityObservation(session);
+    observation.value = activity;
+    observation.observedAt = activity === 'unknown' ? undefined : Date.now();
+    observation.suspect = suspect;
+    ++observation.revision;
+    return this.publishTopicIcon(session);
+  }
+  private topicIconValue(
+    session: TopicSession,
+    ids: Record<KnownTopicActivity, string>,
+  ): string | undefined {
+    const activity = this.activityObservation(session).value;
+    if (activity === 'unknown') return undefined;
+    let preference = this.options.store.getTopicFinishIcon(session.id);
+    if (preference === ids.running) {
+      this.options.store.setTopicFinishIcon(session.id, undefined);
+      preference = undefined;
+    }
+    return activity === 'running' ? ids.running : (preference ?? ids.finished);
+  }
+  private async publishTopicIcon(session: TopicSession): Promise<void> {
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+    const metadata = this.topicMetadata(session);
+    if (this.activityObservation(session).value === 'unknown') return;
+    try {
+      const ids = await this.getIconIds();
+      if (
+        this.stopped ||
+        this.metadataWriters.get(session.id) !== metadata ||
+        !this.sessionAssigned(session) ||
+        this.options.store.getSessionGeneration(session.id) !== metadata.generation
       )
-    ) {
-      this.invalidateTopicStatus(session.id);
-      return Promise.resolve();
-    }
-    const projection = this.topicProjection(session);
-    const generation = this.options.store.getSessionGeneration(session.id);
-    if (projection.activity !== activity || projection.generation !== generation) {
-      projection.icon = transitionTopicField(projection.icon, { type: 'publish' });
-    }
-    projection.activity = activity;
-    projection.generation = generation;
-    const revision = ++projection.revision;
-    if (activity === 'unknown') {
-      projection.icon = transitionTopicField(projection.icon, { type: 'publish' });
-      return Promise.resolve();
-    }
-    return this.getIconIds()
-      .then(async (ids) => {
-        if (
-          this.topicProjections.get(session.id) !== projection ||
-          (projection.revision !== revision && projection.activity !== activity) ||
-          generation !== this.options.store.getSessionGeneration(session.id)
-        )
-          return;
-        if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session))
-          return;
-        const preference = this.options.store.getTopicFinishIcon(session.id);
-        if (preference === ids.running)
-          this.options.store.setTopicFinishIcon(session.id, undefined);
-        const value =
-          activity === 'finished'
-            ? preference === ids.running
-              ? ids.finished
-              : (preference ?? ids.finished)
-            : ids.running;
-        projection.icon = transitionTopicField(projection.icon, {
-          type: 'publish',
-          target: { generation, value },
-        });
-        this.pumpTopicField(session, 'icon');
-        for (;;) {
-          const completion = projection.completion.icon;
-          await completion;
-          if (projection.completion.icon === completion) break;
-        }
-      })
-      .catch((error) => {
+        return;
+      const value = this.topicIconValue(session, ids);
+      if (value !== undefined) await metadata.icon.publish(value);
+    } catch (error) {
+      if (!this.stopped)
         this.sessionObservation(session.id).failure = {
           operation: 'Topic icon synchronization',
           at: Date.now(),
           error,
         };
-      });
+    }
   }
-  private observeExistingSession(session: TopicSession): Promise<void> {
-    const existing = this.hostObservations.get(session.id);
-    if (existing) return existing;
-    const generation = this.options.store.getSessionGeneration(session.id);
-    const projection = this.topicProjection(session);
-    const active = () =>
-      !this.stopped &&
-      !this.options.config.terminated &&
-      this.sessionAssigned(session) &&
-      this.options.store.getSession(session.id)?.status === 'open' &&
-      this.options.store.getSessionGeneration(session.id) === generation &&
-      !this.listeners.has(session.id) &&
-      this.topicProjections.get(session.id) === projection;
+  private refreshActivity(session: TopicSession): Promise<void> {
+    const observation = this.activityObservation(session);
+    if (observation.probe) return observation.probe;
+    const revision = observation.revision;
     const controller = new AbortController();
+    observation.controller = controller;
     const signal = AbortSignal.any([this.background.signal, controller.signal]);
     const timeout = setTimeout(
       () => controller.abort(new Error('Host activity lookup timed out after 5 seconds')),
       5000,
     );
-    const observation = (async () => {
-      if (!active()) return;
-      if (Date.now() - (projection.activityObservedAt ?? 0) >= 60_000)
-        void this.setTopicStatus(session, 'unknown');
+    const active = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      this.hostActivity.get(session.id) === observation &&
+      observation.revision === revision &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSessionGeneration(session.id) === observation.generation &&
+      this.options.store.getSession(session.id)?.status === 'open';
+    const probe = (async () => {
       const binding = await withCancellation(this.options.runtime.resolveExisting(session), signal);
       if (!active()) return;
       if (!binding) {
-        projection.activityObservedAt = Date.now();
         void this.setTopicStatus(session, 'finished');
         return;
       }
@@ -1539,7 +1517,8 @@ export class BotService {
         signal,
       );
       if (!active()) return;
-      projection.activityObservedAt = Date.now();
+      const listener = this.listeners.get(session.id);
+      if (listener) listener.queuedMessages = state.queuedMessageCount;
       void this.setTopicStatus(
         session,
         state.isStreaming ||
@@ -1561,79 +1540,12 @@ export class BotService {
       })
       .finally(() => {
         clearTimeout(timeout);
-        if (this.hostObservations.get(session.id) === observation)
-          this.hostObservations.delete(session.id);
-      });
-    this.hostObservations.set(session.id, observation);
-    return observation;
-  }
-  private refreshActivity(session: TopicSession, listener: Listener): Promise<void> {
-    if (listener.activityProbe) return listener.activityProbe;
-    const revision = listener.activityRevision;
-    const controller = new AbortController();
-    listener.activityProbeController = controller;
-    const signal = AbortSignal.any([this.background.signal, controller.signal]);
-    const timeout = setTimeout(
-      () => controller.abort(new Error('Host activity lookup timed out after 5 seconds')),
-      5000,
-    );
-    const active = () =>
-      !this.stopped &&
-      !this.options.config.terminated &&
-      this.sessionAssigned(session) &&
-      this.listeners.get(session.id) === listener &&
-      listener.activityRevision === revision &&
-      this.options.store.getSessionGeneration(session.id) === listener.generation &&
-      this.options.store.getSession(session.id)?.status === 'open';
-    const probe = (async () => {
-      const binding = await withCancellation(this.options.runtime.resolveExisting(session), signal);
-      if (!active()) return;
-      if (!binding) {
-        listener.activity = 'finished';
-        listener.activityObservedAt = Date.now();
-        listener.activitySuspect = false;
-        return;
-      }
-      const state = await withCancellation(
-        (this.options.readState ?? readCollabState)(
-          binding,
-          `Telegram @${this.bot.botInfo!.username} activity`,
-          signal,
-        ),
-        signal,
-      );
-      if (!active()) return;
-      listener.queuedMessages = state.queuedMessageCount;
-      listener.activity =
-        this.options.store.hasPendingInitialTask(session.id) ||
-        state.isStreaming ||
-        state.queuedMessageCount > 0
-          ? 'running'
-          : 'finished';
-      listener.activityObservedAt = Date.now();
-      listener.activitySuspect = false;
-    })()
-      .catch((error) => {
-        if (active()) {
-          listener.activity = 'unknown';
-          listener.activityObservedAt = undefined;
-          listener.activitySuspect = true;
-          void this.setTopicStatus(session, 'unknown');
-          this.sessionObservation(session.id).failure = {
-            operation: 'Host status lookup',
-            at: Date.now(),
-            error,
-          };
-        }
-      })
-      .finally(() => {
-        clearTimeout(timeout);
-        if (listener.activityProbe === probe) {
-          listener.activityProbe = undefined;
-          listener.activityProbeController = undefined;
+        if (observation.probe === probe) {
+          observation.probe = undefined;
+          observation.controller = undefined;
         }
       });
-    listener.activityProbe = probe;
+    observation.probe = probe;
     return probe;
   }
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
@@ -1647,22 +1559,22 @@ export class BotService {
       ) {
         void this.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
       } else if (state.settled) {
-        void this.setTopicStatus(session, 'finished');
+        void this.publishTopicIcon(session);
       }
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
-    let listener = this.listeners.get(session.id);
-    if (listener && listener.generation !== generation) {
-      this.dropListener(session.id);
-      listener = undefined;
-    }
-    if (!listener) {
-      const projection = this.topicProjection(session);
-      const revision = projection.titleRevision;
+    const listener = this.listeners.get(session.id);
+    if (listener && listener.generation !== generation) this.dropListener(session.id);
+    const current = this.listeners.get(session.id);
+    if (current) {
+      this.syncTopicTitle(session, current);
+    } else {
+      const source = this.titleSource(session);
+      const revision = source.revision;
       const title =
         this.options.store.getPendingSessionTitle(session.id) ??
-        projection.humanTitle ??
+        source.humanTitle ??
         this.stripTopicStatus(session, session.name);
       void this.projectTopicTitle(
         session,
@@ -1672,49 +1584,31 @@ export class BotService {
           this.sessionAssigned(session) &&
           this.options.store.getSession(session.id)?.status === 'open' &&
           this.options.store.getSessionGeneration(session.id) === generation &&
-          projection.titleRevision === revision &&
-          this.topicProjections.get(session.id) === projection,
+          this.topicTitles.get(session.id) === source &&
+          source.revision === revision,
       );
-      await this.observeExistingSession(session);
-      if (
-        this.stopped ||
-        !this.sessionAssigned(session) ||
-        this.options.store.getSessionGeneration(session.id) !== generation
-      )
-        return;
-      listener = this.listeners.get(session.id);
     }
-    if (listener) {
-      this.syncTopicTitle(session, listener);
-      if (listener.activitySuspect || Date.now() - (listener.activityObservedAt ?? 0) >= 30_000) {
-        if (listener.activitySuspect || Date.now() - (listener.activityObservedAt ?? 0) >= 60_000) {
-          listener.activity = 'unknown';
-          void this.setTopicStatus(session, 'unknown');
-        }
-        await this.refreshActivity(session, listener);
-      }
-      if (
-        this.stopped ||
-        !this.sessionAssigned(session) ||
-        this.listeners.get(session.id) !== listener ||
-        this.options.store.getSessionGeneration(session.id) !== generation ||
-        this.options.store.getSession(session.id)?.status !== 'open'
-      )
-        return;
-      void this.setTopicStatus(session, listener.activity);
-    } else {
-      const icon = this.topicProjections.get(session.id);
-      if (icon?.generation === generation) void this.setTopicStatus(session, icon.activity);
+    const observation = this.activityObservation(session);
+    const age = Date.now() - (observation.observedAt ?? 0);
+    if (observation.suspect || age >= 30_000) {
+      if (observation.suspect || age >= 60_000) void this.setTopicStatus(session, 'unknown');
+      await this.refreshActivity(session);
     }
+    if (
+      !this.stopped &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSessionGeneration(session.id) === generation
+    )
+      void this.publishTopicIcon(session);
   }
   private windDownClosedSession(session: TopicSession): Promise<void> {
     const generation = this.options.store.getSessionGeneration(session.id);
     let state = this.closedSessions.get(session.id);
     if (!state || state.generation !== generation) {
-      state = {generation,settled:false};
-      this.closedSessions.set(session.id,state);
+      state = { generation, settled: false };
+      this.closedSessions.set(session.id, state);
       this.options.store.cancelInitialTask(session.id);
-      this.invalidateTopicStatus(session.id);
+      this.invalidateActivity(session.id);
       this.dropListener(session.id);
       for (const [token, request] of this.capacityRequests) {
         if (request.sessionId === session.id) this.capacityRequests.delete(token);
@@ -1723,19 +1617,30 @@ export class BotService {
         if (proposal.sessionId === session.id) this.promptProposals.delete(token);
       }
     }
-    if (state.settled) return this.setTopicStatus(session,'finished');
+    if (state.settled) return this.setTopicStatus(session, 'finished');
     if (state.pending) return state.pending;
     const current = state;
-    const pending = (session.runtime.kind === 'attached'
-      ? this.options.runtime.isRunning(session).then(running => !running)
-      : this.options.runtime.stop(session)).then(async settled => {
-      if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
+    const pending = (
+      session.runtime.kind === 'attached'
+        ? this.options.runtime.isRunning(session).then((running) => !running)
+        : this.options.runtime.stop(session)
+    )
+      .then(async (settled) => {
+        if (
+          this.stopped ||
+          this.options.config.terminated ||
+          !this.sessionAssigned(session) ||
           this.closedSessions.get(session.id) !== current ||
           this.options.store.getSessionGeneration(session.id) !== generation ||
-          this.options.store.getSession(session.id)?.status !== 'closed') return;
-      current.settled = settled;
-      if (settled) await this.setTopicStatus(session,'finished');
-    }).finally(() => { current.pending = undefined; });
+          this.options.store.getSession(session.id)?.status !== 'closed'
+        )
+          return;
+        current.settled = settled;
+        if (settled) await this.setTopicStatus(session, 'finished');
+      })
+      .finally(() => {
+        current.pending = undefined;
+      });
     current.pending = pending;
     return pending;
   }
@@ -1750,21 +1655,21 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
-    const projection = this.topicProjections.get(session.id);
-    await projection?.completion.icon;
-    this.topicProjections.delete(session.id);
+    const metadata = this.metadataWriters.get(session.id);
+    await metadata?.icon.completion;
+    this.metadataWriters.delete(session.id);
+    this.topicTitles.delete(session.id);
+    this.hostActivity.delete(session.id);
     if (session.status === 'detached') return;
     try {
-      await this.delivery.runTopic(
+      await this.delivery.run(
         session.chatId,
-        'icon',
-        session.id,
-        (signal) =>
+        () =>
           this.bot.api.editForumTopic(
             session.chatId,
             session.threadId,
             { icon_custom_emoji_id: '' },
-            signal,
+            this.apiAbort.signal,
           ),
         () =>
           !this.stopped &&
@@ -2316,58 +2221,19 @@ export class BotService {
       const edited = message.forum_topic_edited;
       const attributable =
         ctx.from !== undefined && ctx.from.id !== this.id && !message.sender_chat;
-      const projection = this.topicProjections.get(session.id);
-      for (const field of ['name', 'icon'] as const) {
-        const value = field === 'name' ? edited.name : edited.icon_custom_emoji_id;
-        if (value !== undefined && projection) {
-          projection[field] = transitionTopicField(projection[field], { type: 'notice', value });
-          if (!detached) this.pumpTopicField(session, field);
-        }
-      }
-      if (edited.icon_custom_emoji_id !== undefined && attributable) {
-        const generation = this.options.store.getSessionGeneration(session.id);
-        void this.getIconIds()
-          .then((ids) => {
-            if (
-              this.stopped ||
-              this.options.config.terminated ||
-              generation !== this.options.store.getSessionGeneration(session.id) ||
-              (detached
-                ? this.options.store.getSession(session.id)?.status !== 'detached' ||
-                  findInstance(this.options.config, this.id, session.chatId)?.path !==
-                    session.instancePath
-                : !this.sessionAssigned(session))
-            )
-              return;
-            if (edited.icon_custom_emoji_id !== ids.running)
-              this.options.store.setTopicFinishIcon(session.id, edited.icon_custom_emoji_id);
-            if (!detached && projection) void this.setTopicStatus(session, projection.activity);
-          })
-          .catch((error) => {
-            this.sessionObservation(session.id).failure = {
-              operation: 'Topic icon synchronization',
-              at: Date.now(),
-              error,
-            };
-          });
-      }
-      if (edited.name !== undefined && attributable) {
-        const title = this.stripTopicStatus(session, edited.name);
-        const listener = this.listeners.get(session.id);
-        if (listener) listener.sessionTitle = title;
-        const source = this.topicProjection(session);
-        if (source.humanTitle !== title)
-          source.name = transitionTopicField(source.name, { type: 'publish' });
-        source.humanTitle = title;
-        const prefix =
-          [this.options.store.getTopicTitlePrefix(session.id) ?? '', ...source.prefixes].find(
-            (prefix) => prefix !== '' && edited.name?.startsWith(`${prefix} `),
-          ) ?? '';
-        this.options.store.setTopicTitle(session.id, edited.name, prefix);
-        ++source.titleRevision;
-        if (!detached) {
+      const metadata = this.topicMetadata(session);
+      if (attributable) {
+        if (edited.name !== undefined) {
+          const title = this.stripTopicStatus(session, edited.name);
+          const source = this.titleSource(session);
+          source.humanTitle = title;
+          const prefix =
+            [this.options.store.getTopicTitlePrefix(session.id) ?? '', ...source.prefixes].find(
+              (candidate) => candidate !== '' && edited.name?.startsWith(`${candidate} `),
+            ) ?? '';
+          this.options.store.setTopicTitle(session.id, edited.name, prefix);
           this.options.store.setPendingSessionTitle(session.id, title);
-          const revision = source.titleRevision;
+          const revision = ++source.revision;
           const generation = this.options.store.getSessionGeneration(session.id);
           void this.projectTopicTitle(
             session,
@@ -2377,9 +2243,10 @@ export class BotService {
               !refreshTermination(this.options.config) &&
               this.sessionAssigned(session) &&
               this.options.store.getSession(session.id)?.status === 'open' &&
-              source.titleRevision === revision &&
-              this.options.store.getSessionGeneration(session.id) === generation,
+              this.options.store.getSessionGeneration(session.id) === generation &&
+              source.revision === revision,
           );
+          void metadata.name.observe(edited.name);
           void this.applySessionTitle(session).catch((error) => {
             this.sessionObservation(session.id).failure = {
               operation: 'Topic title synchronization',
@@ -2388,6 +2255,37 @@ export class BotService {
             };
           });
         }
+        if (edited.icon_custom_emoji_id !== undefined) {
+          const value = edited.icon_custom_emoji_id;
+          void metadata.icon.publish(undefined);
+          void this.getIconIds()
+            .then((ids) => {
+              if (
+                this.stopped ||
+                this.options.config.terminated ||
+                this.metadataWriters.get(session.id) !== metadata ||
+                !this.sessionAssigned(session) ||
+                this.options.store.getSessionGeneration(session.id) !== metadata.generation
+              )
+                return;
+              if (value !== ids.running) this.options.store.setTopicFinishIcon(session.id, value);
+              const target = this.topicIconValue(session, ids);
+              if (target !== undefined) void metadata.icon.publish(target);
+              void metadata.icon.observe(value);
+            })
+            .catch((error) => {
+              if (!this.stopped)
+                this.sessionObservation(session.id).failure = {
+                  operation: 'Topic icon synchronization',
+                  at: Date.now(),
+                  error,
+                };
+            });
+        }
+      } else {
+        if (edited.name !== undefined) void metadata.name.observe(edited.name);
+        if (edited.icon_custom_emoji_id !== undefined)
+          void metadata.icon.observe(edited.icon_custom_emoji_id);
       }
       if (
         ctx.from?.id === this.id &&
@@ -2426,7 +2324,10 @@ export class BotService {
       return;
     }
     if (!ctx.from || ctx.from.is_bot) return;
-    if (session?.status === 'closed' && !['status', 'help', 'detach'].includes(command?.action ?? '')) {
+    if (
+      session?.status === 'closed' &&
+      !['status', 'help', 'detach'].includes(command?.action ?? '')
+    ) {
       await replyTo(
         ctx,
         destination,
@@ -2813,11 +2714,7 @@ export class BotService {
         const listener = this.listeners.get(session.id);
         clearTimeout(listener?.initial?.timer);
         if (listener) listener.initial = undefined;
-        if (listener) {
-          listener.activity = 'unknown';
-          ++listener.activityRevision;
-        }
-        this.invalidateTopicStatus(session.id);
+        this.invalidateActivity(session.id);
         for (const [token, request] of this.capacityRequests) {
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         }
@@ -2920,27 +2817,32 @@ export class BotService {
     this.reconnects.set(session.id, timer);
   }
   private dropListener(id: string): void {
-    this.invalidateTopicStatus(id);
+    this.invalidateActivity(id);
     clearTimeout(this.reconnects.get(id));
     this.reconnects.delete(id);
     const listener = this.listeners.get(id);
-    for (const pending of listener?.pendingPrompts ?? []) pending.observation.state = 'acceptance unknown';
+    for (const pending of listener?.pendingPrompts ?? [])
+      pending.observation.state = 'acceptance unknown';
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
-    if (listener) {
-      listener.activityProbeController?.abort(new Error('Activity observation canceled because its listener closed'));
-      listener.initial = undefined;
-      listener.activity = 'unknown';
-    }
+    if (listener) listener.initial = undefined;
     for (const [token, question] of this.questions) {
       if (question.listener === listener) this.endQuestion(token);
     }
     listener?.connection?.close();
   }
-  private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly = false, recoverClosed = true): Promise<CollabConnection> {
-    if (existingOnly && !binding) return Promise.reject(new Error('Existing host binding is required'));
+  private listen(
+    session: TopicSession,
+    binding?: HostBinding,
+    beforeMutation?: () => Promise<void>,
+    existingOnly = false,
+    recoverClosed = true,
+  ): Promise<CollabConnection> {
+    if (existingOnly && !binding)
+      return Promise.reject(new Error('Existing host binding is required'));
     this.requireSessionAssignment(session);
-    if (this.options.store.getSession(session.id)?.status !== 'open') return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
+    if (this.options.store.getSession(session.id)?.status !== 'open')
+      return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
     const generation = this.options.store.getSessionGeneration(session.id);
     const existing = this.listeners.get(session.id);
     if (existing?.promise && existing.generation === generation) return existing.promise;
@@ -2948,7 +2850,6 @@ export class BotService {
     const listener: Listener = {
       sessionId: session.id,
       generation,
-      activityRevision: 0,
       tail: Promise.resolve(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
@@ -2956,47 +2857,83 @@ export class BotService {
       pendingAnswers: new Map(),
       pendingStops: [],
       queuedMessages: 0,
-      activity: this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
     };
     this.listeners.set(session.id, listener);
-    void this.setTopicStatus(session,listener.activity);
-    const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
+    void this.setTopicStatus(
+      session,
+      this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
+    );
+    const active = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      this.sessionAssigned(session) &&
       this.options.store.getSession(session.id)?.status === 'open' &&
-      this.options.store.getSessionGeneration(session.id) === generation && this.listeners.get(session.id) === listener;
+      this.options.store.getSessionGeneration(session.id) === generation &&
+      this.listeners.get(session.id) === listener;
     const closed = new Error('Session closed');
-    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session,beforeMutation)).then(async binding => {
-      if (!active()) throw closed;
-      await beforeMutation?.();
-      if (!active()) throw closed;
-      await this.applySessionTitle(session);
-      if (!active()) throw closed;
-      return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
-        onFrame: frame => this.onFrame(session,listener,frame),
-        onClose: reason => {
-          if (!active()) return;
-          this.sessionObservation(session.id).failure = {operation:'Mirroring disconnected',at:Date.now(),error:reason};
-          const connected = listener.connection !== undefined;
-          this.dropListener(session.id);
-          if (connected) this.scheduleReconnect(session);
-        },
+    listener.promise = (
+      binding ? Promise.resolve(binding) : this.options.runtime.ensure(session, beforeMutation)
+    )
+      .then(async (binding) => {
+        if (!active()) throw closed;
+        await beforeMutation?.();
+        if (!active()) throw closed;
+        await this.applySessionTitle(session);
+        if (!active()) throw closed;
+        return (this.options.connect ?? connectCollab)(
+          binding,
+          `Telegram @${this.bot.botInfo!.username}`,
+          {
+            onFrame: (frame) => this.onFrame(session, listener, frame),
+            onClose: (reason) => {
+              if (!active()) return;
+              this.sessionObservation(session.id).failure = {
+                operation: 'Mirroring disconnected',
+                at: Date.now(),
+                error: reason,
+              };
+              const connected = listener.connection !== undefined;
+              this.dropListener(session.id);
+              if (connected) this.scheduleReconnect(session);
+            },
+          },
+        );
+      })
+      .then((connection) => {
+        if (!active()) {
+          connection.close();
+          throw closed;
+        }
+        this.sessionObservation(session.id).mirrored = true;
+        listener.connection = connection;
+        return connection;
+      })
+      .catch(async (error) => {
+        if (active())
+          this.sessionObservation(session.id).failure = {
+            operation: 'Session connection',
+            at: Date.now(),
+            error,
+          };
+        try {
+          if (!existingOnly && error instanceof SessionCapacityError && active())
+            await this.requestCapacity(session, error.limit);
+          if (
+            error !== closed ||
+            !recoverClosed ||
+            existingOnly ||
+            this.stopped ||
+            refreshTermination(this.options.config) ||
+            !this.sessionAssigned(session) ||
+            this.options.store.getSession(session.id)?.status !== 'open' ||
+            this.options.store.getSessionGeneration(session.id) !== generation
+          )
+            throw error;
+        } finally {
+          if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
+        }
+        return this.listen(session, undefined, beforeMutation, false, false);
       });
-    }).then(connection => {
-      if (!active()) { connection.close(); throw closed; }
-      this.sessionObservation(session.id).mirrored = true;
-      listener.connection = connection;
-      return connection;
-    }).catch(async error => {
-      if (active()) this.sessionObservation(session.id).failure = {operation:'Session connection',at:Date.now(),error};
-      try {
-        if (!existingOnly && error instanceof SessionCapacityError && active()) await this.requestCapacity(session,error.limit);
-        if (error !== closed || !recoverClosed || existingOnly || this.stopped || refreshTermination(this.options.config) ||
-            !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open' ||
-            this.options.store.getSessionGeneration(session.id) !== generation) throw error;
-      } finally {
-        if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
-      }
-      return this.listen(session,undefined,beforeMutation,false,false);
-    });
     return listener.promise;
   }
   private sendPrompt(listener: Listener, content: PromptContent, messageId?: number, onStartupRejected?: () => void): void {
@@ -3257,7 +3194,7 @@ export class BotService {
     const savedPrefix = this.options.store.getTopicTitlePrefix(session.id);
     if (savedPrefix && title.startsWith(`${savedPrefix} `))
       return title.slice(savedPrefix.length + 1);
-    for (const prefix of this.topicProjections.get(session.id)?.prefixes ?? []) {
+    for (const prefix of this.topicTitles.get(session.id)?.prefixes ?? []) {
       if (title.startsWith(`${prefix} `)) return title.slice(prefix.length + 1);
     }
     if (title.startsWith('🌳 ')) return title.slice('🌳 '.length);
@@ -3271,41 +3208,28 @@ export class BotService {
     const callerActive = active;
     active = () => callerActive() && this.options.store.getTopicKind(session) === 'tracked';
     if (!active()) return;
-    const owner = this.topicProjection(session);
+    const source = this.titleSource(session);
+    const initial = source.humanTitle === undefined;
+    source.humanTitle = title;
+    const publish = () => {
+      const current = this.formatTopicTitle(source);
+      if (!current.name.trim()) return;
+      if (current.prefix) source.prefixes.add(current.prefix);
+      void this.topicMetadata(session).name.publish(current.name);
+    };
+    publish();
     try {
       const status = await withCancellation(
         this.options.runtime.topicTitleStatus(session),
         AbortSignal.any([this.background.signal, AbortSignal.timeout(5000)]),
       );
-      if (!active() || this.topicProjections.get(session.id) !== owner) return;
+      if (!active() || this.topicTitles.get(session.id) !== source) return;
       const topicBranch = `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`;
       const branch = status.branch === topicBranch ? '' : (status.branch ?? '');
-      const statusText = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
-      const prefixLimit = 127 - Math.min(Array.from(title).length, 64);
-      const statusCharacters = Array.from(statusText);
-      const prefix =
-        statusCharacters.length > prefixLimit
-          ? `${statusCharacters.slice(0, prefixLimit - 1).join('')}…`
-          : statusText;
-      const projection = this.topicProjection(session);
-      const prefixes = projection.prefixes;
-      if (projection.humanTitle === undefined && prefix && title.startsWith(`${prefix} `))
-        title = title.slice(prefix.length + 1);
-      projection.humanTitle = title;
-      const name = Array.from(`${prefix ? `${prefix} ` : ''}${title}`)
-        .slice(0, 128)
-        .join('');
-      if (!name.trim()) return;
-      projection.currentPrefix = prefix;
-      if (prefix) prefixes.add(prefix);
-      projection.name = transitionTopicField(projection.name, {
-        type: 'publish',
-        target: {
-          generation: this.options.store.getSessionGeneration(session.id),
-          value: name,
-        },
-      });
-      this.pumpTopicField(session, 'name');
+      source.prefix = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
+      if (initial && source.prefix && source.humanTitle?.startsWith(`${source.prefix} `))
+        source.humanTitle = source.humanTitle.slice(source.prefix.length + 1);
+      publish();
     } catch (error) {
       this.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
@@ -3315,14 +3239,9 @@ export class BotService {
     }
   }
   private syncTopicTitle(session: TopicSession, listener: Listener, title?: string): void {
-    if (title !== undefined) listener.sessionTitle = title;
-    else title = listener.sessionTitle;
     const generation = this.options.store.getSessionGeneration(session.id);
-    const projection = this.topicProjection(session);
-    if (title !== undefined && title !== projection.humanTitle) {
-      projection.name = transitionTopicField(projection.name, { type: 'publish' });
-    }
-    const revision = ++projection.titleRevision;
+    const source = this.titleSource(session);
+    const revision = ++source.revision;
     const active = () =>
       !this.stopped &&
       !refreshTermination(this.options.config) &&
@@ -3330,7 +3249,7 @@ export class BotService {
       this.listeners.get(session.id) === listener &&
       this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation &&
-      projection.titleRevision === revision;
+      source.revision === revision;
     void (async () => {
       if (!active()) return;
       const pending = this.options.store.getPendingSessionTitle(session.id);
@@ -3342,12 +3261,12 @@ export class BotService {
       const human =
         this.options.store.getPendingSessionTitle(session.id) ??
         (pending === undefined ? title : undefined) ??
-        projection.humanTitle ??
+        source.humanTitle ??
         this.stripTopicStatus(
           session,
           this.options.store.getSession(session.id)?.name ?? session.name,
         );
-      if (pending !== undefined || title !== undefined) projection.humanTitle = human;
+      if (pending !== undefined || title !== undefined) source.humanTitle = human;
       await this.projectTopicTitle(session, human, active);
     })().catch((error) => {
       this.sessionObservation(session.id).failure = {
@@ -3371,24 +3290,13 @@ export class BotService {
       this.options.store.getSessionGeneration(session.id) !== listener.generation
     )
       return;
-    if (
-      frame.t === 'welcome' ||
-      frame.t === 'state' ||
-      frame.t === 'error' ||
-      (frame.t === 'event' &&
-        (frame.event.type === 'agent_start' ||
-          frame.event.type === 'agent_end' ||
-          miniAppInterruptionAuthor(frame.event) !== undefined))
-    ) {
-      ++listener.activityRevision;
-    }
     this.options.runtime.observeFrame(session.id, frame);
     if (
       frame.t === 'welcome' ||
       (frame.t === 'state' &&
         (!frame.state.isStreaming ||
           (frame.state.sessionName !== undefined &&
-            frame.state.sessionName !== this.topicProjections.get(session.id)?.humanTitle)))
+            frame.state.sessionName !== this.topicTitles.get(session.id)?.humanTitle)))
     ) {
       this.syncTopicTitle(session, listener, frame.state.sessionName);
     }
@@ -3430,8 +3338,7 @@ export class BotService {
     if (interruptedBy) {
       listener.pendingAnswers.clear();
       listener.queuedMessages = 0;
-      listener.activity = 'finished';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(session, 'finished');
       void sendTo(
         this.bot.api,
         topicDestination(session.chatId, session.threadId),
@@ -3440,27 +3347,24 @@ export class BotService {
       ).catch(() => undefined);
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
-      listener.activityObservedAt = Date.now();
-      listener.activitySuspect = false;
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity =
+      void this.setTopicStatus(
+        session,
         this.options.store.hasPendingInitialTask(session.id) ||
-        frame.state.isStreaming ||
-        listener.queuedMessages > 0
+          frame.state.isStreaming ||
+          listener.queuedMessages > 0
           ? 'running'
-          : 'finished';
-      void this.setTopicStatus(session, listener.activity);
+          : 'finished',
+      );
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
-      listener.activityObservedAt = Date.now();
-      listener.activity = 'running';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(session, 'running');
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      listener.activitySuspect = true;
-      listener.activity = listener.queuedMessages > 0 ? 'running' : 'finished';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
     }
     if (frame.t === 'error') {
-      listener.activitySuspect = true;
+      const observation = this.activityObservation(session);
+      observation.suspect = true;
+      ++observation.revision;
       const pending = listener.pendingPrompts.shift();
       if (pending) pending.observation.state = 'not accepted';
       this.sessionObservation(session.id).failure = {
