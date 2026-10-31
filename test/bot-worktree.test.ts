@@ -73,7 +73,7 @@ test('General worktree waits for group administrator approval', async t => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     let calls = 0;
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls++;
@@ -165,7 +165,7 @@ test('forum worktree setting gates native creation before skill-bearing initial 
     await app.update({text:'/new Default disabled'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(calls,[]);
-    await setForumSetting(app,5,0);
+    await setForumSetting(app, 5);
     await setForumSetting(app,2,0);
     await app.update({text:'/skill_pdf_tools'});
     await app.update({text:'/new Isolated task'});
@@ -174,7 +174,7 @@ test('forum worktree setting gates native creation before skill-bearing initial 
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text.endsWith('Isolated task')));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\nIsolated task'});
     assert.deepEqual(app.store.getPendingSkills({botId,destination:{kind:'general',chatId},userId:ownerId}),[]);
-    await setForumSetting(app,5,1);
+    await setForumSetting(app, 5);
     await app.update({text:'/new Disabled again'});
     await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 3);
     assert.equal(calls.length,1);
@@ -185,7 +185,7 @@ test('manual topic creation uses its topic branch once and does not submit a tas
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app,5,0);
+    await setForumSetting(app, 5);
     const calls: Array<{id:string;branch?:string}> = [];
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls.push({id:session.id,branch});
@@ -207,7 +207,7 @@ for (const branch of ['', ' feature/explicit']) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app,5,0);
+      await setForumSetting(app, 5);
       const calls: Array<string | undefined> = [];
       t.mock.method(app.runtime,'worktree',async (session: TopicSession, name?: string) => {
         calls.push(name);
@@ -227,7 +227,7 @@ test('automatic worktree failure does not admit the initial task or consume sele
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app,5,0);
+    await setForumSetting(app, 5);
     await app.update({text:'/skill_pdf_tools'});
     t.mock.method(app.runtime,'worktree',async () => {
       throw new Error('Native worktree failure\nOriginal diagnostic');
@@ -246,7 +246,7 @@ test('automatic worktrees exclude attached sessions and the bot status topic', a
     await app.update({text:'/setup'});
     await app.update({text:'/new Existing host'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    await setForumSetting(app,5,0);
+    await setForumSetting(app, 5);
     const calls: string[] = [];
     t.mock.method(app.runtime,'worktree',async (session: TopicSession) => {
       calls.push(session.id);

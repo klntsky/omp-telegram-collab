@@ -44,7 +44,7 @@ for (const allMessagesArePrompts of [true,false]) {
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
-    if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+    if (!allMessagesArePrompts) await setForumSetting(app, 0);
     await app.update({ text: '/new Start' });
     const session = app.store.listSessions(botId)[0]!;
     app.emit({ t: 'ui-request', request: { kind: 'select', reqId: 81, title: 'Deployment target?', options: ['Production', 'Other (type your own)'] } });

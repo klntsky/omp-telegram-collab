@@ -93,7 +93,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
 });
 
 for (const failureKind of ['transport', 429, 503] as const) {
-  test(`identity lookup failure reaches startup without framework retries (${failureKind})`, { timeout: 10_000 }, async () => {
+  test(`identity lookup handles explicit rate limits and preserves other failures (${failureKind})`, { timeout: 10_000 }, async () => {
     const app = await createSmokeApp();
     await app.service.close();
     const bot = new Bot(botToken, { client: { apiRoot: app.telegramUrl } });
@@ -108,6 +108,12 @@ for (const failureKind of ['transport', 429, 503] as const) {
     });
     const service = createBot({ config: app.config, botConfig: app.config.bots[0]!, token: botToken, store: app.store, runtime: app.runtime, bot });
     try {
+      if (failureKind === 429) {
+        await service.initialize();
+        assert.equal(lookups, 2);
+        assert.equal(bot.botInfo.id, botId);
+        return;
+      }
       await assert.rejects(service.initialize(), error => {
         if (failureKind === 'transport') assert.equal(error, transportFailure);
         else {

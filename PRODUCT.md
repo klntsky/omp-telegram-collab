@@ -69,7 +69,7 @@ Session titles and Telegram topic names synchronize in both directions. Telegram
 
 Renaming a topic updates the actual OMP session title without submitting a prompt or starting a stopped host; pending renames survive service restarts and apply when the managed host next starts. Previously generated status is removed from human edits, and the current status is restored even when the user deletes it or the host cannot accept native title changes. Generated status never becomes part of the OMP title. OMP title changes update the readable portion while mirroring is connected, including automatically generated titles. Telegram displays at most 128 Unicode characters including status; the full OMP title remains intact. Long status prefixes are shortened with an ellipsis to reserve space for up to 64 readable-title characters. Detached topics no longer synchronize titles.
 
-The bot deletes its own topic rename and icon-change service messages when their updates arrive, including renames caused by Git status changes. Human and other bots' topic-edit notices are preserved. Cleanup failures retain their original diagnostics in service logs.
+In tracked topics, the bot deletes its own topic rename and icon-change service messages when their updates arrive, including renames caused by Git status changes. Human and other bots' topic-edit notices are preserved. Detached topics ignore lifecycle updates, including late notices from the bot's earlier edits. Cleanup failures retain their original diagnostics in service logs.
 
 Telegram-to-OMP renames require a host with session-title control support. Terminal-owned attached hosts without that support report a control error rather than claiming their title changed; OMP-to-Telegram mirroring remains available.
 
@@ -77,7 +77,7 @@ Anonymous topic-edit notices do not change the saved readable title or finish-ic
 
 Close a topic to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
-`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
+`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead permanently releases bot control of the topic, with or without an existing session. It disables prompts, receipt reactions, mirroring, approvals, Mini App access, automatic renaming, and branch and worktree tracking for that topic. It preserves history and does not kill the host. Commands remain available under their normal authorization rules, but cannot create or resume a session in the detached topic. `/new` and `/attach` create separate session topics.
 
 While terminated, prompts, callbacks, Mini App agent access, and commands other than read-only `/status` are blocked. Blocked commands receive “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Current human members may still inspect status for an assigned, enrolled forum; status does not resume the service or query suspended hosts. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
 
@@ -85,7 +85,11 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark the saved option with `(current)`, including named skills, model presets, and the options to use no default skill or the host's default model preset. Message handling distinguishes all messages from commands and replies only. Request permissions distinguish admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
 
-Saving keeps the same choice screen and catalog page open with the saved option marked. Back to settings returns to the overview. Close removes the controls and leaves a summary of changes saved through that panel, showing each setting's previous and final values. Repeated edits collapse into one entry; reverting a setting to its original value removes the entry. Failed saves and unconfirmed capacity proposals are excluded. Closing without net changes says that no settings changed. Changes edit the existing panel rather than posting a new menu for each click. Group controls state their scope and when defaults take effect.
+The settings overview arrives with its controls in the initial message, without a loading placeholder.
+
+Settings overview labels separate names and values with a colon. The default selectors are named “Default skill” and “Default model preset”. Message handling, request permissions, and worktrees toggle immediately when their overview button is pressed, without opening a submenu. Worktrees show “Enabled” or “Disabled” in the overview and saved-change summary.
+
+Saving a default keeps the same choice screen and catalog page open with the saved option marked. Toggles save immediately and keep the overview open with the updated value. Back to settings returns to the overview. Close removes the controls and leaves a summary of changes saved through that panel, showing each setting's previous and final values. Repeated edits collapse into one entry; reverting a setting to its original value removes the entry. Failed saves and unconfirmed capacity proposals are excluded. Closing without net changes says that no settings changed. Changes edit the existing panel rather than posting a new menu for each click. Group controls state their scope and when defaults take effect.
 
 Maximum live sessions shows the current limit and is marked service-wide, applying across all bots and instances. A single row of − and + buttons decreases or increases the limit by one. Administrators confirm before the limit changes, or cancel without changing it. The value stays between 1 and JavaScript's maximum safe integer. Lowering the limit leaves existing sessions running and prevents new starts until usage falls below the limit. Settings button actions do not submit or retry tasks.
 
@@ -157,10 +161,12 @@ Agent questions include the full text, option descriptions, and numbered option 
 
 | Indicator | Meaning |
 | --- | --- |
-| 👀 reaction | The bot received eligible input. |
+| 👀 reaction | The bot received a prompt, an answer to an agent question, or a session control command. |
 | 🤝 reaction | OMP confirmed receipt. For `/stop`, interruption was confirmed. For `/kill`, the process exited. |
 | ⚡ topic icon | An agent turn is running, including tool work. |
 | 🏁 topic icon, or your chosen topic icon | No agent turn is running, whether the host is idle, stopped, or not started. |
+
+Local commands such as `/settings`, `/help`, and `/status`, and skill selection do not use delivery reactions or wait for a reaction request before executing. Reactions are reserved for prompts, agent answers, and commands sent to the OMP session, including `/stop`, `/kill`, `/worktree`, and `/model_preset`.
 
 Approval alone does not produce a receipt reaction. Failed or rejected instructions do not get one. A relay disconnect does not mean OMP stopped. The bot checks liveness every 30 seconds and reconstructs activity after restart instead of trusting a saved Telegram icon. Reactions and icon changes depend on Telegram permissions and rate limits.
 
@@ -172,13 +178,15 @@ Host state snapshots reconcile the activity icon: no streaming or queued work cl
 
 Maintenance samples fresh host activity when running or idle observations become stale or completion and error events leave activity uncertain. Sampling preserves the primary connection and pending interactions, does not submit prompts, and cannot overwrite newer activity observations. Current lookup failures and expired evidence make activity unknown and suspend new icon assertions until a fresh observation arrives. They do not clear the visible icon or manufacture running or finished activity.
 
-Background maintenance reconnects surviving hosts without starting stopped hosts or replaying prompts. Closing a topic does not imply that its host stopped. Detached topics have no custom activity icon, and later status checks or restarts do not restore one. The bot removes its own rename and icon-change service notices while preserving other actors' edit notices.
+Background maintenance reconnects surviving hosts without starting stopped hosts or replaying prompts. Closing a topic does not imply that its host stopped. Detached topics have no custom activity icon, and later status checks or restarts do not restore one.
 
 Closing a session topic blocks new bot work and host admission immediately. It cancels unsubmitted initial tasks and pending session interactions, disconnects live Mini App and bot connections, and stops normal mirroring and recovery for that topic. A bot-managed OMP host receives graceful retirement, including when it survived a bot restart. Attached terminal-owned hosts remain running. Retirement preserves conversation history and worktrees; closing a topic is not proof that its process has already exited. Unsupported retirement and inspection failures retain their original diagnostics rather than escalating to forced termination.
 
 After host shutdown is confirmed, the finish icon is restored while the topic remains closed. Unconfirmed retirement does not claim that the agent stopped. Failed finish-icon delivery remains eligible for reconciliation without reopening the topic or admitting new work.
 
 Opening a closed topic's Mini App shows a confirmation without starting or connecting to OMP. A current group owner or administrator can confirm reopening the Telegram topic and then connect. Other members must wait for an administrator to reopen it. Cancelling leaves the topic closed and starts nothing. A failed Telegram reopen leaves the stored topic closed. Reopening directly in Telegram also restores eligibility, but does not itself start a host or replay a cancelled initial task. An accepted retirement must settle before a managed host can resume.
+
+Telegram requests rejected with an explicit rate-limit retry delay are retried internally after that delay, including ordinary command replies and authorization reads. Users do not need to repeat the command. Cancellation and shutdown stop pending retries. Other failures retain their original diagnostics; an ambiguous transport failure does not authorize replaying a request or the user's operation.
 
 Ordinary Telegram output, topic names, and topic icons have independent per-chat execution capacity with no fixed delay between operations. A slow or failed title request does not hold icon updates behind it. A Telegram `429` pauses subsequent delivery starts in that chat for `retry_after`; without that parameter, the cooldown is five seconds. Still-relevant ordinary output retries after cooldown, while metadata reconciliation selects the latest intended value for its next attempt. Ambiguous network failures do not automatically replay messages or prompts. Both metadata fields remain unconfirmed after uncertain delivery and are periodically reasserted at staggered intervals, without requiring another instruction. Metadata requests have a five-second local deadline. Recovery requires fresh observations and Telegram permissions; rate limits or delayed server effects can postpone convergence, and local cancellation cannot retract an edit Telegram already received.
 
@@ -210,7 +218,7 @@ Keep the YAML and runtime data private. They contain bot tokens, topic mappings,
 
 Each successful startup notifies enrolled groups in the reserved **Bot status** forum topic: “OMP bot service is back online (restarting took N.NN seconds).” The bot creates this topic when needed and persists its ID separately for each bot and chat. Later lifecycle notices reuse it; if Telegram reports that the message thread no longer exists, the bot creates a replacement and saves its ID. Notices never fall back to General. The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice in the same reserved topic.
 
-Bot status is not a session topic. Messages there are ignored before command handling, prompt submission, or receipt reactions: slash commands (including `/terminate`, `/setup`, and `/new`), ordinary text, and replies to the bot have no effect. Use General or a session topic for commands and prompts.
+Bot status is automatically detached under the same policy as `/detach`. It never acquires a session, worktree, branch prefix, or synchronized title. Persisted and replaced status topics remain detached across restarts. Any existing session history is retained without restoring bot control.
 
 
 ## 3. Capacity and reconnection

@@ -99,7 +99,7 @@ for (const manual of [false,true]) {
       await setForumSetting(app, 2, 0);
       if (manual) await app.update({message_thread_id:42,forum_topic_created:{name:'Proposal topic'}});
       await app.update({text:'/setup'});
-      await setForumSetting(app, 1, 0);
+      await setForumSetting(app, 1);
       app.setCurrentMember({username:'participant',status:'member'});
       await app.update({text:'/p Proposed task',...(manual ? {message_thread_id:42} : {})},participant);
       const proposal = app.messages.at(-1)!;

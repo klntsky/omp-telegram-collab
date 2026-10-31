@@ -27,7 +27,7 @@ test('shortcut text immediately submits in explicit mode with pending skills, qu
   try {
     const session = await seed(app);
     await app.update({text:'/setup'});
-    await setForumSetting(app, 0, 1);
+    await setForumSetting(app, 0);
     await app.update({text:'/skill_pdf_tools',message_thread_id:session.threadId});
     await app.update({photo:[{file_id:'photo',file_unique_id:'photo',width:10,height:10}],caption:'/skill_find_skills@FixtureOmpBot Explain this\nwith details',message_thread_id:session.threadId,reply_to_message:{message_id:9000,text:'Original\ncontext'}});
     assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{
@@ -66,7 +66,7 @@ test('shortcut text respects proposal approval without changing a later pending 
     assert.deepEqual(app.store.getPendingSkills({botId,destination:topicDestination(chatId,session.threadId),userId:77}),[]);
     app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     app.setCurrentMember({username:'participant',status:'member'});
     await app.update({text:'/skill_find_skills Proposed task',message_thread_id:session.threadId},participant);
     const proposal = app.messages.at(-1)!;

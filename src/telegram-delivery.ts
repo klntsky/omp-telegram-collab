@@ -3,6 +3,7 @@ import {
   AbortController as TelegramAbortController,
   type AbortSignal as TelegramAbortSignal,
 } from 'abort-controller';
+import { withTelegramDeliveryRetry } from './telegram-retry.js';
 
 type LaneName = 'ordinary' | 'name' | 'icon';
 
@@ -181,8 +182,7 @@ export class TelegramDelivery {
           }
           lane.pending.delete(key);
           lane.running = job;
-          void job
-            .execute()
+          void withTelegramDeliveryRetry(job.execute)
             .catch((error) => {
               if (name === 'ordinary' && this.observeRateLimit(chat, error)) {
                 if (this.closed) job.cancel();

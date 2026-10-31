@@ -13,6 +13,7 @@ import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js
 import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
+import { installTelegramRetry } from './telegram-retry.js';
 import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
 import { topicDestination, sameTopicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
@@ -123,7 +124,8 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees';
+type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees';
+type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity';
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
   | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
@@ -139,7 +141,7 @@ interface SettingsPanel {
   revision: number;
   offset: number;
   choices: SettingsAction[];
-  changes: Map<SettingsPage, {label: string; before: string; after: string}>;
+  changes: Map<SettingsKey, {label: string; before: string; after: string}>;
 }
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
@@ -201,6 +203,7 @@ export class BotService {
   private readonly questions = new Map<string, PendingQuestion>();
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
+  private readonly telegramRetry = new AbortController();
   private readonly topicProjections = new Map<string, TopicProjection>();
   private readonly hostObservations = new Map<string, Promise<void>>();
   private readonly mirrorRecoveries = new Map<string, Promise<void>>();
@@ -260,8 +263,6 @@ export class BotService {
       revision: 0, offset: 0, choices: [], changes: new Map(),
     };
     const persisted = await this.settingsAccess(ctx, panel);
-    const message = await replyTo(ctx, panel.destination, 'Opening settings…');
-    panel.messageId = message.message_id;
     await this.renderSettings(panel, persisted);
   }
   private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
@@ -276,34 +277,18 @@ export class BotService {
     };
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
-      for (const [label, target] of [
-        [`Message handling · ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, 'prompts'],
-        [`Who can send requests · ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, 'proposals'],
-        [`Skill for new topics · ${chat.default_new_topic_skill ?? 'No default skill'}`, 'skills'],
-        [`Model preset for new sessions · ${chat.default_model_preset ?? 'Use host default'}`, 'presets'],
-        [`Maximum live sessions · ${config.omp.maxSessions} · Service-wide`, 'capacity'],
-        [`Worktrees for new topics · ${chat.create_topic_worktrees === true ? 'Create a worktree' : 'Use the instance directory'}`, 'worktrees'],
-      ] as const) {
-        button(label, {kind:'page',page:target});
-      }
-    } else if (page === 'prompts') {
-      text = 'Which messages go to the assistant?\nApplies to this group.\nCommands and replies only means using /p or replying to a bot message. Ordinary messages and mentions are ignored.';
-      button('All messages', {kind:'set',field:'all_messages_are_prompts',value:true}, chat.all_messages_are_prompts !== false);
-      button('Commands and replies only', {kind:'set',field:'all_messages_are_prompts',value:false}, chat.all_messages_are_prompts === false);
-    } else if (page === 'proposals') {
-      text = 'Who can send requests?\nApplies to this group.\nAdmin requests run directly. Member requests need admin approval.';
-      button('Members too, with admin approval', {kind:'set',field:'users_can_propose_prompts',value:true}, chat.users_can_propose_prompts === true);
-      button('Admins only', {kind:'set',field:'users_can_propose_prompts',value:false}, chat.users_can_propose_prompts !== true);
-    } else if (page === 'worktrees') {
-      text = 'Give each new topic its own worktree?\nApplies to new managed topics in this group. Existing topics are unchanged.\nA worktree gives the topic a separate working directory and branch.';
-      button('Create a worktree', {kind:'set',field:'create_topic_worktrees',value:true}, chat.create_topic_worktrees === true);
-      button('Use the instance directory', {kind:'set',field:'create_topic_worktrees',value:false}, chat.create_topic_worktrees !== true);
+      button(`Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, {kind:'set',field:'all_messages_are_prompts',value:chat.all_messages_are_prompts === false});
+      button(`Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, {kind:'set',field:'users_can_propose_prompts',value:chat.users_can_propose_prompts !== true});
+      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {kind:'page',page:'skills'});
+      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {kind:'page',page:'presets'});
+      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {kind:'page',page:'capacity'});
+      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'create_topic_worktrees',value:chat.create_topic_worktrees !== true});
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
       if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
-      text = `${skill ? 'Skill for new topics' : 'Model preset for new sessions'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
+      text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
       for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name}, chat[field] === name);
       button(skill ? 'No default skill' : 'Use host default', {kind:'default',field}, chat[field] === undefined);
       if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
@@ -325,7 +310,14 @@ export class BotService {
     }
     if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
     button('Close', {kind:'close'});
-    await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
+    const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
+    const extra = {reply_markup:{inline_keyboard:rows}};
+    if (panel.messageId === 0) {
+      const message = await sendTo(this.bot.api, panel.destination, body, extra);
+      panel.messageId = message.message_id;
+    } else {
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, body, extra);
+    }
     panel.choices = choices;
     panel.revision = revision;
     panel.offset = offset;
@@ -334,7 +326,7 @@ export class BotService {
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
     const stored = match ? this.options.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(this.id, match[1]!) : undefined;
-    const decoded = stored ? JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {changes: [SettingsPage, {label: string; before: string; after: string}][]} : undefined;
+    const decoded = stored ? JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {changes: [SettingsKey, {label: string; before: string; after: string}][]} : undefined;
     const panel: SettingsPanel | undefined = decoded ? {...decoded, changes: new Map(decoded.changes)} : undefined;
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
     if (!match || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
@@ -361,7 +353,7 @@ export class BotService {
     const action = panel.choices[Number(match![3])];
     if (!action) return;
     const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'capacity');
-    const recordChange = (page: SettingsPage, label: string, before: string, after: string) => {
+    const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
       else panel.changes.set(page, {label, before: original, after});
@@ -399,22 +391,22 @@ export class BotService {
       }
       const current = await this.settingsAccess(ctx,panel,true);
       const chat = findInstance(current,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-      const page: SettingsPage = action.kind === 'default'
+      const page: SettingsKey = action.kind === 'default'
         ? action.field === 'default_new_topic_skill' ? 'skills' : 'presets'
         : action.field === 'all_messages_are_prompts' ? 'prompts'
         : action.field === 'users_can_propose_prompts' ? 'proposals' : 'worktrees';
       const labels = {
         prompts: 'Message handling',
         proposals: 'Who can send requests',
-        skills: 'Skill for new topics',
-        presets: 'Model preset for new sessions',
-        worktrees: 'Worktrees for new topics',
+        skills: 'Default skill',
+        presets: 'Default model preset',
+        worktrees: 'Worktrees',
       };
       const value = (setting: boolean | string | undefined): string => {
         if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
         if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
         if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
-        return setting === true ? 'Create a worktree' : 'Use the instance directory';
+        return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
       if (action.kind === 'set') chat[action.field] = action.value;
@@ -427,7 +419,7 @@ export class BotService {
       if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
       await this.syncCommandMenus();
       const offset = action.kind === 'default' ? panel.offset : 0;
-      await this.renderSettings(panel,current,page,offset);
+      await this.renderSettings(panel,current,action.kind === 'set' ? 'root' : action.field === 'default_new_topic_skill' ? 'skills' : 'presets',offset);
       return;
     }
     await this.renderSettings(panel,config,'capacity');
@@ -442,6 +434,7 @@ export class BotService {
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
+    installTelegramRetry(this.bot, this.telegramRetry.signal);
     this.delivery = new TelegramDelivery();
     this.config = options.botConfig;
     this.token = options.token;
@@ -452,10 +445,6 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      if (ctx.chat) {
-        const destination = contextDestination(ctx);
-        if (destination.kind === 'topic' && destination.threadId === this.options.store.getBotStatusTopic(this.id,ctx.chat.id)) return;
-      }
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -549,12 +538,16 @@ export class BotService {
     return intent;
   }
   private async receiveMessage(ctx: Context, intent: InputIntent): Promise<void> {
-    if (intent.kind === 'ignore' || intent.kind === 'event' || intent.kind === 'ended-question') return;
+    if (intent.kind !== 'new-task' && intent.kind !== 'session-prompt' && intent.kind !== 'question-answer' &&
+        !(intent.kind === 'command' && ['stop','kill','worktree','model_preset'].includes(intent.action))) return;
     const message = ctx.message;
     if (this.options.config.terminated || this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
-    const topic = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
+    const destination = contextDestination(ctx);
+    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
+    if (detached) return;
+    const topic = this.options.store.getTopic({botId:this.id,destination});
     if (topic && topic.status !== 'open') return;
     if ((intent.kind === 'new-task' || intent.kind === 'session-prompt') &&
         !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
@@ -939,6 +932,7 @@ export class BotService {
     }
   }
   async close(): Promise<void> {
+    this.telegramRetry.abort();
     this.stopped = true;
     for (const id of this.topicProjections.keys()) this.invalidateTopicStatus(id);
     this.background.abort(new Error('Bot background maintenance stopped'));
@@ -1003,6 +997,7 @@ export class BotService {
       failures.push({operation:'Forum permissions',at:Date.now(),error});
     }
     const stored = this.options.store.getTopic({botId:this.id,destination});
+    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
     const session = stored?.instancePath === path ? stored : undefined;
     if (stored && !session) lines.push('Session: unavailable (assigned to another project)');
     else if (session) {
@@ -1010,7 +1005,7 @@ export class BotService {
       const listener = this.listeners.get(session.id);
       lines.push(`Session: ${session.name} (${session.status})`);
       let host = 'unknown';
-      if (suspended || session.status === 'detached') {
+      if (suspended || detached) {
         host = `unknown (${suspended ? 'service terminated' : 'conversation-only'}; not queried)`;
       } else {
         try {
@@ -1026,7 +1021,7 @@ export class BotService {
       const recovery = listener?.initial?.phase === 'retrying' ? 'initial task retry scheduled' : this.restoring.has(session.id) ? 'restoring' : this.reconnecting.has(session.id) ? 'reconnecting' : this.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
       lines.push(`Recovery: ${recovery}`);
       if (observation.failure) failures.push(observation.failure);
-    } else lines.push(destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
+    } else lines.push(detached ? 'Session: detached; this topic is conversation-only' : destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
     const catalog = this.options.store.getSkillCatalog(path);
     const catalogObservation = this.catalogObservations.get(path);
     const freshness = this.catalogTasks.has(path) ? 'refreshing' : catalogObservation?.failed ? 'refresh failed' : catalogObservation?.refreshedAt ? 'current' : 'not checked this process';
@@ -1115,6 +1110,7 @@ export class BotService {
   }
   private sessionAssigned(session: TopicSession): boolean {
     if (session.botId !== this.id || !this.options.store.isEnrolled(this.id, session.chatId)) return false;
+    if (this.options.store.getTopicKind(session) === 'detached') return false;
     const stored = this.options.store.getSession(session.id);
     if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instancePath !== session.instancePath || !session.instancePath) return false;
     try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
@@ -1745,10 +1741,6 @@ export class BotService {
   }
 
   private async detachSession(session: TopicSession): Promise<void> {
-    this.options.store.setPendingSessionTitle(session.id, undefined);
-    this.options.store.updateSession(session.id, { status: 'detached' });
-    this.options.store.advanceSessionGeneration(session.id);
-    this.options.store.cancelInitialTask(session.id);
     this.dropListener(session.id);
     this.closedSessions.delete(session.id);
     for (const [token, request] of this.capacityRequests) {
@@ -1758,9 +1750,10 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
-    const icon = this.topicProjections.get(session.id);
-    await icon?.completion.icon;
+    const projection = this.topicProjections.get(session.id);
+    await projection?.completion.icon;
     this.topicProjections.delete(session.id);
+    if (session.status === 'detached') return;
     try {
       await this.delivery.runTopic(
         session.chatId,
@@ -1775,7 +1768,7 @@ export class BotService {
           ),
         () =>
           !this.stopped &&
-          this.options.store.getSession(session.id)?.status === 'detached' &&
+          this.options.store.getTopicKind(session) === 'detached' &&
           findInstance(this.options.config, this.id, session.chatId)?.path === session.instancePath,
       );
     } catch (error) {
@@ -2160,11 +2153,17 @@ export class BotService {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id))
           return;
-        const session = this.options.store.getTopic({
-          botId: this.id,
-          destination: contextDestination(ctx),
-        });
-        if (session?.status === 'detached') return;
+        const destination = contextDestination(ctx);
+        if (
+          destination.kind === 'topic' &&
+          this.options.store.getTopicKind({
+            botId: this.id,
+            chatId: destination.chatId,
+            threadId: destination.threadId,
+          }) === 'detached'
+        )
+          return;
+        const session = this.options.store.getTopic({ botId: this.id, destination });
         await this.skills.callback(ctx, ctx.callbackQuery.data, session);
         return;
       }
@@ -2282,9 +2281,15 @@ export class BotService {
     }
     const destination = contextDestination(ctx);
     let session = this.options.store.getTopic({ botId: this.id, destination });
-    const detached = session?.status === 'detached';
+    const detached =
+      destination.kind === 'topic' &&
+      this.options.store.getTopicKind({
+        botId: this.id,
+        chatId: destination.chatId,
+        threadId: destination.threadId,
+      }) === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
-    if (detached && topicLifecycle && !('forum_topic_edited' in message)) return;
+    if (detached && topicLifecycle) return;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
         session = this.options.store.createSession(
@@ -2392,13 +2397,7 @@ export class BotService {
           .run(
             ctx.chat.id,
             () => this.bot.api.deleteMessage(ctx.chat!.id, message.message_id),
-            () =>
-              !this.stopped &&
-              (detached
-                ? this.options.store.getSession(session.id)?.status === 'detached' &&
-                  findInstance(this.options.config, this.id, session.chatId)?.path ===
-                    session.instancePath
-                : this.sessionAssigned(session)),
+            () => !this.stopped && this.sessionAssigned(session),
           )
           .catch((error) => {
             console.warn(
@@ -2427,7 +2426,7 @@ export class BotService {
       return;
     }
     if (!ctx.from || ctx.from.is_bot) return;
-    if (session?.status === 'closed' && !['status', 'help'].includes(command?.action ?? '')) {
+    if (session?.status === 'closed' && !['status', 'help', 'detach'].includes(command?.action ?? '')) {
       await replyTo(
         ctx,
         destination,
@@ -2435,6 +2434,7 @@ export class BotService {
       );
       return;
     }
+    if (detached && (intent.kind === 'question-answer' || intent.kind === 'ended-question')) return;
     if (intent.kind === 'question-answer') {
       await this.authorize(ctx.chat.id, ctx.from.id);
       const pending = this.questions.get(intent.token);
@@ -2561,15 +2561,20 @@ export class BotService {
           await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.');
           return;
         }
-        if (destination.kind === 'general' || !session) {
+        if (destination.kind !== 'topic') {
           await replyTo(
             ctx,
             contextDestination(ctx),
-            'Use /detach inside a session topic, not General or an unrelated chat.',
+            'Use /detach inside a topic, not General or an unrelated chat.',
           );
           return;
         }
-        await this.detachSession(session);
+        this.options.store.detachTopic({
+          botId: this.id,
+          chatId: destination.chatId,
+          threadId: destination.threadId,
+        });
+        if (session) await this.detachSession(session);
         await replyTo(
           ctx,
           contextDestination(ctx),
@@ -2577,7 +2582,7 @@ export class BotService {
         );
         return;
       }
-      if (detached && !['new', 'worktree', 'attach', 'help', 'start'].includes(action)) {
+      if (detached && !['new', 'attach', 'help', 'start'].includes(action)) {
         await replyTo(
           ctx,
           contextDestination(ctx),
@@ -3263,6 +3268,8 @@ export class BotService {
     title: string,
     active: () => boolean,
   ): Promise<void> {
+    const callerActive = active;
+    active = () => callerActive() && this.options.store.getTopicKind(session) === 'tracked';
     if (!active()) return;
     const owner = this.topicProjection(session);
     try {
