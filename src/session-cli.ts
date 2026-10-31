@@ -3,19 +3,7 @@ import { request } from 'node:http';
 import { join } from 'node:path';
 import { readConfig } from './config.js';
 
-export async function runSessionCommand(args: string[], configPath: string): Promise<void> {
-  const usage = 'Usage: omp-telegram-collab [--config PATH] session join --chat CHAT_ID --topic TOPIC_ID';
-  if (args[0] !== 'join') throw new Error(usage);
-  const values = new Map<string, number>();
-  for (let index = 1; index < args.length; index += 2) {
-    const flag = args[index]!;
-    const value = args[index + 1];
-    if (!['--chat', '--topic'].includes(flag) || values.has(flag) || !value || !/^-?\d+$/.test(value)) throw new Error(usage);
-    const number = Number(value);
-    if (!Number.isSafeInteger(number) || (flag === '--chat' ? number >= 0 : number <= 1)) throw new Error(usage);
-    values.set(flag, number);
-  }
-  if (values.size !== 2) throw new Error(usage);
+export async function joinSession(coordinates: { chat: number; topic: number }, configPath: string): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Joining a session requires an interactive terminal.');
   const config = readConfig(configPath);
   const result = Promise.withResolvers<{ url: string; executable: string }>();
@@ -64,7 +52,7 @@ export async function runSessionCommand(args: string[], configPath: string): Pro
   });
   const timer = setTimeout(() => req.destroy(new Error('Timed out resolving the session through the local service.')), config.omp.startupTimeoutMs + 30_000);
   req.on('error', fail);
-  req.end(JSON.stringify({ configPath: config.configPath, chatId: values.get('--chat'), topicId: values.get('--topic') }));
+  req.end(JSON.stringify({ configPath: config.configPath, chatId: coordinates.chat, topicId: coordinates.topic }));
   const interrupt = () => {};
   const terminate = () => { child?.kill('SIGTERM'); };
   try {

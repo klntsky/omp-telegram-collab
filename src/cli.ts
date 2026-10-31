@@ -6,14 +6,15 @@ import { chmod, unlink, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createControlServer, type Server, type ServerResponse } from 'node:http';
 import { inspect } from 'node:util';
 import { AbortController as TelegramAbortController } from 'abort-controller';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { readConfig, defaultConfigPath, validateStart, findInstance } from './config.js';
 import type { AppConfig } from '../shared/contracts.js';
 import { Store } from './store.js';
 import { createBot, type BotService } from './bot.js';
 import { createServer, type GatewayServer } from './server.js';
 import { OmpRuntime } from './runtime.js';
-import { runAdmin, notifyReload } from './cli-admin.js';
-import { runSessionCommand } from './session-cli.js';
+import { registerAdminCommands, notifyReload } from './cli-admin.js';
+import { joinSession } from './session-cli.js';
 
 let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
@@ -391,109 +392,62 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const commandHelp: Record<string, string> = {
-  start: 'start\nRun the service in the foreground. Use Ctrl+C to shut it down.',
-  setup: `setup [OPTIONS]
-Configure the service interactively, or supply options for noninteractive setup.
-  --public-url URL          Public HTTPS origin; an empty string disables the Mini App
-  --host HOST               HTTP listen address
-  --port PORT               HTTP listen port
-  --data-dir PATH           Runtime data directory; existing histories are not moved
-  --omp-executable FILE     OMP executable name or path
-  --omp-arg ARG             OMP argument; repeat for multiple arguments
-  --clear-omp-args           Clear configured OMP arguments
-  --max-sessions N          Service-wide live session limit
-  --startup-timeout-ms N    OMP startup timeout in milliseconds
-  --relay-url URL           OMP relay URL; use - to clear`,
-  reload: 'reload\nAsk the running service to apply saved configuration.',
-  create: 'create PATH\nRegister an existing project directory.',
-  list: 'list\nList registered projects and their chat assignments.',
-  show: 'show PATH\nShow a registered project and its chat assignments.',
-  remove: 'remove PATH\nRemove a project with no chat assignments. Retain histories.',
-  chat: 'chat <add|list|remove>\nManage Telegram forum assignments for a project.',
-  'chat add': `chat add PATH --chat ID [OPTIONS]
-Assign a Telegram forum to a project.
-  --chat ID                         Telegram supergroup ID
-  --bot ID                          Configured bot ID; required when ambiguous
-  --all-messages-are-prompts true|false
-  --users-can-propose-prompts true|false`,
-  'chat list': 'chat list PATH\nList a project and its Telegram forum assignments.',
-  'chat remove': `chat remove PATH --chat ID [--bot ID]
-Remove a forum assignment. Retain histories and running hosts.`,
-  approve: `approve CODE [--path PATH] [OPTIONS]
-Approve a pending forum setup request for an existing project directory.
-  --path PATH                       Project directory where OMP will run
-  --yes                             Skip confirmation; noninteractive use also requires --path
-  --all-messages-are-prompts true|false
-  --users-can-propose-prompts true|false`,
-  bot: 'bot <add|list|remove>\nManage Telegram bot credentials.',
-  'bot add': `bot add [OPTIONS]
-Register a bot. Interactive use prompts for its token without displaying it.
-  --token-stdin                     Read the token from standard input
-  --token-env VARIABLE              Read the token from an environment variable
-  --mini-app-short-name NAME        BotFather Mini App short name; defaults to app
-Choose only one noninteractive token input option.`,
-  'bot list': 'bot list\nList configured bot IDs and Mini App modes.',
-  'bot remove': 'bot remove ID\nRemove a bot and all its chat assignments. Retain histories.',
-  session: 'session <join>\nConnect a local terminal to a topic session.',
-  'session join': `session join --chat CHAT_ID --topic TOPIC_ID
-Join through the running service on this computer. Requires an interactive terminal.
-  --chat CHAT_ID                    Telegram supergroup ID
-  --topic TOPIC_ID                  Session topic ID`,
-};
-const usage = `Usage: omp-telegram-collab [--config PATH] <command>
-
-Commands:
-${Object.entries(commandHelp).filter(([name]) => !name.includes(' ')).map(([name, text]) => `  ${name.padEnd(10)} ${text.split('\n')[1]}`).join('\n')}
-
-Global options:
-  --config PATH   Configuration file
-  --help, -h      Show help for any command or nested subcommand
-
-Run omp-telegram-collab <command> --help for options.
-`;
-
 export async function main(argv = process.argv.slice(2)): Promise<void> {
-  const args = argv.filter(value => value !== '--');
-  let configPath = defaultConfigPath();
-  let explicitConfig = false;
-  for (let index = 0; index < args.length;) {
-    const argument = args[index]!;
-    if (argument !== '--config' && !argument.startsWith('--config=')) { index++; continue; }
-    if (explicitConfig) throw new Error('Specify --config only once');
-    explicitConfig = true;
-    const value = argument === '--config' ? args[index + 1] : argument.slice('--config='.length);
-    if (!value || value.startsWith('--')) throw new Error('--config requires a path');
-    configPath = resolve(value);
-    args.splice(index, argument === '--config' ? 2 : 1);
+  const program = new Command()
+    .name('omp-telegram-collab')
+    .description('Run local OMP coding sessions from Telegram forum topics.')
+    .addHelpCommand(true)
+    .option('--config <PATH>', 'Configuration file', (value: string, previous?: string) => {
+      if (previous !== undefined) throw new InvalidArgumentError('Specify --config only once');
+      return resolve(value);
+    })
+    .configureHelp({ showGlobalOptions: true })
+    .configureOutput({ outputError: () => {} })
+    .exitOverride();
+  const configPath = () => program.opts<{ config?: string }>().config ?? defaultConfigPath();
+  const closeAdmin = registerAdminCommands(program, configPath);
+  const start = async () => {
+    const path = configPath();
+    if (program.getOptionValueSource('config') === 'cli' && !existsSync(path))
+      throw new Error(`Configuration does not exist: ${path}. Run omp-telegram-collab --config ${JSON.stringify(path)} setup.`);
+    const service = await startService(path);
+    const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  };
+  program.action(start);
+  program.command('start').description('Run the service in the foreground. Use Ctrl+C to shut it down.').action(start);
+  program.command('reload').description('Ask the running service to apply saved configuration.').action(async () => {
+    const path = configPath();
+    await notifyReload(readConfig(path));
+    stdout.write(`Reload requested for ${path}\n`);
+  });
+  program.command('session').description('Connect a local terminal to a topic session.')
+    .command('join').description('Join a session through the running service on this computer.')
+    .addOption(new Option('--chat <CHAT_ID>', 'Telegram supergroup ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
+      if (previous !== undefined) throw new InvalidArgumentError('Specify --chat only once');
+      const id = Number(value);
+      if (!/^-\d+$/.test(value) || !Number.isSafeInteger(id) || id >= 0)
+        throw new InvalidArgumentError('Chat ID must be a negative safe integer.');
+      return id;
+    }))
+    .addOption(new Option('--topic <TOPIC_ID>', 'Session topic ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
+      if (previous !== undefined) throw new InvalidArgumentError('Specify --topic only once');
+      const id = Number(value);
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 1)
+        throw new InvalidArgumentError('Topic ID must be a safe integer greater than one.');
+      return id;
+    }))
+    .action(async (options: { chat: number; topic: number }) => {
+      await joinSession(options, configPath());
+    });
+  try {
+    await program.parseAsync(argv, { from: 'user' });
+  } catch (error) {
+    if (!(error instanceof CommanderError && error.exitCode === 0)) throw error;
+  } finally {
+    closeAdmin();
   }
-  if (args.some(argument => argument === '--help' || argument === '-h') || (args.length === 1 && args[0] === 'help')) {
-    const command = args.filter(argument => argument !== '--help' && argument !== '-h');
-    if (!command.length || (command.length === 1 && command[0] === 'help')) { stdout.write(usage); return; }
-    const nested = `${command[0]} ${command[1]}`;
-    const name = Object.hasOwn(commandHelp, nested) ? nested : command[0]!;
-    if (!Object.hasOwn(commandHelp, name)) throw new Error(usage.trim());
-    const help = commandHelp[name]!;
-    if (['bot', 'chat', 'session'].includes(name) && command[1]) throw new Error(`Unknown subcommand: ${command[0]} ${command[1]}`);
-    stdout.write(`Usage: omp-telegram-collab [--config PATH] ${help}\n\nGlobal options:\n  --config PATH   Configuration file\n  --help, -h      Show this help without running the command\n`);
-    return;
-  }
-  if (args[0] === 'reload' && args.length === 1) {
-    await notifyReload(readConfig(configPath));
-    stdout.write(`Reload requested for ${configPath}\n`);
-    return;
-  }
-  if (args[0] === 'session') { await runSessionCommand(args.slice(1), configPath); return; }
-  if (args.length && args[0] !== 'start') {
-    if (await runAdmin(args, configPath)) return;
-    throw new Error(usage.trim());
-  }
-  if (args.length > 1) throw new Error(usage.trim());
-  if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram-collab --config ${JSON.stringify(configPath)} setup.`);
-  const service = await startService(configPath);
-  const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {

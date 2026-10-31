@@ -112,10 +112,13 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```text
    $ omp-telegram-collab bot add --help
-   Usage: omp-telegram-collab [--config PATH] bot add [OPTIONS]
-   Register a bot. Interactive use prompts for its token without displaying it.
-     --token-stdin                     Read the token from standard input
-     --token-env VARIABLE              Read the token from an environment variable
+   Usage: omp-telegram-collab bot add [options]
+
+   Verify and register a Telegram bot
+
+   Options:
+     --token-env <variable>        Read the token from an environment variable
+     --token-stdin                 Read the token from standard input
    ```
 
    </details>
