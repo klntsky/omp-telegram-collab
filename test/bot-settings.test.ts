@@ -74,6 +74,52 @@ test('settings toggles save immediately in both directions on the same overview'
   } finally { await app.close(); }
 });
 
+test('typing mode choices persist immediately and preserve concurrent configuration', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    assert.equal(saved(app).chat.typing_indicators, 'disabled');
+    await clickSettings(app, 6);
+    const updated = saved(app).config;
+    updated.port = 23456;
+    writeConfig(updated);
+    for (const [index, mode] of [[1, 'streaming'], [2, 'inference'], [0, 'disabled']] as const) {
+      await clickSettings(app, index);
+      assert.equal(saved(app).chat.typing_indicators, mode);
+      assert.equal(Object.values(app.config.instances)[0]!.chats[0]!.typing_indicators, mode);
+      assert.equal(saved(app).config.port, 23456);
+    }
+    assert.equal(app.connectionCount, 0);
+    assert.deepEqual(app.store.listSessions(botId), []);
+  } finally { await app.close(); }
+});
+
+for (const change of ['role', 'assignment', 'read-only'] as const) {
+  test(`typing mode selection rejects ${change} changes without mutating live configuration`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      await clickSettings(app, 6);
+      const panel = app.messages.at(-1)!;
+      const choice = settingsButton(panel, 2);
+      const updated = saved(app).config;
+      if (change === 'role') app.setCurrentMember({status:'member'});
+      if (change === 'assignment') {
+        Object.values(updated.instances)[0]!.chats = [];
+        writeConfig(updated);
+      }
+      if (change === 'read-only') await chmod(app.config.configPath, 0o400);
+      await app.callback(choice, panel);
+      assert.deepEqual(readConfig(app.config.configPath), updated);
+      assert.notEqual(Object.values(app.config.instances)[0]!.chats[0]!.typing_indicators, 'inference');
+      assert.equal(app.connectionCount, 0);
+    } finally {
+      await chmod(app.config.configPath, 0o600);
+      await app.close();
+    }
+  });
+}
+
 test('settings command menus remove superseded preference commands but retain session operations', async () => {
   const app = await createSmokeApp();
   try {

@@ -11,8 +11,10 @@ export interface BotConfig {
   miniAppShortName?: string;
 }
 
+export type TypingMode = 'disabled' | 'streaming' | 'inference';
+
 export interface InstanceConfig {
-  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; default_model_preset?: string; default_new_topic_skill?: string }[];
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skill?: string }[];
 }
 
 export interface AppConfig {

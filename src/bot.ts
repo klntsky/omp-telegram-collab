@@ -4,7 +4,7 @@ import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent } from '../shared/contracts.js';
+import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent, TypingMode } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
@@ -83,6 +83,9 @@ interface Listener {
   activitySuspect?: boolean;
   activityProbe?: Promise<void>;
   activityProbeController?: AbortController;
+  typingText?: boolean;
+  typingNextAt?: number;
+  typingTimer?: NodeJS.Timeout;
   initial?: {
     content: PromptContent;
     userId: number;
@@ -121,11 +124,13 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees';
-type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity';
+const typingLabels: Record<TypingMode, string> = {disabled:'Disabled',streaming:'While typing',inference:'While working'};
+type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees' | 'typing';
+type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing';
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
   | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
+  | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
   | { kind: 'propose-capacity'; limit: number; target: number }
   | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
@@ -280,6 +285,12 @@ export class BotService {
       button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {kind:'page',page:'presets'});
       button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {kind:'page',page:'capacity'});
       button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'create_topic_worktrees',value:chat.create_topic_worktrees !== true});
+      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {kind:'page',page:'typing'});
+    } else if (page === 'typing') {
+      text = 'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
+      for (const value of ['disabled', 'streaming', 'inference'] as const) {
+        button(typingLabels[value], {kind:'typing',field:'typing_indicators',value}, (chat.typing_indicators ?? 'disabled') === value);
+      }
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
@@ -349,7 +360,7 @@ export class BotService {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
-    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'capacity');
+    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'typing' || action.kind === 'capacity');
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
@@ -388,7 +399,7 @@ export class BotService {
       }
       const current = await this.settingsAccess(ctx,panel,true);
       const chat = findInstance(current,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-      const page: SettingsKey = action.kind === 'default'
+      const page: SettingsKey = action.kind === 'typing' ? 'typing' : action.kind === 'default'
         ? action.field === 'default_new_topic_skill' ? 'skills' : 'presets'
         : action.field === 'all_messages_are_prompts' ? 'prompts'
         : action.field === 'users_can_propose_prompts' ? 'proposals' : 'worktrees';
@@ -398,15 +409,18 @@ export class BotService {
         skills: 'Default skill',
         presets: 'Default model preset',
         worktrees: 'Worktrees',
+        typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
+        if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
         if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
         if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
         if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
         return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
-      if (action.kind === 'set') chat[action.field] = action.value;
+      if (action.kind === 'typing') chat.typing_indicators = action.value;
+      else if (action.kind === 'set') chat[action.field] = action.value;
       else if (action.value === undefined) delete chat[action.field];
       else chat[action.field] = action.value;
       writeConfig(current);
@@ -416,7 +430,7 @@ export class BotService {
       if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
       await this.syncCommandMenus();
       const offset = action.kind === 'default' ? panel.offset : 0;
-      await this.renderSettings(panel,current,action.kind === 'set' ? 'root' : action.field === 'default_new_topic_skill' ? 'skills' : 'presets',offset);
+      await this.renderSettings(panel,current,action.kind === 'typing' ? 'typing' : action.kind === 'set' ? 'root' : action.field === 'default_new_topic_skill' ? 'skills' : 'presets',offset);
       return;
     }
     await this.renderSettings(panel,config,'capacity');
@@ -433,6 +447,15 @@ export class BotService {
     this.bot = options.bot ?? new Bot(options.token);
     installTelegramRetry(this.bot, this.telegramRetry.signal);
     this.delivery = new TelegramDelivery();
+    this.bot.api.config.use((previous, method, payload, signal) => {
+      if (method !== 'sendChatAction' && /^(send|copyMessage|forwardMessage)/.test(method) &&
+          'chat_id' in payload && typeof payload.chat_id === 'number') {
+        const threadId = 'message_thread_id' in payload && typeof payload.message_thread_id === 'number'
+          ? payload.message_thread_id : 1;
+        this.delivery.invalidateTyping(payload.chat_id, threadId);
+      }
+      return previous(method, payload, signal);
+    });
     this.config = options.botConfig;
     this.token = options.token;
     this.skills = new SkillPicker({
@@ -858,6 +881,7 @@ export class BotService {
     const listeners = [...this.listeners.values()];
     for (const item of listeners) {
       clearTimeout(item.initial?.timer);
+      clearInterval(item.typingTimer);
       item.connection?.close();
     }
     this.listeners.clear();
@@ -2160,6 +2184,39 @@ export class BotService {
     timer.unref();
     this.reconnects.set(session.id, timer);
   }
+  private typingActive(session: TopicSession, listener: Listener): boolean {
+    if (this.stopped || this.options.config.terminated || this.listeners.get(session.id) !== listener ||
+        !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open') return false;
+    const mode = findInstance(this.options.config, this.id, session.chatId)?.instance.chats
+      .find(chat => chat.botId === this.id && chat.chatId === session.chatId)?.typing_indicators ?? 'disabled';
+    return mode === 'inference' ? listener.activity === 'running' : mode === 'streaming' && listener.typingText === true;
+  }
+
+  private refreshTyping(session: TopicSession, listener: Listener): void {
+    if (this.stopped || this.listeners.get(session.id) !== listener) return;
+    const active = this.typingActive(session, listener);
+    const delay = active ? Math.max(0, (listener.typingNextAt ?? 0) - Date.now()) : 4000;
+    if (!listener.typingTimer) {
+      listener.typingTimer = setTimeout(() => {
+        listener.typingTimer = undefined;
+        this.refreshTyping(session, listener);
+      }, delay || 4000);
+      listener.typingTimer.unref();
+    }
+    if (!active) {
+      this.delivery.invalidateTyping(session.chatId, session.threadId);
+      return;
+    }
+    if ((listener.typingNextAt ?? 0) > Date.now()) return;
+    listener.typingNextAt = Date.now() + 4000;
+    void this.delivery.typing(session.chatId, session.threadId,
+      () => this.bot.api.sendChatAction(session.chatId, 'typing', {
+        message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+      }), () => this.typingActive(session, listener)).catch(error => {
+      console.warn(`Could not send typing action (${session.id}).`, error);
+    });
+  }
+
   private dropListener(id: string): void {
     this.invalidateTopicStatus(id);
     clearTimeout(this.reconnects.get(id));
@@ -2168,6 +2225,9 @@ export class BotService {
     for (const pending of listener?.pendingPrompts ?? []) pending.observation.state = 'acceptance unknown';
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
+    clearInterval(listener?.typingTimer);
+    const session = this.options.store.getSession(id);
+    if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
     if (listener) {
       listener.activityProbeController?.abort(new Error('Activity observation canceled because its listener closed'));
       listener.initial = undefined;
@@ -2192,6 +2252,7 @@ export class BotService {
       pendingStops:[],queuedMessages:0,activity:this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
     };
     this.listeners.set(session.id, listener);
+    this.refreshTyping(session, listener);
     void this.setTopicStatus(session,listener.activity);
     const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
       this.options.store.getSession(session.id)?.status === 'open' &&
@@ -2597,6 +2658,18 @@ export class BotService {
       listener.activity = listener.queuedMessages > 0 ? 'running' : 'finished';
       void this.setTopicStatus(session, listener.activity);
     }
+    if (frame.t === 'event') {
+      const event = frame.event;
+      if ((event.type === 'message_start' || event.type === 'message_update') && event.message.role === 'assistant') {
+        listener.typingText = event.message.content.some(part => part.type === 'text' && part.text.length > 0);
+      } else if (event.type === 'message_end' || event.type === 'agent_end' ||
+          event.type === 'tool_execution_start' || interruptedBy) {
+        listener.typingText = false;
+      }
+    } else if ((frame.t === 'welcome' || frame.t === 'state') && !frame.state.isStreaming) {
+      listener.typingText = false;
+    }
+    this.refreshTyping(session, listener);
     if (frame.t === 'error') {
       listener.activitySuspect = true;
       const pending = listener.pendingPrompts.shift();
