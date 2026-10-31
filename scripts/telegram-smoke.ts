@@ -11,7 +11,7 @@ import { Bot, type Context } from 'grammy';
 import type { TestContext } from 'node:test';
 import { z } from 'zod';
 import type { HostFrame, GuestFrame, AssistantMessage, SessionEntry } from '@oh-my-pi/pi-wire';
-import type { AppConfig, CollabHandlers, TopicSession } from '../shared/contracts.js';
+import type { AppConfig, CollabHandlers, HostBinding, TopicSession } from '../shared/contracts.js';
 import { createBot } from '../src/bot.js';
 import { createServer } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -189,6 +189,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   };
   let sessionLimit = config.omp.maxSessions;
   const managedSessions = new Set<string>();
+  const attachedHosts = new Map<string, { instancePath: string; binding: HostBinding }>();
   const sessionTitles = new Map<string,string>();
   const titleChanges: {sessionId:string;title:string}[] = [];
   const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
@@ -203,14 +204,35 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       return `Moved to worktree ${session.runtime.worktreePath}`;
     },
     async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
-      if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) {
+      if (session.runtime.kind === 'attached') {
+        const host = attachedHosts.get(session.runtime.instanceId);
+        if (!host) throw new Error('OMP host is not available');
+        if (host.binding.sessionId !== session.runtime.sessionId) throw new Error('Attached OMP session identity changed');
+        if (host.instancePath !== session.instancePath) throw new Error('Attached host does not belong to this instance path');
+        return host.binding;
+      }
+      if (!managedSessions.has(session.id)) {
         await beforeMutation?.();
         if (managedSessions.size >= sessionLimit) throw new SessionCapacityError(sessionLimit);
         managedSessions.add(session.id);
       }
       return { instanceId: session.id, sessionId: session.id, generation: 1, url: 'server-only-secret-capability' };
     },
-    async isRunning(session: TopicSession) { return session.runtime.kind === 'attached' || managedSessions.has(session.id); },
+    async resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
+      if (session.runtime.kind === 'managed') {
+        if (!managedSessions.has(session.id)) return undefined;
+        return { instanceId: session.id, sessionId: session.id, generation: 1, url: 'server-only-secret-capability' };
+      }
+      const host = attachedHosts.get(session.runtime.instanceId);
+      if (!host) return undefined;
+      if (host.binding.sessionId !== session.runtime.sessionId) throw new Error('Attached OMP session identity changed');
+      if (host.instancePath !== session.instancePath) throw new Error('Attached host does not belong to this instance path');
+      return host.binding;
+    },
+    async isRunning(session: TopicSession) {
+      return session.runtime.kind === 'managed' ? managedSessions.has(session.id)
+        : attachedHosts.get(session.runtime.instanceId)?.binding.sessionId === session.runtime.sessionId;
+    },
     async setSessionTitle(session: TopicSession, title: string) {
       if (session.runtime.kind === 'managed' && !managedSessions.has(session.id)) return;
       sessionTitles.set(session.id,title);
@@ -219,7 +241,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         if (connectionSessions.get(handlers) === session.id) handlers.onFrame({t:'state',state:{...state,sessionName:title}});
       }
     },
-    async attach(instanceId: string, _instancePath: string) { return { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' }; },
+    async attach(instanceId: string, instancePath: string) {
+      const binding = { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' };
+      attachedHosts.set(instanceId, { instancePath, binding });
+      return binding;
+    },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
     async providerUsage(_instancePath: string): Promise<never> { throw new Error('No provider usage query configured in fixture'); },
     async listSkills(_instancePath: string, _session?: TopicSession) {
@@ -240,7 +266,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     markPrompt(_sessionId: string) {},
     retain(_sessionId: string) { return () => {}; },
     async stop(id: string) { managedSessions.delete(id); }, async close() {},
-    async kill(session: TopicSession) { managedSessions.delete(session.id); },
+    async kill(session: TopicSession) {
+      if (session.runtime.kind === 'attached') attachedHosts.delete(session.runtime.instanceId);
+      else managedSessions.delete(session.id);
+    },
   };
   const state = { cwd: '/fixture/project', isStreaming: false, queuedMessageCount: 0, sessionName: 'Telegram fixture session', participants: [{ name: 'Local host', role: 'host' as const }] };
   const assistant: AssistantMessage = {

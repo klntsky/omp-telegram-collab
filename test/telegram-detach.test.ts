@@ -73,7 +73,7 @@ test('/detach disables prompts and session access and leaves its icon alone acro
     await restarted.bot.handleUpdate({update_id:9002,message:{message_id:9002,date:0,chat,from,message_thread_id:42,forum_topic_edited:{icon_custom_emoji_id:'human-icon'}}});
     await restarted.reconcileConfiguration();
     assert.equal(reopenedStore.getSession(session.id)?.status,'detached');
-    assert.equal(reopenedStore.getTopicIcon(session.id),'human-icon');
+    assert.equal(reopenedStore.getTopicFinishIcon(session.id),'human-icon');
     assert.equal(app.topicEdits.length,icons,'restart and human edits must not restore an activity icon');
   } finally { ws?.terminate(); await restarted?.close(); reopenedStore?.close(); await app.close(); }
 });
@@ -115,6 +115,5 @@ test('/detach keeps the conversation icon after a rate-limited activity edit', a
     const icons = app.topicEdits.length;
     await app.update({message_thread_id:42,forum_topic_reopened:{}});
     assert.equal(app.topicEdits.length,icons);
-    assert.equal(app.store.getTopicIcon(session.id),'');
   } finally { await app.close(); }
 });

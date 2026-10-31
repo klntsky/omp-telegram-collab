@@ -55,6 +55,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     async topicTitleStatus() { return {worktree:false}; },
     async ensure(): Promise<never> { throw new Error('No sessions expected in lifecycle check'); },
     async isRunning() { return false; },
+    async resolveExisting() { return undefined; },
     async setSessionTitle(): Promise<never> { throw new Error('No title change expected in lifecycle check'); },
     async attach(): Promise<never> { throw new Error('No host attachment expected in lifecycle check'); },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
@@ -529,6 +530,7 @@ test('private session join preserves runtime diagnostics and rejects a detach du
   const fixture = await lifecycleFixture(t);
   t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
   await fixture.start();
+  await fixture.waitNotices(fixture.groups.length);
   const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
   t.after(() => store.close());
   store.updateSession(fixture.session.id, { status: 'open' });
@@ -568,6 +570,7 @@ test('private session join rejects ambiguous bot ownership, unassignment, and te
   const duplicate = store.createSession({ botId: secondBot.id, chatId, threadId: 27, instancePath: fixture.config.dataDir }, 'Other bot session');
   store.updateSession(duplicate.id, { status: 'closed' });
   await fixture.start();
+  await fixture.waitNotices(fixture.groups.length);
   let ensured = 0;
   t.mock.method(OmpRuntime.prototype, 'ensure', async () => {
     ensured++;

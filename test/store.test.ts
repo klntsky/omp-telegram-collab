@@ -165,45 +165,8 @@ test('kill generations persist across restart and stay isolated to their session
   }
 });
 
-test('confirmed topic icons persist exactly across restart and clearing stays isolated and durable', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-topic-icons-'));
-  const filename = join(directory, 'topics.sqlite');
-  let store = new Store(filename);
-  try {
-    const target = store.createSession(topic, 'Target');
-    const others = [
-      store.createSession({ ...topic, threadId: topic.threadId + 1 }, 'Other topic'),
-      store.createSession({ ...topic, botId: botId + 1 }, 'Other bot'),
-      store.createSession({ ...topic, chatId: chatId - 1 }, 'Other chat'),
-    ];
-    const iconId = '5368324170671202286';
-    const otherIconId = '5372981976804366741';
-    assert.equal(store.getTopicIcon(target.id), undefined);
-    assert.equal(store.getTopicIcon('unknown-session'), undefined);
-    store.setTopicIcon(target.id, otherIconId);
-    store.setTopicIcon(target.id, iconId);
-    for (const other of others) {
-      assert.equal(store.getTopicIcon(other.id), undefined);
-      store.setTopicIcon(other.id, otherIconId);
-    }
-    store.close();
-    store = new Store(filename);
-    assert.equal(store.getTopicIcon(target.id), iconId);
-    for (const other of others) assert.equal(store.getTopicIcon(other.id), otherIconId);
-    store.setTopicIcon(target.id, undefined);
-    assert.equal(store.getTopicIcon(target.id), undefined);
-    store.close();
-    store = new Store(filename);
-    assert.equal(store.getTopicIcon(target.id), undefined);
-    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, target.id);
-    for (const other of others) assert.equal(store.getTopicIcon(other.id), otherIconId);
-  } finally {
-    store.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
 
-test('human finish icons persist independently of projected icons and preserve empty and status choices', async () => {
+test('human finish icons persist across restart and preserve empty and status choices', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-topic-finish-icons-'));
   const filename = join(directory,'topics.sqlite');
   let store = new Store(filename);
@@ -213,7 +176,6 @@ test('human finish icons persist independently of projected icons and preserve e
       const session = store.createSession({...topic,threadId:topic.threadId+index},`Preference ${index}`);
       assert.equal(store.getTopicFinishIcon(session.id),undefined);
       store.setTopicFinishIcon(session.id,preference);
-      store.setTopicIcon(session.id,'5312016608254762256');
       assert.equal(store.getTopicFinishIcon(session.id),preference);
       return session;
     });
@@ -223,9 +185,6 @@ test('human finish icons persist independently of projected icons and preserve e
     store = new Store(filename);
     for (const [index,session] of sessions.entries()) {
       assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-      assert.equal(store.getTopicIcon(session.id),'5312016608254762256');
-      store.setTopicIcon(session.id,undefined);
-      assert.equal(store.getTopicFinishIcon(session.id),preferences[index],'clearing a projection cannot clear human intent');
     }
     assert.equal(store.getTopicFinishIcon(otherBot.id),undefined);
     assert.equal(store.getTopicFinishIcon(otherChat.id),undefined);
@@ -236,7 +195,6 @@ test('human finish icons persist independently of projected icons and preserve e
     assert.equal(store.getTopicFinishIcon(sessions[0]!.id),'updated-human-icon');
     for (const [index,session] of sessions.entries()) {
       if (index > 0) assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-      assert.equal(store.getTopicIcon(session.id),undefined);
     }
   } finally {
     store.close();
@@ -254,7 +212,6 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     store.rememberReply(original.id, 'saved-reply');
     store.advanceSessionGeneration(original.id);
     store.setReplyTarget(original.id, 77);
-    store.setTopicIcon(original.id, '5368324170671202286');
     store.close();
     store = new Store(filename);
     assert.deepEqual(store.getSession(original.id), original);
@@ -265,7 +222,6 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.hasSnapshot(original.id), true);
     assert.equal(store.rememberReply(original.id, 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
-    assert.equal(store.getTopicIcon(original.id), '5368324170671202286');
     assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
     assert.equal(store.claimInitialTask(original.id), 'Pending instruction');

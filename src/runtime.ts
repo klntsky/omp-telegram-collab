@@ -564,6 +564,71 @@ export class OmpRuntime {
     return pin.cwd === this.#sessionCwd(session) && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
   }
 
+  async resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
+    this.#assertActive();
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (!Object.hasOwn(this.#config.instances, session.instancePath)) throw new Error('Instance path is not configured');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    const runtime = session.runtime;
+    let pin: DurableBinding | undefined;
+    if (runtime.kind === 'managed') {
+      const metadata = path.join(this.#config.dataDir, 'sessions', session.id, 'binding.json');
+      let saved: DurableBinding;
+      try {
+        if (!(await lstat(metadata)).isFile()) throw new Error('Invalid managed binding metadata');
+        saved = JSON.parse(await readFile(metadata, 'utf8')) as DurableBinding;
+      } catch (error) {
+        if (!errno(error, 'ENOENT')) throw error;
+        if (this.#managed.get(session.id)) throw new Error('Managed OMP binding is missing');
+        this.#assertActive();
+        if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+        return undefined;
+      }
+      const cwd = await this.#validatedSessionCwd(session);
+      if (!record(saved) || saved.version !== 1 || typeof saved.sessionFile !== 'string' ||
+          !path.isAbsolute(saved.sessionFile) || saved.cwd !== cwd || typeof saved.sessionId !== 'string' || !saved.sessionId) {
+        throw new Error('Managed OMP binding is incompatible with this configuration');
+      }
+      pin = saved;
+      const header = await readHeader(pin.sessionFile);
+      const owned = this.#managed.get(session.id);
+      if (header.id !== pin.sessionId || header.cwd !== pin.cwd || (owned && owned.sessionId !== pin.sessionId)) {
+        throw new Error('Managed OMP history identity changed');
+      }
+    } else if (!/^[A-Za-z0-9_-]{1,128}$/.test(runtime.instanceId)) {
+      throw new Error('Invalid OMP instance identifier');
+    }
+    const deadline = Date.now() + this.#config.omp.startupTimeoutMs;
+    const hosts = await this.#list(deadline);
+    this.#assertActive();
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    const matches = hosts.filter(host => runtime.kind === 'attached'
+      ? host.instanceId === runtime.instanceId
+      : host.sessionId === pin!.sessionId);
+    if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
+    const host = matches[0];
+    if (!host) return undefined;
+    if (runtime.kind === 'attached') {
+      if (host.sessionId !== runtime.sessionId) throw new Error('Attached OMP session identity changed');
+      if (await realpath(session.instancePath) !== session.instancePath || await realpath(host.cwd) !== session.instancePath) {
+        throw new Error('Attached host does not belong to this instance path');
+      }
+    } else if (await realpath(host.cwd) !== pin!.cwd) {
+      throw new Error('Managed host working directory changed');
+    }
+    const binding = await this.#resolve(host, deadline);
+    this.#assertActive();
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (runtime.kind === 'managed') {
+      const owned = this.#managed.get(session.id);
+      if (!owned || owned.exited) {
+        this.#managed.set(session.id,{sessionId:pin!.sessionId,binding,exited:false,retiring:false});
+        this.#hostActivity(session.id).busy = host.busy !== false;
+      }
+    }
+    return binding;
+  }
+
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
     if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
@@ -1358,8 +1423,11 @@ export class OmpRuntime {
     }
     const parsed = parseCollabLink(link.url);
     if ('error' in parsed || !parsed.writeToken) throw new Error('OMP host returned an invalid control capability');
-    const current = (await this.#list(deadline)).find(candidate => candidate.instanceId === host.instanceId);
-    if (!current || current.sessionId !== host.sessionId || current.generation !== host.generation || current.pid !== host.pid) {
+    const matches = (await this.#list(deadline)).filter(candidate => candidate.instanceId === host.instanceId || candidate.sessionId === host.sessionId);
+    if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
+    const current = matches[0];
+    if (!current || current.instanceId !== host.instanceId || current.sessionId !== host.sessionId ||
+        current.generation !== host.generation || current.pid !== host.pid || current.cwd !== host.cwd) {
       throw new Error('OMP host session changed while resolving its capability');
     }
     return { instanceId: host.instanceId, sessionId: host.sessionId, generation: host.generation, url: link.url };
