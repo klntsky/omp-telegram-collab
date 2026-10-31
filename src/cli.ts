@@ -391,8 +391,66 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const usage = `Usage: omp-telegram-collab [--config PATH] <start|setup|reload|create|list|show|remove|chat|approve|bot|session>
-Instances are identified by directory paths. Run setup for guided configuration.
+const commandHelp: Record<string, string> = {
+  start: 'start\nRun the service in the foreground. Use Ctrl+C to shut it down.',
+  setup: `setup [OPTIONS]
+Configure the service interactively, or supply options for noninteractive setup.
+  --public-url URL          Public HTTPS origin; an empty string disables the Mini App
+  --host HOST               HTTP listen address
+  --port PORT               HTTP listen port
+  --data-dir PATH           Runtime data directory; existing histories are not moved
+  --omp-executable FILE     OMP executable name or path
+  --omp-arg ARG             OMP argument; repeat for multiple arguments
+  --clear-omp-args           Clear configured OMP arguments
+  --max-sessions N          Service-wide live session limit
+  --startup-timeout-ms N    OMP startup timeout in milliseconds
+  --relay-url URL           OMP relay URL; use - to clear`,
+  reload: 'reload\nAsk the running service to apply saved configuration.',
+  create: 'create PATH\nRegister an existing project directory.',
+  list: 'list\nList registered projects and their chat assignments.',
+  show: 'show PATH\nShow a registered project and its chat assignments.',
+  remove: 'remove PATH\nRemove a project with no chat assignments. Retain histories.',
+  chat: 'chat <add|list|remove>\nManage Telegram forum assignments for a project.',
+  'chat add': `chat add PATH --chat ID [OPTIONS]
+Assign a Telegram forum to a project.
+  --chat ID                         Telegram supergroup ID
+  --bot ID                          Configured bot ID; required when ambiguous
+  --all-messages-are-prompts true|false
+  --users-can-propose-prompts true|false`,
+  'chat list': 'chat list PATH\nList a project and its Telegram forum assignments.',
+  'chat remove': `chat remove PATH --chat ID [--bot ID]
+Remove a forum assignment. Retain histories and running hosts.`,
+  approve: `approve CODE [--path PATH] [OPTIONS]
+Approve a pending forum setup request for an existing project directory.
+  --path PATH                       Project directory where OMP will run
+  --yes                             Skip confirmation; noninteractive use also requires --path
+  --all-messages-are-prompts true|false
+  --users-can-propose-prompts true|false`,
+  bot: 'bot <add|list|remove>\nManage Telegram bot credentials.',
+  'bot add': `bot add [OPTIONS]
+Register a bot. Interactive use prompts for its token without displaying it.
+  --token-stdin                     Read the token from standard input
+  --token-env VARIABLE              Read the token from an environment variable
+  --mini-app-short-name NAME        BotFather Mini App short name; defaults to app
+Choose only one noninteractive token input option.`,
+  'bot list': 'bot list\nList configured bot IDs and Mini App modes.',
+  'bot remove': 'bot remove ID\nRemove a bot and all its chat assignments. Retain histories.',
+  session: 'session <join>\nConnect a local terminal to a topic session.',
+  'session join': `session join --chat CHAT_ID --topic TOPIC_ID
+Join through the running service on this computer. Requires an interactive terminal.
+  --chat CHAT_ID                    Telegram supergroup ID
+  --topic TOPIC_ID                  Session topic ID`,
+};
+const usage = `Usage: omp-telegram-collab [--config PATH] <command>
+
+Commands:
+${Object.entries(commandHelp).filter(([name]) => !name.includes(' ')).map(([name, text]) => `  ${name.padEnd(10)} ${text.split('\n')[1]}`).join('\n')}
+
+Global options:
+  --config PATH   Configuration file
+  --help, -h      Show help for any command or nested subcommand
+
+Run omp-telegram-collab <command> --help for options.
 `;
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -409,7 +467,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     configPath = resolve(value);
     args.splice(index, argument === '--config' ? 2 : 1);
   }
-  if (args.length === 1 && ['--help', 'help', '-h'].includes(args[0]!)) { stdout.write(usage); return; }
+  if (args.some(argument => argument === '--help' || argument === '-h') || (args.length === 1 && args[0] === 'help')) {
+    const command = args.filter(argument => argument !== '--help' && argument !== '-h');
+    if (!command.length || (command.length === 1 && command[0] === 'help')) { stdout.write(usage); return; }
+    const nested = `${command[0]} ${command[1]}`;
+    const name = Object.hasOwn(commandHelp, nested) ? nested : command[0]!;
+    if (!Object.hasOwn(commandHelp, name)) throw new Error(usage.trim());
+    const help = commandHelp[name]!;
+    if (['bot', 'chat', 'session'].includes(name) && command[1]) throw new Error(`Unknown subcommand: ${command[0]} ${command[1]}`);
+    stdout.write(`Usage: omp-telegram-collab [--config PATH] ${help}\n\nGlobal options:\n  --config PATH   Configuration file\n  --help, -h      Show this help without running the command\n`);
+    return;
+  }
   if (args[0] === 'reload' && args.length === 1) {
     await notifyReload(readConfig(configPath));
     stdout.write(`Reload requested for ${configPath}\n`);
