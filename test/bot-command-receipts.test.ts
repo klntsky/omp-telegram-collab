@@ -19,7 +19,6 @@ test('local commands bypass delivery reactions and settings remain usable', asyn
     }
     await app.update({text:'/settings'});
     await clickSettings(app, 0);
-    await clickSettings(app, 1);
     const config = readConfig(app.config.configPath);
     const chat = Object.values(config.instances).flatMap(instance => instance.chats)
       .find(chat => chat.botId === botId && chat.chatId === chatId)!;

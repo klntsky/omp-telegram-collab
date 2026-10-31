@@ -26,8 +26,8 @@ export async function clickSettings(app: SettingsApp, index: number, message = a
   return message;
 }
 
-export async function setForumSetting(app: SettingsApp, page: number, choice: number) {
+export async function setForumSetting(app: SettingsApp, ...[page, choice]: [page: 0 | 1 | 5] | [page: 2 | 3, choice: number]) {
   await app.update({ text: '/settings' });
   await clickSettings(app, page);
-  await clickSettings(app, choice);
+  if (choice !== undefined) await clickSettings(app, choice);
 }

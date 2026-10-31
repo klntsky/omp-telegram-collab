@@ -52,7 +52,7 @@ test('session media follows prompt mode and preserves image document bytes', asy
       t:'prompt',text:'What is funny about this picture?',images:[{type:'image',data:imageData,mimeType:'image/png'}],
     });
     await app.update({text:'/setup'});
-    await setForumSetting(app, 0, 1);
+    await setForumSetting(app, 0);
     await app.update({message_thread_id:session.threadId,document,caption:'Ignored discussion'});
     assert.deepEqual(downloads,['original']);
     await app.update({message_thread_id:session.threadId,document,caption:'/p Explain it'});
@@ -69,7 +69,7 @@ test('unapproved image proposals cannot reach the model', async t => {
   app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     const proposer = {id:77,username:'participant',first_name:'Participant',is_bot:false};
     app.setCurrentMember({username:'participant',status:'member'});
     await app.update({photo,caption:'/new Review this'},proposer);
