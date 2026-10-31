@@ -39,7 +39,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/usage` | Send all providers in one Telegram rich Markdown message: a bold provider heading and a rendered table with columns `Quota`, `Left`, and `Reset` for each provider, separated by blank lines. No monospace blocks, introduction, or legend. Reset dates use UTC, with same-day resets shown as `Today`. Percentages and dollar balances are shown directly; unknown quota is `?` and an unavailable reset is `—`. Identical quota entries are collapsed with a multiplicity suffix. Healthy status markers and redundant used/limit values are omitted; provider errors and non-healthy statuses remain visible. Available to authorized forum members in General and topics; accepts no arguments and never starts a session host. Account emails and IDs are omitted. Reports may be cached by OMP. |
 | `/help` | Show commands and prompt settings. |
 
-For an unassigned forum, `/setup` sends an approval command with the service config path and `--path` set to the bot process's working directory. The operator can change `--path` before approval.
+For an unassigned forum, `/setup` sends an approval command with `--path` set to the bot process's working directory. Generated local commands include `--config` only when the service uses a non-default config path. The operator can change `--path` before approval.
 
 Commands are recognized at the start of message text or media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands. Commands take precedence over reply handling. Unknown slash commands and commands targeting another bot are ignored, not submitted as prompts.
 

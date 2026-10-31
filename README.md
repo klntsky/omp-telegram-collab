@@ -200,7 +200,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting. Administrator bots receive ordinary group messages.
 8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
 
-   The command includes the service config path and defaults `--path` to the bot process's working directory. Change `--path` to your project directory if the bot runs from its own checkout. Approval asks for prompt settings and confirmation, not a directory when `--path` is supplied. Requests expire after ten minutes.
+   The command includes `--config` only for a non-default service config path and defaults `--path` to the bot process's working directory. Change `--path` to your project directory if the bot runs from its own checkout. Approval asks for prompt settings and confirmation, not a directory when `--path` is supplied. Requests expire after ten minutes.
 
    <details>
    <summary>Example Telegram setup messages</summary>
@@ -223,7 +223,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    ```text
    Setup requested. Ask the local operator to approve within 10 minutes:
-   omp-telegram --config '/home/operator/.config/omp-telegram/config.yaml' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   omp-telegram approve EXAMPLE_CODE --path '/srv/projects/backend'
    The command defaults to the bot's working directory. Change --path to use another instance directory.
    ```
 
@@ -241,7 +241,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    Run the command from the bot on the service machine. If `omp-telegram` is not on your shell's `PATH`, use `pnpm cli` from the built checkout instead. This example uses filler values and accepts the default prompt settings by pressing Enter.
 
    ```text
-   $ pnpm cli --config '/home/operator/.config/omp-telegram/config.yaml' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   $ pnpm cli approve EXAMPLE_CODE --path '/srv/projects/backend'
    Verified bot @example_omp_bot (123456789)
    Verified forum Example project (-1001234567890)
    Verified requester 42, current group administrator.
