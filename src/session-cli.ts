@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { readConfig } from './config.js';
 
 export async function runSessionCommand(args: string[], configPath: string): Promise<void> {
-  const usage = 'Usage: omp-telegram [--config PATH] session join --chat CHAT_ID --topic TOPIC_ID';
+  const usage = 'Usage: omp-telegram-collab [--config PATH] session join --chat CHAT_ID --topic TOPIC_ID';
   if (args[0] !== 'join') throw new Error(usage);
   const values = new Map<string, number>();
   for (let index = 1; index < args.length; index += 2) {

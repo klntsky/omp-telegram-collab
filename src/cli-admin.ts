@@ -77,7 +77,7 @@ function one(options: Options, name: string): string | undefined {
   return values?.[0];
 }
 function count(args: string[], required: number, usage: string): void {
-  if (args.length !== required) throw new Error(`Usage: omp-telegram ${usage}`);
+  if (args.length !== required) throw new Error(`Usage: omp-telegram-collab ${usage}`);
 }
 function integer(value: string, label: string, min = 1, max = Number.MAX_SAFE_INTEGER): number {
   if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new Error(`${label} must be an integer from ${min} through ${max}.`);
@@ -322,8 +322,8 @@ class Administration {
     this.print(`Service configuration saved to ${config.configPath}.`);
     const configOption = config.configPath === defaultConfigPath() ? '' : ` --config '${config.configPath.replaceAll("'", "'\\''")}'`;
     this.print(config.bots.length
-      ? `Next on the agent's computer: run pnpm cli${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
-      : `Next on the agent's computer: run pnpm cli${configOption} bot add, then pnpm cli${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
+      ? `Next on the agent's computer: run omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
+      : `Next on the agent's computer: run omp-telegram-collab${configOption} bot add, then omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
   }
   async run(argv: string[]): Promise<boolean> {
     const [command, ...args] = argv;
@@ -353,10 +353,10 @@ class Administration {
       const parsed = parse(args, ['chat', 'bot', 'all-messages-are-prompts', 'users-can-propose-prompts']); count(parsed.positional, 2, 'chat add|list|remove PATH [--chat ID] [--bot ID] [--all-messages-are-prompts true|false] [--users-can-propose-prompts true|false]');
       const [action, input] = parsed.positional;
       if (action === 'list') {
-        if (parsed.options.size) throw new Error('Usage: omp-telegram chat list PATH');
+        if (parsed.options.size) throw new Error('Usage: omp-telegram-collab chat list PATH');
         this.show(this.load(), input); return true;
       }
-      if (!['add', 'remove'].includes(action!)) throw new Error('Usage: omp-telegram chat add|list|remove PATH [--chat ID] [--bot ID]');
+      if (!['add', 'remove'].includes(action!)) throw new Error('Usage: omp-telegram-collab chat add|list|remove PATH [--chat ID] [--bot ID]');
       const chat = one(parsed.options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
       if (action === 'add') {
         const mode = one(parsed.options, 'all-messages-are-prompts');
@@ -396,7 +396,7 @@ class Administration {
         for (const instance of Object.values(config.instances)) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
         await this.save(config); this.print(`Removed bot ${bot.id} and its chat assignments. Histories were retained.`); return true;
       }
-      throw new Error('Usage: omp-telegram bot add|list|remove');
+      throw new Error('Usage: omp-telegram-collab bot add|list|remove');
     }
     return false;
   }

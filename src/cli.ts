@@ -1,7 +1,7 @@
 import { stdout, stderr } from 'node:process';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { watchFile, unwatchFile, existsSync, writeFileSync, writeSync } from 'node:fs';
+import { watchFile, unwatchFile, existsSync, realpathSync, writeFileSync, writeSync } from 'node:fs';
 import { chmod, unlink, readFile, writeFile } from 'node:fs/promises';
 import { createServer as createControlServer, type Server, type ServerResponse } from 'node:http';
 import { inspect } from 'node:util';
@@ -391,7 +391,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const usage = `Usage: omp-telegram [--config PATH] <start|setup|reload|create|list|show|remove|chat|approve|bot|session>
+const usage = `Usage: omp-telegram-collab [--config PATH] <start|setup|reload|create|list|show|remove|chat|approve|bot|session>
 Instances are identified by directory paths. Run setup for guided configuration.
 `;
 
@@ -421,14 +421,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     throw new Error(usage.trim());
   }
   if (args.length > 1) throw new Error(usage.trim());
-  if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram --config ${JSON.stringify(configPath)} setup.`);
+  if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram-collab --config ${JSON.stringify(configPath)} setup.`);
   const service = await startService(configPath);
   const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   void main().catch(error => {
     stderr.write(`${error instanceof Error ? error.message : 'Command failed'}\n`);
     process.exitCode = 1;

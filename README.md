@@ -90,40 +90,39 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 Telegram-only mode supports prompts, images, agent replies, and agent questions in forum topics. The optional Mini App adds a live transcript, tool details, and subagent controls inside Telegram. It also requires a public HTTPS address and a Mini App registered with BotFather. Choose either mode during setup; the steps below mark what is needed only for the Mini App.
 
-1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+1. **Agent's computer:** Install Node.js 22.13 or newer, npm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
 2. **Telegram:** Open [BotFather](https://t.me/BotFather) and send `/newbot`. Enter a display name and an available username ending in `bot`. Save the API token privately; you will enter it on the agent's computer.
-3. **Agent's computer:** Clone and build this project.
+3. **Agent's computer:** Install the package globally. **The package has not yet been published to npm; this registry install requires a published release before it will work.**
 
    ```sh
-   git clone https://github.com/klntsky/omp-telegram-collab.git
-   cd omp-telegram-collab
-   pnpm install
-   pnpm build
+   npm install --global omp-telegram-collab
    ```
+
+   A global install puts the `omp-telegram-collab` binary on your `PATH`, so you can run it from your project directory without cloning or building this repository.
 
 4. **Agent's computer:** Configure the service, register the bot with its BotFather token, and start it.
 
    ```sh
-   pnpm cli setup
-   pnpm cli bot add
-   pnpm start
+   omp-telegram-collab setup
+   omp-telegram-collab bot add
+   omp-telegram-collab start
    ```
 
-   At `Enable Mini App?`, answer **No** for Telegram-only mode or **Yes** for the Mini App. If you choose **Yes**, enter your public HTTPS origin, such as `https://omp.example.com`, and the listen host and port for your proxy or tunnel. During `bot add`, accept the Mini App short name `app`, or enter the name you will register with BotFather. Keep `pnpm start` running in this terminal. Approval registers your existing project directory automatically; there is no separate project-registration step.
+   At `Enable Mini App?`, answer **No** for Telegram-only mode or **Yes** for the Mini App. If you choose **Yes**, enter your public HTTPS origin, such as `https://omp.example.com`, and the listen host and port for your proxy or tunnel. During `bot add`, accept the Mini App short name `app`, or enter the name you will register with BotFather. Keep `omp-telegram-collab start` running in this terminal. Approval registers your existing project directory automatically; there is no separate project-registration step.
 
    <details>
    <summary>Example CLI commands and output</summary>
 
-   These examples use filler values. Output excerpts omit package-manager headers and unrelated prompts. Never paste a real bot token into documentation.
+   These examples use filler values. Output excerpts omit unrelated prompts. Never paste a real bot token into documentation.
 
    ```text
-   $ pnpm cli setup
+   $ omp-telegram-collab setup
    The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
    Enable Mini App? [y/N]: n
    Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
-   Next on the agent's computer: run pnpm cli bot add, then pnpm cli start. Leave it running. In Telegram, add the bot to your forum and send /setup.
+   Next on the agent's computer: run omp-telegram-collab bot add, then omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
 
-   $ pnpm cli bot add
+   $ omp-telegram-collab bot add
    Bot token (hidden):
    Added @example_omp_bot (123456789).
    ```
@@ -131,13 +130,13 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
    With the Mini App enabled, the relevant prompts look like this. Other prompts and output are omitted.
 
    ```text
-   $ pnpm cli setup
+   $ omp-telegram-collab setup
    Enable Mini App? [y/N]: y
    Public HTTPS origin []: https://omp.example.com
    Listen host [127.0.0.1]:
    Listen port [3000]:
 
-   $ pnpm cli bot add
+   $ omp-telegram-collab bot add
    Bot token (hidden):
    BotFather Mini App short name [app]:
    Added @example_omp_bot (123456789), Mini App app.
@@ -169,7 +168,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
    6. Set the subdomain to `omp` and select your domain.
    7. Set the service URL to `http://127.0.0.1:3000`, matching the bot's default listen address. If you configured another host or port, use that address.
    8. Save the route. Cloudflare serves `https://omp.example.com` over HTTPS and forwards HTTP and WebSocket traffic to the bot.
-   9. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli setup`. Use the complete per-bot URL printed at startup for BotFather, such as `https://omp.example.com/?bot=123456789`.
+   9. Set `Public HTTPS origin` to `https://omp.example.com` in `omp-telegram-collab setup`. Use the complete per-bot URL printed at startup for BotFather, such as `https://omp.example.com/?bot=123456789`.
 
    The hostname stays the same across bot and tunnel restarts. Keep the bot and the `cloudflared` service running to make the Mini App available.
 
@@ -184,7 +183,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
    2. Configure the proxy to serve that hostname over HTTPS with a publicly trusted certificate.
    3. Forward requests to the bot's configured listen address, which defaults to `http://127.0.0.1:3000`. Use an address reachable from the proxy if it runs on another machine.
    4. Enable WebSocket forwarding for `/api/socket`, preserving the request path and query string.
-   5. Set `Public HTTPS origin` to `https://omp.example.com` in `pnpm cli setup`.
+   5. Set `Public HTTPS origin` to `https://omp.example.com` in `omp-telegram-collab setup`.
    6. Open the complete per-bot URL printed at startup in a browser on your phone using mobile data. Confirm that the page loads over HTTPS with a valid certificate. Complete the Telegram connection check below after registering the Mini App.
 
    </details>
@@ -196,7 +195,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
    3. Enter a description, such as `Run coding sessions from Telegram`.
    4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
    5. Send `/empty` to skip the optional GIF.
-   6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://omp.example.com/?bot=123456789`.
+   6. For the web URL, paste the complete HTTPS URL printed by `omp-telegram-collab start`, including `?bot=...`. It looks like `https://omp.example.com/?bot=123456789`.
    7. For the short name, enter `app`, or the bot's existing configured short name if you previously registered another name.
    8. BotFather returns the Telegram launch link, such as `https://t.me/your_bot/app`.
 
@@ -204,9 +203,9 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
 
 7. **Telegram:** Add the bot to a supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting; administrator bots receive ordinary group messages.
 8. **Telegram:** As a group administrator, send `/setup`. Copy the approval command it returns.
-9. **Agent's computer, second terminal:** Leave `pnpm start` running in the first terminal. Paste the approval command into a second terminal on the same computer. Change `--path` to the existing project directory where OMP should run, not the bot's checkout.
+9. **Agent's computer, second terminal:** Leave `omp-telegram-collab start` running in the first terminal. Paste the approval command into a second terminal on the same computer. Change `--path` to the existing project directory where OMP should run.
 
-   The command uses absolute paths to Node.js and the installed CLI, so it works outside the bot checkout. It includes `--config` only for a non-default configuration file. Its initial `--path` is the bot process's working directory. Requests expire after ten minutes.
+   The command uses `omp-telegram-collab` from your `PATH`, so it works outside this repository. It includes `--config` only for a non-default configuration file. Its initial `--path` is the bot process's working directory. Requests expire after ten minutes.
 
    Approval verifies the bot, forum, and requesting administrator. It asks for a project directory only if `--path` is missing, resolves that directory, warns about filesystem and credential access, and asks you to confirm the forum's connection to that resolved project. Review both the path and access warning before confirming. This does not create a directory or isolate the agent from the rest of the computer.
 
@@ -226,7 +225,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
 
    ```text
    Setup requested. On the agent's computer, approve within 10 minutes:
-   '/usr/bin/node' '/opt/omp-telegram/dist/cli.js' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
    The project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.
    ```
 
@@ -244,7 +243,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
    Run the command from the bot on the agent's computer in the second terminal. These paths and identifiers are filler values.
 
    ```text
-   $ '/usr/bin/node' '/opt/omp-telegram/dist/cli.js' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   $ omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
    Verified bot @example_omp_bot (123456789)
    Verified forum Example project (-1001234567890)
    Verified requester 42, current group administrator.
@@ -260,7 +259,7 @@ Telegram-only mode supports prompts, images, agent replies, and agent questions 
 
 10. **Telegram:** Review `/settings`, including prompt policy, session limit, and forum defaults. Then send `/new <task>`, replacing `<task>` with what you want the agent to do. Confirm that the reply appears in the new topic.
 
-   Interactive setup does not ask for a session limit; `/settings` owns that choice. Automation can still pass `pnpm cli setup --max-sessions N`.
+   Interactive setup does not ask for a session limit; `/settings` owns that choice. Automation can still pass `omp-telegram-collab setup --max-sessions N`.
 
    If you enabled the Mini App, use mobile data to open the topic's **OPEN AGENT** button and confirm that its transcript loads. Keep it open while sending another prompt from a second Telegram client; confirm that the new reply appears live. This checks WebSocket forwarding.
 

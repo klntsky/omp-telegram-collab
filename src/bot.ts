@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
@@ -1556,10 +1555,7 @@ export class BotService {
   }
   private localCliCommand(): string {
     const configPath = this.options.config.configPath;
-    const executable = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
-    const entryPoint = "'" + fileURLToPath(new URL('../dist/cli.js', import.meta.url)).replaceAll("'", "'\\''") + "'";
-    const command = `${executable} ${entryPoint}`;
-    return configPath === defaultConfigPath() ? command : `${command} --config '${configPath.replaceAll("'", "'\\''")}'`;
+    return configPath === defaultConfigPath() ? 'omp-telegram-collab' : `omp-telegram-collab --config '${configPath.replaceAll("'", "'\\''")}'`;
   }
   private async setup(ctx: Context): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
@@ -2069,7 +2065,7 @@ export class BotService {
         if (destination.kind !== 'topic' || !session) { await replyTo(ctx, destination, 'Use /cli in an active session topic.'); return; }
         this.requireSessionAssignment(session);
         if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return; }
-        const command = `omp-telegram session join --chat ${destination.chatId} --topic ${destination.threadId}`;
+        const command = `omp-telegram-collab session join --chat ${destination.chatId} --topic ${destination.threadId}`;
         await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
           parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
         });
