@@ -38,6 +38,12 @@ async function createConnectedApp() {
 function message(app: App, value: AssistantMessage, type: 'message_start' | 'message_update' | 'message_end' = 'message_update') {
   app.emit({ t: 'event', event: { type, message: value } });
 }
+function persistedMessage(app: App, value: AssistantMessage) {
+  app.emit({t:'entry',entry:{
+    type:'message',id:'typing-delivery',parentId:null,timestamp:new Date().toISOString(),message:value,
+  }});
+  message(app, value, 'message_end');
+}
 async function remainsStopped(app: App, count: number) {
   await delay(4300);
   assert.equal(app.chatActions.length, count);
@@ -112,7 +118,7 @@ for (const ending of ['agent_end', 'drop'] as const) {
         }
         return previous(method, payload, signal);
       });
-      message(app, text, 'message_end');
+      persistedMessage(app, text);
       await entered.promise;
       app.emit({ t: 'event', event: { type: 'agent_start' } });
       if (ending === 'agent_end') app.emit({ t: 'event', event: { type: 'agent_end' } });
@@ -143,7 +149,7 @@ test('a real outgoing same-topic send invalidates queued typing before the send 
       }
       return previous(method, payload, signal);
     });
-    message(app, text, 'message_end');
+    persistedMessage(app, text);
     await entered.promise;
     app.emit({ t: 'event', event: { type: 'agent_start' } });
     await app.bot.api.sendMessage(chatId, 'Real delivery', { message_thread_id: 42 });

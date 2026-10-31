@@ -7,6 +7,13 @@ import { topicDestination, type TopicDestination } from '../shared/topic-destina
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
+export interface MessageAnchor {
+  ompSessionId: string;
+  entryId: string;
+  parentEntryId: string | null;
+  kind: 'collab-prompt' | 'assistant';
+  partIndex: number;
+}
 function storedThreadId(destination: TopicDestination): number {
   return destination.kind === 'general' ? 1 : destination.threadId;
 }
@@ -48,15 +55,17 @@ export class Store {
       CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS detached_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id));
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_path TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
-      CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
+      CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,message_id));
-      CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,entry_id));
+      CREATE TABLE IF NOT EXISTS prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
+      CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,omp_session_id,entry_id));
+      CREATE TABLE IF NOT EXISTS prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
+      CREATE TABLE IF NOT EXISTS message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_pending_close_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
@@ -318,15 +327,16 @@ export class Store {
   }
   recordPromptSubmission(
     sessionId: string,
+    ompSessionId: string,
     sender: string,
     content: PromptContent,
     messageId?: number,
   ): number {
     const result = this.db
       .prepare(
-        "INSERT INTO prompt_submissions (session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
+        "INSERT INTO prompt_submissions (session_id,omp_session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,?,'pending')",
       )
-      .run(sessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
+      .run(sessionId, ompSessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
     return Number(result.lastInsertRowid);
   }
   rejectPromptSubmission(submissionId: number): void {
@@ -337,20 +347,20 @@ export class Store {
       .prepare("UPDATE prompt_submissions SET state='uncertain' WHERE id=? AND state='pending'")
       .run(submissionId);
   }
-  beginPromptReceiptSnapshot(sessionId: string): number {
+  beginPromptReceiptSnapshot(sessionId: string, ompSessionId: string): number {
     this.db
       .prepare(
-        "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND state='pending'",
+        "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND omp_session_id=? AND state='pending'",
       )
-      .run(sessionId);
+      .run(sessionId, ompSessionId);
     const row = this.db
-      .prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=?')
-      .get(sessionId);
+      .prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=? AND omp_session_id=?')
+      .get(sessionId, ompSessionId);
     return Number(row?.boundary ?? 0);
   }
   recordPromptReceipt(
     sessionId: string,
-    entryId: string,
+    anchor: Omit<MessageAnchor, 'kind' | 'partIndex'>,
     sender: string | undefined,
     content: PromptContent,
     snapshotBoundary?: number,
@@ -358,8 +368,8 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const previous = this.db
-        .prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND entry_id=?')
-        .get(sessionId, entryId);
+        .prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND omp_session_id=? AND entry_id=?')
+        .get(sessionId, anchor.ompSessionId, anchor.entryId);
       if (previous) {
         this.db.exec('COMMIT');
         return {
@@ -369,9 +379,10 @@ export class Store {
       }
       const column = content.images === undefined ? 'text' : 'fingerprint';
       const value = column === 'text' ? content.text : promptFingerprint(content);
-      let condition = `session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
+      let condition = `session_id=? AND omp_session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
       let parameters = [
         sessionId,
+        anchor.ompSessionId,
         sender ?? '',
         value,
         snapshotBoundary ?? null,
@@ -387,9 +398,10 @@ export class Store {
               .all(...parameters);
       let uncorrelated = false;
       if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
-        condition = 'session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
+        condition = 'session_id=? AND omp_session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
         parameters = [
           sessionId,
+          anchor.ompSessionId,
           sender,
           content.text,
           snapshotBoundary ?? null,
@@ -413,9 +425,19 @@ export class Store {
       const ambiguous = conflicting || pending?.state === 'ambiguous';
       const messageId = ambiguous ? undefined : pending?.message_id;
       this.db
-        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?)')
-        .run(sessionId, entryId, messageId ?? null);
-      if (pending) this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(pending.id);
+        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?)')
+        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null);
+      if (typeof messageId === 'number') {
+        const session = this.getSession(sessionId)!;
+        const aliases = this.db.prepare('SELECT message_id FROM prompt_message_aliases WHERE session_id=? AND source_message_id=?').all(sessionId, messageId);
+        for (const id of [messageId, ...aliases.map(row => Number(row.message_id))])
+          this.recordMessageAnchor(sessionId, session.chatId, id, {...anchor, kind:'collab-prompt', partIndex:0});
+      }
+      if (pending) {
+        this.db.prepare('DELETE FROM prompt_submissions WHERE id=?').run(pending.id);
+        if (pending.message_id !== null)
+          this.db.prepare('DELETE FROM prompt_message_aliases WHERE session_id=? AND source_message_id=?').run(sessionId, pending.message_id);
+      }
       this.db.exec('COMMIT');
       return {
         fresh: true,
@@ -435,8 +457,32 @@ export class Store {
     if (iconId === undefined) this.db.prepare('DELETE FROM session_topic_finish_icons WHERE session_id=?').run(id);
     else this.db.prepare('INSERT INTO session_topic_finish_icons VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET icon_id=excluded.icon_id').run(id,iconId);
   }
-  rememberReply(id: string, fingerprint: string): boolean {
-    const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, fingerprint, Date.now());
+  recordPromptMessageAlias(sessionId: string, sourceMessageId: number, messageId: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO prompt_message_aliases VALUES (?,?,?)').run(sessionId, sourceMessageId, messageId);
+  }
+  getMessageAnchor(sessionId: string, ompSessionId: string, chatId: number, messageId: number): MessageAnchor | undefined {
+    const row = this.db.prepare('SELECT entry_id,parent_entry_id,kind,part_index FROM message_anchors WHERE session_id=? AND omp_session_id=? AND chat_id=? AND message_id=?').get(sessionId, ompSessionId, chatId, messageId);
+    return row ? {
+      ompSessionId,
+      entryId:String(row.entry_id),
+      parentEntryId:row.parent_entry_id === null ? null : String(row.parent_entry_id),
+      kind:row.kind as MessageAnchor['kind'],
+      partIndex:Number(row.part_index),
+    } : undefined;
+  }
+  recordMessageAnchor(sessionId: string, chatId: number, messageId: number, anchor: MessageAnchor): void {
+    const previous = this.getMessageAnchor(sessionId, anchor.ompSessionId, chatId, messageId);
+    if (previous) {
+      if (previous.entryId !== anchor.entryId || previous.parentEntryId !== anchor.parentEntryId ||
+          previous.kind !== anchor.kind || previous.partIndex !== anchor.partIndex)
+        throw new Error(`Conflicting message anchor for session ${sessionId}, OMP session ${anchor.ompSessionId}, chat ${chatId}, message ${messageId}`);
+      return;
+    }
+    this.db.prepare('INSERT INTO message_anchors VALUES (?,?,?,?,?,?,?,?)')
+      .run(sessionId, anchor.ompSessionId, chatId, messageId, anchor.entryId, anchor.parentEntryId, anchor.kind, anchor.partIndex);
+  }
+  rememberReply(id: string, ompSessionId: string, entryId: string): boolean {
+    const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, ompSessionId, entryId);
     return Number(result.changes) === 1;
   }
   hasSnapshot(id: string): boolean {
