@@ -449,10 +449,6 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      if (ctx.chat) {
-        const destination = contextDestination(ctx);
-        if (destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'untracked') return;
-      }
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -552,7 +548,10 @@ export class BotService {
     if (this.options.config.terminated || this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
-    const topic = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
+    const destination = contextDestination(ctx);
+    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
+    if (detached) return;
+    const topic = this.options.store.getTopic({botId:this.id,destination});
     if (topic && topic.status !== 'open') return;
     if ((intent.kind === 'new-task' || intent.kind === 'session-prompt') &&
         !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
@@ -901,6 +900,7 @@ export class BotService {
       failures.push({operation:'Forum permissions',at:Date.now(),error});
     }
     const stored = this.options.store.getTopic({botId:this.id,destination});
+    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
     const session = stored?.instancePath === path ? stored : undefined;
     if (stored && !session) lines.push('Session: unavailable (assigned to another project)');
     else if (session) {
@@ -908,7 +908,7 @@ export class BotService {
       const listener = this.listeners.get(session.id);
       lines.push(`Session: ${session.name} (${session.status})`);
       let host = 'unknown';
-      if (suspended || session.status === 'detached') {
+      if (suspended || detached) {
         host = `unknown (${suspended ? 'service terminated' : 'conversation-only'}; not queried)`;
       } else {
         try {
@@ -924,7 +924,7 @@ export class BotService {
       const recovery = listener?.initial?.phase === 'retrying' ? 'initial task retry scheduled' : this.restoring.has(session.id) ? 'restoring' : this.reconnecting.has(session.id) ? 'reconnecting' : this.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
       lines.push(`Recovery: ${recovery}`);
       if (observation.failure) failures.push(observation.failure);
-    } else lines.push(destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
+    } else lines.push(detached ? 'Session: detached; this topic is conversation-only' : destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
     const catalog = this.options.store.getSkillCatalog(path);
     const catalogObservation = this.catalogObservations.get(path);
     const freshness = this.catalogTasks.has(path) ? 'refreshing' : catalogObservation?.failed ? 'refresh failed' : catalogObservation?.refreshedAt ? 'current' : 'not checked this process';
@@ -1013,7 +1013,7 @@ export class BotService {
   }
   private sessionAssigned(session: TopicSession): boolean {
     if (session.botId !== this.id || !this.options.store.isEnrolled(this.id, session.chatId)) return false;
-    if (this.options.store.getTopicKind(session) === 'untracked') return false;
+    if (this.options.store.getTopicKind(session) === 'detached') return false;
     const stored = this.options.store.getSession(session.id);
     if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instancePath !== session.instancePath || !session.instancePath) return false;
     try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
@@ -1446,10 +1446,6 @@ export class BotService {
   }
 
   private async detachSession(session: TopicSession): Promise<void> {
-    this.options.store.setPendingSessionTitle(session.id,undefined);
-    this.options.store.updateSession(session.id,{status:'detached'});
-    this.options.store.advanceSessionGeneration(session.id);
-    this.options.store.cancelInitialTask(session.id);
     this.dropListener(session.id);
     this.closedSessions.delete(session.id);
     for (const [token, request] of this.capacityRequests) {
@@ -1462,14 +1458,15 @@ export class BotService {
     const icon = this.topicIcons.get(session.id);
     await icon?.tail;
     this.topicIcons.delete(session.id);
-    try {
-      await this.delivery.run(session.chatId, () => this.bot.api.editForumTopic(
-        session.chatId,session.threadId,{icon_custom_emoji_id:''}), () => !this.stopped &&
-          this.options.store.getTopicKind(session) === 'tracked' &&
-          this.options.store.getSession(session.id)?.status === 'detached' &&
-          findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath);
-    } catch (error) {
-      if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
+    if (session.status !== 'detached') {
+      try {
+        await this.delivery.run(session.chatId, () => this.bot.api.editForumTopic(
+          session.chatId,session.threadId,{icon_custom_emoji_id:''}), () => !this.stopped &&
+            this.options.store.getTopicKind(session) === 'detached' &&
+            findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath);
+      } catch (error) {
+        if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
+      }
     }
   }
   private async announce(session: TopicSession): Promise<void> {
@@ -1788,8 +1785,9 @@ export class BotService {
       if (ctx.callbackQuery.data.startsWith('skills:')) {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id)) return;
-        const session = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
-        if (session?.status === 'detached') return;
+        const destination = contextDestination(ctx);
+        if (destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached') return;
+        const session = this.options.store.getTopic({botId:this.id,destination});
         await this.skills.callback(ctx, ctx.callbackQuery.data, session);
         return;
       }
@@ -1844,9 +1842,9 @@ export class BotService {
     if (command?.action === 'settings') { await this.openSettings(ctx); return; }
     const destination = contextDestination(ctx);
     let session = this.options.store.getTopic({botId:this.id,destination});
-    const detached = session?.status === 'detached';
+    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
-    if (detached && topicLifecycle && !('forum_topic_edited' in message)) return;
+    if (detached && topicLifecycle) return;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
         session = this.options.store.createSession({botId:this.id,chatId:destination.chatId,threadId:destination.threadId,instancePath:this.assignedPath(ctx.chat.id)}, message.forum_topic_created.name);
@@ -1899,10 +1897,7 @@ export class BotService {
       if (ctx.from?.id === this.id && (edited.icon_custom_emoji_id !== undefined || edited.name !== undefined)) {
         await this.delivery.run(ctx.chat.id,
           () => this.bot.api.deleteMessage(ctx.chat!.id,message.message_id),
-          () => !this.stopped && (detached
-            ? this.options.store.getSession(session.id)?.status === 'detached' &&
-              findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath
-            : this.sessionAssigned(session))).catch(error => {
+          () => !this.stopped && this.sessionAssigned(session)).catch(error => {
           console.warn(`Could not delete topic edit notice (${session.id}, ${message.message_id}).`, error);
         });
       }
@@ -1925,10 +1920,11 @@ export class BotService {
       return;
     }
     if (!ctx.from || ctx.from.is_bot) return;
-    if (session?.status === 'closed' && !['status','help'].includes(command?.action ?? '')) {
+    if (session?.status === 'closed' && !['status','help','detach'].includes(command?.action ?? '')) {
       await replyTo(ctx,destination,'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.');
       return;
     }
+    if (detached && (intent.kind === 'question-answer' || intent.kind === 'ended-question')) return;
     if (intent.kind === 'question-answer') {
       await this.authorize(ctx.chat.id,ctx.from.id);
       const pending = this.questions.get(intent.token);
@@ -2003,12 +1999,13 @@ export class BotService {
       }
       if (action === 'detach') {
         if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.'); return; }
-        if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a session topic, not General or an unrelated chat.'); return; }
-        await this.detachSession(session);
+        if (destination.kind !== 'topic') { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a topic, not General or an unrelated chat.'); return; }
+        this.options.store.detachTopic({botId:this.id,chatId:destination.chatId,threadId:destination.threadId});
+        if (session) await this.detachSession(session);
         await replyTo(ctx, contextDestination(ctx), 'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
         return;
       }
-      if (detached && !['new','worktree','attach','help','start'].includes(action)) {
+      if (detached && !['new','attach','help','start'].includes(action)) {
         await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /new to create a separate session topic.');
         return;
       }

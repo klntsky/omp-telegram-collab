@@ -56,44 +56,86 @@ test('status notices reuse the saved topic and replace it when Telegram reports 
   } finally { await app.close(); }
 });
 
-test('reserved status topic ignores commands and replies before command and prompt effects', async () => {
+for (const origin of ['status', 'command'] as const) {
+  test(`${origin} detachment without a session ignores lifecycle, prompts, and worktree commands`, async t => {
     const app = await createSmokeApp();
     try {
-      await app.update({ text: '/setup' });
-      await app.service.sendStatusNotice(chatId, 'Online');
-      const threadId = app.store.getBotStatusTopic(botId, chatId)!;
-      for (const text of ['/terminate', '/setup', '/new Do not launch', '/p Do not prompt', '/status', '/help', '/kill', '/stop', '/new@FixtureOmpBot Do not launch', 'Do not treat this as a prompt']) {
-      const before = { messages: app.messages.length, reactions: app.reactions.length, topics: app.createdTopics.length, config: JSON.stringify(app.config) };
-      await app.update({ message_thread_id: threadId, forum_topic_created: { name: 'Bot status' } });
-      await app.update({ message_thread_id: threadId, text, ...(text.startsWith('/') ? { entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]!.length }] } : {}) });
-      await app.update({ message_thread_id: threadId, text: 'Reply must not prompt', reply_to_message: { message_id: 900, date: 0, chat: { id: chatId, type: 'supergroup' }, from: app.bot.botInfo, text: 'Online' } });
-      assert.equal(app.messages.length, before.messages);
-      assert.equal(app.reactions.length, before.reactions);
-      assert.equal(app.createdTopics.length, before.topics);
-      assert.equal(JSON.stringify(app.config), before.config);
-      assert.deepEqual(app.store.listSessions(botId), []);
-      assert.deepEqual(app.accepted, []);
-      assert.equal(app.connectionCount, 0);
-      }
+      await app.update({text:'/setup'});
+      if (origin === 'status') await app.service.sendStatusNotice(chatId, 'Online');
+      const threadId = origin === 'status' ? app.store.getBotStatusTopic(botId,chatId)! : 42;
+      if (origin === 'command') await app.update({message_thread_id:threadId,text:'/detach'});
+      assert.equal(app.store.getTopicKind({botId,chatId,threadId}),'detached');
+      let probes = 0;
+      let worktrees = 0;
+      t.mock.method(app.runtime,'topicTitleStatus',async () => { probes++; return {worktree:true,branch:'must-not-appear'}; });
+      t.mock.method(app.runtime,'worktree',async () => { worktrees++; });
+      const edits = app.topicEdits.length;
+      for (const update of [
+        {forum_topic_created:{name:'Conversation'}},
+        {forum_topic_edited:{name:'Human title'}},
+        {forum_topic_closed:{}},
+        {forum_topic_reopened:{}},
+        {text:'/skill:find-skills'},
+        {text:'/p Must not prompt'},
+        {text:'/worktree'},
+        {text:'Ordinary conversation'},
+        {text:'Reply must not prompt',reply_to_message:{message_id:900,date:0,chat:{id:chatId,type:'supergroup' as const},from:app.bot.botInfo,text:'Online'}},
+      ]) await app.update({message_thread_id:threadId,...update});
+      assert.equal(probes,0);
+      assert.equal(worktrees,0);
+      assert.equal(app.topicEdits.length,edits);
+      assert.equal(app.connectionCount,0);
+      assert.deepEqual(app.store.listSessions(botId),[]);
+      assert.deepEqual(app.accepted,[]);
     } finally { await app.close(); }
   });
+}
 
-test('generic untracked topics ignore lifecycle updates and prompts without runtime or rename effects', async () => {
+for (const origin of ['status', 'empty', 'session'] as const) {
+  for (const command of ['new', 'attach'] as const) {
+    test(`/${command} from a ${origin} detached topic creates a separate topic`, async () => {
+      const app = await createSmokeApp();
+      try {
+        await app.update({text:'/setup'});
+        if (origin === 'status') await app.service.sendStatusNotice(chatId,'Online');
+        const threadId = origin === 'status' ? app.store.getBotStatusTopic(botId,chatId)! : 42;
+        if (origin === 'session') await app.update({message_thread_id:threadId,forum_topic_created:{name:'Conversation history'}});
+        const original = app.store.listSessions(botId)[0];
+        if (origin !== 'status') await app.update({message_thread_id:threadId,text:'/detach'});
+        const edits = app.topicEdits.filter(edit => edit.message_thread_id === threadId).length;
+        await app.update({message_thread_id:threadId,text:command === 'new' ? '/new Separate task' : '/attach existing-host Separate history'});
+        const separate = app.store.listSessions(botId).find(session => session.threadId !== threadId);
+        assert.ok(separate);
+        assert.equal(separate.status,'open');
+        assert.equal(separate.runtime.kind,command === 'new' ? 'managed' : 'attached');
+        assert.equal(app.store.getTopicKind({botId,chatId,threadId}),'detached');
+        assert.equal(app.topicEdits.filter(edit => edit.message_thread_id === threadId).length,edits);
+        if (original) {
+          assert.equal(app.store.getSession(original.id)?.status,'detached');
+          assert.equal(app.store.getSession(original.id)?.name,'Conversation history');
+        } else {
+          assert.equal(app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId}}),undefined);
+        }
+      } finally { await app.close(); }
+    });
+  }
+}
+
+test('explicit detached topic identities ignore lifecycle updates and prompts without runtime or rename effects', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    app.store.setUntrackedTopic({botId,chatId,threadId:42});
+    app.store.detachTopic({botId,chatId,threadId:42});
     let probes = 0;
     app.runtime.topicTitleStatus = async () => { probes++; return {worktree:true,branch:'must-not-appear'}; };
     const before = app.topicEdits.length;
     for (const update of [
-      {forum_topic_created:{name:'Untracked topic'}},
+      {forum_topic_created:{name:'Detached topic'}},
       {forum_topic_edited:{name:'Human title'}},
       {forum_topic_closed:{}},
       {forum_topic_reopened:{}},
-      {text:'/new Must not launch'},
       {text:'/p Must not prompt'},
-      {text:'Ordinary untracked input'},
+      {text:'Ordinary detached input'},
     ]) await app.update({message_thread_id:42,...update});
     assert.equal(probes,0);
     assert.equal(app.topicEdits.length,before);

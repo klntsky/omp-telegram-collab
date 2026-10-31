@@ -75,7 +75,7 @@ Telegram-to-OMP renames require a host with session-title control support. Termi
 
 Close a topic to archive instructions; reopen it to resume. Closing or deleting a topic does not delete OMP history. Telegram has no documented topic-deleted service update, so deletion is not a reliable cleanup signal.
 
-`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead disables prompts, reactions, mirroring, approvals, and Mini App access permanently for that topic. It preserves history and does not kill the host. Use `/new` for another session.
+`/kill` preserves history and invalidates existing Mini App connections, including automatic reconnects. A later instruction, Rejoin, or fresh OPEN AGENT visit can resume a managed session. `/detach` instead permanently releases bot control of the topic, with or without an existing session. It disables prompts, receipt reactions, mirroring, approvals, Mini App access, automatic renaming, and branch and worktree tracking for that topic. It preserves history and does not kill the host. Commands remain available under their normal authorization rules, but cannot create or resume a session in the detached topic. `/new` and `/attach` create separate session topics.
 
 While terminated, prompts, callbacks, Mini App agent access, and commands other than read-only `/status` are blocked. Blocked commands receive “The service got terminated, only admin can resume it (remove terminated: true from the config)”. Current human members may still inspect status for an assigned, enrolled forum; status does not resume the service or query suspended hosts. Pending initial tasks and approvals are cancelled; histories remain intact. Only an operator with configuration access can resume service by removing the top-level flag. Restarting the bot does not clear termination.
 
@@ -204,9 +204,7 @@ Keep the YAML and runtime data private. They contain bot tokens, topic mappings,
 
 Each successful startup notifies enrolled groups in the reserved **Bot status** forum topic: “OMP bot service is back online (restarting took N.NN seconds).” The bot creates this topic when needed and persists its ID separately for each bot and chat. Later lifecycle notices reuse it; if Telegram reports that the message thread no longer exists, the bot creates a replacement and saves its ID. Notices never fall back to General. The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice in the same reserved topic.
 
-Bot status is an untracked topic, not a session topic. Untracked topics never acquire session worktrees or branch tracking, and the bot never renames them or synchronizes their titles with OMP. This applies to persisted status topics after restart and to replaced status topics. Existing session history is retained but detached when its topic becomes untracked.
-
-Messages in untracked topics are ignored before command handling, prompt submission, or receipt reactions: slash commands (including `/terminate`, `/setup`, and `/new`), ordinary text, and replies to the bot have no effect. Use General or a session topic for commands and prompts.
+Bot status is automatically detached under the same policy as `/detach`. It never acquires a session, worktree, branch prefix, or synchronized title. Persisted and replaced status topics remain detached across restarts. Any existing session history is retained without restoring bot control.
 
 
 ## 3. Capacity and reconnection
