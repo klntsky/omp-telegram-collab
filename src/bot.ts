@@ -546,7 +546,8 @@ export class BotService {
     return intent;
   }
   private async receiveMessage(ctx: Context, intent: InputIntent): Promise<void> {
-    if (intent.kind === 'ignore' || intent.kind === 'event' || intent.kind === 'ended-question') return;
+    if (intent.kind !== 'new-task' && intent.kind !== 'session-prompt' && intent.kind !== 'question-answer' &&
+        !(intent.kind === 'command' && ['stop','kill','worktree','model_preset'].includes(intent.action))) return;
     const message = ctx.message;
     if (this.options.config.terminated || this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
