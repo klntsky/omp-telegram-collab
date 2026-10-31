@@ -67,7 +67,8 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Run other built-in, file, template, or extension commands (including `/init`) | No OMP command browser or general slash-command dispatch. The Mini App composer sends prompts, not terminal commands. |
 | ❌ | Configure OMP or provider authentication (`/settings`, `/setup`, `/providers`, `/login`, `/logout`) | Telegram `/settings` manages forum policy and defaults, not OMP settings or credentials. `/setup` enrolls a forum. |
 | ❌ | Manage extensions or MCP (`/extensions`, `/status`, `/marketplace`, `/plugins`, `/plugin`, `/reload-plugins`, `/mcp`) | Telegram `/status` reports service diagnostics, not OMP's extension dashboard. |
-| ❌ | Inspect provider limits or open usage dashboards (`/usage`, `/stats`, `/trace`) | No provider-limit, stats, or trace controls. Displayed subagent costs are separate. |
+| ✅ | Inspect provider quotas (`/usage`) | `/usage` reports provider plan usage, remaining quotas, and reset times. Displayed subagent costs are separate. |
+| ❌ | Open usage dashboards (`/stats`, `/trace`) | No stats or trace dashboards. |
 | ✅ | Copy displayed reply text or follow a link | Use Telegram's or the browser's ordinary selection and link actions. |
 | ❌ | Use OMP's copy picker or open-last-link command (`/copy`, `/open`) | No equivalent command controls. |
 | ❌ | Export, dump requests, or share saved sessions (`/export`, `/dump`, `/share`) | No HTML export, request dump, or encrypted saved-session sharing. |
@@ -101,6 +102,26 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    ```
 
    If pnpm reports that its global executable directory is not configured, run `pnpm setup`, open a new terminal, and repeat the installation command.
+
+   Use `omp-telegram-collab --help` to list commands. Every command and nested subcommand accepts `--help` or `-h`, such as `omp-telegram-collab setup --help` and `omp-telegram-collab bot add --help`. Help does not require configuration or a running service.
+
+   <details>
+   <summary>Example command help</summary>
+
+   Excerpt showing token input options; Mini App and global options are omitted.
+
+   ```text
+   $ omp-telegram-collab bot add --help
+   Usage: omp-telegram-collab bot add [options]
+
+   Verify and register a Telegram bot
+
+   Options:
+     --token-env <variable>        Read the token from an environment variable
+     --token-stdin                 Read the token from standard input
+   ```
+
+   </details>
 
 4. **Agent's computer:** Configure the service, register the bot with its BotFather token, and start it.
 

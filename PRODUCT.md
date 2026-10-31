@@ -6,6 +6,8 @@ Consumer installation requires Node.js 22.13 or newer, pnpm, and OMP. Once a rel
 
 `omp-telegram-collab setup` edits service settings through interactive configuration prompts or command-line options. It does not ask for the session limit; configure that in Telegram `/settings`, or pass the explicit `--max-sessions` flag for automation. On completion, setup directs users to register a bot with `omp-telegram-collab bot add` when none are configured, then start the service; otherwise it directs users to start the service and send `/setup` in Telegram.
 
+Every CLI command and nested subcommand accepts `--help` and `-h`. Top-level `help` also lists commands. Help describes command arguments and options without reading configuration, contacting Telegram, or starting the service.
+
 First-time enrollment needs no separate project-creation step: `omp-telegram-collab approve` automatically registers the existing project directory. `omp-telegram-collab create` remains available for explicit registration outside enrollment.
 
 The Mini App is optional. `omp-telegram-collab setup` explains that it adds a live transcript, tool details, and subagent controls before asking whether to enable it. New services default to Telegram-only.

@@ -6,6 +6,8 @@ This document describes ownership and boundaries. User-visible requirements belo
 
 The CLI owns configuration management and starts the service. The running service composes Telegram bot adapters, persistent session storage, and the OMP runtime manager. A configured public HTTPS origin also enables the HTTP and WebSocket gateway. Bot adapters and the gateway share the runtime and session store, so Telegram and Mini App clients reach the same OMP conversation rather than maintaining independent agent state.
 
+Commander owns the CLI command tree, argument and option parsing, and generated help. Command actions receive parsed values before accessing configuration or external services. Administration owns configuration mutations and Telegram verification; the session-join operation receives validated coordinates rather than raw command-line arguments.
+
 Configuration is the authority for project directories, bot identities, chat assignments, and service settings. Telegram owns group administrator roles. Neither roles nor runtime storage can override configured project assignments. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
 
 The service configuration owns the Mini App mode. An empty public origin keeps the gateway stopped; a configured origin enables it. The bot adapter uses the same configuration to publish Mini App commands and launch controls. Network availability does not change this choice.

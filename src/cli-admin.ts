@@ -4,6 +4,7 @@ import { createInterface, type Interface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import { request } from 'node:http';
 import { Api } from 'grammy';
+import { Command, CommanderError, Option } from 'commander';
 import { z } from 'zod';
 import type { AppConfig, BotConfig, InstanceConfig } from '../shared/contracts.js';
 import { canonicalPath, configWritable, defaultConfigPath, emptyConfig, findInstance, readConfig, writeConfig } from './config.js';
@@ -54,30 +55,8 @@ export async function notifyReload(config: AppConfig, socketDataDir = config.dat
 }
 
 type Options = Map<string, string[]>;
-function parse(args: string[], allowed: string[], switches: string[] = []): { positional: string[]; options: Options } {
-  const positional: string[] = [];
-  const options: Options = new Map();
-  let literal = false;
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
-    if (arg === '--') { literal = true; continue; }
-    if (!literal && arg.startsWith('--')) {
-      const name = arg.slice(2);
-      if (!allowed.includes(name) && !switches.includes(name)) throw new Error(`Unknown option --${name}.`);
-      const value = switches.includes(name) ? 'true' : args[++index];
-      if (value === undefined) throw new Error(`--${name} requires a value.`);
-      options.set(name, [...(options.get(name) ?? []), value]);
-    } else positional.push(arg);
-  }
-  return { positional, options };
-}
 function one(options: Options, name: string): string | undefined {
-  const values = options.get(name);
-  if (values && values.length !== 1) throw new Error(`Use --${name} only once.`);
-  return values?.[0];
-}
-function count(args: string[], required: number, usage: string): void {
-  if (args.length !== required) throw new Error(`Usage: omp-telegram-collab ${usage}`);
+  return options.get(name)?.[0];
 }
 function integer(value: string, label: string, min = 1, max = Number.MAX_SAFE_INTEGER): number {
   if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new Error(`${label} must be an integer from ${min} through ${max}.`);
@@ -325,80 +304,30 @@ class Administration {
       ? `Next on the agent's computer: run omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
       : `Next on the agent's computer: run omp-telegram-collab${configOption} bot add, then omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
   }
-  async run(argv: string[]): Promise<boolean> {
-    const [command, ...args] = argv;
-    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'bot'].includes(command ?? '')) return false;
-    if (command === 'setup') {
-      const parsed = parse(args, ['public-url', 'host', 'port', 'data-dir', 'omp-executable', 'omp-arg', 'max-sessions', 'startup-timeout-ms', 'relay-url'], ['clear-omp-args']);
-      count(parsed.positional, 0, 'setup [--public-url URL --host HOST --port PORT --data-dir PATH --omp-executable FILE --omp-arg ARG --max-sessions N --startup-timeout-ms N --relay-url URL]');
-      await this.setup(parsed.options); return true;
-    }
-    if (command === 'create') {
-      const parsed = parse(args, []); count(parsed.positional, 1, 'create PATH');
-      await this.create(parsed.positional[0]!); return true;
-    }
-    if (command === 'list' || command === 'show') {
-      const parsed = parse(args, []); count(parsed.positional, command === 'list' ? 0 : 1, command === 'list' ? 'list' : 'show PATH');
-      this.show(this.load(), parsed.positional[0]); return true;
-    }
-    if (command === 'remove') {
-      const parsed = parse(args, []); count(parsed.positional, 1, 'remove PATH');
-      const config = this.load(); this.writable(config);
-      const {path, instance} = this.instance(config, parsed.positional[0]!);
-      if (instance.chats.length) throw new Error('Remove this instance’s chat assignments before removing the instance.');
-      delete config.instances[path];
-      await this.save(config); this.print(`Removed ${path}. Histories were retained.`); return true;
-    }
-    if (command === 'chat') {
-      const parsed = parse(args, ['chat', 'bot', 'all-messages-are-prompts', 'users-can-propose-prompts']); count(parsed.positional, 2, 'chat add|list|remove PATH [--chat ID] [--bot ID] [--all-messages-are-prompts true|false] [--users-can-propose-prompts true|false]');
-      const [action, input] = parsed.positional;
-      if (action === 'list') {
-        if (parsed.options.size) throw new Error('Usage: omp-telegram-collab chat list PATH');
-        this.show(this.load(), input); return true;
-      }
-      if (!['add', 'remove'].includes(action!)) throw new Error('Usage: omp-telegram-collab chat add|list|remove PATH [--chat ID] [--bot ID]');
-      const chat = one(parsed.options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
-      if (action === 'add') {
-        const mode = one(parsed.options, 'all-messages-are-prompts');
-        const proposals = one(parsed.options, 'users-can-propose-prompts');
-        await this.addChat(input!, chat, one(parsed.options, 'bot'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'));
-      }
-      else {
-        if (parsed.options.has('all-messages-are-prompts')) throw new Error('--all-messages-are-prompts is only supported by chat add.');
-        if (parsed.options.has('users-can-propose-prompts')) throw new Error('--users-can-propose-prompts is only supported by chat add.');
-        const config = this.load(); this.writable(config); const {instance} = this.instance(config, input!);
-        const bot = await this.selectBot(config, one(parsed.options, 'bot')); const chatId = integer(chat, 'Chat ID', Number.MIN_SAFE_INTEGER, -1);
-        instance.chats = instance.chats.filter(item => item.botId !== bot.id || item.chatId !== chatId);
-        await this.save(config); this.print('Chat assignment removed. Histories were retained.');
-      }
-      return true;
-    }
-    if (command === 'approve') {
-      const parsed = parse(args, ['path', 'all-messages-are-prompts', 'users-can-propose-prompts'], ['yes']); count(parsed.positional, 1, 'approve CODE --path PATH --yes [--all-messages-are-prompts true|false] [--users-can-propose-prompts true|false]');
-      const mode = one(parsed.options, 'all-messages-are-prompts');
-      const proposals = one(parsed.options, 'users-can-propose-prompts');
-      await this.approve(parsed.positional[0]!, one(parsed.options, 'path'), parsed.options.has('yes'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts')); return true;
-    }
-    if (command === 'bot') {
-      const [action, ...rest] = args;
-      if (action === 'add') {
-        const parsed = parse(rest, ['token-env', 'mini-app-short-name'], ['token-stdin']); count(parsed.positional, 0, 'bot add [--token-stdin|--token-env VARIABLE] [--mini-app-short-name NAME]');
-        await this.botAdd(parsed.options); return true;
-      }
-      if (action === 'list') {
-        count(rest, 0, 'bot list'); const config = this.load();
-        for (const bot of config.bots) this.print(`${bot.id}\t${config.publicUrl ? `Mini App: ${bot.miniAppShortName}` : 'Telegram-only'}`);
-        if (!config.bots.length) this.print('No bots configured.'); return true;
-      }
-      if (action === 'remove') {
-        count(rest, 1, 'bot remove ID'); const config = this.load(); this.writable(config);
-        const bot = await this.selectBot(config, rest[0]); config.bots = config.bots.filter(item => item.id !== bot.id);
-        for (const instance of Object.values(config.instances)) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
-        await this.save(config); this.print(`Removed bot ${bot.id} and its chat assignments. Histories were retained.`); return true;
-      }
-      throw new Error('Usage: omp-telegram-collab bot add|list|remove');
-    }
-    return false;
+  async remove(input: string): Promise<void> {
+    const config = this.load(); this.writable(config);
+    const {path, instance} = this.instance(config, input);
+    if (instance.chats.length) throw new Error('Remove this instance’s chat assignments before removing the instance.');
+    delete config.instances[path];
+    await this.save(config); this.print(`Removed ${path}. Histories were retained.`);
+  }
+  async removeChat(input: string, options: Options): Promise<void> {
+    const chat = one(options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
+    const config = this.load(); this.writable(config); const {instance} = this.instance(config, input);
+    const bot = await this.selectBot(config, one(options, 'bot')); const chatId = integer(chat, 'Chat ID', Number.MIN_SAFE_INTEGER, -1);
+    instance.chats = instance.chats.filter(item => item.botId !== bot.id || item.chatId !== chatId);
+    await this.save(config); this.print('Chat assignment removed. Histories were retained.');
+  }
+  listBots(): void {
+    const config = this.load();
+    for (const bot of config.bots) this.print(`${bot.id}\t${config.publicUrl ? `Mini App: ${bot.miniAppShortName}` : 'Telegram-only'}`);
+    if (!config.bots.length) this.print('No bots configured.');
+  }
+  async removeBot(id: string): Promise<void> {
+    const config = this.load(); this.writable(config);
+    const bot = await this.selectBot(config, id); config.bots = config.bots.filter(item => item.id !== bot.id);
+    for (const instance of Object.values(config.instances)) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
+    await this.save(config); this.print(`Removed bot ${bot.id} and its chat assignments. Histories were retained.`);
   }
 }
 
@@ -408,7 +337,7 @@ async function readTokenStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function runAdmin(argv: string[], configPath: string, dependencies: AdminDependencies = {}): Promise<boolean> {
+export function registerAdminCommands(program: Command, configPath: () => string, dependencies: AdminDependencies = {}): () => void {
   let input: Interface | undefined;
   let muted = false;
   const question = dependencies.question ?? (async (prompt: string, hidden = false): Promise<string> => {
@@ -419,6 +348,91 @@ export async function runAdmin(argv: string[], configPath: string, dependencies:
     try { return await input.question(''); }
     finally { muted = false; if (hidden) process.stdout.write('\n'); }
   });
-  try { return await new Administration(resolve(configPath), dependencies, question).run(argv); }
-  finally { input?.close(); }
+  const admin = (): Administration => new Administration(resolve(configPath()), dependencies, question);
+  const options = (command: Command): Options => {
+    const values = command.opts<Record<string, string[]>>();
+    return new Map(command.options.flatMap(option => {
+      const value = values[option.attributeName()];
+      return value === undefined ? [] : [[option.name(), value] as const];
+    }));
+  };
+  const flag = (command: Command, flags: string, description: string, repeat = false): void => {
+    const option = new Option(flags, description);
+    option.argParser((value: string, previous: string[] | undefined): string[] => {
+      if (previous && !repeat) throw new Error(`Use --${option.name()} only once.`);
+      return [...(previous ?? []), value ?? 'true'];
+    });
+    command.addOption(option);
+  };
+  const policies = (command: Command): void => {
+    flag(command, '--all-messages-are-prompts <true|false>', 'Treat ordinary topic messages as prompts');
+    flag(command, '--users-can-propose-prompts <true|false>', 'Allow non-admin prompt proposals');
+  };
+  const setup = program.command('setup').description('Configure service and OMP settings');
+  for (const [flags, description] of [
+    ['--public-url <url>', 'Public HTTPS origin for the optional Mini App'],
+    ['--host <host>', 'Service listen host'],
+    ['--port <port>', 'Service listen port'],
+    ['--data-dir <path>', 'Service data directory'],
+    ['--omp-executable <file>', 'OMP executable'],
+    ['--omp-arg <arg>', 'Literal OMP argument (repeatable, including values starting with --)'],
+    ['--max-sessions <n>', 'Maximum simultaneous OMP sessions'],
+    ['--startup-timeout-ms <n>', 'OMP startup timeout in milliseconds'],
+    ['--relay-url <url>', 'OMP relay URL, or - to clear'],
+    ['--clear-omp-args', 'Clear configured OMP arguments'],
+  ] as const) flag(setup, flags, description, flags === '--omp-arg <arg>');
+  setup.action((_values, command: Command) => admin().setup(options(command)));
+  program.command('create <path>').description('Register a project directory').action((path: string) => admin().create(path));
+  program.command('list').description('List registered project directories').action(() => { const service = admin(); service.show(service.load()); });
+  program.command('show <path>').description('Show a project and its chat assignments').action((path: string) => { const service = admin(); service.show(service.load(), path); });
+  program.command('remove <path>').description('Remove an unassigned project, retaining histories').action((path: string) => admin().remove(path));
+  const chat = program.command('chat').description('Manage project chat assignments');
+  chat.command('list <path>').description('List a project’s chat assignments').action((path: string) => { const service = admin(); service.show(service.load(), path); });
+  const addChat = chat.command('add <path>').description('Connect or update a forum chat assignment');
+  const removeChat = chat.command('remove <path>').description('Remove a chat assignment, retaining histories');
+  for (const command of [addChat, removeChat]) {
+    flag(command, '--chat <id>', 'Telegram forum chat ID');
+    flag(command, '--bot <id>', 'Configured bot ID');
+  }
+  policies(addChat);
+  addChat.action((path: string, _values, command: Command) => {
+    const values = options(command);
+    const chatId = one(values, 'chat'); if (!chatId) throw new Error('Specify --chat ID.');
+    const mode = one(values, 'all-messages-are-prompts');
+    const proposals = one(values, 'users-can-propose-prompts');
+    return admin().addChat(path, chatId, one(values, 'bot'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'));
+  });
+  removeChat.action((path: string, _values, command: Command) => admin().removeChat(path, options(command)));
+  const approve = program.command('approve <code>').description('Approve a Telegram setup request');
+  flag(approve, '--path <path>', 'Project directory where OMP will run');
+  flag(approve, '--yes', 'Confirm approval without prompting');
+  policies(approve);
+  approve.action((code: string, _values, command: Command) => {
+    const values = options(command);
+    const mode = one(values, 'all-messages-are-prompts');
+    const proposals = one(values, 'users-can-propose-prompts');
+    return admin().approve(code, one(values, 'path'), values.has('yes'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'));
+  });
+  const bot = program.command('bot').description('Manage Telegram bot credentials');
+  const addBot = bot.command('add').description('Verify and register a Telegram bot');
+  flag(addBot, '--token-env <variable>', 'Read the token from an environment variable');
+  flag(addBot, '--token-stdin', 'Read the token from standard input');
+  flag(addBot, '--mini-app-short-name <name>', 'BotFather Mini App short name');
+  addBot.action((_values, command: Command) => admin().botAdd(options(command)));
+  bot.command('list').description('List configured bots').action(() => admin().listBots());
+  bot.command('remove <id>').description('Remove a bot and its assignments, retaining histories').action((id: string) => admin().removeBot(id));
+  return () => input?.close();
+}
+
+export async function runAdmin(argv: string[], configPath: string, dependencies: AdminDependencies = {}): Promise<boolean> {
+  const program = new Command().name('omp-telegram-collab').exitOverride().configureOutput({ writeErr: () => {} });
+  const cleanup = registerAdminCommands(program, () => configPath, dependencies);
+  if (!program.commands.some(command => command.name() === argv[0]) && argv[0] !== '--help' && argv[0] !== '-h' && argv[0] !== 'help') return false;
+  try {
+    await program.parseAsync(argv, {from: 'user'});
+    return true;
+  } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0) return true;
+    throw error;
+  } finally { cleanup(); }
 }
