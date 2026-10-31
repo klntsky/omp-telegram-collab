@@ -92,7 +92,7 @@ You'll connect a Telegram group to a project on your computer. The agent runs on
 
 You can use the bot entirely through group messages. If you'd also like to open a live transcript, inspect tool calls, and manage subagents inside Telegram, enable the **Mini App** during setup. It needs a public HTTPS address and an extra registration with BotFather. The guide includes both options, with the extra steps marked **Mini App only**.
 
-1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model provider credentials for the account that will run the bot, following the [official provider setup guide](https://omp.sh/docs/providers#get-one-route-working).
 2. **Telegram:** Open [BotFather](https://t.me/BotFather) and send `/newbot`. Enter a display name and an available username ending in `bot`. Save the API token privately; you will enter it on the agent's computer.
 3. **Agent's computer:** Install the package globally. **The package has not yet been published to npm; this registry install requires a published release before it will work.**
 
