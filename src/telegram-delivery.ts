@@ -316,6 +316,7 @@ export class TelegramDelivery {
             } else job.reject(error);
           })
           .finally(() => {
+            if (retry && this.closed) job.cancel();
             if (name === 'ordinary' && !retry && chat.ordinary[0] === job)
               chat.ordinary.shift();
             lane.running = undefined;

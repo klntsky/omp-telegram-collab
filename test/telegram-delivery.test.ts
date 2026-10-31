@@ -1124,3 +1124,20 @@ test('coalesced admission gives real output priority over pending typing in the 
   await Promise.all([output, typing]);
   assert.deepEqual(calls, ['ordinary', 'typing']);
 });
+
+test('shutdown between rate-limit recovery and finalization settles the retained FIFO head', async (t) => {
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const rejected = Promise.withResolvers<void>();
+  const pending = delivery.run(1, () => rejected.promise, () => true);
+  await settle();
+  rejected.reject(limited(60));
+  await Promise.resolve();
+  await Promise.resolve();
+  delivery.close();
+  const result = await Promise.race([
+    pending.then(value => ({ settled: true, value })),
+    settle().then(() => ({ settled: false })),
+  ]);
+  assert.deepEqual(result, { settled: true, value: undefined });
+});
