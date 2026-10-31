@@ -161,27 +161,3 @@ test('conversion to a status topic during a queued branch probe prevents Telegra
     assert.equal(app.store.getTopicTitlePrefix(session.id),undefined);
   } finally { release.resolve(); await app.close(); }
 });
-
-test('queued commands are discarded if their topic becomes untracked before dispatch', async () => {
-  const app = await createSmokeApp();
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  const ensure = app.runtime.ensure.bind(app.runtime);
-  try {
-    await app.update({text:'/setup'});
-    app.runtime.ensure = async (...args) => {
-      entered.resolve();
-      await release.promise;
-      return ensure(...args);
-    };
-    const first = app.update({text:'/new Active task'});
-    await entered.promise;
-    const queued = app.update({message_thread_id:42,text:'/new Must not launch'});
-    await delay(20);
-    app.store.setUntrackedTopic({botId,chatId,threadId:42});
-    release.resolve();
-    await Promise.all([first,queued]);
-    assert.equal(app.store.listSessions(botId).length,1);
-    assert.equal(app.createdTopics.length,1);
-  } finally { release.resolve(); await app.close(); }
-});

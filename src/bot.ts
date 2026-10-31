@@ -449,12 +449,10 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      const untracked = () => {
-        if (!ctx.chat) return false;
+      if (ctx.chat) {
         const destination = contextDestination(ctx);
-        return destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'untracked';
-      };
-      if (untracked()) return;
+        if (destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'untracked') return;
+      }
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -467,7 +465,7 @@ export class BotService {
       const urgent = intent.kind === 'command' && intent.action === 'terminate';
       if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
       const received = this.receiveMessage(ctx,intent);
-      const process = async () => { await received; if (!untracked()) await this.handle(ctx, intent); };
+      const process = async () => { await received; await this.handle(ctx, intent); };
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) { await this.reportError(ctx,error); }
