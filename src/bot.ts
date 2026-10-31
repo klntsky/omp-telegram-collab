@@ -3651,7 +3651,8 @@ export class BotService {
       await this.delivery.run(question.session.chatId,
         () => this.bot.api.setMessageReaction(question.session.chatId,message.message_id,[{type:'emoji',emoji:'👀'}]),
         () => !this.stopped && this.sessionAssigned(question.session) &&
-          this.listeners.get(question.session.id) === question.listener && this.questions.get(token) === question).catch(() => undefined);
+          this.listeners.get(question.session.id) === question.listener && this.questions.get(token) === question)
+        .catch(error => { console.warn(`Could not show question selection receipt (${question.session.id}).`, error); });
       const value = typeof option === 'string' ? option : option.label;
       this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
