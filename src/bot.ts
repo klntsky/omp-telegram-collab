@@ -124,6 +124,7 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
+const typingLabels: Record<TypingMode, string> = {disabled:'Disabled',streaming:'While typing',inference:'While working'};
 type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees' | 'typing';
 type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing';
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
@@ -284,11 +285,11 @@ export class BotService {
       button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {kind:'page',page:'presets'});
       button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {kind:'page',page:'capacity'});
       button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'create_topic_worktrees',value:chat.create_topic_worktrees !== true});
-      button(`Typing indicators: ${chat.typing_indicators ?? 'disabled'}`, {kind:'page',page:'typing'});
+      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {kind:'page',page:'typing'});
     } else if (page === 'typing') {
       text = 'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
-      for (const [value, label] of [['disabled', 'Disabled'], ['streaming', 'While streaming a response'], ['inference', 'Throughout inference']] as const) {
-        button(label, {kind:'typing',field:'typing_indicators',value}, (chat.typing_indicators ?? 'disabled') === value);
+      for (const value of ['disabled', 'streaming', 'inference'] as const) {
+        button(typingLabels[value], {kind:'typing',field:'typing_indicators',value}, (chat.typing_indicators ?? 'disabled') === value);
       }
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
@@ -411,7 +412,7 @@ export class BotService {
         typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
-        if (page === 'typing') return String(setting ?? 'disabled');
+        if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
         if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
         if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
         if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
