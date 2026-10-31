@@ -257,8 +257,6 @@ export class BotService {
       revision: 0, offset: 0, choices: [], changes: new Map(),
     };
     const persisted = await this.settingsAccess(ctx, panel);
-    const message = await replyTo(ctx, panel.destination, 'Opening settings…');
-    panel.messageId = message.message_id;
     await this.renderSettings(panel, persisted);
   }
   private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
@@ -322,7 +320,14 @@ export class BotService {
     }
     if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
     button('Close', {kind:'close'});
-    await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
+    const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
+    const extra = {reply_markup:{inline_keyboard:rows}};
+    if (panel.messageId === 0) {
+      const message = await sendTo(this.bot.api, panel.destination, body, extra);
+      panel.messageId = message.message_id;
+    } else {
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, body, extra);
+    }
     panel.choices = choices;
     panel.revision = revision;
     panel.offset = offset;

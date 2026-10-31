@@ -34,6 +34,25 @@ test('settings survive elapsed time, additional panels and lost panel state', as
   } finally { await app.close(); }
 });
 
+test('settings open with usable controls even when message edits are unavailable', async () => {
+  const app = await createSmokeApp();
+  await app.update({text:'/setup'});
+  let editsUnavailable = true;
+  app.bot.api.config.use(async (previous, method, payload, signal) => {
+    if (method === 'editMessageText' && editsUnavailable) throw new Error('Message edits unavailable');
+    return previous(method, payload, signal);
+  });
+  try {
+    await app.update({text:'/settings'});
+    const panel = app.messages.at(-1)!;
+    const action = settingsButton(panel, 0);
+    editsUnavailable = false;
+    await app.callback(action, panel);
+    await clickSettings(app, 1, panel);
+    assert.equal(saved(app).chat.all_messages_are_prompts, false);
+  } finally { await app.close(); }
+});
+
 test('setup opens current settings and navigation edits one panel with Back and Close', async () => {
   const app = await createSmokeApp();
   try {
