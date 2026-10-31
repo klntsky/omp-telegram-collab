@@ -1792,6 +1792,10 @@ export class BotService {
         session = this.options.store.createSession({botId:this.id,chatId:destination.chatId,threadId:destination.threadId,instancePath:this.assignedPath(ctx.chat.id)}, message.forum_topic_created.name);
         const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
         if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
+        if (this.createsTopicWorktrees(ctx.chat.id)) {
+          await this.authorize(ctx.chat.id,ctx.from!.id);
+          await this.createTopicWorktree(session);
+        }
         await this.announce(session);
         await this.refreshTopicStatus(session);
       }

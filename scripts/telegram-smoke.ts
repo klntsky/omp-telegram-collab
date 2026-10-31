@@ -452,9 +452,7 @@ export async function verifyTelegramFlow() {
     await clickSetting(1);
     const explicitMenus = await verifyMenus('explicit-command', allMessageMenus);
     await clickSetting(0);
-    await clickSetting(0);
     const restoredMenus = await verifyMenus('all-message', explicitMenus);
-    await clickSetting(0);
     await clickSetting(1);
     await verifyMenus('explicit-command', restoredMenus);
     const reactionsBeforeDiscussion = app.reactions.length;
@@ -496,6 +494,7 @@ export async function verifyTelegramFlow() {
     assert.equal(app.reactions.length,beforeIgnored);
     assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,3);
     app.setCurrentMember({username:ownerUsername,status:'creator'});
+    await clickSetting(2);
     await clickSetting(1);
     await clickSetting(0);
     app.setCurrentMember({username:'grace',status:'member'});
