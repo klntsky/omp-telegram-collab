@@ -90,15 +90,15 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 Telegram-only mode supports prompts, images, agent replies, and agent questions in forum topics. The optional Mini App adds a live transcript, tool details, and subagent controls inside Telegram. It also requires a public HTTPS address and a Mini App registered with BotFather. Choose either mode during setup; the steps below mark what is needed only for the Mini App.
 
-1. **Agent's computer:** Install Node.js 22.13 or newer, npm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
 2. **Telegram:** Open [BotFather](https://t.me/BotFather) and send `/newbot`. Enter a display name and an available username ending in `bot`. Save the API token privately; you will enter it on the agent's computer.
 3. **Agent's computer:** Install the package globally. **The package has not yet been published to npm; this registry install requires a published release before it will work.**
 
    ```sh
-   npm install --global omp-telegram-collab
+   pnpm add --global omp-telegram-collab
    ```
 
-   A global install puts the `omp-telegram-collab` binary on your `PATH`, so you can run it from your project directory without cloning or building this repository.
+   A global install puts the `omp-telegram-collab` binary on your `PATH`, so you can run it from your project directory without cloning or building this repository. If pnpm reports that its global executable directory is not configured, run `pnpm setup`, open a new terminal, and repeat the installation command.
 
 4. **Agent's computer:** Configure the service, register the bot with its BotFather token, and start it.
 
