@@ -210,6 +210,22 @@ timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use
 
 Live Telegram verification requires a BotFather token and forum groups. Mini App verification also requires its BotFather registration and HTTPS deployment. Local fixtures cannot verify BotFather settings or Telegram client behavior. Keep services that own active coding sessions running while testing lifecycle notices elsewhere.
 
+### Check the topic reconciliation model
+
+Install Java 17 or newer. Download the pinned TLA+ tools outside the checkout:
+
+```sh
+curl --fail --location --max-time 60 --create-dirs \
+  --output "$HOME/.cache/omp-telegram/tla2tools-1.7.4.jar" \
+  https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+TLA2TOOLS_JAR="$HOME/.cache/omp-telegram/tla2tools-1.7.4.jar" \
+  timeout 180s pnpm check:topic-model
+```
+
+The runner checks the pinned artifact's SHA256 before execution. Set `JAVA` to a Java executable outside `PATH` when needed. Raw checker output and state files remain in the printed temporary directory, outside the checkout. A timeout or an unexpected checker error fails the command.
+
+`check:topic-model` is separate from `verify`. The specification records its finite scope, environment assumptions, and excluded integration boundaries. Passing it does not establish live Telegram behavior or implementation conformance.
+
 ## Debugging
 
 Use `pm2 logs omp-telegram-collab` for deployed service diagnostics. If configuration was saved but not applied, correct the reported error and run `pnpm cli reload`. The Mini App exchanges fresh Telegram launch data once for a long-lived backend credential, cached in memory and session storage per launch and scoped to the bot/session. It reuses that credential for reloads and automatic reconnects, including after service restarts; elapsed launch age alone does not require reopening Telegram. Credentials are signed using the bot token, bind the bot/session/user and session generation, and have no time expiry. The backend refreshes membership on reconnect, before writes, and periodically for active sockets, revoking access when membership is lost; reads reuse established authorization. Backend and network failures preserve their original diagnostics. If capacity is exhausted, close unused Mini Apps or increase the configured limit before selecting Rejoin.
