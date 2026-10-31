@@ -1483,7 +1483,7 @@ export class BotService {
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const title = (name ?? task?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
+    const title = (name ?? task?.text.replace(/(?:^|\s)\/skill:[^\s]+/g, ' ') ?? '').replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
     const initialIcon = task !== undefined && !worktree ? (await this.getIconIds()).running : undefined;
     if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
@@ -2463,13 +2463,12 @@ export class BotService {
     }
   }
   private stripTopicStatus(session: TopicSession, title: string): string {
-    const worktree = /^wt:[^\s]*(?:\s+|$)/.exec(title);
-    if (worktree) return title.slice(worktree[0].length);
     const savedPrefix = this.options.store.getTopicTitlePrefix(session.id);
     if (savedPrefix && title.startsWith(`${savedPrefix} `)) return title.slice(savedPrefix.length+1);
     for (const prefix of this.titlePrefixes.get(session.id) ?? []) {
       if (title.startsWith(`${prefix} `)) return title.slice(prefix.length+1);
     }
+    if (title.startsWith('🌳 ')) return title.slice('🌳 '.length);
     return title;
   }
   private async projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void> {
@@ -2477,7 +2476,9 @@ export class BotService {
     try {
       const status = await this.options.runtime.topicTitleStatus(session);
       if (!active()) return;
-      const statusText = `${status.worktree ? 'wt:' : ''}${status.branch ?? ''}`;
+      const topicBranch = `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`;
+      const branch = status.branch === topicBranch ? '' : status.branch ?? '';
+      const statusText = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
       const prefixLimit = 127-Math.min(Array.from(title).length,64);
       const statusCharacters = Array.from(statusText);
       const prefix = statusCharacters.length > prefixLimit
