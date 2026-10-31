@@ -153,10 +153,12 @@ Agent questions include the full text, option descriptions, and numbered option 
 
 | Indicator | Meaning |
 | --- | --- |
-| 👀 reaction | The bot received eligible input. |
+| 👀 reaction | The bot received a prompt, an answer to an agent question, or a session control command. |
 | 🤝 reaction | OMP confirmed receipt. For `/stop`, interruption was confirmed. For `/kill`, the process exited. |
 | ⚡ topic icon | An agent turn is running, including tool work. |
 | 🏁 topic icon, or your chosen topic icon | No agent turn is running, whether the host is idle, stopped, or not started. |
+
+Local commands such as `/settings`, `/help`, and `/status`, and skill selection do not use delivery reactions or wait for a reaction request before executing. Reactions are reserved for prompts, agent answers, and commands sent to the OMP session, including `/stop`, `/kill`, `/worktree`, and `/model_preset`.
 
 Approval alone does not produce a receipt reaction. Failed or rejected instructions do not get one. A relay disconnect does not mean OMP stopped. The bot checks liveness every 30 seconds and reconstructs activity after restart instead of trusting a saved Telegram icon. Reactions and icon changes depend on Telegram permissions and rate limits.
 
