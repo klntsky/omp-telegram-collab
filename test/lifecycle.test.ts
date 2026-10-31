@@ -448,7 +448,7 @@ test('a readable protected configuration starts normally and preserves writable 
     assert.equal(stored.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.instancePath, fixture.config.dataDir);
     assert.equal(stored.getSession(fixture.session.id)?.id, fixture.session.id);
   } finally { stored.close(); }
-  await assert.rejects(runAdmin(['configure', '--max-sessions', '50'], fixture.config.configPath), /read-only/);
+  await assert.rejects(runAdmin(['setup', '--max-sessions', '50'], fixture.config.configPath), /read-only/);
   assert.equal(await readFile(fixture.config.configPath, 'utf8'), source);
 });
 

@@ -1588,7 +1588,7 @@ export class BotService {
   async requestCapacity(session: TopicSession, limit: number): Promise<void> {
     if (!this.sessionAssigned(session)) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' setup`;
       await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
@@ -1632,7 +1632,7 @@ export class BotService {
     const session = this.options.store.getSession(request.sessionId);
     if (!session || !this.sessionAssigned(session) || session.status !== 'open' || session.chatId !== request.chatId || session.threadId !== request.threadId) return;
     if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
-      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' configure`;
+      const command = `omp-telegram --config '${this.options.config.configPath.replaceAll("'", "'\\''")}' setup`;
       await replyTo(ctx, contextDestination(ctx), `Configuration is read-only. The session limit is unchanged. Ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }

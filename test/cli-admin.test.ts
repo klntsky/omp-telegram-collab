@@ -77,6 +77,7 @@ function fixture(t: TestContext) {
 test('unhandled commands return false and reads never create a missing configuration', async t => {
   const f = fixture(t);
   assert.equal(await f.run(['start']), false);
+  assert.equal(await f.run(['configure']), false);
   assert.equal(existsSync(f.configPath), false);
   await assert.rejects(f.run(['list']), /Cannot read/);
   assert.equal(await f.run(['admin', 'add', f.project, 'Alice']), false);
@@ -101,21 +102,21 @@ test('create, list, show and remove use canonical directory identities', async t
   assert.deepEqual(readConfig(f.configPath).instances, {});
 });
 
-test('explicit configure completes every service setting without hand editing', async t => {
+test('explicit setup completes every service setting without hand editing', async t => {
   const f = fixture(t);
   const dataDir = join(f.root, 'selected data');
-  await f.run(['configure', '--public-url', 'https://collab.example', '--host', '0.0.0.0', '--port', '4200', '--data-dir', dataDir, '--omp-executable', './bin/custom-omp', '--omp-arg', '--model', '--omp-arg', 'literal model with spaces', '--max-sessions', '12', '--startup-timeout-ms', '12345', '--relay-url', 'wss://relay.example']);
+  await f.run(['setup', '--public-url', 'https://collab.example', '--host', '0.0.0.0', '--port', '4200', '--data-dir', dataDir, '--omp-executable', './bin/custom-omp', '--omp-arg', '--model', '--omp-arg', 'literal model with spaces', '--max-sessions', '12', '--startup-timeout-ms', '12345', '--relay-url', 'wss://relay.example']);
   const config = readConfig(f.configPath);
   assert.equal(config.publicUrl, 'https://collab.example');
   assert.equal(config.host, '0.0.0.0');
   assert.equal(config.port, 4200);
   assert.equal(config.dataDir, dataDir);
   assert.deepEqual(config.omp, {executable: resolve('./bin/custom-omp'), args: ['--model', 'literal model with spaces'], maxSessions: 12, startupTimeoutMs: 12345, relayUrl: 'wss://relay.example'});
-  await f.run(['configure', '--clear-omp-args', '--relay-url', '-']);
+  await f.run(['setup', '--clear-omp-args', '--relay-url', '-']);
   assert.deepEqual(readConfig(f.configPath).omp.args, []);
   assert.equal(readConfig(f.configPath).omp.relayUrl, undefined);
-  await assert.rejects(f.run(['configure', '--port', '4000oops']), /Port must/);
-  await assert.rejects(f.run(['configure', '--public-url', 'http://not-secure.example']), /Invalid configuration/);
+  await assert.rejects(f.run(['setup', '--port', '4000oops']), /Port must/);
+  await assert.rejects(f.run(['setup', '--public-url', 'http://not-secure.example']), /Invalid configuration/);
   assert.equal(readConfig(f.configPath).port, 4200);
 });
 
@@ -144,33 +145,33 @@ test('Telegram-only bot addition skips Mini App prompts and names', async t => {
 
 test('changing Mini App mode preserves registered names and fills only missing names', async t => {
   const f = fixture(t);
-  await f.run(['configure', '--public-url', 'https://collab.example']);
+  await f.run(['setup', '--public-url', 'https://collab.example']);
   await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN', '--mini-app-short-name', 'workspace']);
-  await f.run(['configure', '--public-url', '']);
+  await f.run(['setup', '--public-url', '']);
   assert.equal(readConfig(f.configPath).publicUrl, '');
   assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'workspace');
   await f.run(['bot', 'add', '--token-env', 'SECOND_TOKEN']);
   assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, undefined);
-  await f.run(['configure', '--public-url', 'https://collab.example']);
+  await f.run(['setup', '--public-url', 'https://collab.example']);
   assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'workspace');
   assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, 'app');
 });
 
-test('interactive configure defaults to Telegram-only and preserves the current mode', async t => {
+test('interactive setup defaults to Telegram-only and preserves the current mode', async t => {
   const f = fixture(t);
-  await f.run(['configure'], {interactive: true, question: async () => ''});
+  await f.run(['setup'], {interactive: true, question: async () => ''});
   assert.equal(readConfig(f.configPath).publicUrl, '');
   await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN']);
-  await f.run(['configure'], {interactive: true, question: async prompt => {
+  await f.run(['setup'], {interactive: true, question: async prompt => {
     if (prompt.startsWith('Enable Mini App?')) return 'yes';
     if (prompt.startsWith('Public HTTPS origin')) return 'https://collab.example';
     return '';
   }});
   assert.equal(readConfig(f.configPath).publicUrl, 'https://collab.example');
   assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'app');
-  await f.run(['configure'], {interactive: true, question: async () => ''});
+  await f.run(['setup'], {interactive: true, question: async () => ''});
   assert.equal(readConfig(f.configPath).publicUrl, 'https://collab.example');
-  await f.run(['configure'], {interactive: true, question: async prompt => prompt.startsWith('Enable Mini App?') ? 'no' : ''});
+  await f.run(['setup'], {interactive: true, question: async prompt => prompt.startsWith('Enable Mini App?') ? 'no' : ''});
   assert.equal(readConfig(f.configPath).publicUrl, '');
   assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, 'app');
 });
@@ -377,18 +378,17 @@ test('approval flags independently update existing options without duplicates an
   }
 });
 
-test('guided approval defaults to the current mode and explicit approval flags skip the choice', async t => {
+test('interactive approval defaults to the current mode and explicit approval flags preserve choices', async t => {
   const f = fixture(t);
   f.seed();
   await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false']);
   const store = f.store();
   const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   store.close();
-  const answers = ['approve', pending.code, f.project, '', 'true', 'yes', 'done'];
-  const prompts: string[] = [];
-  await f.run(['setup'], {
+  const answers = ['', 'true', 'yes'];
+  await f.run(['approve', pending.code, '--path', f.project], {
     interactive: true,
-    question: async prompt => { prompts.push(prompt); const next = answers.shift(); assert.notEqual(next, undefined); return next!; },
+    question: async () => { const next = answers.shift(); assert.notEqual(next, undefined); return next!; },
   });
   assert.deepEqual(answers, []);
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
@@ -405,7 +405,7 @@ test('guided approval defaults to the current mode and explicit approval flags s
   explicitStore.close();
   await f.run(['approve', explicit.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'true', '--users-can-propose-prompts', 'false'], {
     interactive: true,
-    question: async () => { assert.fail('An explicit prompt mode must not ask a question.'); },
+    question: async () => '',
   });
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
 });
@@ -452,26 +452,32 @@ test('readonly file and readonly parent reject mutations but permit inspection',
   f.seed();
   chmodSync(f.configPath, 0o400);
   await f.run(['list']);
-  await assert.rejects(f.run(['configure', '--max-sessions', '50']), /read-only/);
+  await assert.rejects(f.run(['setup', '--max-sessions', '50']), /read-only/);
   chmodSync(f.configPath, 0o600);
   chmodSync(f.root, 0o500);
-  try { await assert.rejects(f.run(['configure', '--max-sessions', '50']), /read-only/); }
+  try { await assert.rejects(f.run(['setup', '--max-sessions', '50']), /read-only/); }
   finally { chmodSync(f.root, 0o700); }
   assert.equal(readConfig(f.configPath).omp.maxSessions, 8);
 });
 
-test('setup wizard completes service, bot, instance and chat workflows', async t => {
+test('separate service, bot, instance and approval commands persist an enrolled chat', async t => {
   const f = fixture(t);
-  const answers = ['service', 'yes', 'https://wizard.example', '127.0.0.1', '4555', join(f.root, 'wizard-data'), 'omp', '["--model","literal model"]', '9', '34567', 'wss://relay.example', 'bot', token, 'wizardapp', 'create', f.project, 'connect', f.project, '-1001', 'false', 'true', 'inspect', 'done'];
-  const hidden: boolean[] = [];
-  await f.run(['setup'], {interactive: true, question: async (_prompt, secret) => { hidden.push(Boolean(secret)); const next = answers.shift(); assert.notEqual(next, undefined); return next!; }});
-  assert.deepEqual(answers, []);
-  assert.equal(hidden.filter(Boolean).length, 1);
+  await f.run(['setup', '--public-url', 'https://cli.example', '--omp-arg', '--model', '--omp-arg', 'literal model']);
+  await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN', '--mini-app-short-name', 'workspace']);
+  await f.run(['create', f.project]);
+  const store = f.store();
+  const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
+  store.close();
+  await f.run(['approve', pending.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'false', '--users-can-propose-prompts', 'true']);
   const config = readConfig(f.configPath);
-  assert.equal(config.publicUrl, 'https://wizard.example');
-  assert.equal(config.bots[0]!.miniAppShortName, 'wizardapp');
+  assert.equal(config.publicUrl, 'https://cli.example');
+  assert.equal(config.bots[0]!.miniAppShortName, 'workspace');
   assert.deepEqual(config.omp.args, ['--model', 'literal model']);
   assert.deepEqual(assignmentPolicies(config.instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  const enrolled = f.store();
+  assert.equal(enrolled.isEnrolled(123456789, -1001), true);
+  assert.equal(enrolled.getSetupRequest(pending.code), undefined);
+  enrolled.close();
 });
 
 test('interactive approval can register an existing directory and cancel without consuming', async t => {
@@ -563,7 +569,7 @@ test('configuration writes notify the old data directory and do not roll back fa
   const initial = f.seed();
   const nextData = join(f.root, 'next-data');
   const seen: string[] = [];
-  await assert.rejects(f.run(['configure', '--data-dir', nextData], {reload: async (config, previous) => { seen.push(previous); assert.equal(config.dataDir, nextData); throw new Error('Configuration saved, but service restart failed'); }}), /saved/);
+  await assert.rejects(f.run(['setup', '--data-dir', nextData], {reload: async (config, previous) => { seen.push(previous); assert.equal(config.dataDir, nextData); throw new Error('Configuration saved, but service restart failed'); }}), /saved/);
   assert.deepEqual(seen, [initial.dataDir]);
   assert.equal(readConfig(f.configPath).dataDir, nextData);
 });

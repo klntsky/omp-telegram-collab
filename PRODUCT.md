@@ -1,8 +1,10 @@
 # Product
 
-This document defines current user-visible behavior. See [Development](DEVELOPMENT.md) for setup and operations.
+This document defines current user-visible behavior. See the [README](README.md#setup) for consumer setup and operations, and [Development](DEVELOPMENT.md) for contributor operations.
 
-The Mini App is optional. Setup explains that it adds a live transcript, tool details, and subagent controls before asking whether to enable it. New services default to Telegram-only.
+`pnpm cli setup` edits service settings through interactive configuration prompts or command-line options. Bot registration, project creation, and enrollment approval use `pnpm cli bot add`, `pnpm cli create`, and `pnpm cli approve`.
+
+The Mini App is optional. `pnpm cli setup` explains that it adds a live transcript, tool details, and subagent controls before asking whether to enable it. New services default to Telegram-only.
 
 An empty public HTTPS origin selects Telegram-only operation for every bot in the service. Prompts, images, replies, agent questions, and Telegram session commands remain available. Mini App launch buttons and `/session` menu entries appear when an HTTPS origin is configured. Enabling the Mini App requires a named app registered in BotFather for each bot. A network failure leaves the configured mode unchanged.
 

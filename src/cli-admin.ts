@@ -273,7 +273,7 @@ class Administration {
     await this.save(config);
     this.print(`Added @${String(me.username ?? candidate.id)} (${candidate.id})${candidate.miniAppShortName ? `, Mini App ${candidate.miniAppShortName}` : ''}.`);
   }
-  async configure(options: Options): Promise<void> {
+  async setup(options: Options): Promise<void> {
     const config = this.load(true);
     this.writable(config);
     const previousDataDir = config.dataDir;
@@ -320,28 +320,13 @@ class Administration {
     await this.save(config, previousDataDir);
     this.print(`Service configuration saved to ${config.configPath}.`);
   }
-  async setup(): Promise<void> {
-    if (!this.interactive) throw new Error('Setup requires an interactive terminal; use the flat commands for automation.');
-    for (;;) {
-      const action = (await this.ask('Setup: create, connect, inspect, service, bot, approve, done: ')).trim().toLowerCase();
-      if (action === 'done' || action === 'quit' || action === '') return;
-      if (action === 'create') await this.create(await this.ask('Existing instance directory: '));
-      else if (action === 'connect') await this.addChat(await this.ask('Registered instance directory: '), await this.ask('Forum chat ID: '));
-      else if (action === 'inspect') this.show(this.load());
-      else if (action === 'service') await this.configure(new Map());
-      else if (action === 'bot') await this.botAdd(new Map());
-      else if (action === 'approve') await this.approve((await this.ask('Setup request code: ')).trim(), undefined, false);
-      else this.print('Choose create, connect, inspect, service, bot, approve, or done.');
-    }
-  }
   async run(argv: string[]): Promise<boolean> {
     const [command, ...args] = argv;
-    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'configure', 'bot'].includes(command ?? '')) return false;
-    if (command === 'setup') { count(args, 0, 'setup'); await this.setup(); return true; }
-    if (command === 'configure') {
+    if (!['create', 'list', 'show', 'remove', 'chat', 'approve', 'setup', 'bot'].includes(command ?? '')) return false;
+    if (command === 'setup') {
       const parsed = parse(args, ['public-url', 'host', 'port', 'data-dir', 'omp-executable', 'omp-arg', 'max-sessions', 'startup-timeout-ms', 'relay-url'], ['clear-omp-args']);
-      count(parsed.positional, 0, 'configure [--public-url URL --host HOST --port PORT --data-dir PATH --omp-executable FILE --omp-arg ARG --max-sessions N --startup-timeout-ms N --relay-url URL]');
-      await this.configure(parsed.options); return true;
+      count(parsed.positional, 0, 'setup [--public-url URL --host HOST --port PORT --data-dir PATH --omp-executable FILE --omp-arg ARG --max-sessions N --startup-timeout-ms N --relay-url URL]');
+      await this.setup(parsed.options); return true;
     }
     if (command === 'create') {
       const parsed = parse(args, []); count(parsed.positional, 1, 'create PATH');

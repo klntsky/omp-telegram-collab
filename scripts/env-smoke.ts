@@ -18,7 +18,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
   const cli = join(root, 'dist', 'cli.js');
   const run = (...args: string[]) => execute(process.execPath, [cli, ...args], { cwd, env: processEnv });
   try {
-    await run('--config', configPath, 'configure', '--public-url', 'https://cli.example', '--port', '3101', '--data-dir', 'private-data');
+    await run('--config', configPath, 'setup', '--public-url', 'https://cli.example', '--port', '3101', '--data-dir', 'private-data');
     await run('--config', configPath, 'create', '.');
     const config = readConfig(configPath);
     assert.equal(config.configPath, configPath);
@@ -38,16 +38,16 @@ export async function verifyEnvironmentCli(): Promise<void> {
     const before = await readFile(configPath, 'utf8');
     await assert.rejects(run('--config', configPath, 'create', '.'));
     assert.equal(await readFile(configPath, 'utf8'), before, 'duplicate creation must never overwrite an existing instance');
-    await assert.rejects(run('--config', configPath, 'configure', '--public-url', `https://${fixtureToken}@cli.example`));
+    await assert.rejects(run('--config', configPath, 'setup', '--public-url', `https://${fixtureToken}@cli.example`));
     assert.equal(await readFile(configPath, 'utf8'), before, 'invalid configuration must not replace existing YAML');
     await chmod(configPath, 0o400);
-    await assert.rejects(run('--config', configPath, 'configure', '--max-sessions', '50'));
+    await assert.rejects(run('--config', configPath, 'setup', '--max-sessions', '50'));
     await run('--config', configPath, 'show', '.');
     assert.equal(await readFile(configPath, 'utf8'), before);
     await chmod(configPath, 0o600);
-    await run('--config', configPath, 'configure', '--public-url', '');
+    await run('--config', configPath, 'setup', '--public-url', '');
     assert.equal(readConfig(configPath).publicUrl, '');
-    await run('--config', configPath, 'configure', '--public-url', 'https://cli.example');
+    await run('--config', configPath, 'setup', '--public-url', 'https://cli.example');
     assert.equal(readConfig(configPath).publicUrl, 'https://cli.example');
     const missing = join(cwd, 'missing.yaml');
     await assert.rejects(run('start', '--config', missing));

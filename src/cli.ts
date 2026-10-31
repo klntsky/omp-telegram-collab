@@ -391,7 +391,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   return service;
 }
 
-const usage = `Usage: omp-telegram [--config PATH] <start|setup|configure|reload|create|list|show|remove|chat|approve|bot|session>
+const usage = `Usage: omp-telegram [--config PATH] <start|setup|reload|create|list|show|remove|chat|approve|bot|session>
 Instances are identified by directory paths. Run setup for guided configuration.
 `;
 
@@ -421,7 +421,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     throw new Error(usage.trim());
   }
   if (args.length > 1) throw new Error(usage.trim());
-  if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram --config ${JSON.stringify(configPath)} configure.`);
+  if (explicitConfig && !existsSync(configPath)) throw new Error(`Configuration does not exist: ${configPath}. Run omp-telegram --config ${JSON.stringify(configPath)} setup.`);
   const service = await startService(configPath);
   const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
   process.once('SIGINT', shutdown);
