@@ -2039,7 +2039,7 @@ export class BotService {
     }
     listener?.connection?.close();
   }
-  private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly = false): Promise<CollabConnection> {
+  private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly = false, recoverClosed = true): Promise<CollabConnection> {
     if (existingOnly && !binding) return Promise.reject(new Error('Existing host binding is required'));
     this.requireSessionAssignment(session);
     const generation = this.options.store.getSessionGeneration(session.id);
@@ -2055,12 +2055,13 @@ export class BotService {
     void this.setTopicStatus(session,listener.activity);
     const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
       this.options.store.getSessionGeneration(session.id) === generation && this.listeners.get(session.id) === listener;
+    const closed = new Error('Session closed');
     listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session,beforeMutation)).then(async binding => {
-      if (!active()) throw new Error('Session closed');
+      if (!active()) throw closed;
       await beforeMutation?.();
-      if (!active()) throw new Error('Session closed');
+      if (!active()) throw closed;
       await this.applySessionTitle(session);
-      if (!active()) throw new Error('Session closed');
+      if (!active()) throw closed;
       return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
         onFrame: frame => this.onFrame(session,listener,frame),
         onClose: reason => {
@@ -2072,7 +2073,7 @@ export class BotService {
         },
       });
     }).then(connection => {
-      if (!active()) { connection.close(); throw new Error('Session closed'); }
+      if (!active()) { connection.close(); throw closed; }
       this.sessionObservation(session.id).mirrored = true;
       listener.connection = connection;
       return connection;
@@ -2080,10 +2081,13 @@ export class BotService {
       if (active()) this.sessionObservation(session.id).failure = {operation:'Session connection',at:Date.now(),error};
       try {
         if (!existingOnly && error instanceof SessionCapacityError && active()) await this.requestCapacity(session,error.limit);
-        throw error;
+        if (error !== closed || !recoverClosed || existingOnly || this.stopped || refreshTermination(this.options.config) ||
+            !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open' ||
+            this.options.store.getSessionGeneration(session.id) !== generation) throw error;
       } finally {
         if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
       }
+      return this.listen(session,undefined,beforeMutation,false,false);
     });
     return listener.promise;
   }

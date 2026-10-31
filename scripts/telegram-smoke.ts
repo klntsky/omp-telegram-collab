@@ -32,7 +32,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean } = {}) {
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
@@ -54,7 +54,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   let thread = 20;
   let messageId = 100;
   let updateId = 0;
-  let rejectionCount = 1;
+  let rejectionCount = options.skipStartupRejection ? 0 : 1;
   let transientFailures = options.pollingTransientFailure ? 1 : 0;
   let connectionCount = 0;
   const user: NonNullable<Context['from']> = { id: ownerId, first_name: 'Ada', username: ownerUsername, is_bot: false };
@@ -290,6 +290,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     const sessionState = {...state,sessionName:sessionTitles.get(binding.sessionId) ?? state.sessionName};
     handlers.onFrame({ t: 'welcome', proto: 3, header: { type: 'session', id: binding.sessionId, title: sessionState.sessionName, cwd: state.cwd, timestamp: new Date().toISOString() }, state:sessionState, agents: [], entryCount: entries.length });
     handlers.onFrame({ t: 'snapshot-chunk', entries, final: true });
+    if (options.disconnectDuringConnect && connectionCount === 1) handlers.onClose('Fixture relay disconnected during connection');
     return {
       send(frame: GuestFrame) {
         if (frame.t === 'prompt' && rejectionCount-- > 0) {

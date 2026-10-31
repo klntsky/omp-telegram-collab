@@ -55,6 +55,43 @@ test('empty topic creation, initialization, and reopening do not launch managed 
   }
 });
 
+test('a connection closed during admission reconnects before sending the prompt once', async () => {
+  const app = await createSmokeApp({disconnectDuringConnect:true,skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Reconnect during admission'}});
+    const session = app.store.listSessions(botId)[0]!;
+    await app.update({message_thread_id:42,text:'/p Continue after reconnect'});
+    assert.equal(app.store.getSession(session.id)?.status,'open');
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Continue after reconnect'}]);
+    assert.equal(await app.runtime.isRunning(session),true);
+  } finally {
+    await app.close();
+  }
+});
+
+test('kill generation invalidation during host admission cannot reopen or send the pending prompt', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Kill during admission'}});
+    const session = app.store.listSessions(botId)[0]!;
+    const ensure = app.runtime.ensure.bind(app.runtime);
+    app.runtime.ensure = async (...args) => {
+      const binding = await ensure(...args);
+      app.store.advanceSessionGeneration(session.id);
+      await app.runtime.kill(session);
+      return binding;
+    };
+    await app.update({message_thread_id:42,text:'/p Do not revive a killed host'});
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    assert.equal(app.store.getSessionGeneration(session.id),1);
+  } finally {
+    await app.close();
+  }
+});
+
 
 test('topic edit notices from this bot are deleted without deleting human or other bot edits', async () => {
   const app = await createSmokeApp();

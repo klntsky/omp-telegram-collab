@@ -202,6 +202,8 @@ OMP's Collab protocol has no prompt admission acknowledgement or idempotency key
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 
+If a Telegram listener closes while an authorized operation is still establishing its connection, the bot immediately reacquires the host and reconnects once before continuing. Recovery requires the same session generation, an open topic, and an unchanged assignment; termination, detachment, and kill invalidation cannot reopen the session. No prompt is replayed, and a second connection failure retains its original diagnostic.
+
 Failure to acquire or reconnect to an existing managed host does not retire it. The original connection diagnostic is preserved, and a later attempt can reconnect to the same host.
 
 New managed hosts remain in startup when Collab discovery temporarily reports that a just-discovered host is absent. Recovery uses the original startup deadline and revalidates host identity before connecting. If discovery remains unavailable, startup fails with the original diagnostic. Other connection and identity failures are not retried by this startup recovery.
