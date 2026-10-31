@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { Bot } from 'grammy';
 import { createBot, type BotService, type RuntimeLike } from '../src/bot.js';
 import { Store } from '../src/store.js';
@@ -211,4 +212,170 @@ test('maintenance retries pending initial authorization with an already connecte
     assert.equal(app.store.hasPendingInitialTask(session.id),false);
     assert.equal(app.connectionCount,1);
   } finally { await app.close(); }
+});
+
+for (const stopped of [true,false]) test(`closed topic only finishes after authoritative stop ${stopped}`, {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const app = await createSmokeApp();
+  try {
+    const session = await liveTopic(app);
+    app.emit({t:'event',event:{type:'agent_start'}});
+    await eventually(() => lastIcon(app) === runningIcon);
+    t.mock.method(app.runtime,'stop',async () => stopped);
+    await app.update({message_thread_id:42,forum_topic_closed:{}});
+    if (stopped) await eventually(() => lastIcon(app) === finishIcon);
+    t.mock.timers.tick(30000);
+    await setImmediate();
+    assert.equal(lastIcon(app),stopped ? finishIcon : runningIcon);
+    assert.equal(app.store.getSession(session.id)?.status,'closed');
+    assert.deepEqual(app.accepted,[]);
+  } finally { await app.close(); }
+});
+
+test('nonself generated running echo cannot become a finish preference', {timeout:15000}, async () => {
+  const app = await createSmokeApp();
+  try {
+    const session = await liveTopic(app);
+    await app.update({message_thread_id:42,forum_topic_edited:{icon_custom_emoji_id:''}});
+    app.emit({t:'event',event:{type:'agent_start'}});
+    await eventually(() => lastIcon(app) === runningIcon);
+    await app.update({message_thread_id:42,forum_topic_edited:{icon_custom_emoji_id:runningIcon}});
+    assert.equal(app.store.getTopicFinishIcon(session.id),'');
+    app.emit({t:'state',state:idle});
+    await eventually(() => lastIcon(app) === '');
+  } finally { await app.close(); }
+});
+
+test('restart discards a contaminated generated finish preference', {timeout:15000}, async () => {
+  const app = await createSmokeApp();
+  let restarted: BotService | undefined;
+  try {
+    const session = await liveTopic(app);
+    app.store.setTopicFinishIcon(session.id,runningIcon);
+    await app.bot.api.editForumTopic(chatId,42,{icon_custom_emoji_id:runningIcon});
+    await app.service.close();
+    restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
+      bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),connect:async (binding,_name,handlers) => {
+        welcome(binding,handlers);
+        return {send(){ throw new Error('Recovery must not send work'); },close(){}};
+      }});
+    await restarted.initialize();
+    restarted.startBackground();
+    await eventually(() => lastIcon(app) === finishIcon);
+    assert.equal(app.store.getTopicFinishIcon(session.id),undefined);
+    assert.deepEqual(app.accepted,[]);
+  } finally { await restarted?.close(); await app.close(); }
+});
+
+for (const ending of ['agent_end','error'] as const) test(`maintenance samples current activity after ${ending} with stale queue`, {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const app = await createSmokeApp();
+  try {
+    const session = await liveTopic(app);
+    app.emit({t:'state',state:{...idle,isStreaming:true,queuedMessageCount:2}});
+    await eventually(() => lastIcon(app) === runningIcon);
+    app.setHostState(idle);
+    if (ending === 'agent_end') app.emit({t:'event',event:{type:'agent_end'}});
+    else app.emit({t:'error',message:'Host instruction failed'});
+    t.mock.timers.tick(30000);
+    await eventually(() => lastIcon(app) === finishIcon);
+    assert.equal(await app.runtime.isRunning(session),true);
+    assert.deepEqual(app.accepted,[]);
+  } finally { await app.close(); }
+});
+
+test('newer running frame wins over a delayed read-only idle probe', {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const app = await createSmokeApp({readState:async () => {
+    entered.resolve();
+    await release.promise;
+    return idle;
+  }});
+  try {
+    await liveTopic(app);
+    app.emit({t:'event',event:{type:'agent_start'}});
+    app.emit({t:'event',event:{type:'agent_end'}});
+    t.mock.timers.tick(30000);
+    await entered.promise;
+    app.emit({t:'state',state:{...idle,isStreaming:true}});
+    await eventually(() => lastIcon(app) === runningIcon);
+    release.resolve();
+    await setImmediate();
+    assert.equal(lastIcon(app),runningIcon);
+    assert.deepEqual(app.accepted,[]);
+  } finally { release.resolve(); await app.close(); }
+});
+
+test('stale running activity refreshes without a final frame and ignores probe peer notices', {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const app = await createSmokeApp({readState:async () => {
+    entered.resolve();
+    await release.promise;
+    return idle;
+  }});
+  try {
+    await liveTopic(app);
+    app.emit({t:'event',event:{type:'agent_start'}});
+    await eventually(() => lastIcon(app) === runningIcon);
+    const now = Date.now();
+    t.mock.method(Date,'now',() => now + 31_000);
+    t.mock.timers.tick(30000);
+    await entered.promise;
+    app.emit({t:'event',event:{type:'notice',level:'info',source:'collab',message:'Activity observer joined'}});
+    release.resolve();
+    await eventually(() => lastIcon(app) === finishIcon);
+    assert.deepEqual(app.accepted,[]);
+  } finally { release.resolve(); await app.close(); }
+});
+
+test('confirmed interruption wins over a delayed running activity sample', {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const app = await createSmokeApp({readState:async () => {
+    entered.resolve();
+    await release.promise;
+    return {...idle,isStreaming:true,queuedMessageCount:1};
+  }});
+  try {
+    await liveTopic(app);
+    app.emit({t:'state',state:{...idle,isStreaming:true,queuedMessageCount:1}});
+    app.emit({t:'event',event:{type:'agent_end'}});
+    t.mock.timers.tick(30000);
+    await entered.promise;
+    app.emit({t:'event',event:{type:'notice',level:'info',source:'collab',message:'@fixture_owner interrupted'}});
+    await eventually(() => lastIcon(app) === finishIcon);
+    release.resolve();
+    await setImmediate();
+    assert.equal(lastIcon(app),finishIcon);
+  } finally { release.resolve(); await app.close(); }
+});
+
+test('closing a topic cancels its in-flight activity probe without waiting for setup timeout', {timeout:15000}, async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  const entered = Promise.withResolvers<void>();
+  const canceled = Promise.withResolvers<void>();
+  const stalled = Promise.withResolvers<typeof idle>();
+  const app = await createSmokeApp({readState:async (_binding,_name,signal) => {
+    signal?.addEventListener('abort',() => canceled.resolve(),{once:true});
+    entered.resolve();
+    return stalled.promise;
+  }});
+  try {
+    const session = await liveTopic(app);
+    app.emit({t:'state',state:{...idle,isStreaming:true,queuedMessageCount:1}});
+    app.emit({t:'event',event:{type:'agent_end'}});
+    t.mock.timers.tick(30000);
+    await entered.promise;
+    await app.update({message_thread_id:42,forum_topic_closed:{}});
+    await canceled.promise;
+    await eventually(() => lastIcon(app) === finishIcon);
+    assert.equal(app.store.getSession(session.id)?.status,'closed');
+    assert.equal(app.activeConnectionCount,0);
+    assert.deepEqual(app.accepted,[]);
+  } finally { stalled.resolve(idle); await app.close(); }
 });

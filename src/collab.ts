@@ -1,4 +1,4 @@
-import { COLLAB_PROTO, type GuestFrame, type HostFrame } from '@oh-my-pi/pi-wire';
+import { COLLAB_PROTO, type SessionState, type GuestFrame, type HostFrame } from '@oh-my-pi/pi-wire';
 import WebSocket from 'ws';
 import type { CollabConnection, CollabHandlers, HostBinding } from '../shared/contracts.js';
 import { importRoomKey, open, seal } from './vendor/codec.js';
@@ -20,14 +20,48 @@ export function isStartupRejection(frame: HostFrame): boolean {
   return frame.t === 'error' && frame.message === 'prompting is unavailable until the host finishes starting up';
 }
 
-export async function connectCollab(
+export async function readCollabState(
+  binding: HostBinding,
+  name: string,
+  signal?: AbortSignal,
+): Promise<SessionState> {
+  let state!: SessionState;
+  await openCollab(binding, name, {
+    onFrame(frame) {
+      if (frame.t === 'welcome') {
+        if (!frame.state || typeof frame.state !== 'object' || typeof frame.state.isStreaming !== 'boolean' ||
+            !Number.isSafeInteger(frame.state.queuedMessageCount) || frame.state.queuedMessageCount < 0) {
+          throw new Error('Invalid Collab activity state');
+        }
+        state = frame.state;
+      }
+    },
+    onClose() {},
+  }, signal, true);
+  return state;
+}
+
+export function connectCollab(
   binding: HostBinding,
   name: string,
   handlers: CollabHandlers,
+  signal?: AbortSignal,
 ): Promise<CollabConnection> {
+  return openCollab(binding, name, handlers, signal, false);
+}
+
+async function openCollab(
+  binding: HostBinding,
+  name: string,
+  handlers: CollabHandlers,
+  signal: AbortSignal | undefined,
+  welcomeOnly: boolean,
+): Promise<CollabConnection> {
+  signal?.throwIfAborted();
   const link = parseCollabLink(binding.url);
   if ('error' in link || !link.writeToken) throw new Error('A valid control capability is required');
   const key = await importRoomKey(link.key);
+  signal?.throwIfAborted();
   const ws = new WebSocket(`${link.wsUrl}?role=guest`, {
     handshakeTimeout: SETUP_TIMEOUT_MS,
     maxPayload: MAX_FRAME_BYTES,
@@ -45,21 +79,24 @@ export async function connectCollab(
   let sendChain = Promise.resolve();
   let receiveChain = Promise.resolve();
   let resolveSetup!: (connection: CollabConnection) => void;
-  let rejectSetup!: (error: Error) => void;
+  let rejectSetup!: (error: unknown) => void;
   const setup = new Promise<CollabConnection>((resolve, reject) => {
     resolveSetup = resolve;
     rejectSetup = reject;
   });
   const timer = setTimeout(() => finish('Collab setup timed out'), SETUP_TIMEOUT_MS);
+  const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error('Collab setup aborted'));
+  signal?.addEventListener('abort', onAbort, { once: true });
 
-  function finish(reason: string): void {
+  function finish(reason: string | Error): void {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     ws.terminate();
-    if (!ready) rejectSetup(new Error(reason));
+    if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new Error(reason));
     try {
-      handlers.onClose(reason);
+      handlers.onClose(reason instanceof Error ? reason.message : reason);
     } catch {
     }
   }
@@ -120,6 +157,12 @@ export async function connectCollab(
       if (received > total || (frame.final && received !== total)) throw new Error('Collab snapshot count mismatch');
     }
     handlers.onFrame(frame);
+    if (welcomeOnly && frame.t === 'welcome') {
+      ready = true;
+      resolveSetup(connection);
+      finish('closed');
+      return;
+    }
     if (frame.t === 'bye') {
       finish(frame.reason || 'Collab host ended the room');
       return;

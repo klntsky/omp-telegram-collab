@@ -10,9 +10,10 @@ import { join } from 'node:path';
 import { Bot, type Context } from 'grammy';
 import type { TestContext } from 'node:test';
 import { z } from 'zod';
-import type { HostFrame, GuestFrame, AssistantMessage, SessionEntry } from '@oh-my-pi/pi-wire';
+import type { SessionState, HostFrame, GuestFrame, AssistantMessage, SessionEntry } from '@oh-my-pi/pi-wire';
 import type { AppConfig, CollabHandlers, HostBinding, TopicSession } from '../shared/contracts.js';
 import { createBot } from '../src/bot.js';
+import type { readCollabState } from '../src/collab.js';
 import { createServer } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { SessionCapacityError } from '../src/runtime.js';
@@ -32,7 +33,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean; readState?: typeof readCollabState } = {}) {
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
@@ -280,7 +281,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       else managedSessions.delete(session.id);
     },
   };
-  const state = { cwd: '/fixture/project', isStreaming: false, queuedMessageCount: 0, sessionName: 'Telegram fixture session', participants: [{ name: 'Local host', role: 'host' as const }] };
+  let state: SessionState = { cwd: '/fixture/project', isStreaming: false, queuedMessageCount: 0, sessionName: 'Telegram fixture session', participants: [{ name: 'Local host', role: 'host' as const }] };
   const assistant: AssistantMessage = {
     role: 'assistant', content: [{ type: 'text', text: '## Session fixture\n\nThe source-owned Collab renderer is connected through the authenticated gateway.\n\n```ts\nconst topic = { threadId: 21 };\n```' }],
     timestamp: Date.now(), model: 'fixture-no-model-call', stopReason: 'stop',
@@ -305,14 +306,19 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         if (frame.t === 'prompt' && rejectionCount-- > 0) {
           queueMicrotask(() => {
             handlers.onFrame({ t: 'error', message: 'prompting is unavailable until the host finishes starting up' });
-            if (options.competingStartAfterRejection) handlers.onFrame({ t: 'event', event: { type: 'agent_start' } });
+            if (options.competingStartAfterRejection) {
+              state = { ...state, isStreaming: true };
+              handlers.onFrame({ t: 'event', event: { type: 'agent_start' } });
+            }
           });
           return;
         }
         accepted.push(frame);
         if (frame.t === 'prompt') {
           if (!options.holdPromptReceipts) handlers.onFrame({ t: 'entry', entry: { type: 'custom_message', customType: 'collab-prompt', content: frame.text, details: { from: _name }, display: true, id: `accepted-${accepted.length}`, parentId: null, timestamp: new Date().toISOString() } });
+          state = { ...state, isStreaming: true };
           handlers.onFrame({ t: 'event', event: { type: 'agent_start' } });
+          state = { ...state, isStreaming: false };
           handlers.onFrame({ t: 'event', event: { type: 'agent_end' } });
         }
         if (frame.t === 'ui-response' && options.ackUiResponses) handlers.onFrame({t:'ui-request-end',reqId:frame.reqId});
@@ -323,7 +329,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   };
   const bot = new Bot(botToken, { client: { apiRoot: telegramUrl } });
   writeConfig(config);
-  const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,bot});
+  const readState: typeof readCollabState = options.readState ?? (async (binding, _name, signal) => {
+    signal?.throwIfAborted();
+    return { ...state, sessionName: sessionTitles.get(binding.sessionId) ?? state.sessionName };
+  });
+  const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,readState,bot});
   await service.initialize();
   service.startBackground();
   await service.refreshSkillCatalogs();
@@ -380,7 +390,13 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       rateLimits.set(method,pending);
     },
     disconnect() { for (const connection of [...connections]) connection.onClose('Fixture relay disconnected'); },
-    emit(frame: HostFrame) { for (const connection of connections) connection.onFrame(frame); },
+    setHostState(value: SessionState) { state = value; },
+    emit(frame: HostFrame) {
+      if (frame.t === 'state' || frame.t === 'welcome') state = frame.state;
+      else if (frame.t === 'event' && frame.event.type === 'agent_start') state = { ...state, isStreaming: true };
+      else if (frame.t === 'event' && frame.event.type === 'agent_end') state = { ...state, isStreaming: false };
+      for (const connection of connections) connection.onFrame(frame);
+    },
     appendEntry(entry: SessionEntry) { entries.push(entry); },
     initData(sessionId: string) { return signedInitData(sessionId); },
     async close() { await server.closeConnections(); await close(server); await service.close(); store.close(); await close(telegram); await rm(directory, { recursive: true, force: true }); },

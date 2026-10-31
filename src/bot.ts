@@ -7,7 +7,7 @@ import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, ty
 import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
-import { connectCollab, isStartupRejection } from './collab.js';
+import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
 import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
@@ -45,7 +45,7 @@ export interface RuntimeLike {
   retain(sessionId: string): () => void;
   close(): Promise<void>;
 }
-export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; bot?: Bot<Context>; configWritable?: () => boolean }
+export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean }
 type TopicActivity = 'unknown' | 'running' | 'finished';
 type KnownTopicActivity = Exclude<TopicActivity, 'unknown'>;
 interface TopicIconProjection {
@@ -64,6 +64,7 @@ interface Listener {
   sessionId: string;
   generation: number;
   frameRevision: number;
+  activityRevision: number;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
@@ -77,6 +78,10 @@ interface Listener {
   pendingStops: number[];
   queuedMessages: number;
   activity: TopicActivity;
+  activityObservedAt?: number;
+  activitySuspect?: boolean;
+  activityProbe?: Promise<void>;
+  activityProbeController?: AbortController;
   initial?: {
     content: PromptContent;
     userId: number;
@@ -1195,8 +1200,13 @@ export class BotService {
     ++icon.revision;
   }
   private setTopicStatus(session: TopicSession, activity: TopicActivity, createdIcon?: string): Promise<void> {
-    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
-        this.options.store.getSession(session.id)?.status !== 'open') return Promise.resolve();
+    const eligible = (projected: TopicActivity = activity) => {
+      const status = this.options.store.getSession(session.id)?.status;
+      const closed = this.closedSessions.get(session.id);
+      return status === 'open' || (status === 'closed' && projected === 'finished' && closed?.settled === true &&
+        closed.generation === this.options.store.getSessionGeneration(session.id));
+    };
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) || !eligible()) return Promise.resolve();
     const generation = this.options.store.getSessionGeneration(session.id);
     let icon = this.topicIcons.get(session.id);
     if (!icon) {
@@ -1221,7 +1231,7 @@ export class BotService {
     const current = icon;
     const owned = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
       this.topicIcons.get(session.id) === current &&
-      this.options.store.getSessionGeneration(session.id) === current.generation;
+      this.options.store.getSessionGeneration(session.id) === current.generation && eligible(current.activity);
     current.pending = true;
     current.tail = current.tail.then(async () => {
       while (owned() && current.activity !== 'unknown') {
@@ -1232,7 +1242,9 @@ export class BotService {
         try {
           const ids = await this.getIconIds();
           if (!active()) continue;
-          const id = activity === 'finished' ? this.options.store.getTopicFinishIcon(session.id) ?? ids.finished : ids.running;
+          const preference = this.options.store.getTopicFinishIcon(session.id);
+          if (preference === ids.running) this.options.store.setTopicFinishIcon(session.id,undefined);
+          const id = activity === 'finished' ? (preference === ids.running ? ids.finished : preference ?? ids.finished) : ids.running;
           if (current.confirmed?.id === id && current.confirmed.expires > Date.now()) return;
           const applied = await this.delivery.run(session.chatId, async () => {
             current.confirmed = undefined;
@@ -1290,12 +1302,45 @@ export class BotService {
     this.hostObservations.set(session.id, observation);
     return observation;
   }
+  private refreshActivity(session: TopicSession, listener: Listener): Promise<void> {
+    if (listener.activityProbe) return listener.activityProbe;
+    const revision = listener.activityRevision;
+    const controller = new AbortController();
+    listener.activityProbeController = controller;
+    const signal = AbortSignal.any([this.background.signal,controller.signal]);
+    const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
+      this.listeners.get(session.id) === listener && listener.activityRevision === revision &&
+      this.options.store.getSessionGeneration(session.id) === listener.generation &&
+      this.options.store.getSession(session.id)?.status === 'open';
+    const probe = (async () => {
+      const binding = await withCancellation(this.options.runtime.resolveExisting(session),signal);
+      if (!active() || !binding) return;
+      const state = await withCancellation(
+        (this.options.readState ?? readCollabState)(binding,`Telegram @${this.bot.botInfo!.username} activity`,signal),signal);
+      if (!active()) return;
+      listener.queuedMessages = state.queuedMessageCount;
+      listener.activity = this.options.store.hasPendingInitialTask(session.id) || state.isStreaming || state.queuedMessageCount > 0 ? 'running' : 'finished';
+      listener.activityObservedAt = Date.now();
+      listener.activitySuspect = false;
+    })().catch(error => {
+      if (!signal.aborted || error !== signal.reason) throw error;
+    }).finally(() => {
+      if (listener.activityProbe === probe) {
+        listener.activityProbe = undefined;
+        listener.activityProbeController = undefined;
+      }
+    });
+    listener.activityProbe = probe;
+    return probe;
+  }
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
     if (this.options.store.getSession(session.id)?.status === 'closed') {
       const state = this.closedSessions.get(session.id);
       if (!state || state.generation !== this.options.store.getSessionGeneration(session.id) || (!state.settled && !state.pending)) {
         void this.runBackground(`close:${session.id}`,() => this.windDownClosedSession(session));
+      } else if (state.settled) {
+        await this.setTopicStatus(session,'finished');
       }
       return;
     }
@@ -1342,6 +1387,13 @@ export class BotService {
           return;
         }
       }
+      if (listener.connection && (listener.activitySuspect ||
+          (listener.activity !== 'finished' && Date.now() - (listener.activityObservedAt ?? 0) >= 30_000))) {
+        await this.refreshActivity(session,listener);
+      }
+      if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener ||
+          this.options.store.getSessionGeneration(session.id) !== generation ||
+          this.options.store.getSession(session.id)?.status !== 'open') return;
       this.syncTopicTitle(session,listener);
       await this.setTopicStatus(session,listener.activity);
     } else {
@@ -1360,9 +1412,10 @@ export class BotService {
     const generation = this.options.store.getSessionGeneration(session.id);
     let state = this.closedSessions.get(session.id);
     if (!state || state.generation !== generation) {
-      state = {generation,settled:session.runtime.kind === 'attached'};
+      state = {generation,settled:false};
       this.closedSessions.set(session.id,state);
       this.options.store.cancelInitialTask(session.id);
+      this.invalidateTopicStatus(session.id);
       this.dropListener(session.id);
       for (const [token, request] of this.capacityRequests) {
         if (request.sessionId === session.id) this.capacityRequests.delete(token);
@@ -1371,11 +1424,18 @@ export class BotService {
         if (proposal.sessionId === session.id) this.promptProposals.delete(token);
       }
     }
-    if (state.settled) return Promise.resolve();
+    if (state.settled) return this.setTopicStatus(session,'finished');
     if (state.pending) return state.pending;
     const current = state;
-    const pending = this.options.runtime.stop(session).then(settled => {
+    const pending = (session.runtime.kind === 'attached'
+      ? this.options.runtime.isRunning(session).then(running => !running)
+      : this.options.runtime.stop(session)).then(async settled => {
+      if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
+          this.closedSessions.get(session.id) !== current ||
+          this.options.store.getSessionGeneration(session.id) !== generation ||
+          this.options.store.getSession(session.id)?.status !== 'closed') return;
       current.settled = settled;
+      if (settled) await this.setTopicStatus(session,'finished');
     }).finally(() => { current.pending = undefined; });
     current.pending = pending;
     return pending;
@@ -1799,7 +1859,9 @@ export class BotService {
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
       if (edited.icon_custom_emoji_id !== undefined) {
-        const preferenceEdit = ctx.from?.id !== this.id;
+        const ids = await this.getIconIds();
+        // Telegram can attribute generated icon echoes to an anonymous administrator.
+        const preferenceEdit = ctx.from?.id !== this.id && edited.icon_custom_emoji_id !== ids.running;
         if (preferenceEdit) this.options.store.setTopicFinishIcon(session.id,edited.icon_custom_emoji_id);
         const icon = this.topicIcons.get(session.id);
         if (icon && icon.generation !== this.options.store.getSessionGeneration(session.id)) {
@@ -2033,6 +2095,7 @@ export class BotService {
         if (listener) {
           listener.activity = 'unknown';
           ++listener.frameRevision;
+          ++listener.activityRevision;
         }
         this.invalidateTopicStatus(session.id);
         for (const [token, request] of this.capacityRequests) {
@@ -2110,6 +2173,7 @@ export class BotService {
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
     if (listener) {
+      listener.activityProbeController?.abort(new Error('Activity observation canceled because its listener closed'));
       listener.initial = undefined;
       listener.activity = 'unknown';
     }
@@ -2127,7 +2191,7 @@ export class BotService {
     if (existing?.promise && existing.generation === generation) return existing.promise;
     if (existing) this.dropListener(session.id);
     const listener: Listener = {
-      sessionId:session.id,generation,frameRevision:0,tail:Promise.resolve(),queued:0,
+      sessionId:session.id,generation,frameRevision:0,activityRevision:0,tail:Promise.resolve(),queued:0,
       recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),
       pendingStops:[],queuedMessages:0,activity:this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
     };
@@ -2474,6 +2538,11 @@ export class BotService {
         this.listeners.get(session.id) !== listener ||
         this.options.store.getSessionGeneration(session.id) !== listener.generation) return;
     ++listener.frameRevision;
+    if (frame.t === 'welcome' || frame.t === 'state' || frame.t === 'error' ||
+        (frame.t === 'event' && (frame.event.type === 'agent_start' || frame.event.type === 'agent_end' ||
+          miniAppInterruptionAuthor(frame.event) !== undefined))) {
+      ++listener.activityRevision;
+    }
     this.options.runtime.observeFrame(session.id,frame);
     if (frame.t === 'welcome' || (frame.t === 'state' &&
         (!frame.state.isStreaming || (frame.state.sessionName !== undefined &&
@@ -2515,17 +2584,22 @@ export class BotService {
       }).catch(() => undefined);
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
+      listener.activityObservedAt = Date.now();
+      listener.activitySuspect = false;
       listener.queuedMessages = frame.state.queuedMessageCount;
       listener.activity = this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'finished';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
+      listener.activityObservedAt = Date.now();
       listener.activity = 'running';
       void this.setTopicStatus(session, listener.activity);
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
+      listener.activitySuspect = true;
       listener.activity = listener.queuedMessages > 0 ? 'running' : 'finished';
       void this.setTopicStatus(session, listener.activity);
     }
     if (frame.t === 'error') {
+      listener.activitySuspect = true;
       const pending = listener.pendingPrompts.shift();
       if (pending) pending.observation.state = 'not accepted';
       this.sessionObservation(session.id).failure = {operation:'OMP instruction',at:Date.now(),error:frame.message};
