@@ -257,75 +257,70 @@ for (const explicit of [false,true]) {
   });
 }
 
-for (const [limit,choice,target] of [[8,0,7],[8,1,9],[Number.MAX_SAFE_INTEGER-1,1,Number.MAX_SAFE_INTEGER]] as const) {
-  test(`live session capacity button ${choice} proposes ${target} before confirmation`, async () => {
-    const app = await createSmokeApp({maxSessions:limit});
-    try {
-      await app.update({text:'/setup'});
-      await clickSettings(app, 4);
-      await clickSettings(app, choice);
-      assert.equal(saved(app).config.omp.maxSessions,limit);
-      assert.equal(app.runtime.getSessionLimit(),limit);
-      await clickSettings(app, 0);
-      assert.equal(saved(app).config.omp.maxSessions,target);
-      assert.equal(app.runtime.getSessionLimit(),target);
-      assert.deepEqual(app.accepted,[]);
-      assert.deepEqual(app.store.listSessions(botId),[]);
-      assert.equal(app.connectionCount,0);
-    } finally { await app.close(); }
-  });
-}
-
-for (const [limit,choice] of [[1,0],[Number.MAX_SAFE_INTEGER,1]] as const) {
-  test(`capacity button ${choice} preserves valid bounds at ${limit}`, async () => {
-    const app = await createSmokeApp({maxSessions:limit});
-    try {
-      await app.update({text:'/setup'});
-      await clickSettings(app, 4);
-      await clickSettings(app, choice);
-      assert.equal(saved(app).config.omp.maxSessions,limit);
-      assert.equal(app.runtime.getSessionLimit(),limit);
-      assert.deepEqual(app.accepted,[]);
-      assert.equal(app.connectionCount,0);
-    } finally { await app.close(); }
-  });
-}
-
-test('canceling a capacity proposal leaves the live and persisted limits unchanged', async () => {
+test('capacity replies save immediately, preserve unrelated configuration and never submit tasks', async () => {
   const app = await createSmokeApp({maxSessions:8});
   try {
     await app.update({text:'/setup'});
     await clickSettings(app, 4);
-    await clickSettings(app, 1);
-    await clickSettings(app, -2);
-    assert.equal(saved(app).config.omp.maxSessions,8);
-    assert.equal(app.runtime.getSessionLimit(),8);
+    const panel = app.messages.at(-1)!;
+    const updated = saved(app).config;
+    updated.port = 23456;
+    writeConfig(updated);
+    for (const target of [6, 1, Number.MAX_SAFE_INTEGER, 8]) {
+      await app.update({text:String(target),reply_to_message:panel});
+      assert.equal(saved(app).config.omp.maxSessions,target);
+      assert.equal(app.runtime.getSessionLimit(),target);
+      assert.equal(app.config.omp.maxSessions,target);
+      assert.equal(saved(app).config.port,23456);
+    }
     assert.deepEqual(app.accepted,[]);
+    assert.deepEqual(app.store.listSessions(botId),[]);
     assert.equal(app.connectionCount,0);
   } finally { await app.close(); }
 });
 
-for (const change of ['role','limit'] as const) {
-  test(`capacity confirmation rejects a stale ${change} without mutating runtime`, async () => {
+test('invalid capacity replies leave persisted and live limits unchanged', async () => {
+  const app = await createSmokeApp({maxSessions:8});
+  try {
+    await app.update({text:'/setup'});
+    await clickSettings(app, 4);
+    const panel = app.messages.at(-1)!;
+    for (const text of ['0','-1','1.5','9007199254740992','1e2','hello']) {
+      await app.update({text,reply_to_message:panel});
+      assert.equal(saved(app).config.omp.maxSessions,8);
+      assert.equal(app.runtime.getSessionLimit(),8);
+    }
+    await app.update({text:'7',reply_to_message:panel});
+    assert.equal(saved(app).config.omp.maxSessions,7);
+    assert.equal(app.runtime.getSessionLimit(),7);
+    assert.deepEqual(app.accepted,[]);
+    assert.deepEqual(app.store.listSessions(botId),[]);
+  } finally { await app.close(); }
+});
+
+for (const change of ['role','assignment','read-only'] as const) {
+  test(`capacity replies reject changed ${change} before saving`, async () => {
     const app = await createSmokeApp({maxSessions:8});
     try {
       await app.update({text:'/setup'});
       await clickSettings(app, 4);
-      await clickSettings(app, 1);
-      const confirmation = app.messages.at(-1)!;
-      const choice = settingsButton(confirmation,0);
+      const panel = app.messages.at(-1)!;
       const updated = saved(app).config;
       if (change === 'role') app.setCurrentMember({status:'member'});
-      else {
-        updated.omp.maxSessions = 12;
+      if (change === 'assignment') {
+        Object.values(updated.instances)[0]!.chats = [];
         writeConfig(updated);
       }
-      await app.callback(choice,confirmation);
+      if (change === 'read-only') await chmod(app.config.configPath,0o400);
+      await app.update({text:'6',reply_to_message:panel});
       assert.deepEqual(readConfig(app.config.configPath),updated);
       assert.equal(app.runtime.getSessionLimit(),8);
       assert.deepEqual(app.accepted,[]);
       assert.equal(app.connectionCount,0);
-    } finally { await app.close(); }
+    } finally {
+      await chmod(app.config.configPath,0o600);
+      await app.close();
+    }
   });
 }
 
