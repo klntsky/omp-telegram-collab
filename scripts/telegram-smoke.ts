@@ -559,6 +559,22 @@ export async function verifyTelegramFlow() {
     assert.deepEqual(app.pins, [{ chat_id: chatId, message_id: button.message_id, disable_notification: true }], 'the Mini App entry is pinned inside its session topic');
     const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
     assert.equal(topicMessages[1]?.forwarded_message_id,7003);
+    const binding = await app.runtime.ensure(session);
+    const promptAnchor = {ompSessionId:binding.sessionId,entryId:'accepted-1',parentEntryId:null,kind:'collab-prompt',partIndex:0};
+    for (const messageId of [7003,Number(topicMessages[1]!.message_id)])
+      assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, messageId), promptAnchor);
+    const answer: SessionEntry = {type:'message',id:'smoke-answer',parentId:'accepted-1',timestamp:new Date().toISOString(),message:{
+      role:'assistant',content:[{type:'text',text:'Completed login review'}],model:'fixture',timestamp:Date.now(),stopReason:'stop',
+      usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},
+    }};
+    app.emit({t:'entry',entry:answer});
+    await waitUntil(
+      () => app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(app.messages.at(-1)?.message_id))?.entryId === answer.id,
+      'assistant delivery did not persist its message anchor',
+    );
+    assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(app.messages.at(-1)!.message_id)),
+      {ompSessionId:binding.sessionId,entryId:answer.id,parentEntryId:answer.parentId,kind:'assistant',partIndex:0});
+    console.log('PASS accepted original and forwarded prompts and confirmed assistant delivery retain exact OMP message anchors.');
     assert.equal(app.createdTopics[0]?.icon_custom_emoji_id,'5312016608254762256','initial task topics start with lightning at creation');
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => (app.topicEdits.at(-1)?.icon_custom_emoji_id ?? app.createdTopics[0]?.icon_custom_emoji_id) === '5312016608254762256', 'active turn did not get the running icon');

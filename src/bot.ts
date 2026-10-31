@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
@@ -110,6 +110,7 @@ interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; 
 interface Listener {
   sessionId: string;
   generation: number;
+  ompSessionId?: string;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
@@ -249,12 +250,11 @@ function optionMarker(index: number): string {
   const number = index+1;
   return number === 10 ? '🔟' : String(number).replace(/\d/g, digit => `${digit}\uFE0F\u20E3`);
 }
-function assistantText(message: unknown): { text: string; fingerprint: string } | undefined {
+function assistantText(message: unknown): string | undefined {
   if (!message || typeof message !== 'object' || !('role' in message) || message.role !== 'assistant' || !('content' in message) || !Array.isArray(message.content)) return undefined;
   const text = message.content.filter((part): part is {type:'text';text:string} => Boolean(part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')).map(part => part.text).join('\n');
   if (!text.trim()) return undefined;
-  const timestamp = 'timestamp' in message ? message.timestamp : null;
-  return { text, fingerprint: createHash('sha256').update(JSON.stringify([timestamp, text])).digest('hex') };
+  return text;
 }
 
 function retryDelay(ms: number, signal: TelegramAbortController['signal']): Promise<void> {
@@ -2233,6 +2233,10 @@ export class BotService {
     accepted?.();
     if (task !== undefined && ctx.message)
       this.options.store.setInitialMessage(session.id, ctx.message.message_id);
+    if (task !== undefined && ctx.message)
+      for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
+        if (original.message && original.message.message_id !== ctx.message.message_id)
+          this.options.store.recordPromptMessageAlias(session.id, ctx.message.message_id, original.message.message_id);
     await replyTo(
       ctx,
       contextDestination(ctx),
@@ -2257,13 +2261,14 @@ export class BotService {
     }
     if (task !== undefined)
       for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-        if (original.message)
-          await forwardTo(
-            this.bot.api,
-            topicDestination(session.chatId, session.threadId),
-            ctx.chat!.id,
-            original.message.message_id,
-          );
+        if (!original.message) continue;
+        const forwarded = await forwardTo(
+          this.bot.api,
+          topicDestination(session.chatId, session.threadId),
+          ctx.chat!.id,
+          original.message.message_id,
+        );
+        this.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
       }
     await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
     await this.listen(session);
@@ -2620,6 +2625,9 @@ export class BotService {
       this.consumePendingSkills(selected.key,selected.names);
       if (selected.topicSkill) this.options.store.clearNewTopicSkill(session.id);
     }
+    for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
+      if (original.message && original.message.message_id !== messageId)
+        this.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
     try {
       this.sendPrompt(this.listeners.get(session.id)!,content,messageId,restore);
     } catch (error) {
@@ -3510,7 +3518,7 @@ export class BotService {
       tail: Promise.resolve(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
-      receiptBoundary: this.options.store.beginPromptReceiptSnapshot(session.id),
+      receiptBoundary: 0,
       snapshotReplyTarget: this.options.store.getReplyTarget(session.id),
       pendingPrompts: [],
       pendingAnswers: new Map(),
@@ -3540,6 +3548,8 @@ export class BotService {
         if (!active()) throw closed;
         await this.applySessionTitle(session);
         if (!active()) throw closed;
+        listener.ompSessionId = binding.sessionId;
+        listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, binding.sessionId);
         return (this.options.connect ?? connectCollab)(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
@@ -3612,8 +3622,10 @@ export class BotService {
       listener.generation !== this.options.store.getSessionGeneration(session.id)
     )
       throw new Error('Session closed');
+    if (listener.ompSessionId === undefined) throw new Error('OMP session is not connected');
     const submissionId = this.options.store.recordPromptSubmission(
       session.id,
+      listener.ompSessionId,
       `Telegram @${this.bot.botInfo!.username}`,
       content,
       messageId,
@@ -3682,6 +3694,7 @@ export class BotService {
     listener: Listener,
     entry: CustomMessageEntry,
     replay: boolean,
+    ompSessionId: string,
   ): void {
     const text =
       typeof entry.content === 'string'
@@ -3704,7 +3717,7 @@ export class BotService {
         : undefined;
     const receipt = this.options.store.recordPromptReceipt(
       session.id,
-      entry.id,
+      {ompSessionId,entryId:entry.id,parentEntryId:entry.parentId},
       sender,
       { text, ...(images === undefined ? {} : { images }) },
       replay ? listener.receiptBoundary : undefined,
@@ -4041,6 +4054,8 @@ export class BotService {
       this.options.store.getSessionGeneration(session.id) !== listener.generation
     )
       return;
+    const ompSessionId = listener.ompSessionId;
+    if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
     this.options.runtime.observeFrame(session.id, frame);
     if (
       frame.t === 'welcome' ||
@@ -4202,7 +4217,7 @@ export class BotService {
       frame.entry.type === 'custom_message' &&
       frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE
     )
-      this.reconcilePromptReceipt(session, listener, frame.entry, replay);
+      this.reconcilePromptReceipt(session, listener, frame.entry, replay, ompSessionId);
     if (frame.t === 'error') {
       listener.pendingAnswers.clear();
       listener.pendingStops.length = 0;
@@ -4226,7 +4241,7 @@ export class BotService {
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
-          if (result) this.options.store.rememberReply(session.id, result.fingerprint);
+          if (result) this.options.store.rememberReply(session.id, ompSessionId, entry.id);
         }
       }
       if (frame.final) {
@@ -4235,13 +4250,10 @@ export class BotService {
       }
       return;
     }
-    const result =
-      frame.t === 'event' && frame.event.type === 'message_end'
-        ? assistantText(frame.event.message)
-        : frame.t === 'entry' && frame.entry.type === 'message'
-          ? assistantText(frame.entry.message)
-          : undefined;
-    if (!result || !this.options.store.rememberReply(session.id, result.fingerprint)) return;
+    if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
+    const entry = frame.entry;
+    const text = assistantText(entry.message);
+    if (!text || !this.options.store.rememberReply(session.id, ompSessionId, entry.id)) return;
     const replyTarget = replay
       ? listener.snapshotReplyTarget
       : this.options.store.getReplyTarget(session.id);
@@ -4265,14 +4277,15 @@ export class BotService {
           !this.sessionAssigned(current)
         )
           return;
-        for (const text of renderTelegramMarkdown(result.text)) {
+        let partIndex = 0;
+        for (const part of renderTelegramMarkdown(text)) {
           if (!this.sessionAssigned(current)) return;
-          await this.delivery.run(
+          const sent = await this.delivery.run(
             session.chatId,
             () =>
               this.bot.api.sendRichMessage(
                 session.chatId,
-                { markdown: text },
+                { markdown: part },
                 {
                   message_thread_id: session.threadId === 1 ? undefined : session.threadId,
                   ...(replyTarget === undefined
@@ -4290,9 +4303,14 @@ export class BotService {
               this.sessionAssigned(current) &&
               this.listeners.get(session.id) === listener,
           );
+          if (!sent) return;
+          this.options.store.recordMessageAnchor(session.id, sent.chat.id, sent.message_id, {
+            ompSessionId, entryId:entry.id, parentEntryId:entry.parentId,
+            kind:'assistant', partIndex:partIndex++,
+          });
         }
       })
-      .catch(() => undefined)
+      .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
       .finally(() => {
         listener.queued--;
       });
