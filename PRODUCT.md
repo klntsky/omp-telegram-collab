@@ -168,6 +168,8 @@ Mini App prompts and text answers to agent questions also appear in the topic wi
 
 Agent questions include the full text, option descriptions, and numbered option buttons in compact rows of up to five, with Cancel separate. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the Mini App or terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
 
+Numbered selections receive delivery reactions on the dialog message. 👀 means the bot received the selection. 🤝 replaces it only after OMP confirms the matching question response. Unrelated or repeated question completions do not acknowledge another selection. Typed answers use the same stages on the user's answer message.
+
 | Indicator | Meaning |
 | --- | --- |
 | 👀 reaction | The bot received a prompt, an answer to an agent question, or a session control command. |

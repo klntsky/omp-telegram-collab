@@ -2435,8 +2435,12 @@ export class BotService {
     else if (question.request.kind === 'select') {
       const option = question.request.options[Number(choice)];
       if (option === undefined) return;
+      await this.delivery.run(question.session.chatId,
+        () => this.bot.api.setMessageReaction(question.session.chatId,message.message_id,[{type:'emoji',emoji:'👀'}]),
+        () => !this.stopped && this.sessionAssigned(question.session) &&
+          this.listeners.get(question.session.id) === question.listener && this.questions.get(token) === question).catch(() => undefined);
       const value = typeof option === 'string' ? option : option.label;
-      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`);
+      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
     await ctx.answerCallbackQuery();
   }
