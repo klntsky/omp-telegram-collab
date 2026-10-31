@@ -185,6 +185,14 @@ Create presets locally with OMP's `/modelpreset save <name>`.
 
 The editable Collab Web client lives in `web/src`. `web/upstream.json` records its upstream revision, and `web/LICENSE.upstream` preserves the license. Authentication and WebSocket transport are local adaptations. Run `pnpm build` after changes.
 
+## Format files
+
+Run `pnpm format` to format supported files with Prettier's defaults. Run `pnpm format:check` to check formatting without writing changes.
+
+For a targeted change, run `pnpm exec prettier --write path/to/file.ts` and `pnpm exec prettier --check path/to/file.ts`.
+
+Prettier respects `.gitignore`. `.prettierignore` also excludes the generated dependency lockfile and local agent files. Existing files have not been reformatted as part of adding the formatter, so the repository-wide check can report existing formatting differences.
+
 ## Verify changes
 
 ```sh
