@@ -186,8 +186,6 @@ type SettingsAction =
     }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
-  | { kind: 'propose-capacity'; limit: number; target: number }
-  | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
 interface SettingsPanel {
   token: string;
@@ -198,6 +196,7 @@ interface SettingsPanel {
   revision: number;
   offset: number;
   choices: SettingsAction[];
+  capacityInput?: boolean;
   changes: Map<SettingsKey, {label: string; before: string; after: string}>;
 }
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
@@ -305,6 +304,41 @@ export class BotService {
     }
     return persisted;
   }
+  private settingsReplyPanel(ctx: Context): SettingsPanel | undefined {
+    const message = ctx.message;
+    const reply = message?.reply_to_message;
+    if (!message || !ctx.chat || !ctx.from || ctx.from.is_bot || !reply || reply.from?.id !== this.id ||
+        'forward_origin' in reply || 'forward_date' in reply ||
+        'forward_origin' in message || 'forward_date' in message) return;
+    const stored = this.options.store.db.prepare(
+      "SELECT panel FROM settings_panels WHERE bot_id=? AND json_extract(panel,'$.chatId')=? AND json_extract(panel,'$.messageId')=?",
+    ).get(this.id, ctx.chat.id, reply.message_id);
+    if (!stored) return;
+    const decoded = JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
+      changes: [SettingsKey, { label: string; before: string; after: string }][];
+    };
+    if (!decoded.capacityInput || !sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    return { ...decoded, changes: new Map(decoded.changes) };
+  }
+  private async saveCapacityReply(ctx: Context, panel: SettingsPanel): Promise<void> {
+    const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
+    const target = Number(input);
+    if (!/^[0-9]+$/.test(input) || !Number.isSafeInteger(target) || target < 1)
+      throw new Error('The live session count limit must be a positive safe integer.');
+    const config = await this.settingsAccess(ctx, panel, true);
+    const before = String(config.omp.maxSessions);
+    config.omp.maxSessions = target;
+    writeConfig(config);
+    this.options.config.omp.maxSessions = target;
+    this.options.runtime.setSessionLimit(target);
+    const original = panel.changes.get('capacity')?.before ?? before;
+    if (original === String(target)) panel.changes.delete('capacity');
+    else panel.changes.set('capacity', {
+      label: 'Maximum live sessions (service-wide)', before: original, after: String(target),
+    });
+    this.saveSettingsPanel(panel);
+    await this.renderSettings(panel, config, 'capacity');
+  }
   private async openSettings(ctx: Context): Promise<void> {
     if (!(await this.currentAdmin(ctx))) {
       await replyTo(ctx, contextDestination(ctx), 'Settings require a current group owner or administrator.');
@@ -323,7 +357,6 @@ export class BotService {
     config: AppConfig,
     page: SettingsPage = 'root',
     offset = 0,
-    proposal?: { limit: number; target: number },
   ): Promise<void> {
     const assigned = findInstance(config, this.id, panel.chatId)!;
     const chat = assigned.instance.chats.find(
@@ -411,36 +444,14 @@ export class BotService {
       if (offset > 0) button('Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
       if (offset + 8 < names.length) button('Next', { kind: 'page', page, offset: offset + 8 });
     } else {
-      const limit = this.options.runtime.getSessionLimit();
-      if (proposal) {
-        text = `Maximum live sessions: ${proposal.limit} → ${proposal.target}?\nService-wide.`;
-        button(`Set limit to ${proposal.target}`, {
-          kind: 'capacity',
-          limit: proposal.limit,
-          target: proposal.target,
-        });
-      } else {
-        text = `Maximum live sessions: ${limit}\nService-wide.`;
-        for (const [label, target] of [
-          ['−', limit - 1],
-          ['+', limit + 1],
-        ] as const) {
-          button(
-            label,
-            Number.isSafeInteger(target) && target >= 1 && target !== limit
-              ? { kind: 'propose-capacity', limit, target }
-              : { kind: 'page', page: 'capacity' },
-          );
-        }
-        rows.splice(0, 2, [...rows[0]!, ...rows[1]!]);
-      }
+      text = `Maximum live sessions: ${this.options.runtime.getSessionLimit()}\nService-wide.\nReply to this message with a positive whole number to save the limit immediately.`;
     }
     if (page !== 'root')
-      button(proposal ? 'Cancel' : 'Back to settings', {
+      button(page === 'capacity' ? '❌ Cancel' : 'Back to settings', {
         kind: 'page',
-        page: proposal ? 'capacity' : 'root',
+        page: 'root',
       });
-    button('Close', { kind: 'close' });
+    button('✖️ Close', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
     const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
@@ -452,6 +463,7 @@ export class BotService {
     panel.choices = choices;
     panel.revision = revision;
     panel.offset = offset;
+    panel.capacityInput = page === 'capacity';
     this.saveSettingsPanel(panel);
   }
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
@@ -518,8 +530,7 @@ export class BotService {
       panel,
       action.kind === 'set' ||
         action.kind === 'default' ||
-        action.kind === 'typing' ||
-        action.kind === 'capacity',
+        action.kind === 'typing',
     );
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
@@ -537,6 +548,7 @@ export class BotService {
         reply_markup: { inline_keyboard: [] },
       });
       panel.choices = [];
+      panel.capacityInput = false;
       this.saveSettingsPanel(panel);
       return;
     }
@@ -544,41 +556,7 @@ export class BotService {
       await this.renderSettings(panel, config, action.page, action.offset);
       return;
     }
-    if (action.kind === 'propose-capacity') {
-      if (
-        this.options.runtime.getSessionLimit() !== action.limit ||
-        config.omp.maxSessions !== action.limit
-      )
-        throw new Error(
-          'The live session count limit changed. Open Live session count limit again.',
-        );
-      if (!Number.isSafeInteger(action.target) || action.target < 1)
-        throw new Error('The live session count limit must be a positive safe integer.');
-      await this.renderSettings(panel, config, 'capacity', 0, action);
-      return;
-    }
-    if (action.kind === 'capacity') {
-      if (!Number.isSafeInteger(action.target) || action.target < 1)
-        throw new Error('The live session count limit must be a positive safe integer.');
-      if (
-        this.options.runtime.getSessionLimit() !== action.limit ||
-        config.omp.maxSessions !== action.limit
-      )
-        throw new Error(
-          'The live session count limit changed. Open Live session count limit again.',
-        );
-      config.omp.maxSessions = action.target;
-      writeConfig(config);
-      this.options.config.omp.maxSessions = action.target;
-      this.options.runtime.setSessionLimit(action.target);
-      recordChange(
-        'capacity',
-        'Maximum live sessions (service-wide)',
-        String(action.limit),
-        String(action.target),
-      );
-      this.saveSettingsPanel(panel);
-    } else {
+    {
       if (action.kind === 'default' && action.value !== undefined) {
         const names =
           action.field === 'default_new_topic_skill'
@@ -661,7 +639,6 @@ export class BotService {
       );
       return;
     }
-    await this.renderSettings(panel, config, 'capacity');
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
@@ -787,6 +764,7 @@ export class BotService {
   private classifyInput(ctx: Context): InputIntent {
     const message = ctx.message;
     if (!message || !ctx.chat) return {kind:'event'};
+    if (this.settingsReplyPanel(ctx)) return {kind:'event'};
     const reply = message.reply_to_message;
     const question = reply?.from?.id === this.id ? [...this.questions.entries()].find(([,pending]) =>
       pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
@@ -2382,6 +2360,11 @@ export class BotService {
       return;
     }
     this.termination = undefined;
+    const settingsPanel = this.settingsReplyPanel(ctx);
+    if (settingsPanel) {
+      await this.saveCapacityReply(ctx, settingsPanel);
+      return;
+    }
     if (ctx.inlineQuery) {
       await this.skills.inline(ctx);
       return;
