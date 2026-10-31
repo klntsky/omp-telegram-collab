@@ -3,8 +3,22 @@ import { realpathSync, statSync } from 'node:fs';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
-import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent, TypingMode } from '../shared/contracts.js';
+import {
+  COLLAB_PROMPT_MESSAGE_TYPE,
+  type ImageContent,
+  type CollabUiRequest,
+  type HostFrame,
+  CustomMessageEntry,
+} from '@oh-my-pi/pi-wire';
+import type {
+  AppConfig,
+  BotConfig,
+  TopicSession,
+  HostBinding,
+  CollabConnection,
+  PromptContent,
+  TypingMode,
+} from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
@@ -20,6 +34,7 @@ import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-desti
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
 import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
+import { TopicWriter } from './topic-writer.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -49,40 +64,64 @@ export interface RuntimeLike {
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean }
 type TopicActivity = 'unknown' | 'running' | 'finished';
 type KnownTopicActivity = Exclude<TopicActivity, 'unknown'>;
-interface TopicIconProjection {
-  activity: TopicActivity;
+interface TopicMetadata {
   generation: number;
+  name: TopicWriter;
+  icon: TopicWriter;
+}
+interface TopicTitleSource {
+  humanTitle?: string;
+  prefix: string;
+  prefixes: Set<string>;
   revision: number;
-  pending: boolean;
-  confirmed?: { id: string; expires: number };
-  lifetime: number;
-  tail: Promise<void>;
+}
+interface HostActivityObservation {
+  generation: number;
+  value: TopicActivity;
+  observedAt?: number;
+  suspect: boolean;
+  revision: number;
+  probe?: Promise<void>;
+  controller?: AbortController;
+}
+interface SessionMetadataOwner {
+  generation: number;
+  disposed: boolean;
+  controller: AbortController;
+  activity: HostActivityObservation;
+  title: TopicTitleSource;
+  metadata?: TopicMetadata;
+  recovery?: Promise<void>;
+  titleWrite?: Promise<void>;
 }
 interface StatusFailure { operation: string; at: number; error: unknown }
-interface TaskObservation { state: 'waiting for acceptance' | 'not accepted' | 'acceptance unknown' | 'accepted; completion unknown' }
+interface TaskObservation {
+  state:
+    | 'waiting for acceptance'
+    | 'not accepted'
+    | 'acceptance unknown'
+    | 'accepted; completion unknown';
+  submissionId?: number;
+}
 interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; mirrored?: boolean }
 interface Listener {
   sessionId: string;
   generation: number;
-  frameRevision: number;
-  activityRevision: number;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
-  titleTail?: Promise<void>;
-  titleVersion?: number;
-  sessionTitle?: string;
   queued: number;
   recovering: boolean;
-  pendingPrompts: { content: PromptContent; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
+  receiptBoundary: number;
+  snapshotReplyTarget?: number;
+  pendingPrompts: {
+    submissionId: number;
+    onStartupRejected?: () => void;
+    observation: TaskObservation;
+  }[];
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
-  activity: TopicActivity;
-  activityObservedAt?: number;
-  activitySuspect?: boolean;
-  activityProbe?: Promise<void>;
-  activityProbeController?: AbortController;
   typingText?: boolean;
   typingNextAt?: number;
   typingTimer?: NodeJS.Timeout;
@@ -124,11 +163,27 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-const typingLabels: Record<TypingMode, string> = {disabled:'Disabled',streaming:'While typing',inference:'While working'};
-type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees' | 'typing';
+const typingLabels: Record<TypingMode, string> = {
+  disabled: 'Disabled',
+  streaming: 'While typing',
+  inference: 'While working',
+};
+type SettingsKey =
+  | 'prompts'
+  | 'proposals'
+  | 'skills'
+  | 'presets'
+  | 'capacity'
+  | 'worktrees'
+  | 'typing';
 type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing';
-type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
-  | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees'; value: boolean }
+type SettingsAction =
+  | { kind: 'page'; page: SettingsPage; offset?: number }
+  | {
+      kind: 'set';
+      field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
+      value: boolean;
+    }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
   | { kind: 'propose-capacity'; limit: number; target: number }
@@ -200,17 +255,13 @@ export class BotService {
   readonly config: BotConfig;
   readonly token: string;
   private readonly listeners = new Map<string, Listener>();
-  private readonly titleRevisions = new Map<string,number>();
-  private readonly humanTitles = new Map<string,string>();
-  private readonly titlePrefixes = new Map<string,Set<string>>();
   private readonly reconnects = new Map<string, NodeJS.Timeout>();
   private readonly capacityRequests = new Map<string, CapacityRequest>();
   private readonly questions = new Map<string, PendingQuestion>();
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
   private readonly telegramRetry = new AbortController();
-  private readonly topicIcons = new Map<string, TopicIconProjection>();
-  private readonly hostObservations = new Map<string, Promise<void>>();
+  private readonly metadataOwners = new Map<string, SessionMetadataOwner>();
   private readonly sessionInvalidationHandlers = new Set<(sessionId: string, reason?: string) => void>();
   private readonly closedSessions = new Map<string, { generation: number; settled: boolean; pending?: Promise<void> }>();
   private readonly commandMenus = new Map<number, string>();
@@ -267,59 +318,131 @@ export class BotService {
     const persisted = await this.settingsAccess(ctx, panel);
     await this.renderSettings(panel, persisted);
   }
-  private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
+  private async renderSettings(
+    panel: SettingsPanel,
+    config: AppConfig,
+    page: SettingsPage = 'root',
+    offset = 0,
+    proposal?: { limit: number; target: number },
+  ): Promise<void> {
     const assigned = findInstance(config, this.id, panel.chatId)!;
-    const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-    const rows: {text: string; callback_data: string}[][] = [];
+    const chat = assigned.instance.chats.find(
+      (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+    )!;
+    const rows: { text: string; callback_data: string }[][] = [];
     const choices: SettingsAction[] = [];
     const revision = panel.revision + 1;
     const button = (text: string, action: SettingsAction, current = false) => {
       const index = choices.push(action) - 1;
-      rows.push([{text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100), callback_data: `settings:${panel.token}:${revision}:${index}`}]);
+      rows.push([
+        {
+          text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100),
+          callback_data: `settings:${panel.token}:${revision}:${index}`,
+        },
+      ]);
     };
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
-      button(`Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, {kind:'set',field:'all_messages_are_prompts',value:chat.all_messages_are_prompts === false});
-      button(`Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, {kind:'set',field:'users_can_propose_prompts',value:chat.users_can_propose_prompts !== true});
-      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {kind:'page',page:'skills'});
-      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {kind:'page',page:'presets'});
-      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {kind:'page',page:'capacity'});
-      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'create_topic_worktrees',value:chat.create_topic_worktrees !== true});
-      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {kind:'page',page:'typing'});
+      button(
+        `Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`,
+        {
+          kind: 'set',
+          field: 'all_messages_are_prompts',
+          value: chat.all_messages_are_prompts === false,
+        },
+      );
+      button(
+        `Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
+        {
+          kind: 'set',
+          field: 'users_can_propose_prompts',
+          value: chat.users_can_propose_prompts !== true,
+        },
+      );
+      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {
+        kind: 'page',
+        page: 'skills',
+      });
+      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {
+        kind: 'page',
+        page: 'presets',
+      });
+      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {
+        kind: 'page',
+        page: 'capacity',
+      });
+      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
+        kind: 'set',
+        field: 'create_topic_worktrees',
+        value: chat.create_topic_worktrees !== true,
+      });
+      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {
+        kind: 'page',
+        page: 'typing',
+      });
     } else if (page === 'typing') {
-      text = 'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
+      text =
+        'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
       for (const value of ['disabled', 'streaming', 'inference'] as const) {
-        button(typingLabels[value], {kind:'typing',field:'typing_indicators',value}, (chat.typing_indicators ?? 'disabled') === value);
+        button(
+          typingLabels[value],
+          { kind: 'typing', field: 'typing_indicators', value },
+          (chat.typing_indicators ?? 'disabled') === value,
+        );
       }
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
-      const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
-      if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
+      const names = skill
+        ? (await this.options.runtime.listSkills(panel.instancePath))
+            .map((entry) => entry.name)
+            .filter(isMentionableSkillName)
+        : await this.options.runtime.availableModelPresets(panel.instancePath);
+      if (this.assignedPath(panel.chatId) !== panel.instancePath)
+        throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
       text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
-      for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name}, chat[field] === name);
-      button(skill ? 'No default skill' : 'Use host default', {kind:'default',field}, chat[field] === undefined);
-      if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
-      if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
+      for (const name of names.slice(offset, offset + 8))
+        button(name, { kind: 'default', field, value: name }, chat[field] === name);
+      button(
+        skill ? 'No default skill' : 'Use host default',
+        { kind: 'default', field },
+        chat[field] === undefined,
+      );
+      if (offset > 0) button('Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
+      if (offset + 8 < names.length) button('Next', { kind: 'page', page, offset: offset + 8 });
     } else {
       const limit = this.options.runtime.getSessionLimit();
       if (proposal) {
         text = `Maximum live sessions: ${proposal.limit} → ${proposal.target}?\nService-wide.`;
-        button(`Set limit to ${proposal.target}`, {kind:'capacity',limit:proposal.limit,target:proposal.target});
+        button(`Set limit to ${proposal.target}`, {
+          kind: 'capacity',
+          limit: proposal.limit,
+          target: proposal.target,
+        });
       } else {
         text = `Maximum live sessions: ${limit}\nService-wide.`;
-        for (const [label,target] of [['−',limit-1],['+',limit+1]] as const) {
-          button(label, Number.isSafeInteger(target) && target >= 1 && target !== limit
-            ? {kind:'propose-capacity',limit,target}
-            : {kind:'page',page:'capacity'});
+        for (const [label, target] of [
+          ['−', limit - 1],
+          ['+', limit + 1],
+        ] as const) {
+          button(
+            label,
+            Number.isSafeInteger(target) && target >= 1 && target !== limit
+              ? { kind: 'propose-capacity', limit, target }
+              : { kind: 'page', page: 'capacity' },
+          );
         }
         rows.splice(0, 2, [...rows[0]!, ...rows[1]!]);
       }
     }
-    if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
-    button('Close', {kind:'close'});
+    if (page !== 'root')
+      button(proposal ? 'Cancel' : 'Back to settings', {
+        kind: 'page',
+        page: proposal ? 'capacity' : 'root',
+      });
+    button('Close', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
-    const extra = {reply_markup:{inline_keyboard:rows}};
+    const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
       const message = await sendTo(this.bot.api, panel.destination, body, extra);
       panel.messageId = message.message_id;
@@ -333,25 +456,55 @@ export class BotService {
   }
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
-    const stored = match ? this.options.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(this.id, match[1]!) : undefined;
-    const decoded = stored ? JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {changes: [SettingsKey, {label: string; before: string; after: string}][]} : undefined;
-    const panel: SettingsPanel | undefined = decoded ? {...decoded, changes: new Map(decoded.changes)} : undefined;
-    const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-    if (!match || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
-        !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
+    const stored = match
+      ? this.options.store.db
+          .prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
+          .get(this.id, match[1]!)
+      : undefined;
+    const decoded = stored
+      ? (JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
+          changes: [SettingsKey, { label: string; before: string; after: string }][];
+        })
+      : undefined;
+    const panel: SettingsPanel | undefined = decoded
+      ? { ...decoded, changes: new Map(decoded.changes) }
+      : undefined;
+    const message =
+      ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+    if (
+      !match ||
+      !message ||
+      !ctx.chat ||
+      ctx.chat.type !== 'supergroup' ||
+      !('from' in message) ||
+      message.from?.id !== this.id ||
+      'forward_origin' in message ||
+      'forward_date' in message
+    )
+      return;
     if (!panel) {
       const recovered: SettingsPanel = {
-        token: match[1]!, chatId: ctx.chat.id, destination: contextDestination(ctx),
-        messageId: message.message_id, instancePath: this.assignedPath(ctx.chat.id),
-        revision: Number(match[2]), offset: 0, choices: [], changes: new Map(),
+        token: match[1]!,
+        chatId: ctx.chat.id,
+        destination: contextDestination(ctx),
+        messageId: message.message_id,
+        instancePath: this.assignedPath(ctx.chat.id),
+        revision: Number(match[2]),
+        offset: 0,
+        choices: [],
+        changes: new Map(),
       };
       const config = await this.settingsAccess(ctx, recovered);
       await this.renderSettings(recovered, config);
       await ctx.answerCallbackQuery();
       return;
     }
-    if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
-        !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
+    if (
+      ctx.chat.id !== panel.chatId ||
+      message.message_id !== panel.messageId ||
+      !sameTopicDestination(contextDestination(ctx), panel.destination)
+    )
+      return;
     if (Number(match[2]) !== panel.revision) {
       const config = await this.settingsAccess(ctx, panel);
       await this.renderSettings(panel, config);
@@ -360,49 +513,98 @@ export class BotService {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
-    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'typing' || action.kind === 'capacity');
+    const config = await this.settingsAccess(
+      ctx,
+      panel,
+      action.kind === 'set' ||
+        action.kind === 'default' ||
+        action.kind === 'typing' ||
+        action.kind === 'capacity',
+    );
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
-      else panel.changes.set(page, {label, before: original, after});
+      else panel.changes.set(page, { label, before: original, after });
     };
     if (action.kind === 'close') {
-      const changes = [...panel.changes.values()].map(({label,before,after}) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`);
-      const summary = changes.length ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}` : 'Settings closed.\nNo settings changed.';
-      await this.bot.api.editMessageText(panel.chatId,panel.messageId,summary,{reply_markup:{inline_keyboard:[]}});
+      const changes = [...panel.changes.values()].map(
+        ({ label, before, after }) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`,
+      );
+      const summary = changes.length
+        ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}`
+        : 'Settings closed.\nNo settings changed.';
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, summary, {
+        reply_markup: { inline_keyboard: [] },
+      });
       panel.choices = [];
       this.saveSettingsPanel(panel);
       return;
     }
-    if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
+    if (action.kind === 'page') {
+      await this.renderSettings(panel, config, action.page, action.offset);
+      return;
+    }
     if (action.kind === 'propose-capacity') {
-      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
-      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
-      await this.renderSettings(panel,config,'capacity',0,action);
+      if (
+        this.options.runtime.getSessionLimit() !== action.limit ||
+        config.omp.maxSessions !== action.limit
+      )
+        throw new Error(
+          'The live session count limit changed. Open Live session count limit again.',
+        );
+      if (!Number.isSafeInteger(action.target) || action.target < 1)
+        throw new Error('The live session count limit must be a positive safe integer.');
+      await this.renderSettings(panel, config, 'capacity', 0, action);
       return;
     }
     if (action.kind === 'capacity') {
-      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
-      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
+      if (!Number.isSafeInteger(action.target) || action.target < 1)
+        throw new Error('The live session count limit must be a positive safe integer.');
+      if (
+        this.options.runtime.getSessionLimit() !== action.limit ||
+        config.omp.maxSessions !== action.limit
+      )
+        throw new Error(
+          'The live session count limit changed. Open Live session count limit again.',
+        );
       config.omp.maxSessions = action.target;
       writeConfig(config);
       this.options.config.omp.maxSessions = action.target;
       this.options.runtime.setSessionLimit(action.target);
-      recordChange('capacity', 'Maximum live sessions (service-wide)', String(action.limit), String(action.target));
+      recordChange(
+        'capacity',
+        'Maximum live sessions (service-wide)',
+        String(action.limit),
+        String(action.target),
+      );
       this.saveSettingsPanel(panel);
     } else {
       if (action.kind === 'default' && action.value !== undefined) {
-        const names = action.field === 'default_new_topic_skill'
-          ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name)
-          : await this.options.runtime.availableModelPresets(panel.instancePath);
-        if (!names.includes(action.value)) throw new Error(`Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`);
+        const names =
+          action.field === 'default_new_topic_skill'
+            ? (await this.options.runtime.listSkills(panel.instancePath)).map((entry) => entry.name)
+            : await this.options.runtime.availableModelPresets(panel.instancePath);
+        if (!names.includes(action.value))
+          throw new Error(
+            `Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`,
+          );
       }
-      const current = await this.settingsAccess(ctx,panel,true);
-      const chat = findInstance(current,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-      const page: SettingsKey = action.kind === 'typing' ? 'typing' : action.kind === 'default'
-        ? action.field === 'default_new_topic_skill' ? 'skills' : 'presets'
-        : action.field === 'all_messages_are_prompts' ? 'prompts'
-        : action.field === 'users_can_propose_prompts' ? 'proposals' : 'worktrees';
+      const current = await this.settingsAccess(ctx, panel, true);
+      const chat = findInstance(current, this.id, panel.chatId)!.instance.chats.find(
+        (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+      )!;
+      const page: SettingsKey =
+        action.kind === 'typing'
+          ? 'typing'
+          : action.kind === 'default'
+            ? action.field === 'default_new_topic_skill'
+              ? 'skills'
+              : 'presets'
+            : action.field === 'all_messages_are_prompts'
+              ? 'prompts'
+              : action.field === 'users_can_propose_prompts'
+                ? 'proposals'
+                : 'worktrees';
       const labels = {
         prompts: 'Message handling',
         proposals: 'Who can send requests',
@@ -413,9 +615,16 @@ export class BotService {
       };
       const value = (setting: boolean | string | undefined): string => {
         if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
-        if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
-        if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
-        if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
+        if (action.kind === 'default')
+          return setting === undefined
+            ? page === 'skills'
+              ? 'No default skill'
+              : 'Use host default'
+            : String(setting);
+        if (page === 'prompts')
+          return setting === false ? 'Commands and replies only' : 'All messages';
+        if (page === 'proposals')
+          return setting === true ? 'Members with admin approval' : 'Admins only';
         return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
@@ -426,14 +635,33 @@ export class BotService {
       writeConfig(current);
       recordChange(page, labels[page], before, value(chat[action.field]));
       this.saveSettingsPanel(panel);
-      Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
-      if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
+      Object.assign(
+        findInstance(this.options.config, this.id, panel.chatId)!.instance.chats.find(
+          (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+        )!,
+        chat,
+      );
+      if (action.kind === 'default' && action.value === undefined)
+        delete findInstance(this.options.config, this.id, panel.chatId)!.instance.chats.find(
+          (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+        )![action.field];
       await this.syncCommandMenus();
       const offset = action.kind === 'default' ? panel.offset : 0;
-      await this.renderSettings(panel,current,action.kind === 'typing' ? 'typing' : action.kind === 'set' ? 'root' : action.field === 'default_new_topic_skill' ? 'skills' : 'presets',offset);
+      await this.renderSettings(
+        panel,
+        current,
+        action.kind === 'typing'
+          ? 'typing'
+          : action.kind === 'set'
+            ? 'root'
+            : action.field === 'default_new_topic_skill'
+              ? 'skills'
+              : 'presets',
+        offset,
+      );
       return;
     }
-    await this.renderSettings(panel,config,'capacity');
+    await this.renderSettings(panel, config, 'capacity');
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
@@ -448,10 +676,16 @@ export class BotService {
     installTelegramRetry(this.bot, this.telegramRetry.signal);
     this.delivery = new TelegramDelivery();
     this.bot.api.config.use((previous, method, payload, signal) => {
-      if (method !== 'sendChatAction' && /^(send|copyMessage|forwardMessage)/.test(method) &&
-          'chat_id' in payload && typeof payload.chat_id === 'number') {
-        const threadId = 'message_thread_id' in payload && typeof payload.message_thread_id === 'number'
-          ? payload.message_thread_id : 1;
+      if (
+        method !== 'sendChatAction' &&
+        /^(send|copyMessage|forwardMessage)/.test(method) &&
+        'chat_id' in payload &&
+        typeof payload.chat_id === 'number'
+      ) {
+        const threadId =
+          'message_thread_id' in payload && typeof payload.message_thread_id === 'number'
+            ? payload.message_thread_id
+            : 1;
         this.delivery.invalidateTyping(payload.chat_id, threadId);
       }
       return previous(method, payload, signal);
@@ -459,12 +693,14 @@ export class BotService {
     this.config = options.botConfig;
     this.token = options.token;
     this.skills = new SkillPicker({
-      store: options.store, botId: () => this.id, username: () => this.bot.botInfo!.username,
+      store: options.store,
+      botId: () => this.id,
+      username: () => this.bot.botInfo!.username,
       authorize: (chatId, userId) => this.authorize(chatId, userId),
-      instancePath: chatId => this.assignedPath(chatId),
+      instancePath: (chatId) => this.assignedPath(chatId),
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
-    this.bot.use(async ctx => {
+    this.bot.use(async (ctx) => {
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -475,15 +711,25 @@ export class BotService {
       if (this.collectAlbum(ctx)) return;
       const intent = this.classifyInput(ctx);
       const urgent = intent.kind === 'command' && intent.action === 'terminate';
-      if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
-      const received = this.receiveMessage(ctx,intent);
-      const process = async () => { await received; await this.handle(ctx, intent); };
+      if (++this.queuedUpdates > 256 && !urgent) {
+        this.queuedUpdates--;
+        return;
+      }
+      const received = this.receiveMessage(ctx, intent);
+      const process = async () => {
+        await received;
+        await this.handle(ctx, intent);
+      };
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
-      try { await task; } catch (error) { await this.reportError(ctx,error); }
-      finally {
+      try {
+        await task;
+      } catch (error) {
+        await this.reportError(ctx, error);
+      } finally {
         this.queuedUpdates--;
-        if (ctx.callbackQuery && !callbackAnswered) await ctx.answerCallbackQuery().catch(() => undefined);
+        if (ctx.callbackQuery && !callbackAnswered)
+          await ctx.answerCallbackQuery().catch(() => undefined);
       }
     });
   }
@@ -619,27 +865,51 @@ export class BotService {
   }
   startBackground(): void {
     if (this.stopped || this.backgroundStarted) return;
-    if (!this.bot.isInited()) throw new Error('Bot identity must be initialized before background maintenance');
+    if (!this.bot.isInited())
+      throw new Error('Bot identity must be initialized before background maintenance');
     this.backgroundStarted = true;
     this.restoreSessions();
     this.statusTimer ??= setInterval(() => {
       if (this.stopped || this.options.config.terminated || this.checkingStatuses) return;
       this.checkingStatuses = true;
-      void this.runBackground('topic-status', async signal => {
+      void this.runBackground('topic-status', async (signal) => {
         try {
-          for (const session of this.options.store.listSessions(this.id)) {
-            signal.throwIfAborted();
-            if (this.sessionAssigned(session)) {
-              await this.runBackground(`topic-status:${session.id}`, () => this.refreshTopicStatus(session));
-            } else this.dropListener(session.id);
-          }
-        } finally { this.checkingStatuses = false; }
+          const sessions = this.options.store.listSessions(this.id);
+          await Promise.all(
+            Array.from({ length: Math.min(4, sessions.length) }, async () => {
+              for (let next = sessions.shift(); next; next = sessions.shift()) {
+                const session = next;
+                signal.throwIfAborted();
+                if (this.sessionAssigned(session)) {
+                  if (this.options.store.hasPendingInitialTask(session.id)) {
+                    void this.runBackground(`initial-recovery:${session.id}`, () =>
+                      this.sendInitial(session),
+                    );
+                  }
+                  await Promise.all([
+                    this.runBackground(`topic-status:${session.id}`, () =>
+                      this.refreshTopicStatus(session),
+                    ),
+                    this.runBackground(`mirror-recovery:${session.id}`, () =>
+                      this.recoverExistingMirror(session),
+                    ),
+                  ]);
+                } else this.dropListener(session.id);
+              }
+            }),
+          );
+        } finally {
+          this.checkingStatuses = false;
+        }
       });
     }, 30000);
     this.statusTimer.unref();
     void this.refreshSkillCatalogs();
     void this.refreshPresetCatalogs();
-    this.menuTimer ??= setInterval(() => { void this.refreshSkillCatalogs(); void this.refreshPresetCatalogs(); }, 60000);
+    this.menuTimer ??= setInterval(() => {
+      void this.refreshSkillCatalogs();
+      void this.refreshPresetCatalogs();
+    }, 60000);
     this.menuTimer.unref();
   }
   private runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal = this.background.signal): Promise<void> {
@@ -665,20 +935,93 @@ export class BotService {
     return task;
   }
   private restoreSessions(): void {
-    for (const existing of this.options.store.listSessions(this.id)) {
-      if (this.options.config.terminated || !this.sessionAssigned(existing) || this.listeners.has(existing.id) || this.restoring.has(existing.id)) continue;
-      const generation = this.options.store.getSessionGeneration(existing.id);
-      this.restoring.add(existing.id);
-      void this.runBackground(`restore:${existing.id}`, async signal => {
-        try {
-          await withCancellation(this.refreshTopicStatus(existing), signal);
-        } catch (error) {
-          if (error === signal.reason) throw error;
-          if (!this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(existing.id) === generation) this.scheduleReconnect(existing);
-          throw error;
+    const sessions = this.options.store
+      .listSessions(this.id)
+      .filter(
+        (existing) =>
+          !this.options.config.terminated &&
+          this.sessionAssigned(existing) &&
+          !this.listeners.has(existing.id) &&
+          !this.restoring.has(existing.id),
+      );
+    for (const session of sessions) this.restoring.add(session.id);
+    void Promise.all(
+      Array.from({ length: Math.min(4, sessions.length) }, async () => {
+        for (let next = sessions.shift(); next; next = sessions.shift()) {
+          const existing = next;
+          const generation = this.options.store.getSessionGeneration(existing.id);
+          await this.runBackground(`restore:${existing.id}`, async (signal) => {
+            try {
+              if (existing.status === 'open') {
+                if (this.options.store.hasPendingInitialTask(existing.id)) {
+                  await withCancellation(this.sendInitial(existing), signal);
+                } else {
+                  await this.recoverExistingMirror(existing, signal);
+                }
+              }
+              await withCancellation(this.refreshTopicStatus(existing), signal);
+            } catch (error) {
+              if (error === signal.reason) throw error;
+              if (
+                !this.stopped &&
+                !(error instanceof SessionCapacityError) &&
+                this.options.store.getSessionGeneration(existing.id) === generation
+              )
+                this.scheduleReconnect(existing);
+              throw error;
+            }
+          }).finally(() => this.restoring.delete(existing.id));
         }
-      }).finally(() => this.restoring.delete(existing.id));
-    }
+      }),
+    );
+  }
+  private recoverExistingMirror(
+    session: TopicSession,
+    signal = this.background.signal,
+  ): Promise<void> {
+    if (this.stopped || this.options.config.terminated || signal.aborted) return Promise.resolve();
+    const metadataOwner = this.metadataOwner(session);
+    const existing = metadataOwner.recovery;
+    if (existing) return existing;
+    const generation = metadataOwner.generation;
+    const owner = metadataOwner.activity;
+    const active = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSession(session.id)?.status === 'open' &&
+      this.options.store.getSessionGeneration(session.id) === generation &&
+      this.metadataOwners.get(session.id)?.activity === owner;
+    if (
+      !active() ||
+      this.listeners.has(session.id) ||
+      this.options.store.hasPendingInitialTask(session.id)
+    )
+      return Promise.resolve();
+    const deadline = AbortSignal.any([
+      signal,
+      metadataOwner.controller.signal,
+      AbortSignal.timeout(5000),
+    ]);
+    const recovery = (async () => {
+      const binding = await withCancellation(
+        this.options.runtime.resolveExisting(session),
+        deadline,
+      );
+      if (!binding || !active() || this.listeners.has(session.id)) return;
+      const connecting = this.listen(session, binding, undefined, true);
+      const listener = this.listeners.get(session.id);
+      try {
+        await withCancellation(connecting, deadline);
+      } catch (error) {
+        if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
+        throw error;
+      }
+    })().finally(() => {
+      if (metadataOwner.recovery === recovery) metadataOwner.recovery = undefined;
+    });
+    metadataOwner.recovery = recovery;
+    return recovery;
   }
   refreshSkillCatalogs(): Promise<void> {
     if (this.stopped || this.options.config.terminated) return Promise.resolve();
@@ -861,14 +1204,22 @@ export class BotService {
   async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
-    for (const id of this.topicIcons.keys()) this.invalidateTopicStatus(id);
+    const metadataCompletions = [...this.metadataOwners.values()].flatMap((owner) => [
+      owner.metadata?.name.completion,
+      owner.metadata?.icon.completion,
+      owner.titleWrite,
+    ]);
+    for (const id of this.metadataOwners.keys()) this.disposeMetadataOwner(id);
     this.background.abort(new Error('Bot background maintenance stopped'));
     this.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
     this.apiAbort.abort();
     this.delivery.close();
     clearInterval(this.statusTimer);
     clearInterval(this.menuTimer);
-    for (const album of this.albums.values()) { clearTimeout(album.timer); album.resolve(); }
+    for (const album of this.albums.values()) {
+      clearTimeout(album.timer);
+      album.resolve();
+    }
     this.albums.clear();
     this.polling?.controller.abort();
     await this.polling?.done.catch(() => undefined);
@@ -886,10 +1237,10 @@ export class BotService {
     }
     this.listeners.clear();
     await this.updateTail;
-    await Promise.all(listeners.map(listener => listener.tail));
+    await Promise.all(listeners.map((listener) => listener.tail));
     await Promise.all(this.backgroundTasks);
     await this.menuTail;
-    await Promise.all([...this.topicIcons.values()].map(icon => icon.tail));
+    await Promise.all(metadataCompletions);
   }
   private sessionObservation(id: string): SessionObservation {
     let observation = this.sessionObservations.get(id);
@@ -1149,12 +1500,16 @@ export class BotService {
       if (!this.sessionAssigned(session)) {
         this.dropListener(session.id);
         this.closedSessions.delete(session.id);
-        this.topicIcons.delete(session.id);
-        for (const [token, request] of this.capacityRequests) if (request.sessionId === session.id) this.capacityRequests.delete(token);
+        this.disposeMetadataOwner(session.id);
+        for (const [token, request] of this.capacityRequests)
+          if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
       }
     }
-    if (this.options.config.terminated) { await this.applyTermination(); return; }
+    if (this.options.config.terminated) {
+      await this.applyTermination();
+      return;
+    }
     this.termination = undefined;
     await this.syncCommandMenus();
     await this.syncSessionEntries();
@@ -1214,230 +1569,365 @@ export class BotService {
     })().catch(error => { this.iconIds = undefined; throw error; });
     return this.iconIds;
   }
-  private invalidateTopicStatus(id: string): void {
-    const icon = this.topicIcons.get(id);
-    if (!icon) return;
-    icon.activity = 'unknown';
-    icon.confirmed = undefined;
-    ++icon.revision;
+  private invalidateActivity(id: string): void {
+    const activity = this.metadataOwners.get(id)?.activity;
+    if (activity) {
+      activity.controller?.abort(
+        new Error('Activity observation canceled because its listener closed'),
+      );
+      activity.value = 'unknown';
+      activity.observedAt = undefined;
+      activity.suspect = true;
+      ++activity.revision;
+    }
   }
-  private setTopicStatus(session: TopicSession, activity: TopicActivity, createdIcon?: string): Promise<void> {
-    const eligible = (projected: TopicActivity = activity) => {
-      const status = this.options.store.getSession(session.id)?.status;
-      const closed = this.closedSessions.get(session.id);
-      return status === 'open' || (status === 'closed' && projected === 'finished' && closed?.settled === true &&
-        closed.generation === this.options.store.getSessionGeneration(session.id));
-    };
-    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) || !eligible()) return Promise.resolve();
+  private disposeMetadataOwner(id: string): void {
+    const owner = this.metadataOwners.get(id);
+    if (!owner) return;
+    this.invalidateActivity(id);
+    owner.disposed = true;
+    owner.controller.abort(new Error('Session metadata ownership changed'));
+    owner.metadata = undefined;
+    owner.recovery = undefined;
+    if (!owner.titleWrite) this.metadataOwners.delete(id);
+  }
+  private metadataOwner(session: TopicSession): SessionMetadataOwner {
     const generation = this.options.store.getSessionGeneration(session.id);
-    let icon = this.topicIcons.get(session.id);
-    if (!icon) {
-      icon = {
-        activity: 'unknown', generation, revision: 0, pending: false,
-        lifetime: 10 * 60_000 + createHash('sha256').update(session.id).digest().readUInt32BE(0) % 60_000,
-        tail: Promise.resolve(),
+    let owner = this.metadataOwners.get(session.id);
+    if (!owner) {
+      owner = {
+        generation,
+        disposed: false,
+        controller: new AbortController(),
+        activity: { generation, value: 'unknown', suspect: false, revision: 0 },
+        title: {
+          prefix: this.options.store.getTopicTitlePrefix(session.id) ?? '',
+          prefixes: new Set(),
+          revision: 0,
+        },
       };
-      if (createdIcon !== undefined) icon.confirmed = {id:createdIcon, expires:Date.now() + icon.lifetime};
-      this.topicIcons.set(session.id, icon);
+      this.metadataOwners.set(session.id, owner);
+    } else if (owner.disposed || owner.generation !== generation) {
+      this.disposeMetadataOwner(session.id);
+      owner.generation = generation;
+      owner.disposed = false;
+      owner.controller = new AbortController();
+      owner.activity = { generation, value: 'unknown', suspect: false, revision: 0 };
+      owner.title = {
+        prefix: this.options.store.getTopicTitlePrefix(session.id) ?? '',
+        prefixes: new Set(),
+        revision: 0,
+      };
+      this.metadataOwners.set(session.id, owner);
     }
-    if (icon.generation !== generation) {
-      this.invalidateTopicStatus(session.id);
-      icon.generation = generation;
-    }
-    if (icon.activity !== activity) {
-      icon.activity = activity;
-      ++icon.revision;
-      if (activity === 'unknown') icon.confirmed = undefined;
-    }
-    if (icon.pending || activity === 'unknown') return icon.tail;
-    const current = icon;
-    const owned = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
-      this.topicIcons.get(session.id) === current &&
-      this.options.store.getSessionGeneration(session.id) === current.generation && eligible(current.activity);
-    current.pending = true;
-    current.tail = current.tail.then(async () => {
-      while (owned() && current.activity !== 'unknown') {
-        const revision = current.revision;
-        const generation = current.generation;
-        const activity = current.activity;
-        const active = () => owned() && current.revision === revision && current.generation === generation;
-        try {
-          const ids = await this.getIconIds();
-          if (!active()) continue;
-          const preference = this.options.store.getTopicFinishIcon(session.id);
-          if (preference === ids.running) this.options.store.setTopicFinishIcon(session.id,undefined);
-          const id = activity === 'finished' ? (preference === ids.running ? ids.finished : preference ?? ids.finished) : ids.running;
-          if (current.confirmed?.id === id && current.confirmed.expires > Date.now()) return;
-          const applied = await this.delivery.run(session.chatId, async () => {
-            current.confirmed = undefined;
-            const controller = new TelegramAbortController();
-            const abort = () => controller.abort();
-            this.background.signal.addEventListener('abort', abort, {once:true});
-            if (this.stopped) abort();
-            const timeout = setTimeout(() => controller.abort(), 5000);
-            try {
+    return owner;
+  }
+  private activityObservation(session: TopicSession): HostActivityObservation {
+    return this.metadataOwner(session).activity;
+  }
+  private titleSource(session: TopicSession): TopicTitleSource {
+    return this.metadataOwner(session).title;
+  }
+  private activityAtUse(session: TopicSession): TopicActivity {
+    const owner = this.metadataOwners.get(session.id);
+    if (
+      !owner ||
+      owner.disposed ||
+      owner.generation !== this.options.store.getSessionGeneration(session.id)
+    )
+      return 'unknown';
+    const status = this.options.store.getSession(session.id)?.status;
+    if (status === 'open' && this.options.store.hasPendingInitialTask(session.id)) return 'running';
+    const activity = owner.activity;
+    const closed = this.closedSessions.get(session.id);
+    if (
+      activity.value === 'finished' &&
+      status === 'closed' &&
+      closed?.generation === owner.generation &&
+      closed.settled
+    )
+      return 'finished';
+    return activity.observedAt !== undefined && Date.now() - activity.observedAt < 60_000
+      ? activity.value
+      : 'unknown';
+  }
+  private formatTopicTitle(source: TopicTitleSource): { name: string; prefix: string } {
+    const title = source.humanTitle ?? '';
+    const prefixLimit = 127 - Math.min(Array.from(title).length, 64);
+    const characters = Array.from(source.prefix);
+    const prefix =
+      characters.length > prefixLimit
+        ? `${characters.slice(0, prefixLimit - 1).join('')}…`
+        : source.prefix;
+    return {
+      name: Array.from(`${prefix ? `${prefix} ` : ''}${title}`)
+        .slice(0, 128)
+        .join(''),
+      prefix,
+    };
+  }
+  private topicMetadata(session: TopicSession): TopicMetadata {
+    const generation = this.options.store.getSessionGeneration(session.id);
+    const owner = this.metadataOwner(session);
+    let metadata = owner.metadata;
+    if (metadata?.generation === generation) return metadata;
+    const owned = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      !owner.disposed &&
+      owner.metadata === metadata &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSessionGeneration(session.id) === generation;
+    const writer = (field: 'name' | 'icon'): TopicWriter => {
+      const eligible = () => {
+        if (!owned()) return false;
+        if (field === 'icon' && this.activityAtUse(session) === 'unknown') return false;
+        const status = this.options.store.getSession(session.id)?.status;
+        return (
+          status === 'open' ||
+          (field === 'icon' &&
+            status === 'closed' &&
+            this.activityAtUse(session) === 'finished' &&
+            this.closedSessions.get(session.id)?.settled === true)
+        );
+      };
+      const result = new TopicWriter(
+        (take) =>
+          this.delivery.runTopic(
+            session.chatId,
+            field,
+            session.id,
+            async (signal) => {
+              if (!eligible()) return;
+              const value = take();
+              if (value === undefined) return;
               try {
                 await this.bot.api.editForumTopic(
-                  session.chatId, session.threadId, {icon_custom_emoji_id:id}, controller.signal);
+                  session.chatId,
+                  session.threadId,
+                  field === 'name' ? { name: value } : { icon_custom_emoji_id: value },
+                  signal,
+                );
               } catch (error) {
-                if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
+                if (
+                  !(
+                    error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')
+                  )
+                )
+                  throw error;
               }
-              return !controller.signal.aborted;
-            } finally {
-              clearTimeout(timeout);
-              this.background.signal.removeEventListener('abort', abort);
-            }
-          }, active, true);
-          if (applied === true && active()) current.confirmed = {id, expires:Date.now() + current.lifetime};
-        } catch (error) {
-          this.sessionObservation(session.id).failure = {operation:'Topic icon synchronization',at:Date.now(),error};
-          console.warn(`Could not update topic status (${session.id}, ${activity}).`, error);
-        }
-        if (current.revision === revision) return;
-      }
-    }).finally(() => { current.pending = false; });
-    return current.tail;
+              if (owned()) {
+                void result.observe(value);
+                if (field === 'name') {
+                  const source = owner.title;
+                  if (source) {
+                    const current = this.formatTopicTitle(source);
+                    if (current.name === value)
+                      this.options.store.setTopicTitle(session.id, value, current.prefix);
+                  }
+                }
+              }
+              return value;
+            },
+            eligible,
+          ),
+        eligible,
+        (error) => {
+          if (!owned()) return;
+          this.sessionObservation(session.id).failure = {
+            operation:
+              field === 'name' ? 'Topic title synchronization' : 'Topic icon synchronization',
+            at: Date.now(),
+            error,
+          };
+          if (field === 'icon')
+            console.warn(`Could not update topic status (${session.id}).`, error);
+        },
+      );
+      return result;
+    };
+    metadata = { generation, name: writer('name'), icon: writer('icon') };
+    owner.metadata = metadata;
+    return metadata;
   }
-  private observeExistingSession(session: TopicSession): Promise<void> {
-    const existing = this.hostObservations.get(session.id);
-    if (existing) return existing;
-    const generation = this.options.store.getSessionGeneration(session.id);
-    const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
-      this.options.store.getSession(session.id)?.status === 'open' &&
-      this.options.store.getSessionGeneration(session.id) === generation && !this.listeners.has(session.id);
-    const observation = (async () => {
-      if (!active()) return;
-      if (this.options.store.getSession(session.id)?.status === 'open' && this.options.store.hasPendingInitialTask(session.id)) {
-        await withCancellation(this.sendInitial(session), this.background.signal);
+  private setTopicStatus(
+    session: TopicSession,
+    activity: TopicActivity,
+    suspect = false,
+  ): Promise<void> {
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session))
+      return Promise.resolve();
+    const observation = this.activityObservation(session);
+    observation.value = activity;
+    observation.observedAt = activity === 'unknown' ? undefined : Date.now();
+    observation.suspect = suspect;
+    ++observation.revision;
+    return this.publishTopicIcon(session);
+  }
+  private topicIconValue(
+    session: TopicSession,
+    ids: Record<KnownTopicActivity, string>,
+  ): string | undefined {
+    const activity = this.activityAtUse(session);
+    if (activity === 'unknown') return undefined;
+    let preference = this.options.store.getTopicFinishIcon(session.id);
+    if (preference === ids.running) {
+      this.options.store.setTopicFinishIcon(session.id, undefined);
+      preference = undefined;
+    }
+    return activity === 'running' ? ids.running : (preference ?? ids.finished);
+  }
+  private async publishTopicIcon(session: TopicSession): Promise<void> {
+    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+    const metadata = this.topicMetadata(session);
+    if (this.activityAtUse(session) === 'unknown') return;
+    try {
+      const ids = await this.getIconIds();
+      if (
+        this.stopped ||
+        this.metadataOwners.get(session.id)?.metadata !== metadata ||
+        !this.sessionAssigned(session) ||
+        this.options.store.getSessionGeneration(session.id) !== metadata.generation
+      )
         return;
-      }
-      const binding = await withCancellation(this.options.runtime.resolveExisting(session), this.background.signal);
-      if (!active()) return;
-      if (!binding) {
-        await this.setTopicStatus(session, 'finished');
-      } else {
-        await withCancellation(this.listen(session, binding, undefined, true), this.background.signal);
-      }
-    })().finally(() => {
-      if (this.hostObservations.get(session.id) === observation) this.hostObservations.delete(session.id);
-    });
-    this.hostObservations.set(session.id, observation);
-    return observation;
+      const value = this.topicIconValue(session, ids);
+      if (value !== undefined) await metadata.icon.publish(value);
+    } catch (error) {
+      if (!this.stopped)
+        this.sessionObservation(session.id).failure = {
+          operation: 'Topic icon synchronization',
+          at: Date.now(),
+          error,
+        };
+    }
   }
-  private refreshActivity(session: TopicSession, listener: Listener): Promise<void> {
-    if (listener.activityProbe) return listener.activityProbe;
-    const revision = listener.activityRevision;
+  private refreshActivity(session: TopicSession): Promise<void> {
+    const observation = this.activityObservation(session);
+    if (observation.probe) return observation.probe;
+    const revision = observation.revision;
     const controller = new AbortController();
-    listener.activityProbeController = controller;
-    const signal = AbortSignal.any([this.background.signal,controller.signal]);
-    const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
-      this.listeners.get(session.id) === listener && listener.activityRevision === revision &&
-      this.options.store.getSessionGeneration(session.id) === listener.generation &&
+    observation.controller = controller;
+    const signal = AbortSignal.any([this.background.signal, controller.signal]);
+    const timeout = setTimeout(
+      () => controller.abort(new Error('Host activity lookup timed out after 5 seconds')),
+      5000,
+    );
+    const active = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      this.metadataOwners.get(session.id)?.activity === observation &&
+      observation.revision === revision &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSessionGeneration(session.id) === observation.generation &&
       this.options.store.getSession(session.id)?.status === 'open';
     const probe = (async () => {
-      const binding = await withCancellation(this.options.runtime.resolveExisting(session),signal);
-      if (!active() || !binding) return;
-      const state = await withCancellation(
-        (this.options.readState ?? readCollabState)(binding,`Telegram @${this.bot.botInfo!.username} activity`,signal),signal);
+      const binding = await withCancellation(this.options.runtime.resolveExisting(session), signal);
       if (!active()) return;
-      listener.queuedMessages = state.queuedMessageCount;
-      listener.activity = this.options.store.hasPendingInitialTask(session.id) || state.isStreaming || state.queuedMessageCount > 0 ? 'running' : 'finished';
-      listener.activityObservedAt = Date.now();
-      listener.activitySuspect = false;
-    })().catch(error => {
-      if (!signal.aborted || error !== signal.reason) throw error;
-    }).finally(() => {
-      if (listener.activityProbe === probe) {
-        listener.activityProbe = undefined;
-        listener.activityProbeController = undefined;
+      if (!binding) {
+        void this.setTopicStatus(session, 'finished');
+        return;
       }
-    });
-    listener.activityProbe = probe;
+      const state = await withCancellation(
+        (this.options.readState ?? readCollabState)(
+          binding,
+          `Telegram @${this.bot.botInfo!.username} activity`,
+          signal,
+        ),
+        signal,
+      );
+      if (!active()) return;
+      const listener = this.listeners.get(session.id);
+      if (listener) listener.queuedMessages = state.queuedMessageCount;
+      void this.setTopicStatus(
+        session,
+        state.isStreaming ||
+          state.queuedMessageCount > 0 ||
+          this.options.store.hasPendingInitialTask(session.id)
+          ? 'running'
+          : 'finished',
+      );
+    })()
+      .catch((error) => {
+        if (active()) {
+          void this.setTopicStatus(session, 'unknown');
+          this.sessionObservation(session.id).failure = {
+            operation: 'Host status lookup',
+            at: Date.now(),
+            error,
+          };
+        }
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        if (observation.probe === probe) {
+          observation.probe = undefined;
+          observation.controller = undefined;
+        }
+      });
+    observation.probe = probe;
     return probe;
   }
   private async refreshTopicStatus(session: TopicSession): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
     if (this.options.store.getSession(session.id)?.status === 'closed') {
       const state = this.closedSessions.get(session.id);
-      if (!state || state.generation !== this.options.store.getSessionGeneration(session.id) || (!state.settled && !state.pending)) {
-        void this.runBackground(`close:${session.id}`,() => this.windDownClosedSession(session));
+      if (
+        !state ||
+        state.generation !== this.options.store.getSessionGeneration(session.id) ||
+        (!state.settled && !state.pending)
+      ) {
+        void this.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
       } else if (state.settled) {
-        await this.setTopicStatus(session,'finished');
+        void this.publishTopicIcon(session);
       }
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
-    let listener = this.listeners.get(session.id);
-    if (listener && listener.generation !== generation) {
-      this.dropListener(session.id);
-      listener = undefined;
-    }
-    if (listener && this.options.store.getSession(session.id)?.status === 'open' &&
-        this.options.store.hasPendingInitialTask(session.id)) {
-      await withCancellation(this.sendInitial(session), this.background.signal);
-      if (this.stopped || !this.sessionAssigned(session) ||
-          this.options.store.getSessionGeneration(session.id) !== generation) return;
-      listener = this.listeners.get(session.id);
-    }
-    if (!listener) {
-      await this.observeExistingSession(session);
-      if (this.stopped || !this.sessionAssigned(session) || this.options.store.getSessionGeneration(session.id) !== generation) return;
-      listener = this.listeners.get(session.id);
-    }
-    if (listener) {
-      if (listener.connection) {
-        const observed = listener;
-        const frameRevision = observed.frameRevision;
-        let running: boolean;
-        try {
-          running = await withCancellation(this.options.runtime.isRunning(session), this.background.signal);
-        } catch (error) {
-          if (!this.stopped && this.sessionAssigned(session) && this.listeners.get(session.id) === observed &&
-              this.options.store.getSessionGeneration(session.id) === generation && observed.frameRevision === frameRevision) {
-            this.invalidateTopicStatus(session.id);
-          }
-          if (error !== this.background.signal.reason) {
-            this.sessionObservation(session.id).failure = {operation:'Host status lookup',at:Date.now(),error};
-          }
-          throw error;
-        }
-        if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== observed ||
-            this.options.store.getSessionGeneration(session.id) !== generation) return;
-        if (!running && observed.frameRevision === frameRevision) {
-          this.dropListener(session.id);
-          await this.setTopicStatus(session, 'finished');
-          return;
-        }
-      }
-      if (listener.connection && (listener.activitySuspect ||
-          (listener.activity !== 'finished' && Date.now() - (listener.activityObservedAt ?? 0) >= 30_000))) {
-        await this.refreshActivity(session,listener);
-      }
-      if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener ||
-          this.options.store.getSessionGeneration(session.id) !== generation ||
-          this.options.store.getSession(session.id)?.status !== 'open') return;
-      this.syncTopicTitle(session,listener);
-      await this.setTopicStatus(session,listener.activity);
+    const listener = this.listeners.get(session.id);
+    if (listener && listener.generation !== generation) this.dropListener(session.id);
+    const current = this.listeners.get(session.id);
+    if (current) {
+      this.syncTopicTitle(session, current);
     } else {
-      const icon = this.topicIcons.get(session.id);
-      if (icon?.generation === generation) await this.setTopicStatus(session,icon.activity);
-      const revision = this.titleRevisions.get(session.id);
-      const title = this.options.store.getPendingSessionTitle(session.id) ?? this.humanTitles.get(session.id) ??
-        this.stripTopicStatus(session,session.name);
-      await this.projectTopicTitle(session,title,() => !this.stopped && this.sessionAssigned(session) &&
-        this.options.store.getSession(session.id)?.status === 'open' &&
-        this.options.store.getSessionGeneration(session.id) === generation &&
-        this.titleRevisions.get(session.id) === revision);
+      const source = this.titleSource(session);
+      const revision = source.revision;
+      const title =
+        this.options.store.getPendingSessionTitle(session.id) ??
+        source.humanTitle ??
+        this.stripTopicStatus(session, session.name);
+      void this.projectTopicTitle(
+        session,
+        title,
+        () =>
+          !this.stopped &&
+          this.sessionAssigned(session) &&
+          this.options.store.getSession(session.id)?.status === 'open' &&
+          this.options.store.getSessionGeneration(session.id) === generation &&
+          this.metadataOwners.get(session.id)?.title === source &&
+          source.revision === revision,
+      );
     }
+    const observation = this.activityObservation(session);
+    const age = Date.now() - (observation.observedAt ?? 0);
+    if (observation.suspect || age >= 30_000) {
+      if (observation.suspect || age >= 60_000) void this.setTopicStatus(session, 'unknown');
+      await this.refreshActivity(session);
+    }
+    if (
+      !this.stopped &&
+      this.sessionAssigned(session) &&
+      this.options.store.getSessionGeneration(session.id) === generation
+    )
+      void this.publishTopicIcon(session);
   }
   private windDownClosedSession(session: TopicSession): Promise<void> {
     const generation = this.options.store.getSessionGeneration(session.id);
     let state = this.closedSessions.get(session.id);
     if (!state || state.generation !== generation) {
-      state = {generation,settled:false};
-      this.closedSessions.set(session.id,state);
+      state = { generation, settled: false };
+      this.closedSessions.set(session.id, state);
       this.options.store.cancelInitialTask(session.id);
-      this.invalidateTopicStatus(session.id);
+      this.invalidateActivity(session.id);
       this.dropListener(session.id);
       for (const [token, request] of this.capacityRequests) {
         if (request.sessionId === session.id) this.capacityRequests.delete(token);
@@ -1446,19 +1936,30 @@ export class BotService {
         if (proposal.sessionId === session.id) this.promptProposals.delete(token);
       }
     }
-    if (state.settled) return this.setTopicStatus(session,'finished');
+    if (state.settled) return this.setTopicStatus(session, 'finished');
     if (state.pending) return state.pending;
     const current = state;
-    const pending = (session.runtime.kind === 'attached'
-      ? this.options.runtime.isRunning(session).then(running => !running)
-      : this.options.runtime.stop(session)).then(async settled => {
-      if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
+    const pending = (
+      session.runtime.kind === 'attached'
+        ? this.options.runtime.isRunning(session).then((running) => !running)
+        : this.options.runtime.stop(session)
+    )
+      .then(async (settled) => {
+        if (
+          this.stopped ||
+          this.options.config.terminated ||
+          !this.sessionAssigned(session) ||
           this.closedSessions.get(session.id) !== current ||
           this.options.store.getSessionGeneration(session.id) !== generation ||
-          this.options.store.getSession(session.id)?.status !== 'closed') return;
-      current.settled = settled;
-      if (settled) await this.setTopicStatus(session,'finished');
-    }).finally(() => { current.pending = undefined; });
+          this.options.store.getSession(session.id)?.status !== 'closed'
+        )
+          return;
+        current.settled = settled;
+        if (settled) await this.setTopicStatus(session, 'finished');
+      })
+      .finally(() => {
+        current.pending = undefined;
+      });
     current.pending = pending;
     return pending;
   }
@@ -1473,18 +1974,28 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
-    const icon = this.topicIcons.get(session.id);
-    await icon?.tail;
-    this.topicIcons.delete(session.id);
-    if (session.status !== 'detached') {
-      try {
-        await this.delivery.run(session.chatId, () => this.bot.api.editForumTopic(
-          session.chatId,session.threadId,{icon_custom_emoji_id:''}), () => !this.stopped &&
-            this.options.store.getTopicKind(session) === 'detached' &&
-            findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath);
-      } catch (error) {
-        if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED'))) throw error;
-      }
+    const metadata = this.metadataOwners.get(session.id)?.metadata;
+    await metadata?.icon.completion;
+    this.disposeMetadataOwner(session.id);
+    if (session.status === 'detached') return;
+    try {
+      await this.delivery.run(
+        session.chatId,
+        () =>
+          this.bot.api.editForumTopic(
+            session.chatId,
+            session.threadId,
+            { icon_custom_emoji_id: '' },
+            this.apiAbort.signal,
+          ),
+        () =>
+          !this.stopped &&
+          this.options.store.getTopicKind(session) === 'detached' &&
+          findInstance(this.options.config, this.id, session.chatId)?.path === session.instancePath,
+      );
+    } catch (error) {
+      if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')))
+        throw error;
     }
   }
   private async announce(session: TopicSession): Promise<void> {
@@ -1495,26 +2006,58 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
-  private async newSession(ctx: Context, task?: PromptContent, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, accepted?: () => void, worktree = false, authority = ctx): Promise<void> {
+  private async newSession(
+    ctx: Context,
+    task?: PromptContent,
+    attached?: { instanceId: string; sessionId: string; instancePath: string },
+    name?: string,
+    accepted?: () => void,
+    worktree = false,
+    authority = ctx,
+  ): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
-    if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
+    if (attached && attached.instancePath !== instancePath)
+      throw new Error('The group instance assignment changed');
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
-    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const title = (name ?? task?.text.replace(/(?:^|\s)\/skill:[^\s]+/g, ' ') ?? '').replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
-    const initialIcon = task !== undefined && !worktree ? (await this.getIconIds()).running : undefined;
-    if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
-    const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
-    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
+    if (this.assignedPath(ctx.chat!.id) !== instancePath)
+      throw new Error('The group instance assignment changed');
+    const title =
+      (name ?? task?.text.replace(/(?:^|\s)\/skill:[^\s]+/g, ' ') ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 128) || 'OMP session';
+    const initialIcon =
+      task !== undefined && !worktree ? (await this.getIconIds()).running : undefined;
+    if (!(await this.currentAdmin(authority)))
+      throw new Error('Administrator access changed before topic creation.');
+    const topic = await this.bot.api.createForumTopic(
+      ctx.chat!.id,
+      title,
+      initialIcon ? { icon_custom_emoji_id: initialIcon } : {},
+    );
+    if (this.assignedPath(ctx.chat!.id) !== instancePath)
+      throw new Error('The group instance assignment changed');
     const automaticWorktree = !attached && !worktree && this.createsTopicWorktrees(ctx.chat!.id);
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree || automaticWorktree ? undefined : task, ctx.from!.id, authority.from!.id);
+    const session = this.options.store.createSession(
+      { botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath },
+      title,
+      attached
+        ? { kind: 'attached', instanceId: attached.instanceId, sessionId: attached.sessionId }
+        : { kind: 'managed' },
+      attached || worktree || automaticWorktree ? undefined : task,
+      ctx.from!.id,
+      authority.from!.id,
+    );
     if (automaticWorktree) {
       await this.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
+      if (!(await this.currentAdmin(authority)))
+        throw new Error('Administrator access changed before worktree creation.');
       await this.createTopicWorktree(session);
       if (task !== undefined) {
         await this.authorize(ctx.chat!.id, ctx.from!.id);
-        if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+        if (!(await this.currentAdmin(authority)))
+          throw new Error('Administrator access changed before initial task submission.');
         this.requireSessionAssignment(session);
         this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
       }
@@ -1523,33 +2066,56 @@ export class BotService {
       const text = await this.options.runtime.worktree(session, task?.text || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);
       task = undefined;
-      await replyTo(ctx,topicDestination(session.chatId,session.threadId),text);
+      await replyTo(ctx, topicDestination(session.chatId, session.threadId), text);
     }
     if (worktree) {
       const sourceKey = this.skills.key(ctx);
-      const destinationKey = {...sourceKey,destination:topicDestination(session.chatId,session.threadId)};
-      for (const skill of this.options.store.getPendingSkills(sourceKey)) this.options.store.addPendingSkill(destinationKey,skill);
+      const destinationKey = {
+        ...sourceKey,
+        destination: topicDestination(session.chatId, session.threadId),
+      };
+      for (const skill of this.options.store.getPendingSkills(sourceKey))
+        this.options.store.addPendingSkill(destinationKey, skill);
       this.options.store.clearPendingSkills(sourceKey);
       const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
-      if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
+      if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
     }
     accepted?.();
-    if (task !== undefined && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
-    await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
-      reply_parameters: { message_id: ctx.message!.message_id, allow_sending_without_reply: true },
-      link_preview_options: { is_disabled: true },
-    });
+    if (task !== undefined && ctx.message)
+      this.options.store.setInitialMessage(session.id, ctx.message.message_id);
+    await replyTo(
+      ctx,
+      contextDestination(ctx),
+      `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`,
+      {
+        reply_parameters: {
+          message_id: ctx.message!.message_id,
+          allow_sending_without_reply: true,
+        },
+        link_preview_options: { is_disabled: true },
+      },
+    );
     await this.announce(session);
     const source = ctx.message;
     if (task !== undefined && source?.reply_to_message) {
-      await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
-        ctx.chat!.id, source.reply_to_message.message_id);
+      await forwardTo(
+        this.bot.api,
+        topicDestination(session.chatId, session.threadId),
+        ctx.chat!.id,
+        source.reply_to_message.message_id,
+      );
     }
-    if (task !== undefined) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-      if (original.message) await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
-        ctx.chat!.id, original.message.message_id);
-    }
-    await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown', initialIcon);
+    if (task !== undefined)
+      for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
+        if (original.message)
+          await forwardTo(
+            this.bot.api,
+            topicDestination(session.chatId, session.threadId),
+            ctx.chat!.id,
+            original.message.message_id,
+          );
+      }
+    await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
     await this.listen(session);
     await this.sendInitial(session);
   }
@@ -1758,9 +2324,7 @@ export class BotService {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
-    const previousTarget = this.options.store.getReplyTarget(session.id);
     const messageId = ctx.message!.message_id;
-    this.options.store.setReplyTarget(session.id,messageId);
     const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
       if (selected.names.length) {
         const current = this.options.store.getPendingSkills(selected.key);
@@ -1776,7 +2340,6 @@ export class BotService {
     try {
       this.sendPrompt(this.listeners.get(session.id)!,content,messageId,restore);
     } catch (error) {
-      this.options.store.setReplyTarget(session.id,previousTarget);
       restore?.();
       throw error;
     }
@@ -1785,91 +2348,185 @@ export class BotService {
   private async handle(ctx: Context, intent: InputIntent): Promise<void> {
     if (this.stopped || intent.kind === 'ignore') return;
     if (intent.kind === 'command' && intent.action === 'status' && ctx.chat?.type !== 'private') {
-      if (intent.argument) { await replyTo(ctx,contextDestination(ctx),'Usage: /status'); return; }
+      if (intent.argument) {
+        await replyTo(ctx, contextDestination(ctx), 'Usage: /status');
+        return;
+      }
       await this.showStatus(ctx);
       return;
     }
     if (refreshTermination(this.options.config)) {
-      try { await this.applyTermination(); }
-      finally {
-        if (ctx.chat && (ctx.callbackQuery || intent.kind !== 'event')) await replyTo(ctx, contextDestination(ctx), terminationMessage);
+      try {
+        await this.applyTermination();
+      } finally {
+        if (ctx.chat && (ctx.callbackQuery || intent.kind !== 'event'))
+          await replyTo(ctx, contextDestination(ctx), terminationMessage);
       }
       return;
     }
     this.termination = undefined;
-    if (ctx.inlineQuery) { await this.skills.inline(ctx); return; }
+    if (ctx.inlineQuery) {
+      await this.skills.inline(ctx);
+      return;
+    }
     if (ctx.callbackQuery) {
       if (ctx.callbackQuery.data === undefined || !ctx.chat || !ctx.from || ctx.from.is_bot) return;
       if (ctx.callbackQuery.data.startsWith('skills:')) {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-        if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id)) return;
+        if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id))
+          return;
         const destination = contextDestination(ctx);
-        if (destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached') return;
-        const session = this.options.store.getTopic({botId:this.id,destination});
+        if (
+          destination.kind === 'topic' &&
+          this.options.store.getTopicKind({
+            botId: this.id,
+            chatId: destination.chatId,
+            threadId: destination.threadId,
+          }) === 'detached'
+        )
+          return;
+        const session = this.options.store.getTopic({ botId: this.id, destination });
         await this.skills.callback(ctx, ctx.callbackQuery.data, session);
         return;
       }
-      if (ctx.callbackQuery.data.startsWith('settings:')) { await this.settingsCallback(ctx,ctx.callbackQuery.data); return; }
+      if (ctx.callbackQuery.data.startsWith('settings:')) {
+        await this.settingsCallback(ctx, ctx.callbackQuery.data);
+        return;
+      }
       if (ctx.callbackQuery.data === 'setup:check') {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-        if (message && 'from' in message && message.from?.id === this.id && !('forward_origin' in message) && !('forward_date' in message)) await this.setup(ctx);
+        if (
+          message &&
+          'from' in message &&
+          message.from?.id === this.id &&
+          !('forward_origin' in message) &&
+          !('forward_date' in message)
+        )
+          await this.setup(ctx);
       }
       const proposal = ctx.callbackQuery.data.match(/^prompt:approve:([A-Za-z0-9_-]{22})$/);
-      if (proposal) await this.approvePrompt(ctx,proposal[1]!);
-      const capacity = ctx.callbackQuery.data.match(/^capacity:(approve|cancel):([A-Za-z0-9_-]{22})$/);
-      if (capacity) await this.confirmCapacity(ctx,capacity[1]!,capacity[2]!);
+      if (proposal) await this.approvePrompt(ctx, proposal[1]!);
+      const capacity = ctx.callbackQuery.data.match(
+        /^capacity:(approve|cancel):([A-Za-z0-9_-]{22})$/,
+      );
+      if (capacity) await this.confirmCapacity(ctx, capacity[1]!, capacity[2]!);
       const answer = ctx.callbackQuery.data.match(/^ask:([A-Za-z0-9_-]{16}):(\d+|cancel)$/);
       if (answer) await this.answerQuestion(ctx, answer[1]!, answer[2]!);
       return;
     }
     if (ctx.myChatMember) {
-      if (ctx.chat && ['administrator','member'].includes(ctx.myChatMember.new_chat_member.status)) await replyTo(ctx, contextDestination(ctx), 'A current group administrator can run /setup to request instance assignment from the local operator.');
+      if (ctx.chat && ['administrator', 'member'].includes(ctx.myChatMember.new_chat_member.status))
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'A current group administrator can run /setup to request instance assignment from the local operator.',
+        );
       return;
     }
     const message = ctx.message;
     if (!message || !ctx.chat) return;
     const topicLifecycle = intent.kind === 'event';
-    const command = intent.kind === 'command' ? {action:intent.action,argument:intent.argument} : undefined;
+    const command =
+      intent.kind === 'command' ? { action: intent.action, argument: intent.argument } : undefined;
     if (command?.action === 'terminate') {
-      if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Termination requires a current group administrator.'); return; }
+      if (!(await this.currentAdmin(ctx))) {
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'Termination requires a current group administrator.',
+        );
+        return;
+      }
       const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from!.id);
       const persisted = readConfig(this.options.config.configPath);
       const assigned = findInstance(persisted, this.id, ctx.chat.id);
-      if (!assigned || assigned.path !== this.assignedPath(ctx.chat.id) || !isAdministrator(member)) {
-        await replyTo(ctx, contextDestination(ctx), 'Termination requires a current group administrator.');
+      if (
+        !assigned ||
+        assigned.path !== this.assignedPath(ctx.chat.id) ||
+        !isAdministrator(member)
+      ) {
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'Termination requires a current group administrator.',
+        );
         return;
       }
       persisted.terminated = true;
       writeConfig(persisted);
       this.options.config.terminated = true;
-      try { await this.applyTermination(); }
-      finally { await replyTo(ctx, contextDestination(ctx), terminationMessage); }
-      return;
-    }
-    if (ctx.chat.type === 'private') {
-      await replyTo(ctx, contextDestination(ctx), `Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup.${this.options.config.publicUrl ? ' Configure the Mini App URL in BotFather for this bot.' : ''}`, {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
-    }
-    if (command?.action === 'setup') { await this.setup(ctx); return; }
-    const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
-    if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
-      if (command?.action === 'help') {
-        await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n${this.promptHelp(ctx.chat.id)}`);
+      try {
+        await this.applyTermination();
+      } finally {
+        await replyTo(ctx, contextDestination(ctx), terminationMessage);
       }
       return;
     }
-    if (command?.action === 'settings') { await this.openSettings(ctx); return; }
+    if (ctx.chat.type === 'private') {
+      await replyTo(
+        ctx,
+        contextDestination(ctx),
+        `Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup.${this.options.config.publicUrl ? ' Configure the Mini App URL in BotFather for this bot.' : ''}`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: 'Add to Group',
+                  url: `https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`,
+                },
+              ],
+            ],
+          },
+        },
+      );
+      return;
+    }
+    if (command?.action === 'setup') {
+      await this.setup(ctx);
+      return;
+    }
+    const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
+    if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
+      if (command?.action === 'help') {
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${(await this.currentAdmin(ctx)) ? `\n${cliHelp}` : ''}\n${this.promptHelp(ctx.chat.id)}`,
+        );
+      }
+      return;
+    }
+    if (command?.action === 'settings') {
+      await this.openSettings(ctx);
+      return;
+    }
     const destination = contextDestination(ctx);
-    let session = this.options.store.getTopic({botId:this.id,destination});
-    const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
+    let session = this.options.store.getTopic({ botId: this.id, destination });
+    const detached =
+      destination.kind === 'topic' &&
+      this.options.store.getTopicKind({
+        botId: this.id,
+        chatId: destination.chatId,
+        threadId: destination.threadId,
+      }) === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
     if (detached && topicLifecycle) return;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
-        session = this.options.store.createSession({botId:this.id,chatId:destination.chatId,threadId:destination.threadId,instancePath:this.assignedPath(ctx.chat.id)}, message.forum_topic_created.name);
+        session = this.options.store.createSession(
+          {
+            botId: this.id,
+            chatId: destination.chatId,
+            threadId: destination.threadId,
+            instancePath: this.assignedPath(ctx.chat.id),
+          },
+          message.forum_topic_created.name,
+        );
         const defaultSkill = this.defaultNewTopicSkill(ctx.chat.id);
-        if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
+        if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
         if (this.createsTopicWorktrees(ctx.chat.id)) {
-          await this.authorize(ctx.chat.id,ctx.from!.id);
+          await this.authorize(ctx.chat.id, ctx.from!.id);
           await this.createTopicWorktree(session);
         }
         await this.announce(session);
@@ -1879,108 +2536,178 @@ export class BotService {
     }
     if (session && message.forum_topic_edited) {
       const edited = message.forum_topic_edited;
-      if (edited.icon_custom_emoji_id !== undefined) {
-        const ids = await this.getIconIds();
-        // Telegram can attribute generated icon echoes to an anonymous administrator.
-        const preferenceEdit = ctx.from?.id !== this.id && edited.icon_custom_emoji_id !== ids.running;
-        if (preferenceEdit) this.options.store.setTopicFinishIcon(session.id,edited.icon_custom_emoji_id);
-        const icon = this.topicIcons.get(session.id);
-        if (icon && icon.generation !== this.options.store.getSessionGeneration(session.id)) {
-          this.invalidateTopicStatus(session.id);
-        }
-        if (icon && (preferenceEdit || (icon.confirmed && icon.confirmed.id !== edited.icon_custom_emoji_id))) {
-          icon.confirmed = undefined;
-          ++icon.revision;
-          if (!detached) void this.setTopicStatus(session,icon.activity);
-        }
-      }
-      if (edited.name && ctx.from?.id !== this.id) {
-        const title = this.stripTopicStatus(session,edited.name);
-        const listener = this.listeners.get(session.id);
-        if (listener) listener.sessionTitle = title;
-        this.humanTitles.set(session.id,title);
-        this.options.store.updateSession(session.id, {name:edited.name});
-        this.titleRevisions.set(session.id,(this.titleRevisions.get(session.id) ?? 0)+1);
-        if (!detached) {
-          this.options.store.setPendingSessionTitle(session.id,title);
-          const revision = this.titleRevisions.get(session.id);
+      const attributable = ctx.from !== undefined && !ctx.from.is_bot && !message.sender_chat;
+      const metadata = this.topicMetadata(session);
+      if (attributable) {
+        if (edited.name !== undefined) {
+          const title = this.stripTopicStatus(session, edited.name);
+          const source = this.titleSource(session);
+          source.humanTitle = title;
+          const prefix =
+            [this.options.store.getTopicTitlePrefix(session.id) ?? '', ...source.prefixes].find(
+              (candidate) => candidate !== '' && edited.name?.startsWith(`${candidate} `),
+            ) ?? '';
+          this.options.store.setTopicTitle(session.id, edited.name, prefix);
+          this.options.store.setPendingSessionTitle(session.id, title);
+          const revision = ++source.revision;
           const generation = this.options.store.getSessionGeneration(session.id);
-          await this.projectTopicTitle(session,title,() => !this.stopped && !refreshTermination(this.options.config) &&
-            this.sessionAssigned(session) && this.options.store.getSession(session.id)?.status === 'open' &&
-            this.titleRevisions.get(session.id) === revision &&
-            this.options.store.getSessionGeneration(session.id) === generation);
-          await this.applySessionTitle(session);
+          void this.projectTopicTitle(
+            session,
+            title,
+            () =>
+              !this.stopped &&
+              !refreshTermination(this.options.config) &&
+              this.sessionAssigned(session) &&
+              this.options.store.getSession(session.id)?.status === 'open' &&
+              this.options.store.getSessionGeneration(session.id) === generation &&
+              source.revision === revision,
+          );
+          void metadata.name.observe(edited.name);
+          void this.applySessionTitle(session).catch((error) => {
+            this.sessionObservation(session.id).failure = {
+              operation: 'Topic title synchronization',
+              at: Date.now(),
+              error,
+            };
+          });
         }
+        if (edited.icon_custom_emoji_id !== undefined) {
+          const value = edited.icon_custom_emoji_id;
+          void metadata.icon.publish(undefined);
+          void this.getIconIds()
+            .then((ids) => {
+              if (
+                this.stopped ||
+                this.options.config.terminated ||
+                this.metadataOwners.get(session.id)?.metadata !== metadata ||
+                !this.sessionAssigned(session) ||
+                this.options.store.getSessionGeneration(session.id) !== metadata.generation
+              )
+                return;
+              if (value !== ids.running) this.options.store.setTopicFinishIcon(session.id, value);
+              const target = this.topicIconValue(session, ids);
+              if (target !== undefined) void metadata.icon.publish(target);
+              void metadata.icon.observe(value);
+            })
+            .catch((error) => {
+              if (!this.stopped)
+                this.sessionObservation(session.id).failure = {
+                  operation: 'Topic icon synchronization',
+                  at: Date.now(),
+                  error,
+                };
+            });
+        }
+      } else {
+        if (edited.name !== undefined) void metadata.name.observe(edited.name);
+        if (edited.icon_custom_emoji_id !== undefined)
+          void metadata.icon.observe(edited.icon_custom_emoji_id);
       }
-      if (ctx.from?.id === this.id && (edited.icon_custom_emoji_id !== undefined || edited.name !== undefined)) {
-        await this.delivery.run(ctx.chat.id,
-          () => this.bot.api.deleteMessage(ctx.chat!.id,message.message_id),
-          () => !this.stopped && this.sessionAssigned(session)).catch(error => {
-          console.warn(`Could not delete topic edit notice (${session.id}, ${message.message_id}).`, error);
-        });
+      if (
+        ctx.from?.id === this.id &&
+        (edited.icon_custom_emoji_id !== undefined || edited.name !== undefined)
+      ) {
+        await this.delivery
+          .run(
+            ctx.chat.id,
+            () => this.bot.api.deleteMessage(ctx.chat!.id, message.message_id),
+            () => !this.stopped && this.sessionAssigned(session),
+          )
+          .catch((error) => {
+            console.warn(
+              `Could not delete topic edit notice (${session.id}, ${message.message_id}).`,
+              error,
+            );
+          });
       }
       return;
     }
     if (session && 'forum_topic_closed' in message) {
       if (this.options.store.getSession(session.id)?.status !== 'closed') {
-        this.options.store.updateSession(session.id,{status:'closed'});
+        this.options.store.updateSession(session.id, { status: 'closed' });
         this.options.store.advanceSessionGeneration(session.id);
       }
       this.options.store.cancelInitialTask(session.id);
       this.dropListener(session.id);
-      for (const handler of this.sessionInvalidationHandlers) handler(session.id,'This topic is closed. Reopen it explicitly to connect.');
-      void this.runBackground(`close:${session.id}`,() => this.windDownClosedSession(session));
+      for (const handler of this.sessionInvalidationHandlers)
+        handler(session.id, 'This topic is closed. Reopen it explicitly to connect.');
+      void this.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
       return;
     }
     if (session && 'forum_topic_reopened' in message) {
-      this.options.store.updateSession(session.id,{status:'open'});
+      this.options.store.updateSession(session.id, { status: 'open' });
       this.closedSessions.delete(session.id);
       return;
     }
     if (!ctx.from || ctx.from.is_bot) return;
-    if (session?.status === 'closed' && !['status','help','detach'].includes(command?.action ?? '')) {
-      await replyTo(ctx,destination,'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.');
+    if (
+      session?.status === 'closed' &&
+      !['status', 'help', 'detach'].includes(command?.action ?? '')
+    ) {
+      await replyTo(
+        ctx,
+        destination,
+        'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.',
+      );
       return;
     }
     if (detached && (intent.kind === 'question-answer' || intent.kind === 'ended-question')) return;
     if (intent.kind === 'question-answer') {
-      await this.authorize(ctx.chat.id,ctx.from.id);
+      await this.authorize(ctx.chat.id, ctx.from.id);
       const pending = this.questions.get(intent.token);
       if (!pending) {
-        await replyTo(ctx,destination,'This question is no longer active. Answer the latest question instead.');
+        await replyTo(
+          ctx,
+          destination,
+          'This question is no longer active. Answer the latest question instead.',
+        );
         return;
       }
-      if (pending.request.kind === 'editor') this.submitAnswer(intent.token,intent.text,undefined,message.message_id);
-      else await replyTo(ctx,destination,'Use the numbered answer buttons on the question.');
+      if (pending.request.kind === 'editor')
+        this.submitAnswer(intent.token, intent.text, undefined, message.message_id);
+      else await replyTo(ctx, destination, 'Use the numbered answer buttons on the question.');
       return;
     }
     if (intent.kind === 'ended-question') {
-      await this.authorize(ctx.chat.id,ctx.from.id);
-      await replyTo(ctx,destination,'This question is no longer active. Answer the latest question instead.');
+      await this.authorize(ctx.chat.id, ctx.from.id);
+      await replyTo(
+        ctx,
+        destination,
+        'This question is no longer active. Answer the latest question instead.',
+      );
       return;
     }
     if (intent.kind === 'skill-selection') {
-      if (!detached) await this.skills.selection(ctx,intent.text,session);
+      if (!detached) await this.skills.selection(ctx, intent.text, session);
       return;
     }
     if (intent.kind === 'new-task' || intent.kind === 'session-prompt') {
       if (detached && intent.kind !== 'new-task') return;
       if (intent.kind === 'session-prompt' && destination.kind !== 'general' && !session) {
-        await replyTo(ctx,destination,'No session in this topic. Use /new to create one.');
+        await replyTo(ctx, destination, 'No session in this topic. Use /new to create one.');
         return;
       }
       if (!this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
       if (!intent.content.text.trim() && !intent.content.images.length) {
-        if (intent.kind === 'session-prompt' && destination.kind !== 'general') await replyTo(ctx,destination,'Usage: /p <prompt>');
+        if (intent.kind === 'session-prompt' && destination.kind !== 'general')
+          await replyTo(ctx, destination, 'Usage: /p <prompt>');
         return;
       }
-      await this.authorize(ctx.chat.id,ctx.from.id);
+      await this.authorize(ctx.chat.id, ctx.from.id);
       const instancePath = this.assignedPath(ctx.chat.id);
       const generation = session && this.options.store.getSessionGeneration(session.id);
       const images = await this.promptImages(intent.content.images);
-      if (this.assignedPath(ctx.chat.id) !== instancePath ||
-          (session && this.options.store.getSessionGeneration(session.id) !== generation)) throw new Error('The session or group assignment changed while downloading the image');
-      await this.routePrompt(ctx,{text:intent.content.text,...(images.length ? {images} : {})},intent.kind === 'new-task' ? undefined : session,intent.skill);
+      if (
+        this.assignedPath(ctx.chat.id) !== instancePath ||
+        (session && this.options.store.getSessionGeneration(session.id) !== generation)
+      )
+        throw new Error('The session or group assignment changed while downloading the image');
+      await this.routePrompt(
+        ctx,
+        { text: intent.content.text, ...(images.length ? { images } : {}) },
+        intent.kind === 'new-task' ? undefined : session,
+        intent.skill,
+      );
       return;
     }
     if (command) {
@@ -1988,94 +2715,245 @@ export class BotService {
       const action = command.action;
       const arg = command.argument;
       if (action === 'list_admins') {
-        if (arg) { await replyTo(ctx, destination, 'Usage: /list_admins'); return; }
+        if (arg) {
+          await replyTo(ctx, destination, 'Usage: /list_admins');
+          return;
+        }
         await this.listAdmins(ctx);
         return;
       }
       if (action === 'usage') {
-        if (arg) { await replyTo(ctx, destination, 'Usage: /usage'); return; }
+        if (arg) {
+          await replyTo(ctx, destination, 'Usage: /usage');
+          return;
+        }
         const usage = await this.options.runtime.providerUsage(assigned.path);
-        const text = usage.map(section => `${section.heading ? `**${section.heading}**\n\n` : ''}${section.table}`).join('\n\n');
-        await ctx.api.sendRichMessage(destination.chatId, { markdown: text }, {
-          message_thread_id: destination.kind === 'topic' ? destination.threadId : undefined,
-        });
+        const text = usage
+          .map(
+            (section) => `${section.heading ? `**${section.heading}**\n\n` : ''}${section.table}`,
+          )
+          .join('\n\n');
+        await ctx.api.sendRichMessage(
+          destination.chatId,
+          { markdown: text },
+          {
+            message_thread_id: destination.kind === 'topic' ? destination.threadId : undefined,
+          },
+        );
         return;
       }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
       if (skillAlias) {
-        if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Select skills in General or a session topic.'); return; }
+        if (detached) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'This topic is conversation-only. Select skills in General or a session topic.',
+          );
+          return;
+        }
         if (!arg) {
           await this.skills.choose(ctx, skillAlias.name, session);
           return;
         }
       }
       if (action === 'skills') {
-        if (detached) { await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /skills in General or a session topic.'); return; }
-        if (arg && arg !== 'clear') { await replyTo(ctx, contextDestination(ctx), 'Usage: /skills or /skills clear'); return; }
+        if (detached) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'This topic is conversation-only. Use /skills in General or a session topic.',
+          );
+          return;
+        }
+        if (arg && arg !== 'clear') {
+          await replyTo(ctx, contextDestination(ctx), 'Usage: /skills or /skills clear');
+          return;
+        }
         await this.skills.open(ctx, session, arg === 'clear');
         return;
       }
       if (action === 'detach') {
-        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.'); return; }
-        if (destination.kind !== 'topic') { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a topic, not General or an unrelated chat.'); return; }
-        this.options.store.detachTopic({botId:this.id,chatId:destination.chatId,threadId:destination.threadId});
+        if (!(await this.currentAdmin(ctx))) {
+          await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.');
+          return;
+        }
+        if (destination.kind !== 'topic') {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'Use /detach inside a topic, not General or an unrelated chat.',
+          );
+          return;
+        }
+        this.options.store.detachTopic({
+          botId: this.id,
+          chatId: destination.chatId,
+          threadId: destination.threadId,
+        });
         if (session) await this.detachSession(session);
-        await replyTo(ctx, contextDestination(ctx), 'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.');
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.',
+        );
         return;
       }
-      if (detached && !['new','attach','help','start'].includes(action)) {
-        await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /new to create a separate session topic.');
+      if (detached && !['new', 'attach', 'help', 'start'].includes(action)) {
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'This topic is conversation-only. Use /new to create a separate session topic.',
+        );
         return;
       }
       if (action === 'worktree') {
-        if (destination.kind === 'general') { await this.routePrompt(ctx,{text:arg},undefined,undefined,true); return; }
-        if (!session || detached) { await replyTo(ctx,destination,'Use /worktree inside an active session topic, or General to create one.'); return; }
-        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx,destination,'Worktree commands require a group administrator.'); return; }
-        await this.authorize(ctx.chat.id,ctx.from.id);
+        if (destination.kind === 'general') {
+          await this.routePrompt(ctx, { text: arg }, undefined, undefined, true);
+          return;
+        }
+        if (!session || detached) {
+          await replyTo(
+            ctx,
+            destination,
+            'Use /worktree inside an active session topic, or General to create one.',
+          );
+          return;
+        }
+        if (!(await this.currentAdmin(ctx))) {
+          await replyTo(ctx, destination, 'Worktree commands require a group administrator.');
+          return;
+        }
+        await this.authorize(ctx.chat.id, ctx.from.id);
         this.requireSessionAssignment(session);
-        if (session.status !== 'open') throw new Error('This session is archived. Reopen the topic before creating a worktree.');
+        if (session.status !== 'open')
+          throw new Error('This session is archived. Reopen the topic before creating a worktree.');
         let text: string;
         try {
-          text = await this.options.runtime.worktree(session,arg || undefined);
-          this.options.store.setSessionRuntime(session.id,session.runtime);
+          text = await this.options.runtime.worktree(session, arg || undefined);
+          this.options.store.setSessionRuntime(session.id, session.runtime);
         } finally {
           this.dropListener(session.id);
         }
         await this.listen(session);
-        await replyTo(ctx,destination,text);
+        await replyTo(ctx, destination, text);
         return;
       }
       if (action === 'attach') {
-        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Attaching requires a group administrator.'); return; }
+        if (!(await this.currentAdmin(ctx))) {
+          await replyTo(ctx, contextDestination(ctx), 'Attaching requires a group administrator.');
+          return;
+        }
         const match = arg.match(/^([A-Za-z0-9_-]+)(?:\s+(.+))?$/);
-        if (!match) { await replyTo(ctx, contextDestination(ctx), 'Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.'); return; }
+        if (!match) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.',
+          );
+          return;
+        }
         const instancePath = this.assignedPath(ctx.chat.id);
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
-        await this.newSession(ctx,undefined,{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
+        await this.newSession(
+          ctx,
+          undefined,
+          { instanceId: binding.instanceId, sessionId: binding.sessionId, instancePath },
+          match[2] ?? 'Attached OMP session',
+        );
+        return;
       }
-      if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
+      if (action === 'help' || action === 'start') {
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${(await this.currentAdmin(ctx)) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`,
+        );
+        return;
+      }
       if (action === 'cli') {
-        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, destination, 'This command requires a current group administrator.'); return; }
-        if (arg) { await replyTo(ctx, destination, 'Usage: /cli'); return; }
-        if (destination.kind !== 'topic' || !session) { await replyTo(ctx, destination, 'Use /cli in an active session topic.'); return; }
+        if (!(await this.currentAdmin(ctx))) {
+          await replyTo(ctx, destination, 'This command requires a current group administrator.');
+          return;
+        }
+        if (arg) {
+          await replyTo(ctx, destination, 'Usage: /cli');
+          return;
+        }
+        if (destination.kind !== 'topic' || !session) {
+          await replyTo(ctx, destination, 'Use /cli in an active session topic.');
+          return;
+        }
         this.requireSessionAssignment(session);
-        if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return; }
+        if (session.status !== 'open') {
+          await replyTo(
+            ctx,
+            destination,
+            'This session is archived. Reopen the topic before joining.',
+          );
+          return;
+        }
         const command = `omp-telegram session join --chat ${destination.chatId} --topic ${destination.threadId}`;
-        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
-          parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
-        });
+        await replyTo(
+          ctx,
+          destination,
+          `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`,
+          {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[{ text: 'Copy command', copy_text: { text: command } }]],
+            },
+          },
+        );
         return;
       }
       if (action === 'session') {
-        if (!this.options.config.publicUrl) { await replyTo(ctx, contextDestination(ctx), 'The Mini App is disabled. Continue using this topic to interact with the agent in Telegram.'); return; }
-        if (!session) { await replyTo(ctx, contextDestination(ctx), 'No session in this topic. Use /new task or create a topic.'); return; }
-        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`,{reply_markup:this.sessionMarkup(session)});
+        if (!this.options.config.publicUrl) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'The Mini App is disabled. Continue using this topic to interact with the agent in Telegram.',
+          );
+          return;
+        }
+        if (!session) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'No session in this topic. Use /new task or create a topic.',
+          );
+          return;
+        }
+        await replyTo(ctx, contextDestination(ctx), `${session.name} (${session.status})`, {
+          reply_markup: this.sessionMarkup(session),
+        });
         return;
       }
       if (action === 'model_preset') {
-        if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }
-        if (destination.kind !== 'topic' || !session) { await this.replyPresetUsage(ctx, assigned.path, '\nUse this command in a session topic. Use /settings for forum defaults.'); return; }
-        if (session && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before using model preset commands.'); return; }
+        if (!(await this.currentAdmin(ctx))) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'Model preset commands require a group administrator.',
+          );
+          return;
+        }
+        if (destination.kind !== 'topic' || !session) {
+          await this.replyPresetUsage(
+            ctx,
+            assigned.path,
+            '\nUse this command in a session topic. Use /settings for forum defaults.',
+          );
+          return;
+        }
+        if (session && session.status !== 'open') {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'This session is archived. Reopen the topic before using model preset commands.',
+          );
+          return;
+        }
         if (arg && !/^[A-Za-z][\w-]*$/.test(arg)) {
           await this.replyPresetUsage(ctx, session.instancePath);
           return;
@@ -2085,39 +2963,74 @@ export class BotService {
         const release = this.options.runtime.retain(session.id);
         try {
           await this.options.runtime.ensure(session);
-          await this.authorize(ctx.chat.id,ctx.from.id);
-          if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Model preset commands require a group administrator.'); return; }
+          await this.authorize(ctx.chat.id, ctx.from.id);
+          if (!(await this.currentAdmin(ctx))) {
+            await replyTo(
+              ctx,
+              contextDestination(ctx),
+              'Model preset commands require a group administrator.',
+            );
+            return;
+          }
           this.requireSessionAssignment(session);
-          if (this.options.store.getSessionGeneration(session.id) !== generation ||
-              this.options.store.getSession(session.id)?.status !== 'open') throw new Error('The session changed before the model preset command could run');
-          let text = await this.options.runtime.modelPresets(session,arg || undefined);
+          if (
+            this.options.store.getSessionGeneration(session.id) !== generation ||
+            this.options.store.getSession(session.id)?.status !== 'open'
+          )
+            throw new Error('The session changed before the model preset command could run');
+          let text = await this.options.runtime.modelPresets(session, arg || undefined);
           if (!arg) {
-            const preset = findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats
-              .find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)?.default_model_preset;
+            const preset = findInstance(
+              this.options.config,
+              this.id,
+              ctx.chat.id,
+            )!.instance.chats.find(
+              (chat) => chat.botId === this.id && chat.chatId === ctx.chat!.id,
+            )?.default_model_preset;
             text += `\nDefault model preset: ${preset ?? '(not set)'}`;
             text = `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\n${text}`;
           }
           await this.replyPresetText(ctx, text);
         } catch (error) {
-          if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
-          await replyTo(ctx, contextDestination(ctx), "Can't change model preset while busy. /stop first");
-        } finally { release(); }
+          if (
+            !(error instanceof Error) ||
+            error.message !==
+              'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets'
+          )
+            throw error;
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            "Can't change model preset while busy. /stop first",
+          );
+        } finally {
+          release();
+        }
         return;
       }
       if (action === 'stop' || action === 'kill') {
-        if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), `Use /${action} inside a session topic, not General or an unrelated chat.`); return; }
+        if (destination.kind === 'general' || !session) {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            `Use /${action} inside a session topic, not General or an unrelated chat.`,
+          );
+          return;
+        }
         this.requireSessionAssignment(session);
-        if (action === 'stop' && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
+        if (action === 'stop' && session.status !== 'open') {
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'This session is archived. Reopen the topic before sending instructions.',
+          );
+          return;
+        }
         this.options.store.cancelInitialTask(session.id);
         const listener = this.listeners.get(session.id);
         clearTimeout(listener?.initial?.timer);
         if (listener) listener.initial = undefined;
-        if (listener) {
-          listener.activity = 'unknown';
-          ++listener.frameRevision;
-          ++listener.activityRevision;
-        }
-        this.invalidateTopicStatus(session.id);
+        this.invalidateActivity(session.id);
         for (const [token, request] of this.capacityRequests) {
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         }
@@ -2126,9 +3039,13 @@ export class BotService {
           this.dropListener(session.id);
           for (const handler of this.sessionInvalidationHandlers) handler(session.id);
           await this.options.runtime.kill(session);
-          this.acknowledgeMessage(session,message.message_id);
+          this.acknowledgeMessage(session, message.message_id);
           await this.setTopicStatus(session, 'finished');
-          await replyTo(ctx, contextDestination(ctx), 'Session process killed. History is preserved; a managed session can restart on your next instruction or OPEN AGENT visit.');
+          await replyTo(
+            ctx,
+            contextDestination(ctx),
+            'Session process killed. History is preserved; a managed session can restart on your next instruction or OPEN AGENT visit.',
+          );
           return;
         }
         if (!(await this.options.runtime.isRunning(session))) {
@@ -2141,18 +3058,26 @@ export class BotService {
         await this.authorize(ctx.chat.id, ctx.from.id);
         this.requireSessionAssignment(session);
         const activeListener = this.listeners.get(session.id);
-        if (!activeListener || activeListener.connection !== connection ||
-            activeListener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+        if (
+          !activeListener ||
+          activeListener.connection !== connection ||
+          activeListener.generation !== this.options.store.getSessionGeneration(session.id)
+        )
+          throw new Error('Session closed');
         activeListener.pendingAnswers.clear();
         activeListener.pendingStops.push(message.message_id);
         try {
-          connection.send({t:'abort'});
+          connection.send({ t: 'abort' });
         } catch (error) {
           const index = activeListener.pendingStops.indexOf(message.message_id);
-          if (index !== -1) activeListener.pendingStops.splice(index,1);
+          if (index !== -1) activeListener.pendingStops.splice(index, 1);
           throw error;
         }
-        await replyTo(ctx, contextDestination(ctx), 'Abort requested. The session process is still running.');
+        await replyTo(
+          ctx,
+          contextDestination(ctx),
+          'Abort requested. The session process is still running.',
+        );
         return;
       }
     }
@@ -2162,34 +3087,68 @@ export class BotService {
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
-      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
+      void sendTo(
+        this.bot.api,
+        topicDestination(session.chatId, session.threadId),
+        `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`,
+      ).catch(() => undefined);
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
-    const timer = setTimeout(() => {
-      this.reconnects.delete(session.id);
-      if (this.stopped || !this.sessionAssigned(session) || this.options.store.getSessionGeneration(session.id) !== generation) return;
-      const active = this.options.store.getSession(session.id);
-      if (active?.status !== 'open') return;
-      this.reconnecting.add(active.id);
-      void this.runBackground(`reconnect:${active.id}`, async signal => {
-        try {
-          await withCancellation(this.refreshTopicStatus(active), signal);
-        } catch (error) {
-          if (error !== signal.reason && !this.stopped && !(error instanceof SessionCapacityError) && this.options.store.getSessionGeneration(active.id) === generation) this.scheduleReconnect(active, attempt + 1);
-          throw error;
-        }
-      }).finally(() => this.reconnecting.delete(active.id));
-    }, Math.min(1000 * 2 ** attempt, 16000));
+    const timer = setTimeout(
+      () => {
+        this.reconnects.delete(session.id);
+        if (
+          this.stopped ||
+          !this.sessionAssigned(session) ||
+          this.options.store.getSessionGeneration(session.id) !== generation
+        )
+          return;
+        const active = this.options.store.getSession(session.id);
+        if (active?.status !== 'open') return;
+        this.reconnecting.add(active.id);
+        void this.runBackground(`reconnect:${active.id}`, async (signal) => {
+          try {
+            if (this.options.store.hasPendingInitialTask(active.id)) {
+              await withCancellation(this.sendInitial(active), signal);
+            } else {
+              await this.recoverExistingMirror(active, signal);
+            }
+            await withCancellation(this.refreshTopicStatus(active), signal);
+          } catch (error) {
+            if (
+              error !== signal.reason &&
+              !this.stopped &&
+              !(error instanceof SessionCapacityError) &&
+              this.options.store.getSessionGeneration(active.id) === generation
+            )
+              this.scheduleReconnect(active, attempt + 1);
+            throw error;
+          }
+        }).finally(() => this.reconnecting.delete(active.id));
+      },
+      Math.min(1000 * 2 ** attempt, 16000),
+    );
     timer.unref();
     this.reconnects.set(session.id, timer);
   }
   private typingActive(session: TopicSession, listener: Listener): boolean {
-    if (this.stopped || this.options.config.terminated || this.listeners.get(session.id) !== listener ||
-        !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open') return false;
-    const mode = findInstance(this.options.config, this.id, session.chatId)?.instance.chats
-      .find(chat => chat.botId === this.id && chat.chatId === session.chatId)?.typing_indicators ?? 'disabled';
-    return mode === 'inference' ? listener.activity === 'running' : mode === 'streaming' && listener.typingText === true;
+    if (this.options.store.getSessionGeneration(session.id) !== listener.generation) return false;
+    if (
+      this.stopped ||
+      this.options.config.terminated ||
+      this.listeners.get(session.id) !== listener ||
+      !this.sessionAssigned(session) ||
+      this.options.store.getSession(session.id)?.status !== 'open'
+    )
+      return false;
+    const mode =
+      findInstance(this.options.config, this.id, session.chatId)?.instance.chats.find(
+        (chat) => chat.botId === this.id && chat.chatId === session.chatId,
+      )?.typing_indicators ?? 'disabled';
+    return mode === 'inference'
+      ? this.activityAtUse(session) === 'running'
+      : mode === 'streaming' && listener.typingText === true;
   }
 
   private refreshTyping(session: TopicSession, listener: Listener): void {
@@ -2209,110 +3168,188 @@ export class BotService {
     }
     if ((listener.typingNextAt ?? 0) > Date.now()) return;
     listener.typingNextAt = Date.now() + 4000;
-    void this.delivery.typing(session.chatId, session.threadId,
-      () => this.bot.api.sendChatAction(session.chatId, 'typing', {
-        message_thread_id: session.threadId === 1 ? undefined : session.threadId,
-      }), () => this.typingActive(session, listener)).catch(error => {
-      console.warn(`Could not send typing action (${session.id}).`, error);
-    });
+    void this.delivery
+      .typing(
+        session.chatId,
+        session.threadId,
+        () =>
+          this.bot.api.sendChatAction(session.chatId, 'typing', {
+            message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+          }),
+        () => this.typingActive(session, listener),
+      )
+      .catch((error) => {
+        console.warn(`Could not send typing action (${session.id}).`, error);
+      });
   }
 
   private dropListener(id: string): void {
-    this.invalidateTopicStatus(id);
+    this.invalidateActivity(id);
     clearTimeout(this.reconnects.get(id));
     this.reconnects.delete(id);
     const listener = this.listeners.get(id);
-    for (const pending of listener?.pendingPrompts ?? []) pending.observation.state = 'acceptance unknown';
+    for (const pending of listener?.pendingPrompts ?? [])
+      pending.observation.state = 'acceptance unknown';
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
-    clearInterval(listener?.typingTimer);
+    if (listener) listener.initial = undefined;
+    clearTimeout(listener?.typingTimer);
     const session = this.options.store.getSession(id);
     if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
-    if (listener) {
-      listener.activityProbeController?.abort(new Error('Activity observation canceled because its listener closed'));
-      listener.initial = undefined;
-      listener.activity = 'unknown';
-    }
     for (const [token, question] of this.questions) {
       if (question.listener === listener) this.endQuestion(token);
     }
     listener?.connection?.close();
   }
-  private listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly = false, recoverClosed = true): Promise<CollabConnection> {
-    if (existingOnly && !binding) return Promise.reject(new Error('Existing host binding is required'));
+  private listen(
+    session: TopicSession,
+    binding?: HostBinding,
+    beforeMutation?: () => Promise<void>,
+    existingOnly = false,
+    recoverClosed = true,
+  ): Promise<CollabConnection> {
+    if (existingOnly && !binding)
+      return Promise.reject(new Error('Existing host binding is required'));
     this.requireSessionAssignment(session);
-    if (this.options.store.getSession(session.id)?.status !== 'open') return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
+    if (this.options.store.getSession(session.id)?.status !== 'open')
+      return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
     const generation = this.options.store.getSessionGeneration(session.id);
     const existing = this.listeners.get(session.id);
     if (existing?.promise && existing.generation === generation) return existing.promise;
     if (existing) this.dropListener(session.id);
     const listener: Listener = {
-      sessionId:session.id,generation,frameRevision:0,activityRevision:0,tail:Promise.resolve(),queued:0,
-      recovering:this.options.store.hasSnapshot(session.id),pendingPrompts:[],pendingAnswers:new Map(),
-      pendingStops:[],queuedMessages:0,activity:this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
+      sessionId: session.id,
+      generation,
+      tail: Promise.resolve(),
+      queued: 0,
+      recovering: this.options.store.hasSnapshot(session.id),
+      receiptBoundary: this.options.store.beginPromptReceiptSnapshot(session.id),
+      snapshotReplyTarget: this.options.store.getReplyTarget(session.id),
+      pendingPrompts: [],
+      pendingAnswers: new Map(),
+      pendingStops: [],
+      queuedMessages: 0,
     };
     this.listeners.set(session.id, listener);
     this.refreshTyping(session, listener);
-    void this.setTopicStatus(session,listener.activity);
-    const active = () => !this.stopped && !this.options.config.terminated && this.sessionAssigned(session) &&
+    void this.setTopicStatus(
+      session,
+      this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
+    );
+    const active = () =>
+      !this.stopped &&
+      !this.options.config.terminated &&
+      this.sessionAssigned(session) &&
       this.options.store.getSession(session.id)?.status === 'open' &&
-      this.options.store.getSessionGeneration(session.id) === generation && this.listeners.get(session.id) === listener;
+      this.options.store.getSessionGeneration(session.id) === generation &&
+      this.listeners.get(session.id) === listener;
     const closed = new Error('Session closed');
-    listener.promise = (binding ? Promise.resolve(binding) : this.options.runtime.ensure(session,beforeMutation)).then(async binding => {
-      if (!active()) throw closed;
-      await beforeMutation?.();
-      if (!active()) throw closed;
-      await this.applySessionTitle(session);
-      if (!active()) throw closed;
-      return (this.options.connect ?? connectCollab)(binding,`Telegram @${this.bot.botInfo!.username}`,{
-        onFrame: frame => this.onFrame(session,listener,frame),
-        onClose: reason => {
-          if (!active()) return;
-          this.sessionObservation(session.id).failure = {operation:'Mirroring disconnected',at:Date.now(),error:reason};
-          const connected = listener.connection !== undefined;
-          this.dropListener(session.id);
-          if (connected) this.scheduleReconnect(session);
-        },
+    listener.promise = (
+      binding ? Promise.resolve(binding) : this.options.runtime.ensure(session, beforeMutation)
+    )
+      .then(async (binding) => {
+        if (!active()) throw closed;
+        await beforeMutation?.();
+        if (!active()) throw closed;
+        await this.applySessionTitle(session);
+        if (!active()) throw closed;
+        return (this.options.connect ?? connectCollab)(
+          binding,
+          `Telegram @${this.bot.botInfo!.username}`,
+          {
+            onFrame: (frame) => this.onFrame(session, listener, frame),
+            onClose: (reason) => {
+              if (!active()) return;
+              this.sessionObservation(session.id).failure = {
+                operation: 'Mirroring disconnected',
+                at: Date.now(),
+                error: reason,
+              };
+              const connected = listener.connection !== undefined;
+              this.dropListener(session.id);
+              if (connected) this.scheduleReconnect(session);
+            },
+          },
+        );
+      })
+      .then((connection) => {
+        if (!active()) {
+          connection.close();
+          throw closed;
+        }
+        this.sessionObservation(session.id).mirrored = true;
+        listener.connection = connection;
+        return connection;
+      })
+      .catch(async (error) => {
+        if (active())
+          this.sessionObservation(session.id).failure = {
+            operation: 'Session connection',
+            at: Date.now(),
+            error,
+          };
+        try {
+          if (!existingOnly && error instanceof SessionCapacityError && active())
+            await this.requestCapacity(session, error.limit);
+          if (
+            error !== closed ||
+            !recoverClosed ||
+            existingOnly ||
+            this.stopped ||
+            refreshTermination(this.options.config) ||
+            !this.sessionAssigned(session) ||
+            this.options.store.getSession(session.id)?.status !== 'open' ||
+            this.options.store.getSessionGeneration(session.id) !== generation
+          )
+            throw error;
+        } finally {
+          if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
+        }
+        return this.listen(session, undefined, beforeMutation, false, false);
       });
-    }).then(connection => {
-      if (!active()) { connection.close(); throw closed; }
-      this.sessionObservation(session.id).mirrored = true;
-      listener.connection = connection;
-      return connection;
-    }).catch(async error => {
-      if (active()) this.sessionObservation(session.id).failure = {operation:'Session connection',at:Date.now(),error};
-      try {
-        if (!existingOnly && error instanceof SessionCapacityError && active()) await this.requestCapacity(session,error.limit);
-        if (error !== closed || !recoverClosed || existingOnly || this.stopped || refreshTermination(this.options.config) ||
-            !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open' ||
-            this.options.store.getSessionGeneration(session.id) !== generation) throw error;
-      } finally {
-        if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
-      }
-      return this.listen(session,undefined,beforeMutation,false,false);
-    });
     return listener.promise;
   }
-  private sendPrompt(listener: Listener, content: PromptContent, messageId?: number, onStartupRejected?: () => void): void {
+  private sendPrompt(
+    listener: Listener,
+    content: PromptContent,
+    messageId?: number,
+    onStartupRejected?: () => void,
+  ): void {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
-    if (session.status !== 'open') throw new Error('This topic is closed. Reopen it before submitting work.');
-    if (this.listeners.get(session.id) !== listener ||
-        listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
-    const observation: TaskObservation = {state:'waiting for acceptance'};
+    if (session.status !== 'open')
+      throw new Error('This topic is closed. Reopen it before submitting work.');
+    if (
+      this.listeners.get(session.id) !== listener ||
+      listener.generation !== this.options.store.getSessionGeneration(session.id)
+    )
+      throw new Error('Session closed');
+    const submissionId = this.options.store.recordPromptSubmission(
+      session.id,
+      `Telegram @${this.bot.botInfo!.username}`,
+      content,
+      messageId,
+    );
+    const observation: TaskObservation = { state: 'waiting for acceptance', submissionId };
     this.sessionObservation(session.id).task = observation;
-    const pending = {content,messageId,onStartupRejected,observation};
+    const pending = { submissionId, onStartupRejected, observation };
     listener.pendingPrompts.push(pending);
     let attempted = false;
     try {
       this.options.runtime.markPrompt(listener.sessionId);
       attempted = true;
-      listener.connection!.send({t:'prompt',text:content.text,...(content.images?.length ? {images:content.images} : {})});
+      listener.connection!.send({
+        t: 'prompt',
+        text: content.text,
+        ...(content.images?.length ? { images: content.images } : {}),
+      });
     } catch (error) {
       observation.state = attempted ? 'acceptance unknown' : 'not accepted';
+      if (attempted) this.options.store.markPromptSubmissionUncertain(submissionId);
+      else this.options.store.rejectPromptSubmission(submissionId);
       const index = listener.pendingPrompts.indexOf(pending);
-      if (index !== -1) listener.pendingPrompts.splice(index,1);
+      if (index !== -1) listener.pendingPrompts.splice(index, 1);
       throw error;
     }
   }
@@ -2347,11 +3384,64 @@ export class BotService {
     this.options.runtime.markPrompt(session.id);
     const task = this.options.store.claimInitialTask(session.id);
     if (task === undefined) return;
-    const messageId = this.options.store.getReplyTarget(session.id);
+    const messageId = this.options.store.getInitialMessage(session.id);
     listener.initial = {content:task,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.options.config.omp.startupTimeoutMs);
     listener.initial.timer.unref();
     this.sendPrompt(listener,task,messageId);
+  }
+  private reconcilePromptReceipt(
+    session: TopicSession,
+    listener: Listener,
+    entry: CustomMessageEntry,
+    replay: boolean,
+  ): void {
+    const text =
+      typeof entry.content === 'string'
+        ? entry.content
+        : entry.content
+            .filter((part) => part.type === 'text')
+            .map((part) => part.text)
+            .join('\n');
+    const images =
+      typeof entry.content === 'string'
+        ? undefined
+        : entry.content.filter((part) => part.type === 'image');
+    const details = entry.details;
+    const sender =
+      details &&
+      typeof details === 'object' &&
+      'from' in details &&
+      typeof details.from === 'string'
+        ? details.from
+        : undefined;
+    const receipt = this.options.store.recordPromptReceipt(
+      session.id,
+      entry.id,
+      sender,
+      { text, ...(images === undefined ? {} : { images }) },
+      replay ? listener.receiptBoundary : undefined,
+    );
+    if (replay) listener.snapshotReplyTarget = receipt.messageId;
+    else if (receipt.fresh) this.options.store.setReplyTarget(session.id, receipt.messageId);
+    if (!receipt.fresh) return;
+    const index = listener.pendingPrompts.findIndex(
+      (pending) => pending.submissionId === receipt.submissionId,
+    );
+    const pending = index === -1 ? undefined : listener.pendingPrompts.splice(index, 1)[0];
+    const task = pending?.observation ?? this.sessionObservation(session.id).task;
+    if (receipt.submissionId !== undefined && task?.submissionId === receipt.submissionId)
+      task.state = 'accepted; completion unknown';
+    if (
+      pending &&
+      listener.initial?.phase === 'sent' &&
+      listener.initial.messageId === receipt.messageId
+    ) {
+      clearTimeout(listener.initial.timer);
+      listener.initial = undefined;
+    }
+    if (receipt.messageId !== undefined)
+      this.acknowledgeMessage(session, receipt.messageId, listener);
   }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.delivery.run(session.chatId,
@@ -2504,113 +3594,172 @@ export class BotService {
       console.warn(`Could not relay agent question (${session.id}).`, error);
     }).finally(() => { listener.queued--; });
   }
-  private async applySessionTitle(session: TopicSession): Promise<void> {
-    const title = this.options.store.getPendingSessionTitle(session.id);
-    if (title === undefined || this.stopped || refreshTermination(this.options.config) ||
-        !this.sessionAssigned(session) || this.options.store.getSession(session.id)?.status !== 'open') return;
-    try {
-      await this.options.runtime.setSessionTitle(session,title);
-    } catch (error) {
-      this.sessionObservation(session.id).failure = {operation:'Session title synchronization',at:Date.now(),error};
-      if (error instanceof SessionTitleUnsupportedError && this.options.store.getPendingSessionTitle(session.id) === title) {
-        this.options.store.setPendingSessionTitle(session.id,undefined);
+  private applySessionTitle(session: TopicSession): Promise<void> {
+    const owner = this.metadataOwner(session);
+    if (owner.titleWrite) return owner.titleWrite;
+    const write = async () => {
+      let attempted: { title: string; generation: number } | undefined;
+      while (!this.stopped && !refreshTermination(this.options.config) && !owner.disposed) {
+        const current = this.options.store.getSession(session.id);
+        if (!current || current.status !== 'open' || !this.sessionAssigned(current)) return;
+        const generation = this.options.store.getSessionGeneration(session.id);
+        const title = this.options.store.getPendingSessionTitle(session.id);
+        if (
+          title === undefined ||
+          (attempted?.title === title && attempted.generation === generation)
+        )
+          return;
+        attempted = { title, generation };
+        const source = owner.title;
+        try {
+          await this.options.runtime.setSessionTitle(current, title);
+        } catch (error) {
+          if (!owner.disposed && owner.generation === generation && owner.title === source) {
+            this.sessionObservation(session.id).failure = {
+              operation: 'Session title synchronization',
+              at: Date.now(),
+              error,
+            };
+            if (
+              !this.stopped &&
+              error instanceof SessionTitleUnsupportedError &&
+              this.options.store.getPendingSessionTitle(session.id) === title &&
+              this.options.store.getSessionGeneration(session.id) === generation &&
+              this.sessionAssigned(current) &&
+              this.options.store.getSession(session.id)?.status === 'open'
+            ) {
+              this.options.store.setPendingSessionTitle(session.id, undefined);
+            }
+          }
+        }
       }
-    }
+    };
+    const pending = Promise.resolve()
+      .then(write)
+      .finally(() => {
+        if (owner.titleWrite === pending) owner.titleWrite = undefined;
+        if (owner.disposed && this.metadataOwners.get(session.id) === owner)
+          this.metadataOwners.delete(session.id);
+      });
+    owner.titleWrite = pending;
+    return pending;
   }
   private stripTopicStatus(session: TopicSession, title: string): string {
     const savedPrefix = this.options.store.getTopicTitlePrefix(session.id);
-    if (savedPrefix && title.startsWith(`${savedPrefix} `)) return title.slice(savedPrefix.length+1);
-    for (const prefix of this.titlePrefixes.get(session.id) ?? []) {
-      if (title.startsWith(`${prefix} `)) return title.slice(prefix.length+1);
+    if (savedPrefix && title.startsWith(`${savedPrefix} `))
+      return title.slice(savedPrefix.length + 1);
+    for (const prefix of this.metadataOwners.get(session.id)?.title.prefixes ?? []) {
+      if (title.startsWith(`${prefix} `)) return title.slice(prefix.length + 1);
     }
     if (title.startsWith('🌳 ')) return title.slice('🌳 '.length);
     return title;
   }
-  private async projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void> {
+  private async projectTopicTitle(
+    session: TopicSession,
+    title: string,
+    active: () => boolean,
+  ): Promise<void> {
     const callerActive = active;
-    active = () => this.options.store.getTopicKind(session) === 'tracked' && callerActive();
+    active = () => callerActive() && this.options.store.getTopicKind(session) === 'tracked';
     if (!active()) return;
+    const source = this.titleSource(session);
+    const initial = source.humanTitle === undefined;
+    source.humanTitle = title;
+    const publish = () => {
+      const current = this.formatTopicTitle(source);
+      if (!current.name.trim()) return;
+      if (current.prefix) source.prefixes.add(current.prefix);
+      void this.topicMetadata(session).name.publish(current.name);
+    };
+    publish();
     try {
-      const status = await this.options.runtime.topicTitleStatus(session);
-      if (!active()) return;
+      const status = await withCancellation(
+        this.options.runtime.topicTitleStatus(session),
+        AbortSignal.any([this.background.signal, AbortSignal.timeout(5000)]),
+      );
+      if (!active() || this.metadataOwners.get(session.id)?.title !== source) return;
       const topicBranch = `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`;
-      const branch = status.branch === topicBranch ? '' : status.branch ?? '';
-      const statusText = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
-      const prefixLimit = 127-Math.min(Array.from(title).length,64);
-      const statusCharacters = Array.from(statusText);
-      const prefix = statusCharacters.length > prefixLimit
-        ? `${statusCharacters.slice(0,prefixLimit-1).join('')}…` : statusText;
-      let prefixes = this.titlePrefixes.get(session.id);
-      if (!prefixes) this.titlePrefixes.set(session.id,prefixes = new Set());
-      if (!this.humanTitles.has(session.id) && prefix && title.startsWith(`${prefix} `)) title = title.slice(prefix.length+1);
-      this.humanTitles.set(session.id,title);
-      const name = Array.from(`${prefix ? `${prefix} ` : ''}${title}`).slice(0,128).join('');
-      if (!name.trim()) return;
-      if (this.options.store.getSession(session.id)?.name === name) {
-        this.options.store.setTopicTitlePrefix(session.id,prefix);
-        if (prefix) prefixes.add(prefix);
-        return;
-      }
-      const applied = await this.delivery.run(session.chatId,
-        () => this.bot.api.editForumTopic(session.chatId,session.threadId,{name}).catch(error => {
-          if (error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')) return true;
-          throw error;
-        }),active);
-      if (applied && active()) {
-        this.options.store.updateSession(session.id,{name});
-        this.options.store.setTopicTitlePrefix(session.id,prefix);
-        if (prefix) prefixes.add(prefix);
-      }
+      const branch = status.branch === topicBranch ? '' : (status.branch ?? '');
+      source.prefix = status.worktree ? `🌳${branch ? ` ${branch}` : ''}` : branch;
+      if (initial && source.prefix && source.humanTitle?.startsWith(`${source.prefix} `))
+        source.humanTitle = source.humanTitle.slice(source.prefix.length + 1);
+      publish();
     } catch (error) {
-      this.sessionObservation(session.id).failure = {operation:'Topic title synchronization',at:Date.now(),error};
+      this.sessionObservation(session.id).failure = {
+        operation: 'Topic title synchronization',
+        at: Date.now(),
+        error,
+      };
     }
   }
   private syncTopicTitle(session: TopicSession, listener: Listener, title?: string): void {
-    if (title !== undefined) listener.sessionTitle = title;
-    else title = listener.sessionTitle;
     const generation = this.options.store.getSessionGeneration(session.id);
-    const revision = this.titleRevisions.get(session.id);
-    const version = listener.titleVersion = (listener.titleVersion ?? 0)+1;
-    const active = () => !this.stopped && !refreshTermination(this.options.config) &&
-      this.sessionAssigned(session) && this.listeners.get(session.id) === listener &&
+    const source = this.titleSource(session);
+    const revision = ++source.revision;
+    const active = () =>
+      !this.stopped &&
+      !refreshTermination(this.options.config) &&
+      this.sessionAssigned(session) &&
+      this.listeners.get(session.id) === listener &&
       this.options.store.getSession(session.id)?.status === 'open' &&
       this.options.store.getSessionGeneration(session.id) === generation &&
-      this.titleRevisions.get(session.id) === revision && listener.titleVersion === version;
-    listener.titleTail = (listener.titleTail ?? Promise.resolve()).then(async () => {
+      source.revision === revision;
+    void (async () => {
       if (!active()) return;
       const pending = this.options.store.getPendingSessionTitle(session.id);
       if (pending !== undefined) {
-        if (pending === title) this.options.store.setPendingSessionTitle(session.id,undefined);
+        if (pending === title) this.options.store.setPendingSessionTitle(session.id, undefined);
         else await this.applySessionTitle(session);
       }
       if (!active()) return;
-      const human = this.options.store.getPendingSessionTitle(session.id) ??
-        (pending === undefined ? title : undefined) ?? this.humanTitles.get(session.id) ??
-        this.stripTopicStatus(session,this.options.store.getSession(session.id)?.name ?? session.name);
-      if (pending !== undefined || title !== undefined) this.humanTitles.set(session.id,human);
-      await this.projectTopicTitle(session,human,active);
-    }).catch(error => {
-      this.sessionObservation(session.id).failure = {operation:'Topic title synchronization',at:Date.now(),error};
+      const human =
+        this.options.store.getPendingSessionTitle(session.id) ??
+        (pending === undefined ? title : undefined) ??
+        source.humanTitle ??
+        this.stripTopicStatus(
+          session,
+          this.options.store.getSession(session.id)?.name ?? session.name,
+        );
+      if (pending !== undefined || title !== undefined) source.humanTitle = human;
+      await this.projectTopicTitle(session, human, active);
+    })().catch((error) => {
+      this.sessionObservation(session.id).failure = {
+        operation: 'Topic title synchronization',
+        at: Date.now(),
+        error,
+      };
     });
   }
-  private onFrame(session: TopicSession, listener: Listener, frame: HostFrame, replay = false): void {
-    if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session) ||
-        this.listeners.get(session.id) !== listener ||
-        this.options.store.getSessionGeneration(session.id) !== listener.generation) return;
-    ++listener.frameRevision;
-    if (frame.t === 'welcome' || frame.t === 'state' || frame.t === 'error' ||
-        (frame.t === 'event' && (frame.event.type === 'agent_start' || frame.event.type === 'agent_end' ||
-          miniAppInterruptionAuthor(frame.event) !== undefined))) {
-      ++listener.activityRevision;
-    }
-    this.options.runtime.observeFrame(session.id,frame);
-    if (frame.t === 'welcome' || (frame.t === 'state' &&
-        (!frame.state.isStreaming || (frame.state.sessionName !== undefined &&
-          frame.state.sessionName !== this.humanTitles.get(session.id))))) {
-      this.syncTopicTitle(session,listener,frame.state.sessionName);
+  private onFrame(
+    session: TopicSession,
+    listener: Listener,
+    frame: HostFrame,
+    replay = false,
+  ): void {
+    if (
+      this.stopped ||
+      this.options.config.terminated ||
+      !this.sessionAssigned(session) ||
+      this.listeners.get(session.id) !== listener ||
+      this.options.store.getSessionGeneration(session.id) !== listener.generation
+    )
+      return;
+    this.options.runtime.observeFrame(session.id, frame);
+    if (
+      frame.t === 'welcome' ||
+      (frame.t === 'state' &&
+        (!frame.state.isStreaming ||
+          (frame.state.sessionName !== undefined &&
+            frame.state.sessionName !== this.metadataOwners.get(session.id)?.title.humanTitle)))
+    ) {
+      this.syncTopicTitle(session, listener, frame.state.sessionName);
     }
     if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'error') {
-      this.sessionObservation(session.id).failure = {operation:'OMP notice',at:Date.now(),error:frame.event.message};
+      this.sessionObservation(session.id).failure = {
+        operation: 'OMP notice',
+        at: Date.now(),
+        error: frame.event.message,
+      };
     }
     if (frame.t === 'ui-request') {
       this.relayQuestion(session, listener, frame.request);
@@ -2620,50 +3769,67 @@ export class BotService {
       const messageId = listener.pendingAnswers.get(frame.reqId);
       if (messageId !== undefined) {
         listener.pendingAnswers.delete(frame.reqId);
-        this.acknowledgeMessage(session,messageId,listener);
+        this.acknowledgeMessage(session, messageId, listener);
       }
       for (const [token, question] of this.questions) {
-        if (question.listener === listener && question.request.reqId === frame.reqId) this.endQuestion(token);
+        if (question.listener === listener && question.request.reqId === frame.reqId)
+          this.endQuestion(token);
       }
       return;
     }
-    if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'info' &&
-        frame.event.source === 'collab' && frame.event.message === `Telegram @${this.bot.botInfo!.username} interrupted`) {
+    if (
+      frame.t === 'event' &&
+      frame.event.type === 'notice' &&
+      frame.event.level === 'info' &&
+      frame.event.source === 'collab' &&
+      frame.event.message === `Telegram @${this.bot.botInfo!.username} interrupted`
+    ) {
       listener.pendingAnswers.clear();
       const messageId = listener.pendingStops.shift();
-      if (messageId !== undefined) this.acknowledgeMessage(session,messageId,listener);
+      if (messageId !== undefined) this.acknowledgeMessage(session, messageId, listener);
     }
     const interruptedBy = frame.t === 'event' ? miniAppInterruptionAuthor(frame.event) : undefined;
     if (interruptedBy) {
       listener.pendingAnswers.clear();
       listener.queuedMessages = 0;
-      listener.activity = 'finished';
-      void this.setTopicStatus(session, listener.activity);
-      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), `⛔️${interruptedBy} interrupted the chat`, {
-        
-      }).catch(() => undefined);
+      void this.setTopicStatus(session, 'finished');
+      void sendTo(
+        this.bot.api,
+        topicDestination(session.chatId, session.threadId),
+        `⛔️${interruptedBy} interrupted the chat`,
+        {},
+      ).catch(() => undefined);
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
-      listener.activityObservedAt = Date.now();
-      listener.activitySuspect = false;
       listener.queuedMessages = frame.state.queuedMessageCount;
-      listener.activity = this.options.store.hasPendingInitialTask(session.id) || frame.state.isStreaming || listener.queuedMessages > 0 ? 'running' : 'finished';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(
+        session,
+        this.options.store.hasPendingInitialTask(session.id) ||
+          frame.state.isStreaming ||
+          listener.queuedMessages > 0
+          ? 'running'
+          : 'finished',
+      );
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
-      listener.activityObservedAt = Date.now();
-      listener.activity = 'running';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(session, 'running');
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      listener.activitySuspect = true;
-      listener.activity = listener.queuedMessages > 0 ? 'running' : 'finished';
-      void this.setTopicStatus(session, listener.activity);
+      void this.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
     }
     if (frame.t === 'event') {
       const event = frame.event;
-      if ((event.type === 'message_start' || event.type === 'message_update') && event.message.role === 'assistant') {
-        listener.typingText = event.message.content.some(part => part.type === 'text' && part.text.length > 0);
-      } else if (event.type === 'message_end' || event.type === 'agent_end' ||
-          event.type === 'tool_execution_start' || interruptedBy) {
+      if (
+        (event.type === 'message_start' || event.type === 'message_update') &&
+        event.message.role === 'assistant'
+      ) {
+        listener.typingText = event.message.content.some(
+          (part) => part.type === 'text' && part.text.length > 0,
+        );
+      } else if (
+        event.type === 'message_end' ||
+        event.type === 'agent_end' ||
+        event.type === 'tool_execution_start' ||
+        interruptedBy
+      ) {
         listener.typingText = false;
       }
     } else if ((frame.t === 'welcome' || frame.t === 'state') && !frame.state.isStreaming) {
@@ -2671,112 +3837,168 @@ export class BotService {
     }
     this.refreshTyping(session, listener);
     if (frame.t === 'error') {
-      listener.activitySuspect = true;
+      const observation = this.activityObservation(session);
+      observation.suspect = true;
+      ++observation.revision;
       const pending = listener.pendingPrompts.shift();
-      if (pending) pending.observation.state = 'not accepted';
-      this.sessionObservation(session.id).failure = {operation:'OMP instruction',at:Date.now(),error:frame.message};
+      if (pending) {
+        if (isStartupRejection(frame)) {
+          this.options.store.rejectPromptSubmission(pending.submissionId);
+          pending.observation.state = 'not accepted';
+        } else {
+          this.options.store.markPromptSubmissionUncertain(pending.submissionId);
+          pending.observation.state = 'acceptance unknown';
+        }
+      }
+      this.sessionObservation(session.id).failure = {
+        operation: 'OMP instruction',
+        at: Date.now(),
+        error: frame.message,
+      };
       if (isStartupRejection(frame)) pending?.onStartupRejected?.();
     }
     if (isStartupRejection(frame) && listener.initial) {
       const initial = listener.initial;
       initial.phase = 'retrying';
       clearTimeout(initial.timer);
-      const delay = Math.min(1000,250 * ++initial.retries);
-      if (Date.now()+delay >= initial.deadline) {
+      const delay = Math.min(1000, 250 * ++initial.retries);
+      if (Date.now() + delay >= initial.deadline) {
         listener.initial = undefined;
-        void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),`The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`).catch(() => undefined);
+        void sendTo(
+          this.bot.api,
+          topicDestination(session.chatId, session.threadId),
+          `The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`,
+        ).catch(() => undefined);
       } else {
         initial.timer = setTimeout(() => {
-          void this.authorizeInitial(session,initial.userId,initial.authorityUserId).then(() => {
-            if (listener.initial !== initial || this.stopped || !this.sessionAssigned(session) || !listener.connection) return;
-            if (Date.now() >= initial.deadline) {
-              listener.initial = undefined;
-              return;
-            }
-            initial.timer = setTimeout(() => { listener.initial = undefined; },initial.deadline-Date.now());
-            initial.timer.unref();
-            initial.phase = 'sent';
-            this.sendPrompt(listener,initial.content,initial.messageId);
-          }).catch(() => {
-            clearTimeout(initial.timer);
-            if (listener.initial === initial) listener.initial = undefined;
-          });
-        },delay);
+          void this.authorizeInitial(session, initial.userId, initial.authorityUserId)
+            .then(() => {
+              if (
+                listener.initial !== initial ||
+                this.stopped ||
+                !this.sessionAssigned(session) ||
+                !listener.connection
+              )
+                return;
+              if (Date.now() >= initial.deadline) {
+                listener.initial = undefined;
+                return;
+              }
+              initial.timer = setTimeout(() => {
+                listener.initial = undefined;
+              }, initial.deadline - Date.now());
+              initial.timer.unref();
+              initial.phase = 'sent';
+              this.sendPrompt(listener, initial.content, initial.messageId);
+            })
+            .catch(() => {
+              clearTimeout(initial.timer);
+              if (listener.initial === initial) listener.initial = undefined;
+            });
+        }, delay);
         initial.timer.unref();
       }
       return;
     }
-    if (frame.t === 'entry' && frame.entry.type === 'custom_message' &&
-        frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE && !replay) {
-      const details = frame.entry.details;
-      if (details && typeof details === 'object' && 'from' in details &&
-          typeof details.from === 'string' && details.from !== `Telegram @${this.bot.botInfo!.username}`) {
-        this.options.store.setReplyTarget(session.id,undefined);
-      }
-    }
-    if (frame.t === 'entry' && frame.entry.type === 'custom_message' &&
-        frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE && !replay) {
-      const entry = frame.entry;
-      const content = typeof entry.content === 'string' ? entry.content
-        : entry.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
-      const images = typeof entry.content === 'string' ? undefined : entry.content.filter(part => part.type === 'image');
-      const matchesContent = (prompt: PromptContent): boolean => prompt.text === content &&
-        (images === undefined || (prompt.images?.length ?? 0) === images.length &&
-          images.every((image,index) => image.data === prompt.images![index]!.data && image.mimeType === prompt.images![index]!.mimeType));
-      const details = entry.details;
-      if (details && typeof details === 'object' &&
-          'from' in details && details.from === `Telegram @${this.bot.botInfo!.username}`) {
-        const index = listener.pendingPrompts.findIndex(pending => matchesContent(pending.content));
-        if (index !== -1) {
-          const [pending] = listener.pendingPrompts.splice(index,1);
-          pending!.observation.state = 'accepted; completion unknown';
-          if (pending!.messageId !== undefined) {
-            this.acknowledgeMessage(session,pending!.messageId,listener);
-          }
-        }
-        if (listener.initial?.phase === 'sent' && matchesContent(listener.initial.content)) {
-          clearTimeout(listener.initial.timer);
-          listener.initial = undefined;
-        }
-      }
-    }
+    if (
+      frame.t === 'entry' &&
+      frame.entry.type === 'custom_message' &&
+      frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE
+    )
+      this.reconcilePromptReceipt(session, listener, frame.entry, replay);
     if (frame.t === 'error') {
       listener.pendingAnswers.clear();
       listener.pendingStops.length = 0;
-      const text = isStartupRejection(frame)
-        ? 'The host is still starting. Your instruction was not accepted. Resend it after startup.'
-        : 'OMP rejected an instruction. OPEN AGENT for details before resending.';
-      void sendTo(this.bot.api, topicDestination(session.chatId, session.threadId), text).catch(() => undefined);
+      const prefix = isStartupRejection(frame)
+        ? 'The host has not accepted this instruction during startup.\n\n'
+        : 'OMP reported an error. Acceptance of a pending instruction is uncertain; inspect OPEN AGENT before submitting again.\n\n';
+      void sendTo(
+        this.bot.api,
+        topicDestination(session.chatId, session.threadId),
+        prefix + frame.message,
+        { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
+      ).catch(() => undefined);
       return;
     }
     if (frame.t === 'snapshot-chunk') {
       for (const entry of frame.entries) {
-        if (listener.recovering) this.onFrame(session, listener, { t: 'entry', entry }, true);
+        if (
+          listener.recovering ||
+          (entry.type === 'custom_message' && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
+        )
+          this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
           if (result) this.options.store.rememberReply(session.id, result.fingerprint);
         }
       }
-      if (frame.final) this.options.store.markSnapshot(session.id);
+      if (frame.final) {
+        this.options.store.markSnapshot(session.id);
+        this.options.store.setReplyTarget(session.id, listener.snapshotReplyTarget);
+      }
       return;
     }
-    const result = frame.t === 'event' && frame.event.type === 'message_end' ? assistantText(frame.event.message) : frame.t === 'entry' && frame.entry.type === 'message' ? assistantText(frame.entry.message) : undefined;
-    if (!result || !this.options.store.rememberReply(session.id,result.fingerprint)) return;
-    const replyTarget = this.options.store.getReplyTarget(session.id);
-    if (++listener.queued > 128) { this.dropListener(session.id); return; }
-    listener.tail = listener.tail.then(async () => {
-      if (this.stopped || !this.sessionAssigned(session) || this.listeners.get(session.id) !== listener) return;
-      const current = this.options.store.getSession(session.id);
-      if (!current || current.status !== 'open' || !(await this.ready(session.chatId)) || !this.sessionAssigned(current)) return;
-      for (const text of renderTelegramMarkdown(result.text)) {
-        if (!this.sessionAssigned(current)) return;
-        await this.delivery.run(session.chatId,
-          () => this.bot.api.sendRichMessage(session.chatId, {markdown:text},{
-            message_thread_id: session.threadId === 1 ? undefined : session.threadId,
-            ...(replyTarget === undefined ? {} : {reply_parameters:{message_id:replyTarget,allow_sending_without_reply:true}}),
-          }), () => !this.stopped && this.sessionAssigned(current) && this.listeners.get(session.id) === listener);
-      }
-    }).catch(() => undefined).finally(() => { listener.queued--; });
+    const result =
+      frame.t === 'event' && frame.event.type === 'message_end'
+        ? assistantText(frame.event.message)
+        : frame.t === 'entry' && frame.entry.type === 'message'
+          ? assistantText(frame.entry.message)
+          : undefined;
+    if (!result || !this.options.store.rememberReply(session.id, result.fingerprint)) return;
+    const replyTarget = replay
+      ? listener.snapshotReplyTarget
+      : this.options.store.getReplyTarget(session.id);
+    if (++listener.queued > 128) {
+      this.dropListener(session.id);
+      return;
+    }
+    listener.tail = listener.tail
+      .then(async () => {
+        if (
+          this.stopped ||
+          !this.sessionAssigned(session) ||
+          this.listeners.get(session.id) !== listener
+        )
+          return;
+        const current = this.options.store.getSession(session.id);
+        if (
+          !current ||
+          current.status !== 'open' ||
+          !(await this.ready(session.chatId)) ||
+          !this.sessionAssigned(current)
+        )
+          return;
+        for (const text of renderTelegramMarkdown(result.text)) {
+          if (!this.sessionAssigned(current)) return;
+          await this.delivery.run(
+            session.chatId,
+            () =>
+              this.bot.api.sendRichMessage(
+                session.chatId,
+                { markdown: text },
+                {
+                  message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+                  ...(replyTarget === undefined
+                    ? {}
+                    : {
+                        reply_parameters: {
+                          message_id: replyTarget,
+                          allow_sending_without_reply: true,
+                        },
+                      }),
+                },
+              ),
+            () =>
+              !this.stopped &&
+              this.sessionAssigned(current) &&
+              this.listeners.get(session.id) === listener,
+          );
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        listener.queued--;
+      });
   }
 }
 export function createBot(options: BotOptions): BotService { return new BotService(options); }

@@ -235,3 +235,47 @@ test('delivery retains its relevance check instead of retrying stale work inside
     { chat_id: -100123, text: 'current' },
   ]);
 });
+
+test('metadata 429 handling preserves latest edits and the shared cooldown', { timeout: 5000 }, async t => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const calls: { payload: unknown; at: number }[] = [];
+  const { bot } = fixture(t, async (_previous, _method, payload) => {
+    calls.push({ payload: structuredClone(payload), at: Date.now() });
+    return calls.length === 1 ? limited(2) : { ok: true, result: true };
+  });
+  const first = delivery.runTopic(
+    -100123, 'name', 'topic',
+    signal => bot.api.editForumTopic(-100123, 42, { name: 'old title' }, signal),
+    () => true,
+  );
+  await assert.rejects(first, error => error instanceof GrammyError && error.error_code === 429);
+  const latest = delivery.runTopic(
+    -100123, 'name', 'topic',
+    signal => bot.api.editForumTopic(-100123, 42, { name: 'latest title' }, signal),
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    -100123, 'icon', 'topic',
+    signal => bot.api.editForumTopic(-100123, 42, { icon_custom_emoji_id: 'running' }, signal),
+    () => true,
+  );
+  await advance(1999);
+  assert.deepEqual(calls, [{
+    payload: { chat_id: -100123, message_thread_id: 42, name: 'old title' },
+    at: 0,
+  }]);
+  await advance(1);
+  await Promise.all([latest, icon]);
+  assert.deepEqual(calls.slice(1), [
+    {
+      payload: { chat_id: -100123, message_thread_id: 42, name: 'latest title' },
+      at: 2000,
+    },
+    {
+      payload: { chat_id: -100123, message_thread_id: 42, icon_custom_emoji_id: 'running' },
+      at: 2000,
+    },
+  ]);
+});

@@ -117,44 +117,55 @@ for (const blockAt of [1,2]) {
   });
 }
 
-for (const source of ['startup','mirror retry']) {
-  test(`kill fences a background ${source} liveness check`, async t => {
-    const {app,session} = await setup();
+for (const source of ['startup', 'mirror retry']) {
+  test(`kill fences a background ${source} existing-host lookup`, { timeout: 10000 }, async (t) => {
+    const { app, session } = await setup();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<boolean>();
     let restarted: BotService | undefined;
     try {
-      await app.service.ensureMirroring(session,await app.runtime.ensure(session));
-      const original = app.runtime.isRunning.bind(app.runtime);
+      await app.service.ensureMirroring(session, await app.runtime.ensure(session));
+      const original = app.runtime.resolveExisting.bind(app.runtime);
       let blockNext = source === 'startup';
-      t.mock.method(app.runtime,'isRunning',async (value: Parameters<typeof original>[0]) => {
-        if (blockNext) {
-          blockNext = false;
-          entered.resolve();
-          return release.promise;
-        }
-        return original(value);
-      });
+      t.mock.method(
+        app.runtime,
+        'resolveExisting',
+        async (value: Parameters<typeof original>[0]) => {
+          const binding = await original(value);
+          if (blockNext) {
+            blockNext = false;
+            entered.resolve();
+            return (await release.promise) ? binding : undefined;
+          }
+          return binding;
+        },
+      );
       if (source === 'startup') {
         restarted = createBot({
-          config:app.config,botConfig:app.config.bots[0]!,token:app.service.token,
-          store:app.store,runtime:app.runtime,
-          bot:new Bot(app.service.token,{client:{apiRoot:app.telegramUrl}}),
+          config: app.config,
+          botConfig: app.config.bots[0]!,
+          token: app.service.token,
+          store: app.store,
+          runtime: app.runtime,
+          bot: new Bot(app.service.token, { client: { apiRoot: app.telegramUrl } }),
         });
         await restarted.initialize();
         restarted.startBackground();
-      }
-      else {
+      } else {
         app.disconnect();
         blockNext = true;
       }
       await entered.promise;
       const connections = app.connectionCount;
-      await app.update({message_thread_id:42,text:'/kill'});
+      await app.update({ message_thread_id: 42, text: '/kill' });
       release.resolve(true);
       await delay(100);
-      assert.equal(await app.runtime.isRunning(session),false);
-      assert.equal(app.connectionCount,connections,'stale liveness results must not restart mirroring or its host');
+      assert.equal(await app.runtime.isRunning(session), false);
+      assert.equal(
+        app.connectionCount,
+        connections,
+        'stale liveness results must not restart mirroring or its host',
+      );
     } finally {
       release.resolve(false);
       await restarted?.close();
