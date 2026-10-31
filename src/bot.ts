@@ -1726,6 +1726,13 @@ export class BotService {
                       this.options.store.setTopicTitle(session.id, value, current.prefix);
                   }
                 }
+                if (
+                  field === 'icon' &&
+                  this.options.store.getSession(session.id)?.status === 'closed' &&
+                  value === this.topicIconValue(session, await this.getIconIds()) &&
+                  owned()
+                )
+                  this.options.store.completeCloseIcon(session.id);
               }
               return value;
             },
@@ -1779,6 +1786,11 @@ export class BotService {
   }
   private async publishTopicIcon(session: TopicSession): Promise<void> {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+    if (
+      this.options.store.getSession(session.id)?.status === 'closed' &&
+      !this.options.store.hasPendingCloseIcon(session.id)
+    )
+      return;
     const metadata = this.topicMetadata(session);
     if (this.activityAtUse(session) === 'unknown') return;
     try {

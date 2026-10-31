@@ -59,6 +59,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,entry_id));
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_pending_close_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
@@ -104,6 +105,7 @@ export class Store {
     const existing = this.getTopic({botId:key.botId,destination:topicDestination(key.chatId,key.threadId)});
     if (!existing) return;
     this.db.prepare("UPDATE sessions SET status='detached' WHERE id=?").run(existing.id);
+    this.completeCloseIcon(existing.id);
     this.setPendingSessionTitle(existing.id,undefined);
     this.db.prepare('DELETE FROM session_topic_title_prefixes WHERE session_id=?').run(existing.id);
     this.cancelInitialTask(existing.id);
@@ -175,9 +177,27 @@ export class Store {
     return rows.map(row => session(row as Row)!);
   }
   updateSession(id: string, value: { name?: string; status?: TopicSession['status'] }): TopicSession | undefined {
-    if (value.name !== undefined) this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(value.name, id);
-    if (value.status !== undefined) this.db.prepare('UPDATE sessions SET status=? WHERE id=?').run(value.status, id);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (value.name !== undefined) this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(value.name, id);
+      if (value.status !== undefined) {
+        if (value.status === 'closed') {
+          this.db.prepare("INSERT OR IGNORE INTO session_pending_close_icons SELECT id FROM sessions WHERE id=? AND status!='closed'").run(id);
+        } else this.completeCloseIcon(id);
+        this.db.prepare('UPDATE sessions SET status=? WHERE id=?').run(value.status, id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return this.getSession(id);
+  }
+  hasPendingCloseIcon(id: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM session_pending_close_icons WHERE session_id=?').get(id));
+  }
+  completeCloseIcon(id: string): void {
+    this.db.prepare('DELETE FROM session_pending_close_icons WHERE session_id=?').run(id);
   }
   getPendingSessionTitle(id: string): string | undefined {
     const row = this.db.prepare('SELECT title FROM session_pending_titles WHERE session_id=?').get(id);
