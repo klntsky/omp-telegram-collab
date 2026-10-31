@@ -274,12 +274,12 @@ export class BotService {
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
       for (const [label, target] of [
-        [`Message handling · ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, 'prompts'],
-        [`Who can send requests · ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, 'proposals'],
-        [`Skill for new topics · ${chat.default_new_topic_skill ?? 'No default skill'}`, 'skills'],
-        [`Model preset for new sessions · ${chat.default_model_preset ?? 'Use host default'}`, 'presets'],
-        [`Maximum live sessions · ${config.omp.maxSessions} · Service-wide`, 'capacity'],
-        [`Worktrees for new topics · ${chat.create_topic_worktrees === true ? 'Create a worktree' : 'Use the instance directory'}`, 'worktrees'],
+        [`Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, 'prompts'],
+        [`Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, 'proposals'],
+        [`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, 'skills'],
+        [`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, 'presets'],
+        [`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, 'capacity'],
+        [`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, 'worktrees'],
       ] as const) {
         button(label, {kind:'page',page:target});
       }
@@ -293,14 +293,14 @@ export class BotService {
       button('Admins only', {kind:'set',field:'users_can_propose_prompts',value:false}, chat.users_can_propose_prompts !== true);
     } else if (page === 'worktrees') {
       text = 'Give each new topic its own worktree?\nApplies to new managed topics in this group. Existing topics are unchanged.\nA worktree gives the topic a separate working directory and branch.';
-      button('Create a worktree', {kind:'set',field:'create_topic_worktrees',value:true}, chat.create_topic_worktrees === true);
-      button('Use the instance directory', {kind:'set',field:'create_topic_worktrees',value:false}, chat.create_topic_worktrees !== true);
+      button('Enabled', {kind:'set',field:'create_topic_worktrees',value:true}, chat.create_topic_worktrees === true);
+      button('Disabled', {kind:'set',field:'create_topic_worktrees',value:false}, chat.create_topic_worktrees !== true);
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
       if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
-      text = `${skill ? 'Skill for new topics' : 'Model preset for new sessions'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
+      text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
       for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name}, chat[field] === name);
       button(skill ? 'No default skill' : 'Use host default', {kind:'default',field}, chat[field] === undefined);
       if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
@@ -403,15 +403,15 @@ export class BotService {
       const labels = {
         prompts: 'Message handling',
         proposals: 'Who can send requests',
-        skills: 'Skill for new topics',
-        presets: 'Model preset for new sessions',
-        worktrees: 'Worktrees for new topics',
+        skills: 'Default skill',
+        presets: 'Default model preset',
+        worktrees: 'Worktrees',
       };
       const value = (setting: boolean | string | undefined): string => {
         if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
         if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
         if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
-        return setting === true ? 'Create a worktree' : 'Use the instance directory';
+        return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
       if (action.kind === 'set') chat[action.field] = action.value;
