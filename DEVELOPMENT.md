@@ -21,7 +21,11 @@ pnpm dev --config /path/to/development/config.yaml
 
 Configure model credentials for the development account through OMP. Do not reuse production tokens or run a second service against production state.
 
+## Change the database schema
 
+Append SQL to the migration list in `src/migrations.ts`. Each list entry advances the database version by one. Keep applied entries unchanged and in order. Do not include transaction statements in migration SQL.
+
+Store startup applies pending entries in one transaction, including their version updates. A failure rolls back the entire pending upgrade and preserves the original SQLite error. There are no down migrations.
 
 ## Modify the Mini App
 
