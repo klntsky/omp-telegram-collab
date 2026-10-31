@@ -54,6 +54,28 @@ timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use
 
 Live Telegram verification requires a BotFather token and forum groups. Mini App verification also requires its BotFather registration and HTTPS deployment. Local fixtures cannot verify BotFather settings or Telegram client behavior. Keep services that own active coding sessions running while testing lifecycle notices elsewhere.
 
+## Run tests against Telegram's test network
+
+Obtain an application `api_id` and `api_hash` from [Telegram's application settings](https://my.telegram.org/apps). Set them only for the test process:
+
+```sh
+export TELEGRAM_TEST_API_ID='YOUR_APPLICATION_ID'
+export TELEGRAM_TEST_API_HASH='YOUR_APPLICATION_HASH'
+timeout 240s pnpm test:e2e
+```
+
+`test:e2e` is separate from `test` and `verify`. Missing credentials fail the command instead of skipping live tests. These tests use Telegram's [separate test environment](https://core.telegram.org/bots/features#testing-your-bot), never the production Bot API. They do not launch OMP or invoke inference.
+
+The helpers use in-memory MTProto sessions and generate a reserved test phone number by default. Set `TELEGRAM_TEST_PHONE` to a number in the `99966XYYYY` format to select an account. `X` is the test datacenter number from 1 to 3. Do not use personal phone numbers. Test accounts have publicly predictable login codes and Telegram periodically wipes their data. Never put private data in them.
+
+Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environment. Otherwise, the fixture creates a uniquely named bot through that environment's BotFather. Created bots remain in the test account for reuse; the helpers do not issue BotFather's irreversible bot-deletion command. Retrieve a reusable token through BotFather in the test environment. Never log tokens or commit them.
+
+Each fixture creates its own forum and deletes that forum during teardown, including after partial setup failure. Teardown closes the owned user session. Do not run concurrent fixtures with the same fixed phone account while they are creating bots, or run another `getUpdates` consumer against the fixture's bot token. Give parallel workers separate accounts and bots.
+
+Import `setupTelegramTest` from `test/e2e/helpers/telegram-fixture.ts` in live tests. It registers teardown with the Node test context and returns the authenticated user, bot, test Bot API client, forum, and update inbox. Lower-level login and provisioning helpers are available in the same directory when a test needs different ownership. Keep domain scenarios and assertions in test files, not in the setup helpers.
+
+Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
+
 ## Debugging
 
 Use `pm2 logs omp-telegram-collab` for deployed service diagnostics. If configuration was saved but not applied, correct the reported error and run `pnpm cli reload`. The Mini App exchanges fresh Telegram launch data once for a long-lived backend credential, cached in memory and session storage per launch and scoped to the bot/session. It reuses that credential for reloads and automatic reconnects, including after service restarts; elapsed launch age alone does not require reopening Telegram. Credentials are signed using the bot token, bind the bot/session/user and session generation, and have no time expiry. The backend refreshes membership on reconnect, before writes, and periodically for active sockets, revoking access when membership is lost; reads reuse established authorization. Backend and network failures preserve their original diagnostics. If capacity is exhausted, close unused Mini Apps or increase the configured limit before selecting Rejoin.
