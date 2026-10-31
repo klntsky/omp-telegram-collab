@@ -26,7 +26,7 @@ test('skill aliases and canonical names are exact and deduplicated', () => {
 });
 
 test('unknown roots and wrong bot roots are ignored after full tokenization', () => {
-  for (const text of ['/unknown /new x', '/p@OtherBot x', '/bad-command x']) assert.deepEqual(parse(text), { kind: 'ignore' });
+  for (const text of ['/unknown /new x', '/constructor task', '/__proto__ task', '/p@OtherBot x', '/bad-command x']) assert.deepEqual(parse(text), { kind: 'ignore' });
   assert.deepEqual(parse('/p@eXAMPLEbOT hello'), { kind: 'prompt', action: 'p', text: 'hello', extensions: [] });
 });
 
@@ -46,7 +46,7 @@ test('prefix boundaries and repeated singleton extensions reject', () => {
 });
 
 test('all standalone command groups enforce their arities', () => {
-  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli']) {
+  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'cli']) {
     assert.deepEqual(parse(`/${action}`), { kind: 'command', action, argument: '' });
     assert.equal(parse(`/${action} extra`).kind, 'invalid');
   }
@@ -62,6 +62,14 @@ test('all standalone command groups enforce their arities', () => {
   assert.deepEqual(parse('/skills'), { kind: 'command', action: 'skills', argument: '' });
   assert.equal(parse('/skills unknown').kind, 'invalid');
   assert.deepEqual(parse('/new'), { kind: 'prompt', action: 'new', text: '', extensions: [] });
+});
+
+test('standalone start accepts deep-link payloads without becoming composable', () => {
+  assert.deepEqual(parse('/start'), {kind:'command',action:'start',argument:''});
+  assert.deepEqual(parse('/start@ExampleBot setup'), {kind:'command',action:'start',argument:'setup'});
+  assert.deepEqual(parse('/start token_with-dashes'), {kind:'command',action:'start',argument:'token_with-dashes'});
+  assert.equal(parse('/start one two').kind,'invalid');
+  assert.equal(parse('/p /start setup task').kind,'invalid');
 });
 
 test('tokenization consumes every non-whitespace span with strictly advancing offsets', () => {
@@ -103,4 +111,14 @@ test('long prefixes terminate and deduplicate without changing literal tails', (
   });
   assert.equal(parse(`/p ${prefix}/unknown`).kind, 'invalid');
   assert.equal(parse(`/p ${prefix}/worktree /worktree`).kind, 'invalid');
+});
+
+test('source-offset parser and tokenizer agree on whitespace boundaries', () => {
+  for (const separator of [' ', '\t', '\r\n', '\u00a0', '\u2028', '\u2029', '\ufeff']) {
+    const source = `/p${separator}/model_preset${separator}Fast${separator}Explain${separator}/stop`;
+    assert.deepEqual(parse(source), {
+      kind:'prompt',action:'p',text:`Explain${separator}/stop`,
+      extensions:[{kind:'model-preset',name:'Fast'}],
+    });
+  }
 });

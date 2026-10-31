@@ -43,6 +43,7 @@ export interface RuntimeLike {
   worktree(session: TopicSession, branch?: string): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
+  reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{bind(id: string): void; release(): void}>;
   /** Resolves an existing host without preparing one; undefined means confirmed absence. */
   resolveExisting(session: TopicSession): Promise<HostBinding | undefined>;
   isRunning(session: TopicSession): Promise<boolean>;
@@ -152,6 +153,7 @@ interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
+  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instancePath: string; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}};
 }
 interface PromptProposal {
   source: Context;
@@ -258,6 +260,7 @@ export class BotService {
   private readonly listeners = new Map<string, Listener>();
   private readonly reconnects = new Map<string, NodeJS.Timeout>();
   private readonly capacityRequests = new Map<string, CapacityRequest>();
+  private admissionEpoch = 0;
   private readonly questions = new Map<string, PendingQuestion>();
   private readonly endedQuestionReplies = new Map<string,{sessionId:string;generation:number} | undefined>();
   private readonly delivery: TelegramDelivery;
@@ -830,6 +833,7 @@ export class BotService {
     if (!this.options.config.terminated) { this.termination = undefined; return; }
     this.termination ??= (async () => {
       this.capacityRequests.clear();
+      this.admissionEpoch++;
       this.promptProposals.clear();
       const sessions = this.options.store.listSessions();
       for (const session of sessions) {
@@ -1232,6 +1236,7 @@ export class BotService {
     this.reconnects.clear();
     this.closedSessions.clear();
     this.capacityRequests.clear();
+    this.admissionEpoch++;
     this.promptProposals.clear();
     for (const token of this.questions.keys()) this.endQuestion(token);
     const listeners = [...this.listeners.values()];
@@ -2032,6 +2037,7 @@ export class BotService {
     worktree = false,
     authority = ctx,
     extensions: readonly PromptExtension[] = [],
+    reservation?: {bind(id: string): void},
   ): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
@@ -2049,6 +2055,7 @@ export class BotService {
       task !== undefined && !worktree ? (await this.getIconIds()).running : undefined;
     if (!(await this.currentAdmin(authority)))
       throw new Error('Administrator access changed before topic creation.');
+    if (this.stopped || refreshTermination(this.options.config)) throw new Error('The service is stopping');
     const topic = await this.bot.api.createForumTopic(
       ctx.chat!.id,
       title,
@@ -2067,6 +2074,7 @@ export class BotService {
       ctx.from!.id,
       authority.from!.id,
     );
+    reservation?.bind(session.id);
     if (automaticWorktree) {
       await this.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.currentAdmin(authority)))
@@ -2210,7 +2218,7 @@ export class BotService {
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
     if (!request || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
         ctx.chat.id !== request.chatId || message.message_id !== request.messageId ||
-        !('message_thread_id' in message) || message.message_thread_id !== request.threadId ||
+        (('message_thread_id' in message ? message.message_thread_id : undefined) ?? 1) !== request.threadId ||
         !('from' in message) || message.from?.id !== this.id ||
         'forward_origin' in message || 'forward_date' in message) return;
     if (request.expires <= Date.now()) {
@@ -2226,6 +2234,28 @@ export class BotService {
     this.capacityRequests.delete(token);
     if (action === 'cancel') {
       await replyTo(ctx, contextDestination(ctx), 'Capacity increase cancelled. The session limit is unchanged.');
+      return;
+    }
+    if (request.command) {
+      if (this.stopped || refreshTermination(this.options.config)) return;
+      const command = request.command;
+      const session = request.sessionId ? this.options.store.getSession(request.sessionId) : undefined;
+      if (request.sessionId && (!session || session.status !== 'open' || !this.sessionAssigned(session) ||
+          this.options.store.getSessionGeneration(session.id) !== command.generation)) return;
+      await this.authorize(request.chatId, command.source.from!.id);
+      if (!(await this.currentAdmin(command.source))) return;
+      const approver = await this.bot.api.getChatMember(request.chatId, ctx.from!.id);
+      if (!isActiveMember(approver) || !isAdministrator(approver)) return;
+      if (command.epoch !== this.admissionEpoch || this.stopped || refreshTermination(this.options.config)) return;
+      const persisted = readConfig(this.options.config.configPath);
+      if (findInstance(persisted, this.id, request.chatId)?.path !== command.instancePath ||
+          this.assignedPath(request.chatId) !== command.instancePath) return;
+      if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) return;
+      if (persisted.omp.maxSessions !== request.limit || this.options.runtime.getSessionLimit() !== request.limit) return;
+      writeConfig({...persisted, omp:{...persisted.omp,maxSessions:request.limit * 2}});
+      this.options.config.omp.maxSessions = request.limit * 2;
+      if (!this.options.runtime.increaseSessionLimit(request.limit)) return;
+      await this.routePrompt(command.source, command.content, session, command.extensions, command.worktree, command.skills);
       return;
     }
     const session = this.options.store.getSession(request.sessionId);
@@ -2271,6 +2301,7 @@ export class BotService {
   private async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
     const generation = this.options.store.getSessionGeneration(session.id);
     const checkSession = () => {
+      if (this.stopped || refreshTermination(this.options.config)) throw new Error('The service is stopping');
       this.requireSessionAssignment(session);
       if (this.options.store.getSessionGeneration(session.id) !== generation ||
           this.options.store.getSession(session.id)?.status !== 'open') {
@@ -2311,7 +2342,8 @@ export class BotService {
       checkSession();
     }
   }
-  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false): Promise<void> {
+  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}): Promise<void> {
+    const epoch = this.admissionEpoch;
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     const preparations = extensions.filter(extension => extension.kind !== 'skill');
@@ -2325,7 +2357,9 @@ export class BotService {
       if (session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
     }
     const instancePath = this.assignedPath(ctx.chat!.id);
+    if (session?.runtime.kind === 'attached' && preparations.length) throw new Error('Attached sessions cannot run prompt preparations.');
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    const originalContent = structuredClone(content);
     if (extensions.some(extension => extension.kind === 'model-preset')) {
       const names = await this.options.runtime.availableModelPresets(instancePath);
       for (const extension of extensions) {
@@ -2336,8 +2370,8 @@ export class BotService {
       }
     }
     const skillKey = this.skills.key(ctx);
-    const pendingSkills = this.options.store.getPendingSkills(skillKey);
-    const topicSkill = worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
+    const pendingSkills = frozenSkills?.names ?? this.options.store.getPendingSkills(skillKey);
+    const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
     const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
       const available = await this.options.runtime.listSkills(instancePath, session);
@@ -2349,10 +2383,48 @@ export class BotService {
     if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (await this.currentAdmin(ctx)) {
-      if (session) {
-        await this.preparePrompt(ctx, session, preparations);
-        await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
-      } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree, ctx, preparations);
+      const authorizeExecution = async () => {
+        await this.authorize(ctx.chat!.id,ctx.from!.id);
+        if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('The service is stopping');
+        if (!(await this.currentAdmin(ctx)) || this.assignedPath(ctx.chat!.id) !== instancePath || this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('Prompt authority or assignment changed before execution.');
+        if (session && (this.options.store.getSessionGeneration(session.id) !== generation || this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed before execution.');
+      };
+      let reservation: {bind(id:string):void;release():void} | undefined;
+      if (extensions.length && session?.runtime.kind !== 'attached') {
+        try {
+          reservation = await this.options.runtime.reserveSession(session?.id, authorizeExecution);
+        } catch (error) {
+          if (!(error instanceof SessionCapacityError)) throw error;
+          if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
+            await replyTo(ctx, contextDestination(ctx), `${error.message}\nConfiguration is read-only; ask the local operator to increase the configured capacity.`);
+            return;
+          }
+          const token = randomBytes(16).toString('base64url');
+          if (this.stopped || refreshTermination(this.options.config)) return;
+          for (const [key, request] of this.capacityRequests) if (request.expires <= Date.now()) this.capacityRequests.delete(key);
+          const message = await replyTo(ctx, contextDestination(ctx), `OMP session limit reached (${error.limit}). Increase shared capacity to ${error.limit * 2} and execute this command?`, {
+            reply_markup:{inline_keyboard:[[
+              {text:'Approve',callback_data:`capacity:approve:${token}`},
+              {text:'Cancel',callback_data:`capacity:cancel:${token}`},
+            ]]},
+          });
+          if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) return;
+          this.capacityRequests.set(token, {
+            sessionId:session?.id ?? '',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
+            messageId:message.message_id,limit:error.limit,expires:Date.now()+300000,
+            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instancePath,epoch,generation,skills:{names:[...pendingSkills],topicSkill}},
+          });
+          setTimeout(() => this.capacityRequests.delete(token),300000).unref();
+          return;
+        }
+      }
+      try {
+        await authorizeExecution();
+        if (session) {
+          await this.preparePrompt(ctx, session, preparations);
+          await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
+        } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation);
+      } finally { reservation?.release(); }
       return;
     }
     if (preparations.length) throw new Error('Prompt preparations require a group administrator.');
@@ -2407,6 +2479,11 @@ export class BotService {
     } else await this.newSession(proposal.source,proposal.content,undefined,undefined,undefined,proposal.worktree,ctx);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
+  private consumePendingSkills(key: PendingSkillKey, names: readonly string[]): void {
+    const remaining = this.options.store.getPendingSkills(key).filter(name => !names.includes(name));
+    this.options.store.clearPendingSkills(key);
+    for (const name of remaining) this.options.store.addPendingSkill(key,name);
+  }
   private async submitSessionPrompt(ctx: Context, session: TopicSession, content: PromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     this.requireSessionAssignment(session);
@@ -2427,7 +2504,7 @@ export class BotService {
       if (selected.topicSkill) this.options.store.setNewTopicSkill(session.id,selected.topicSkill);
     } : undefined;
     if (selected) {
-      this.options.store.clearPendingSkills(selected.key);
+      this.consumePendingSkills(selected.key,selected.names);
       if (selected.topicSkill) this.options.store.clearNewTopicSkill(session.id);
     }
     try {

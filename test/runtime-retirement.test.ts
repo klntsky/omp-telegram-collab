@@ -650,3 +650,54 @@ test('missing lifecycle and registry cannot make a known live host appear absent
   assert.deepEqual(app.requests, []);
   assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);
 });
+
+test('reservations serialize competing targets without spawning and share an existing logical slot', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.removeHost();
+  const results = await Promise.allSettled([app.runtime.reserveSession('first'),app.runtime.reserveSession('second')]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length,1);
+  assert.equal(results.filter(result => result.status === 'rejected').length,1);
+  const winner = results.find(result => result.status === 'fulfilled')!;
+  assert.equal(winner.status,'fulfilled');
+  if (winner.status !== 'fulfilled') throw new Error('Missing reservation');
+  const id = results[0]!.status === 'fulfilled' ? 'first' : 'second';
+  const shared = await app.runtime.reserveSession(id);
+  winner.value.release();
+  await assert.rejects(app.runtime.reserveSession('competitor'), /OMP session limit/);
+  shared.release();
+  const next = await app.runtime.reserveSession();
+  next.bind('final-target');
+  await assert.rejects(app.runtime.ensure({...app.session,id:'competitor'}), /OMP session limit/);
+  assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length,0);
+  next.release();
+  const released = await app.runtime.reserveSession('competitor');
+  released.release();
+});
+
+test('a reservation protects the managed slot from retirement and is invalidated by shutdown', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  const reservation = await app.runtime.reserveSession(app.session.id);
+  assert.equal(await app.runtime.retireIdle(0),0);
+  assert.deepEqual(app.requests,[]);
+  await assert.rejects(app.runtime.reserveSession('competitor'), /OMP session limit/);
+  await app.runtime.close();
+  assert.throws(() => reservation.bind(app.session.id), /reservation expired/);
+  await assert.rejects(app.runtime.reserveSession('competitor'), /stopping/);
+  reservation.release();
+});
+
+test('denied admission authorization cannot retire another managed session', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  const denied = new Error('Admission permission revoked during discovery');
+  await assert.rejects(app.runtime.ensure({...app.session,id:'another-topic'},async () => {
+    throw denied;
+  }),error => error === denied);
+  await assert.rejects(app.runtime.reserveSession('another-topic',async () => {
+    throw denied;
+  }),error => error === denied);
+  assert.deepEqual(app.requests,[]);
+  assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length,0);
+});

@@ -8,3 +8,4 @@ const generated = buildParserFile(grammar, {
   warn(message) { throw new Error(message); },
 });
 await writeFile(new URL('../src/telegram-command-parser.ts', import.meta.url), generated.parser);
+await writeFile(new URL('../src/telegram-command-parser.terms.ts', import.meta.url), generated.terms);

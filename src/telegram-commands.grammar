@@ -1,54 +1,78 @@
+// One message produces one request. A prompt request selects one target session
+// and submits at most one task; the other request groups run standalone.
+//
+// Example: /new /worktree /model_preset openai Fix login
+//          target -> worktree -> preset argument -> literal task
 @top Request {
   Prompt | SkillPrompt | Inspection | Configuration | Lifecycle | Guidance |
-  OptionalArgument | Attach | Skills
+  Start | OptionalArgument | Attach | Skills
 }
 
-Prompt { (NewCommand | PromptCommand) Extension* Tail? }
+// Only /new and /p select the target. A skill shortcut with task content uses
+// /p routing and adds that skill. A bare shortcut keeps its selection behavior.
+Prompt { (command_new | command_p) Extension* Tail? }
 SkillPrompt { Skill Extension* Tail? }
+
+// These are the only commands allowed between the target and the task.
+// /model_preset consumes exactly one name. Chained /worktree consumes no
+// branch name: "/p /worktree Fix login" means an automatically named worktree
+// and the task "Fix login". Repeated preset/worktree extensions are rejected
+// by interpretation; skill extensions accumulate and are deduplicated.
 Extension { Preset | Worktree | Skill }
-Preset { PresetCommand Word }
-Worktree { WorktreeCommand }
-Skill { SkillCommand }
+Preset { command_model_preset Word }
+Worktree { command_worktree }
+Skill { SkillToken }
 
-Inspection { ListAdminsCommand | SessionCommand | StatusCommand | UsageCommand | CliCommand }
-Configuration { SettingsCommand | SetupCommand }
-Lifecycle { StopCommand | KillCommand | DetachCommand | TerminateCommand }
-Guidance { HelpCommand | StartCommand }
-OptionalArgument { (WorktreeCommand | PresetCommand) Word? }
-Attach { AttachCommand Word Any* }
-Skills { SkillsCommand Word? }
+// Standalone groups cannot appear as prompt extensions. In particular, /stop,
+// /kill, and /terminate never become implicit preparation steps.
+Inspection { command_list_admins | command_session | command_status | command_usage | command_cli }
+Configuration { command_settings | command_setup }
+Lifecycle { command_stop | command_kill | command_detach | command_terminate }
+Guidance { command_help }
+// Telegram deep links supply "/start@Bot payload"; this is not composition.
+Start { command_start Word? }
+// Standalone /worktree may name a branch; standalone /model_preset may name
+// a preset or omit its argument to list choices.
+OptionalArgument { (command_worktree | command_model_preset) Word? }
+// /attach requires an instance ID, then treats the remaining words as a topic
+// name. /skills accepts only no argument or "clear", checked by interpretation.
+Attach { command_attach Word Any* }
+Skills { command_skills Word? }
 
+// A required extension argument is consumed before looking for a task.
+// The first non-slash word starts Tail. From then on, ALL tokens are literal
+// task text, including known and unknown slash commands. There is no "--" or
+// escape syntax. A task that starts with a slash needs a natural-language lead-in.
+//
+// "/p /model_preset openai Explain /stop" selects the preset, then submits
+// "Explain /stop". "/p /stop" is invalid because no literal task has started.
 Word { TextToken }
 Tail { Word Any* }
 Any {
-  TextToken | NewCommand | PromptCommand | WorktreeCommand | PresetCommand |
-  SkillsCommand | AttachCommand | SettingsCommand | SetupCommand |
-  ListAdminsCommand | DetachCommand | SessionCommand | StatusCommand |
-  UsageCommand | StopCommand | KillCommand | TerminateCommand |
-  HelpCommand | StartCommand | CliCommand | SkillCommand | UnknownCommand
+  TextToken | command_new | command_p | command_worktree | command_model_preset |
+  command_skills | command_attach | command_settings | command_setup |
+  command_list_admins | command_detach | command_session | command_status |
+  command_usage | command_stop | command_kill | command_terminate |
+  command_help | command_start | command_cli | SkillToken | UnknownToken
 }
 
-@tokens {
-  NewCommand { "n" }
-  PromptCommand { "p" }
-  WorktreeCommand { "t" }
-  PresetCommand { "m" }
-  SkillsCommand { "s" }
-  AttachCommand { "a" }
-  SettingsCommand { "b" }
-  SetupCommand { "c" }
-  ListAdminsCommand { "d" }
-  DetachCommand { "e" }
-  SessionCommand { "f" }
-  StatusCommand { "g" }
-  UsageCommand { "h" }
-  StopCommand { "i" }
-  KillCommand { "j" }
-  TerminateCommand { "k" }
-  HelpCommand { "l" }
-  StartCommand { "o" }
-  CliCommand { "q" }
-  SkillCommand { "v" }
-  UnknownCommand { "u" }
-  TextToken { "w" }
+// The external tokenizer reads the original message, preserving source offsets.
+// command_new means "/new", command_model_preset means "/model_preset", etc.
+// Command matching ignores case and accepts an optional @ThisBot suffix.
+// SkillToken covers registered /skill_* shortcuts and exact /skill:name names.
+// TextToken is one non-slash word; UnknownToken is an unrecognized slash word.
+// An unknown or foreign-bot root is ignored before parsing. The same token in
+// a prefix is rejected, while Any allows it unchanged after the task starts.
+@context commandContext from "./telegram-command-tokens.js"
+@external tokens commandTokenizer from "./telegram-command-tokens.js" {
+  command_new, command_p, command_worktree, command_model_preset,
+  command_skills, command_attach, command_settings, command_setup,
+  command_list_admins, command_detach, command_session, command_status,
+  command_usage, command_stop, command_kill, command_terminate,
+  command_help, command_start, command_cli, SkillToken, UnknownToken, TextToken
 }
+
+// Whitespace separates tokens but is not discarded from the original message.
+// The interpreter slices task text from source offsets, retaining its formatting.
+@skip { space }
+@tokens { space { (@whitespace | "\uFEFF")+ } }

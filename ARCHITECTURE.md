@@ -76,6 +76,8 @@ The runtime manager owns host discovery, startup, attachment, capacity, activity
 
 Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
 
+The runtime owns capacity reservations before composed-command execution. A reservation accounts for one logical managed-session target and remains valid across sequential host replacement; all managed admissions share that accounting boundary. The bot adapter owns interactive backpressure and the complete frozen command awaiting approval. Capacity approval rechecks the original sender, approving administrator, assignment, and target lifecycle before reserving again and executing any preparation. A rejected or expired wait cannot become an unprepared prompt submission.
+
 OMP owns worktree creation, change transfer, and live session relocation. The runtime requests OMP's native worktree operation and persists the resulting managed working-directory identity. A worktree-backed session retains its configured instance as the authorization and forum-assignment identity while its worktree supplies execution, history, model settings, and skill-discovery context. Recovery and force termination verify that execution identity rather than treating every session assigned to a repository as the same host. Worktrees remain independent durable filesystem state; host retirement and session shutdown do not remove them.
 
 The runtime boundary owns skill-catalog discovery from OMP for the project and, when applicable, its session host. Bot adapters consume catalog names and descriptions through that boundary rather than inspecting OMP resources themselves.
