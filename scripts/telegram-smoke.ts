@@ -37,6 +37,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
+  const chatActions: Record<string, unknown>[] = [];
   const reopenedTopics: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
   const topicEdits: Record<string, unknown>[] = [];
@@ -141,6 +142,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     else if (method === 'editForumTopic') {
       topicEdits.push(params);
       events.emit('topic');
+      result = true;
+    }
+    else if (method === 'sendChatAction') {
+      chatActions.push(params);
       result = true;
     }
     else if (method === 'deleteMessage') {
@@ -364,6 +369,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   return {
     url, telegramUrl, store, config, bot, service, runtime, messages, reactions, pins, topicEdits, deletedMessages, accepted, events, update, callback, inlineQuery, inlineAnswers,
     createdTopics, reopenedTopics,
+    chatActions,
     sessionTitles, titleChanges, topicTitleStatuses,
     fileRequests,
     pollRequests,

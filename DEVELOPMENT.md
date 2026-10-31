@@ -95,6 +95,8 @@ See [Product](PRODUCT.md#12-prompts-and-permissions) for default-skill applicati
 
 Each bot/chat assignment may contain an optional `create_topic_worktrees` boolean, which defaults to `false` when omitted. Administrators can toggle it per forum through `/settings`, or an operator can set it under `instances[project path].chats[]` in YAML. See [Product](PRODUCT.md#11-sessions-and-commands) for automatic worktree creation, branch names, and session exclusions.
 
+Each bot/chat assignment may set `typing_indicators` to `disabled`, `streaming`, or `inference`; omission selects `disabled`. Administrators can change it through `/settings`, or operators can edit `instances[project path].chats[]` in YAML and reload. See [Product](PRODUCT.md#12-prompts-and-permissions) for indicator behavior.
+
 Both the file and its parent directory must be writable to change configuration. A service with readable but protected configuration can still run sessions. Protect both against the service account if it must not change them; an administrator can run the CLI under another account.
 
 Runtime data lives separately in `dataDir`, which defaults to a `data` directory beside the YAML. Back up both. Changing `dataDir` selects different state; it does not migrate histories. Startup does not import `.env` files or old configuration formats.
