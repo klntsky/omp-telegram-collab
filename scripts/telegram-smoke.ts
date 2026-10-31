@@ -270,6 +270,11 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       return binding;
     },
     async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
+    async modelPresetDetails(_instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}> {
+      if (name === 'Fast') return {modelRoles: {default: 'fixture/fast', worker: 'fixture/fast#minimal'}, defaultThinkingLevel: 'low'};
+      if (name === 'Slow') return {modelRoles: {default: 'fixture/slow', worker: 'fixture/slow#medium'}, defaultThinkingLevel: 'high'};
+      throw new Error(`Unknown model preset: ${name}`);
+    },
     async providerUsage(_instancePath: string): Promise<never> { throw new Error('No provider usage query configured in fixture'); },
     async listSkills(_instancePath: string, _session?: TopicSession) {
       return [

@@ -30,7 +30,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/terminate` | Supergroup owner or administrator service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
 | `/detach` | Make the topic permanently conversation-only. Requires the supergroup owner or an administrator. |
 | `/attach INSTANCE_ID` | Connect a running OMP host to a new topic. Requires the supergroup owner or an administrator. |
-| `/model_preset [name]` | List available presets and the current selection, or switch an idle topic's session by name. Requires the supergroup owner or an administrator. Forum defaults are managed through `/settings`. |
+| `/model_preset [name]` | Browse preset models and agent roles with buttons, use a preset in the idle topic, or save the forum default. An explicit name switches the idle topic directly. Requires the supergroup owner or an administrator. |
 | `/list_admins` | List the current human supergroup owner and administrators. Available to current group members in General and topics. |
 | `/setup` | Request or complete forum enrollment, then open `/settings`. |
 | `/status` | Show forum, host, mirroring, task-admission, recovery, skill-cache and failure diagnostics. Current members can inspect assigned forums, including during service termination. Accepts no arguments. |
@@ -209,7 +209,9 @@ Avoiding periodic metadata writes deliberately gives up unconditional repair of 
 
 The Default model preset picker in `/settings` saves or clears the default for that bot/chat assignment. New managed hosts apply its models and thinking settings before accepting work, including when resuming history. It overrides restored settings and model-selection flags. Running hosts do not change. A missing saved preset fails startup rather than selecting another one.
 
-In a session topic, `/model_preset` starts the host if needed and lists presets and the current selection. `/model_preset <name>` switches only that idle session. Usage replies include available presets. The command-menu description explains both forms and includes as many complete preset names as fit Telegram's limit, preferring shorter names. Menu preset names refresh in the background; discovery failures retain the last successful names and their original diagnostics. Neither form changes the forum default. Attached hosts must use `/modelpreset` in their local terminal. Older managed hosts that cannot switch without changing shared settings must be restarted first.
+In an open session topic, `/model_preset` opens preset buttons without starting a host. Selecting a preset displays its model selectors (including effort levels) by agent role. Use switches only that idle session, Make default saves the forum default without changing running hosts, and Back returns to the preset list. `/model_preset <name>` still switches only that idle session directly. Panels belong to their original topic and session; expired or stale controls cannot apply changes, and current administrator access and assignments are checked before writes. Usage replies include available presets. The command-menu description explains both forms and includes as many complete preset names as fit Telegram's limit, preferring shorter names. Menu preset names refresh in the background; discovery failures retain the last successful names and their original diagnostics. Attached hosts must use `/modelpreset` in their local terminal to switch presets. Older managed hosts that cannot switch without changing shared settings must be restarted first.
+
+Large preset catalogs and long role details use page buttons. Back returns from details to the same catalog page. Use and Make default remain available on every details page.
 
 Busy model-preset switches reply “Can't change model preset while busy. /stop first” without the generic service-failure wrapper.
 

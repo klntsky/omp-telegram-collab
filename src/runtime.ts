@@ -735,6 +735,22 @@ export class OmpRuntime {
     if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
     return Object.keys(presets).filter(name => presets[name] !== null && presets[name] !== undefined).sort((a, b) => a.localeCompare(b));
   }
+  async modelPresetDetails(instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}> {
+    const presets = await this.#nativeSetting(instancePath, 'modelPresets');
+    if (!record(presets)) throw new Error('OMP config get modelPresets returned an invalid preset mapping');
+    const preset = Object.hasOwn(presets, name) ? presets[name] : undefined;
+    if (preset === undefined || preset === null) throw new Error(`Unknown model preset: ${name}`);
+    if (!record(preset) || !record(preset.modelRoles)) throw new Error(`Invalid model preset "${name}": modelRoles must be a mapping`);
+    const roles: Record<string, string> = {};
+    for (const [role, selector] of Object.entries(preset.modelRoles)) {
+      if (typeof selector !== 'string' || !selector.trim()) throw new Error(`Invalid model preset "${name}": role "${role}" is not a model selector`);
+      roles[role] = selector;
+    }
+    if (preset.defaultThinkingLevel !== undefined &&
+        (typeof preset.defaultThinkingLevel !== 'string' || !preset.defaultThinkingLevel.trim()))
+      throw new Error(`Invalid model preset "${name}": defaultThinkingLevel is not a thinking level`);
+    return {modelRoles: roles, ...(preset.defaultThinkingLevel === undefined ? {} : {defaultThinkingLevel: preset.defaultThinkingLevel})};
+  }
   async listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     this.#assertActive();
