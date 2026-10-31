@@ -128,6 +128,97 @@ test('agent replies retain their triggering Telegram message across chunks and l
   }
 });
 
+test('agent replies follow acknowledged inputs rather than newer submissions', { timeout: 15_000 }, async () => {
+  const app = await createSmokeApp({ holdPromptReceipts: true, skipStartupRejection: true });
+  const acknowledge = (text: string, id: number) => {
+    app.emit({
+      t: 'entry',
+      entry: {
+        type: 'custom_message',
+        id: `receipt-${id}`,
+        parentId: null,
+        timestamp: new Date(id).toISOString(),
+        customType: 'collab-prompt',
+        content: text,
+        details: { from: 'Telegram @FixtureOmpBot' },
+        display: true,
+      },
+    });
+  };
+  const reply = async (id: number) => {
+    const before = app.messages.length;
+    app.emit({
+      t: 'entry',
+      entry: {
+        type: 'message',
+        id: `held-receipt-answer-${id}`,
+        parentId: null,
+        timestamp: new Date(id).toISOString(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: `Answer ${id}` }],
+          model: 'fixture',
+          timestamp: id,
+          stopReason: 'stop',
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { total: 0 },
+          },
+        },
+      },
+    });
+    await eventually(() =>
+      app.messages.slice(before).some(message => message.rich_message !== undefined),
+    );
+    return app.messages.slice(before).find(message => message.rich_message !== undefined)!;
+  };
+  try {
+    await app.update({ text: '/setup' });
+    await app.update({ message_id: 6001, text: '/new Initial task' });
+    const session = app.store.listSessions(botId)[0]!;
+    assert.equal((await reply(1)).reply_parameters, undefined);
+
+    acknowledge('Initial task', 1);
+    await eventually(() =>
+      app.reactions.some(reaction =>
+        reaction.message_id === 6001 && JSON.stringify(reaction.reaction).includes('🤝'),
+      ),
+    );
+    await app.update({
+      message_id: 6002,
+      message_thread_id: session.threadId,
+      text: '/p Not yet accepted',
+    });
+    assert.deepEqual((await reply(2)).reply_parameters, {
+      message_id: 6001,
+      allow_sending_without_reply: true,
+    });
+
+    app.emit({ t: 'error', message: 'Fixture rejected the pending prompt' });
+    await app.update({
+      message_id: 6003,
+      message_thread_id: session.threadId,
+      text: '/p Accepted follow-up',
+    });
+    acknowledge('Accepted follow-up', 2);
+    await eventually(() =>
+      app.reactions.some(reaction =>
+        reaction.message_id === 6003 && JSON.stringify(reaction.reaction).includes('🤝'),
+      ),
+    );
+    assert.deepEqual((await reply(3)).reply_parameters, {
+      message_id: 6003,
+      allow_sending_without_reply: true,
+    });
+  } finally {
+    await app.close();
+  }
+});
+
 
 test('busy streaming delivers every state frame without starving live output', { timeout: 10_000 }, async () => {
   const app = await createSmokeApp({ authorizationDelayMs: 30 });
