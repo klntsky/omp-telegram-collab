@@ -204,7 +204,9 @@ Keep the YAML and runtime data private. They contain bot tokens, topic mappings,
 
 Each successful startup notifies enrolled groups in the reserved **Bot status** forum topic: “OMP bot service is back online (restarting took N.NN seconds).” The bot creates this topic when needed and persists its ID separately for each bot and chat. Later lifecycle notices reuse it; if Telegram reports that the message thread no longer exists, the bot creates a replacement and saves its ID. Notices never fall back to General. The duration runs from the preceding orderly shutdown through readiness, including time between processes; without a shutdown timestamp it measures startup. An orderly shutdown sends a winding-down notice in the same reserved topic.
 
-Bot status is not a session topic. Messages there are ignored before command handling, prompt submission, or receipt reactions: slash commands (including `/terminate`, `/setup`, and `/new`), ordinary text, and replies to the bot have no effect. Use General or a session topic for commands and prompts.
+Bot status is an untracked topic, not a session topic. Untracked topics never acquire session worktrees or branch tracking, and the bot never renames them or synchronizes their titles with OMP. This applies to persisted status topics after restart and to replaced status topics. Existing session history is retained but detached when its topic becomes untracked.
+
+Messages in untracked topics are ignored before command handling, prompt submission, or receipt reactions: slash commands (including `/terminate`, `/setup`, and `/new`), ordinary text, and replies to the bot have no effect. Use General or a session topic for commands and prompts.
 
 
 ## 3. Capacity and reconnection

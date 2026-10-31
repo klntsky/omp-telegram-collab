@@ -36,6 +36,7 @@ export class Store {
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
+      CREATE TABLE IF NOT EXISTS untracked_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id));
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_path TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
       CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL,fingerprint TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(session_id,fingerprint));
       CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
@@ -54,6 +55,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
       COMMIT;`);
+    for (const row of this.db.prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics').all()) {
+      this.setUntrackedTopic({botId:Number(row.bot_id),chatId:Number(row.chat_id),threadId:Number(row.thread_id)});
+    }
   }
   enrollGroup(botId: number, chatId: number): void { this.db.prepare('INSERT OR IGNORE INTO groups VALUES (?,?)').run(botId, chatId); }
   isEnrolled(botId: number, chatId: number): boolean { return Boolean(this.db.prepare('SELECT 1 FROM groups WHERE bot_id=? AND chat_id=?').get(botId, chatId)); }
@@ -62,8 +66,41 @@ export class Store {
     const row = this.db.prepare('SELECT thread_id FROM bot_status_topics WHERE bot_id=? AND chat_id=?').get(botId, chatId);
     return row ? Number(row.thread_id) : undefined;
   }
+  getTopicKind(key: TopicKey): 'tracked' | 'untracked' {
+    return this.db.prepare('SELECT 1 FROM untracked_topics WHERE bot_id=? AND chat_id=? AND thread_id=? UNION ALL SELECT 1 FROM bot_status_topics WHERE bot_id=? AND chat_id=? AND thread_id=? LIMIT 1')
+      .get(key.botId,key.chatId,key.threadId,key.botId,key.chatId,key.threadId) ? 'untracked' : 'tracked';
+  }
+  setUntrackedTopic(key: TopicKey): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.markUntrackedTopic(key);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  private markUntrackedTopic(key: TopicKey): void {
+    this.db.prepare('INSERT OR IGNORE INTO untracked_topics VALUES (?,?,?)').run(key.botId,key.chatId,key.threadId);
+    const existing = this.getTopic({botId:key.botId,destination:topicDestination(key.chatId,key.threadId)});
+    if (!existing) return;
+    this.db.prepare("UPDATE sessions SET status='detached' WHERE id=?").run(existing.id);
+    this.setPendingSessionTitle(existing.id,undefined);
+    this.db.prepare('DELETE FROM session_topic_title_prefixes WHERE session_id=?').run(existing.id);
+    if (existing.status !== 'detached') this.advanceSessionGeneration(existing.id);
+  }
   setBotStatusTopic(botId: number, chatId: number, threadId: number): void {
-    this.db.prepare('INSERT INTO bot_status_topics VALUES (?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE SET thread_id=excluded.thread_id').run(botId, chatId, threadId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.getBotStatusTopic(botId,chatId);
+      if (previous !== undefined && previous !== threadId) this.markUntrackedTopic({botId,chatId,threadId:previous});
+      this.db.prepare('INSERT INTO bot_status_topics VALUES (?,?,?) ON CONFLICT(bot_id,chat_id) DO UPDATE SET thread_id=excluded.thread_id').run(botId,chatId,threadId);
+      this.markUntrackedTopic({botId,chatId,threadId});
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   getPendingSkills(key: PendingSkillKey): string[] {
     return this.db.prepare('SELECT name FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=? ORDER BY rowid').all(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId).map(row => String(row.name));
@@ -96,6 +133,7 @@ export class Store {
     if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length) throw new Error('An initial task requires text or images');
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      if (this.getTopicKind(key) === 'untracked') throw new Error('An untracked topic cannot have a session');
       const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instancePath);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');

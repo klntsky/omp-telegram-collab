@@ -449,10 +449,12 @@ export class BotService {
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
     this.bot.use(async ctx => {
-      if (ctx.chat) {
+      const untracked = () => {
+        if (!ctx.chat) return false;
         const destination = contextDestination(ctx);
-        if (destination.kind === 'topic' && destination.threadId === this.options.store.getBotStatusTopic(this.id,ctx.chat.id)) return;
-      }
+        return destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'untracked';
+      };
+      if (untracked()) return;
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -465,7 +467,7 @@ export class BotService {
       const urgent = intent.kind === 'command' && intent.action === 'terminate';
       if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
       const received = this.receiveMessage(ctx,intent);
-      const process = async () => { await received; await this.handle(ctx, intent); };
+      const process = async () => { await received; if (!untracked()) await this.handle(ctx, intent); };
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) { await this.reportError(ctx,error); }
@@ -1013,6 +1015,7 @@ export class BotService {
   }
   private sessionAssigned(session: TopicSession): boolean {
     if (session.botId !== this.id || !this.options.store.isEnrolled(this.id, session.chatId)) return false;
+    if (this.options.store.getTopicKind(session) === 'untracked') return false;
     const stored = this.options.store.getSession(session.id);
     if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instancePath !== session.instancePath || !session.instancePath) return false;
     try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
@@ -1464,6 +1467,7 @@ export class BotService {
     try {
       await this.delivery.run(session.chatId, () => this.bot.api.editForumTopic(
         session.chatId,session.threadId,{icon_custom_emoji_id:''}), () => !this.stopped &&
+          this.options.store.getTopicKind(session) === 'tracked' &&
           this.options.store.getSession(session.id)?.status === 'detached' &&
           findInstance(this.options.config,this.id,session.chatId)?.path === session.instancePath);
     } catch (error) {
@@ -2473,6 +2477,8 @@ export class BotService {
     return title;
   }
   private async projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void> {
+    const callerActive = active;
+    active = () => this.options.store.getTopicKind(session) === 'tracked' && callerActive();
     if (!active()) return;
     try {
       const status = await this.options.runtime.topicTitleStatus(session);
