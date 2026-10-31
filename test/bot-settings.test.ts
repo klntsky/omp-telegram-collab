@@ -18,9 +18,8 @@ test('settings survive elapsed time, additional panels and lost panel state', as
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app, 0);
     const panel = app.messages.at(-1)!;
-    const choice = settingsButton(panel, 1);
+    const choice = settingsButton(panel, 0);
     const now = Date.now();
     t.mock.method(Date, 'now', () => now + 365 * 24 * 60 * 60_000);
     for (let index = 0; index < 257; index++) await app.update({text:'/settings'});
@@ -29,29 +28,28 @@ test('settings survive elapsed time, additional panels and lost panel state', as
     app.store.db.prepare('DELETE FROM settings_panels WHERE bot_id=?').run(botId);
     await app.callback(choice, panel);
     await clickSettings(app, 0, panel);
-    await clickSettings(app, 0, panel);
     assert.equal(saved(app).chat.all_messages_are_prompts, true);
   } finally { await app.close(); }
 });
 
-test('setup opens current settings and navigation edits one panel with Back and Close', async () => {
+test('settings toggles save immediately in both directions on the same overview', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
     const panel = app.messages.at(-1)!;
     await clickSettings(app, 0);
     assert.equal(app.messages.at(-1)!.message_id,panel.message_id);
-    await clickSettings(app, 1);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
     await clickSettings(app, 0);
     assert.equal(saved(app).chat.all_messages_are_prompts,true);
-    await clickSettings(app, -2);
     await clickSettings(app, 1);
-    await clickSettings(app, 0);
     assert.equal(saved(app).chat.users_can_propose_prompts,true);
     await clickSettings(app, 1);
     assert.equal(saved(app).chat.users_can_propose_prompts,false);
-    await clickSettings(app, -2);
+    await clickSettings(app, 5);
+    assert.equal(saved(app).chat.create_topic_worktrees,true);
+    await clickSettings(app, 5);
+    assert.equal(saved(app).chat.create_topic_worktrees,false);
     await clickSettings(app, -1);
     assert.deepEqual(app.store.listSessions(botId),[]);
     assert.equal(app.connectionCount,0);
@@ -77,9 +75,8 @@ test('settings callbacks reject unauthorized users, old choices and closed panel
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app, 0);
     const page = app.messages.at(-1)!;
-    const choice = settingsButton(page, 1);
+    const choice = settingsButton(page, 0);
     app.setCurrentMember({username:'other_admin',status:'member'});
     await app.callback(choice,page);
     assert.notEqual(saved(app).chat.all_messages_are_prompts,false);
@@ -87,11 +84,10 @@ test('settings callbacks reject unauthorized users, old choices and closed panel
     await app.callback(choice,page);
     assert.equal(saved(app).chat.all_messages_are_prompts,false);
     await clickSettings(app, 0);
-    await clickSettings(app, 0);
     await app.callback(choice,page);
     assert.equal(saved(app).chat.all_messages_are_prompts,true);
-    const current = await clickSettings(app, 0);
-    const old = settingsButton(current, 1);
+    const current = page;
+    const old = settingsButton(current, 0);
     await clickSettings(app, -1);
     await app.callback(old,current);
     assert.equal(saved(app).chat.all_messages_are_prompts,true);
@@ -104,10 +100,9 @@ for (const targetKind of ['file','directory'] as const) {
     const target = targetKind === 'file' ? app.config.configPath : dirname(app.config.configPath);
     try {
       await app.update({text:'/setup'});
-      await clickSettings(app, 0);
       const before = saved(app).config;
       await chmod(target,targetKind === 'file' ? 0o400 : 0o500);
-      await clickSettings(app, 1);
+      await clickSettings(app, 0);
       assert.deepEqual(saved(app).config,before);
       assert.notEqual(Object.values(app.config.instances)[0]!.chats[0]!.all_messages_are_prompts,false);
     } finally {
@@ -183,7 +178,7 @@ for (const explicit of [false,true]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (explicit) await setForumSetting(app,0,1);
+      if (explicit) await setForumSetting(app, 0);
       await app.update({text:'/settings'});
       const panel = app.messages.at(-1)!;
       const before = saved(app).config;
@@ -291,9 +286,8 @@ test('settings choices cannot be replayed from another message or destination', 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await clickSettings(app, 0);
     const page = app.messages.at(-1)!;
-    const choice = settingsButton(page, 1);
+    const choice = settingsButton(page, 0);
     await app.callback(choice,{...page,message_id:Number(page.message_id)+1});
     await app.callback(choice,{...page,message_thread_id:42});
     await app.callback(choice,{...page,chat:{id:chatId-1,type:'supergroup',is_forum:true}});

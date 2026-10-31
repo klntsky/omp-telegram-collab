@@ -108,7 +108,7 @@ test('ignored commands, discussion and rejected prompts retain skills; clear rem
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await setForumSetting(app, 0, 1);
+    await setForumSetting(app, 0);
     await select(app, 'find-skills', session.threadId);
     await app.update({ text: '/unknown', message_thread_id: session.threadId });
     await app.update({ text: 'Discussion', message_thread_id: session.threadId });
@@ -131,7 +131,7 @@ test('proposal creation freezes and consumes proposer skills without consuming a
   try {
     const session = await seed(app);
     await app.update({ text: '/setup' });
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     app.setCurrentMember({ username: 'grace', status: 'member' });
     await select(app, 'find-skills', session.threadId, participant);
     await app.update({ text: '/p Frozen proposal', message_thread_id: session.threadId }, participant);

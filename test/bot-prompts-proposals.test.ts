@@ -38,7 +38,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 0, 1);
+    await setForumSetting(app, 0);
     const path = Object.keys(app.config.instances)[0]!;
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
     await app.update({message_thread_id:42,forum_topic_created:{name:'Explicit prompts'}});
@@ -80,7 +80,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
       {t:'prompt',text:'Implement explicit text\nwith multiple lines'},
     ]);
     await app.update({text:'/setup'});
-    await setForumSetting(app, 0, 0);
+    await setForumSetting(app, 0);
     assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,true);
   } finally { await app.close(); }
 });
@@ -91,7 +91,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+      if (!allMessagesArePrompts) await setForumSetting(app, 0);
       const from = {id:botId,is_bot:true,first_name:'OMP'};
       await app.update({message_id:7200,text:'Explain this',reply_to_message:{message_id:9100,from,caption:'Original\ncontext'}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -115,7 +115,7 @@ for (const allMessagesArePrompts of [true, false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+      if (!allMessagesArePrompts) await setForumSetting(app, 0);
       await app.update({text:command,reply_to_message:{message_id:9000,caption:'Screenshot context\nsecond line',
         photo:[{file_id:'quoted-photo',file_unique_id:'quoted-photo',width:100,height:100}]}});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
@@ -141,7 +141,7 @@ for (const allMessagesArePrompts of [true, false]) {
       const app = await createSmokeApp();
       try {
         await app.update({text:'/setup'});
-        if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+        if (!allMessagesArePrompts) await setForumSetting(app, 0);
         await app.update({text:'/p@FixtureOmpBot Create from General',message_thread_id:1});
         await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
         const session = app.store.listSessions(botId)[0]!;
@@ -156,7 +156,7 @@ test('empty new-session commands do not create sessions or request replies', asy
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 0, 1);
+    await setForumSetting(app, 0);
     const before = app.messages.slice();
     for (const text of ['/new','/new@FixtureOmpBot','/p','/p@FixtureOmpBot']) await app.update({text});
     assert.deepEqual(app.messages,before);
@@ -182,7 +182,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+      if (!allMessagesArePrompts) await setForumSetting(app, 0);
       await app.update({message_thread_id:42,forum_topic_created:{name:'Admin prompts only'}});
       app.setCurrentMember({username:'another_user',status:'member'});
       const before = app.messages.length;
@@ -201,8 +201,8 @@ for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app, 1, 0);
-      if (!allMessagesArePrompts) await setForumSetting(app, 0, 1);
+      await setForumSetting(app, 1);
+      if (!allMessagesArePrompts) await setForumSetting(app, 0);
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -242,7 +242,7 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app, 1, 0);
+      await setForumSetting(app, 1);
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
@@ -276,7 +276,7 @@ test('a non-admin /new task creates no session until a group administrator appro
   try {
     app.setCurrentMember({username:ownerUsername,status:'creator'});
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     app.setCurrentMember({username:'grace',status:'member'});
     await app.update({text:'/new Proposed initial task'});
     const proposal = promptProposal(app);
@@ -294,7 +294,7 @@ test('approval sends one reply reference and submits the stored proposal text', 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     await app.update({text:'/new Seed task'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const session = app.store.listSessions(botId)[0]!;
@@ -361,7 +361,7 @@ for (const general of [false,true]) {
     app.mockFiles(t,data);
     try {
       await app.update({text:'/setup'});
-      await setForumSetting(app,1,0);
+      await setForumSetting(app, 1);
       await app.update({text:'/new Seed'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const seed = app.store.listSessions(botId)[0]!;

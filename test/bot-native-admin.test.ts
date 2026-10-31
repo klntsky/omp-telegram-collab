@@ -56,7 +56,7 @@ test('deferred proposal admission rechecks its approver rather than treating the
   const app = await createSmokeApp({maxSessions:1});
   try {
     await app.update({text:'/setup'});
-    await setForumSetting(app, 1, 0);
+    await setForumSetting(app, 1);
     await app.update({text:'/new Running task'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const proposer = {id:77,is_bot:false,first_name:'Proposer'};
