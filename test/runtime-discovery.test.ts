@@ -53,12 +53,12 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
   });
 }
 
-async function startupFixture(mode: 'recover' | 'persistent' | 'fatal' | 'identity') {
+async function startupFixture(mode: 'recover' | 'persistent' | 'deadline' | 'fatal' | 'identity') {
   const directory = await mkdtemp(join(tmpdir(), 'omp-discovery-startup-'));
   const executable = join(directory, 'omp');
   const statePath = join(directory, 'registry.json');
   const attemptsPath = join(directory, 'attempts.json');
-  const startupTimeoutMs = 15000;
+  const startupTimeoutMs = mode === 'deadline' ? 5000 : 15000;
   await writeFile(statePath, 'null');
   await writeFile(attemptsPath, '[]');
   await writeFile(executable, `#!${process.execPath}
@@ -73,12 +73,16 @@ if (process.argv[2] !== 'collab') {
   require('node:net').createServer(socket => socket.destroy()).listen(${JSON.stringify(join(directory, 'keepalive.sock'))});
 } else {
   const host = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  if (process.argv[3] === 'list') console.log(JSON.stringify({version:1,hosts:host?[host]:[]}));
-  else {
+  if (process.argv[3] === 'list') {
+    if (mode === 'deadline' && JSON.parse(fs.readFileSync(attemptsPath, 'utf8')).length > 0 && !fs.existsSync(attemptsPath + '.deadline')) {
+      fs.writeFileSync(attemptsPath + '.deadline', '');
+      setInterval(() => {}, 1000);
+    } else console.log(JSON.stringify({version:1,hosts:host?[host]:[]}));
+  } else {
     const attempts = JSON.parse(fs.readFileSync(attemptsPath, 'utf8'));
     attempts.push(Date.now());
     fs.writeFileSync(attemptsPath, JSON.stringify(attempts));
-    if (mode === 'persistent' || (mode === 'recover' && attempts.length === 1)) {
+    if (mode === 'persistent' || mode === 'deadline' || (mode === 'recover' && attempts.length === 1)) {
       process.stderr.write('error: no active Collab host matches fixture-host\\n'); process.exit(1);
     }
     if (mode === 'fatal') {
@@ -130,7 +134,7 @@ test('managed startup preserves the last original not-found diagnostic at its or
   const started = Date.now();
   await assert.rejects(app.runtime.ensure(app.session), error => {
     assert.ok(error instanceof Error);
-    assert.equal((error as NodeJS.ErrnoException).code, 1);
+    assert.equal((error as NodeJS.ErrnoException).code, 1, error);
     assert.equal((error as Error & { signal: string | null }).signal, null);
     assert.ok(error.message.startsWith(`Command failed: ${app.executable} collab link fixture-host --json\nerror: no active Collab host matches fixture-host\n`));
     return true;
@@ -139,6 +143,22 @@ test('managed startup preserves the last original not-found diagnostic at its or
   assert.ok(attempts.length > 1);
   assert.ok(Date.now() - started >= app.startupTimeoutMs - 100);
   assert.ok(attempts.at(-1)! - started < app.startupTimeoutMs + 250, 'retries must not extend the original startup deadline');
+});
+
+test('managed startup retains the original discovery rejection when the final probe is killed at the deadline', async t => {
+  const app = await startupFixture('deadline');
+  t.after(() => app.close());
+  await assert.rejects(app.runtime.ensure(app.session), error => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as NodeJS.ErrnoException).code, 1);
+    assert.equal((error as Error & {signal: string | null}).signal, null);
+    const cause = error.cause as Error & {code: number | null; signal: string; killed: boolean};
+    assert.ok(cause instanceof Error);
+    assert.equal(cause.code, null);
+    assert.equal(cause.signal, 'SIGKILL');
+    assert.equal(cause.killed, true);
+    return true;
+  });
 });
 
 test('managed startup does not retry a nontransient Collab link subprocess failure', async t => {

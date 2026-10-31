@@ -187,6 +187,11 @@ test('conversion to a status topic during a queued branch probe prevents Telegra
     const session = app.store.listSessions(botId)[0]!;
     await app.service.ensureMirroring(session,await app.runtime.ensure(session));
     await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
+    await eventually(() =>
+      app.topicEdits.some(edit =>
+        edit.message_thread_id === session.threadId && edit.name === 'Preserved topic',
+      ),
+    );
     app.runtime.topicTitleStatus = async () => {
       entered.resolve();
       await release.promise;
