@@ -156,7 +156,7 @@ test('captionless photos use the largest size in all-message sessions', async t 
       ...photo,{file_id:'largest',file_unique_id:'largest',width:1000,height:1000},
     ]});
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{
-      t:'prompt',text:'',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
+      t:'prompt',text:'Describe this image.',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
     });
     assert.deepEqual(app.fileRequests, ['largest']);
   } finally {
