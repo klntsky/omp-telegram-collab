@@ -1804,7 +1804,9 @@ export class BotService {
         if (arg) { await replyTo(ctx, destination, 'Usage: /usage'); return; }
         const usage = await this.options.runtime.providerUsage(assigned.path);
         const text = usage.map(section => `${section.heading ? `**${section.heading}**\n\n` : ''}${section.table}`).join('\n\n');
-        await replyTo(ctx, destination, text);
+        await ctx.api.sendRichMessage(destination.chatId, { markdown: text }, {
+          message_thread_id: destination.kind === 'topic' ? destination.threadId : undefined,
+        });
         return;
       }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
