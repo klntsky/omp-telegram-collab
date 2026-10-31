@@ -216,7 +216,7 @@ interface PresetPanel {
   detailOffset: number;
   choices: PresetAction[];
 }
-const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — browse presets, use one, or make it the forum default; a name switches this idle session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
+const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — 🌳 move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — browse presets, use one, or make it the forum default; a name switches this idle session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
 const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
 const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
@@ -224,7 +224,7 @@ const cliHelp = '/cli — copy a local terminal session join command (group admi
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
-  { command: 'worktree', description: 'Move session to an OMP worktree; new topic in General' },
+  { command: 'worktree', description: '🌳 Move session to an OMP worktree; new topic in General' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
   { command: 'settings', description: 'Forum defaults and live session count limit (group admin)' },
@@ -422,7 +422,7 @@ export class BotService {
         kind: 'page',
         page: 'capacity',
       });
-      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
+      button(`🌳 Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
         kind: 'set',
         field: 'create_topic_worktrees',
         value: chat.create_topic_worktrees !== true,
@@ -718,7 +718,7 @@ export class BotService {
         proposals: 'Who can send requests',
         skills: 'Default skill',
         presets: 'Default model preset',
-        worktrees: 'Worktrees',
+        worktrees: '🌳 Worktrees',
         typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
@@ -2191,7 +2191,7 @@ export class BotService {
       const text = await this.options.runtime.worktree(session, task?.text || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);
       task = undefined;
-      await replyTo(ctx, topicDestination(session.chatId, session.threadId), text);
+      await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
     }
     if (worktree) {
       const sourceKey = this.skills.key(ctx);
@@ -2955,12 +2955,12 @@ export class BotService {
           await replyTo(
             ctx,
             destination,
-            'Use /worktree inside an active session topic, or General to create one.',
+            '🌳 Use /worktree inside an active session topic, or General to create one.',
           );
           return;
         }
         if (!(await this.currentAdmin(ctx))) {
-          await replyTo(ctx, destination, 'Worktree commands require a group administrator.');
+          await replyTo(ctx, destination, '🌳 Worktree commands require a group administrator.');
           return;
         }
         await this.authorize(ctx.chat.id, ctx.from.id);
@@ -2975,7 +2975,7 @@ export class BotService {
           this.dropListener(session.id);
         }
         await this.listen(session);
-        await replyTo(ctx, destination, text);
+        await replyTo(ctx, destination, `🌳 ${text}`);
         return;
       }
       if (action === 'attach') {
