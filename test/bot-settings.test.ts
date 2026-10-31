@@ -14,6 +14,26 @@ function saved(app: { config: AppConfig }) {
   return { config, instance, chat: instance.chats.find(chat => chat.botId === botId && chat.chatId === chatId)! };
 }
 
+test('settings survive elapsed time, additional panels and lost panel state', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await clickSettings(app, 0);
+    const panel = app.messages.at(-1)!;
+    const choice = settingsButton(panel, 1);
+    const now = Date.now();
+    t.mock.method(Date, 'now', () => now + 365 * 24 * 60 * 60_000);
+    for (let index = 0; index < 257; index++) await app.update({text:'/settings'});
+    await app.callback(choice, panel);
+    assert.equal(saved(app).chat.all_messages_are_prompts, false);
+    app.store.db.prepare('DELETE FROM settings_panels WHERE bot_id=?').run(botId);
+    await app.callback(choice, panel);
+    await clickSettings(app, 0);
+    await clickSettings(app, 0);
+    assert.equal(saved(app).chat.all_messages_are_prompts, true);
+  } finally { await app.close(); }
+});
+
 test('setup opens current settings and navigation edits one panel with Back and Close', async () => {
   const app = await createSmokeApp();
   try {
@@ -178,7 +198,7 @@ for (const explicit of [false,true]) {
   });
 }
 
-for (const [limit,choice,target] of [[8,0,7],[8,1,9],[8,2,1],[8,3,18],[8,4,16],[Number.MAX_SAFE_INTEGER-1,1,Number.MAX_SAFE_INTEGER]] as const) {
+for (const [limit,choice,target] of [[8,0,7],[8,1,9],[Number.MAX_SAFE_INTEGER-1,1,Number.MAX_SAFE_INTEGER]] as const) {
   test(`live session capacity button ${choice} proposes ${target} before confirmation`, async () => {
     const app = await createSmokeApp({maxSessions:limit});
     try {
@@ -197,7 +217,7 @@ for (const [limit,choice,target] of [[8,0,7],[8,1,9],[8,2,1],[8,3,18],[8,4,16],[
   });
 }
 
-for (const [limit,choice] of [[1,0],[1,2],[Number.MAX_SAFE_INTEGER,1],[Number.MAX_SAFE_INTEGER,3],[Number.MAX_SAFE_INTEGER,4]] as const) {
+for (const [limit,choice] of [[1,0],[Number.MAX_SAFE_INTEGER,1]] as const) {
   test(`capacity button ${choice} preserves valid bounds at ${limit}`, async () => {
     const app = await createSmokeApp({maxSessions:limit});
     try {
@@ -217,7 +237,7 @@ test('canceling a capacity proposal leaves the live and persisted limits unchang
   try {
     await app.update({text:'/setup'});
     await clickSettings(app, 4);
-    await clickSettings(app, 4);
+    await clickSettings(app, 1);
     await clickSettings(app, -2);
     assert.equal(saved(app).config.omp.maxSessions,8);
     assert.equal(app.runtime.getSessionLimit(),8);

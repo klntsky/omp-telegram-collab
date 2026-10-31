@@ -304,15 +304,16 @@ export class BotService {
     } else {
       const limit = this.options.runtime.getSessionLimit();
       if (proposal) {
-        text = `Change maximum live sessions from ${proposal.limit} to ${proposal.target}?\nService-wide. Affects every bot and instance.`;
+        text = `Maximum live sessions: ${proposal.limit} → ${proposal.target}?\nService-wide.`;
         button(`Set limit to ${proposal.target}`, {kind:'capacity',limit:proposal.limit,target:proposal.target});
       } else {
-        text = `Maximum live sessions\nCurrent limit: ${limit}.\nService-wide. Applies to every bot and instance, not just this group. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
-        for (const [label,target] of [[`Decrease to ${Math.max(1,limit-1)}`,Math.max(1,limit-1)],[`Increase to ${limit+1}`,limit+1],[`Decrease to ${Math.max(1,limit-10)}`,Math.max(1,limit-10)],[`Increase to ${limit+10}`,limit+10],[`Double to ${limit*2}`,limit*2]] as const) {
+        text = `Maximum live sessions: ${limit}\nService-wide.`;
+        for (const [label,target] of [['−',limit-1],['+',limit+1]] as const) {
           button(label, Number.isSafeInteger(target) && target >= 1 && target !== limit
             ? {kind:'propose-capacity',limit,target}
             : {kind:'page',page:'capacity'});
         }
+        rows.splice(0, 2, [...rows[0]!, ...rows[1]!]);
       }
     }
     if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
