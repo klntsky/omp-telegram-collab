@@ -28,11 +28,22 @@ test('General stays outside sessions while task requests and pending selections 
     assert.equal(store.getTopic({botId,destination})?.id, created.id);
     store.addTaskRequest(botId, general, 10, 42);
     assert.equal(store.db.prepare('SELECT thread_id FROM task_requests WHERE message_id=10').get()?.thread_id, 1);
+    assert.equal(store.hasTaskRequest(botId, general, 10, 42), true);
+    assert.equal(store.hasTaskRequest(botId, general, 10, 42), true);
+    assert.equal(store.hasTaskRequest(botId, destination, 10, 42), false);
+    assert.equal(store.hasTaskRequest(botId + 1, general, 10, 42), false);
+    assert.equal(store.hasTaskRequest(botId, general, 10, 43), false);
     assert.equal(store.takeTaskRequest(botId, destination, 10, 42), false);
     assert.equal(store.takeTaskRequest(botId + 1, general, 10, 42), false);
     assert.equal(store.takeTaskRequest(botId, general, 10, 43), false);
     assert.equal(store.takeTaskRequest(botId, general, 10, 42), true);
     assert.equal(store.takeTaskRequest(botId, general, 10, 42), false);
+    assert.equal(store.hasTaskRequest(botId, general, 10, 42), false);
+    store.addTaskRequest(botId, general, 12, 42);
+    store.db.prepare('UPDATE task_requests SET created_at=? WHERE message_id=12').run(Date.now()-3600001);
+    assert.equal(store.hasTaskRequest(botId, general, 12, 42), false);
+    assert.equal(store.db.prepare('SELECT message_id FROM task_requests WHERE message_id=12').get()?.message_id,12);
+    assert.equal(store.takeTaskRequest(botId, general, 12, 42), false);
     store.addTaskRequest(botId, destination, 11, 42);
     assert.equal(store.takeTaskRequest(botId, general, 11, 42), false);
     assert.equal(store.takeTaskRequest(botId, destination, 11, 42), true);
@@ -93,7 +104,7 @@ test('topic identity survives a service restart and closing preserves its histor
   }
 });
 
-test('initial images survive reopening storage with their pending task and stay session-scoped', async () => {
+test('image-only initial content survives reopening storage and stays session-scoped', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-image-task-'));
   const filename = join(directory,'topics.sqlite');
   const images = [{type:'image' as const,data:'aW1hZ2U=',mimeType:'image/png'}];
@@ -101,24 +112,59 @@ test('initial images survive reopening storage with their pending task and stay 
     const first = new Store(filename);
     let id: string;
     try {
-      id = first.createSession(topic,'Image task',{kind:'managed'},'Inspect this',42,images).id;
-      first.createSession({...topic,threadId:18},'Unrelated',{kind:'managed'},'Other task',42);
+      id = first.createSession(topic,'Image task',{kind:'managed'},{text:'',images},42).id;
+      first.createSession({...topic,threadId:18},'Unrelated',{kind:'managed'},{text:'Other task'},43,44);
     } finally {
       first.close();
     }
     const restored = new Store(filename);
     try {
       assert.equal(restored.hasPendingInitialTask(id),true);
-      assert.deepEqual(restored.getInitialImages(id),images);
+      assert.equal(restored.getInitialUser(id),42);
+      assert.equal(restored.getInitialAuthority(id),42);
       const unrelated = restored.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, 18)})!;
-      assert.equal(restored.getInitialImages(unrelated.id),undefined);
-      assert.equal(restored.claimInitialTask(id),'Inspect this');
+      assert.deepEqual(restored.claimInitialTask(id),{text:'',images});
+      assert.equal(restored.hasPendingInitialTask(id),false);
+      assert.equal(restored.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(id)?.initial_state,'submitted');
       assert.equal(restored.claimInitialTask(id),undefined);
+      assert.equal(restored.hasPendingInitialTask(unrelated.id),true);
+      assert.equal(restored.getInitialUser(unrelated.id),43);
+      assert.equal(restored.getInitialAuthority(unrelated.id),44);
+      assert.deepEqual(restored.claimInitialTask(unrelated.id),{text:'Other task'});
     } finally {
       restored.close();
     }
   } finally {
     await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('absent initial content creates no task while empty supplied content is rejected', () => {
+  const store = new Store(':memory:');
+  try {
+    const absent = store.createSession(topic,'No task',{kind:'managed'},undefined,42);
+    assert.equal(store.hasPendingInitialTask(absent.id),false);
+    assert.equal(store.claimInitialTask(absent.id),undefined);
+    assert.equal(store.getInitialUser(absent.id),undefined);
+    assert.equal(store.getInitialAuthority(absent.id),undefined);
+    assert.deepEqual(store.db.prepare('SELECT initial_task,initial_state FROM sessions WHERE id=?').get(absent.id),Object.assign(Object.create(null),{initial_task:null,initial_state:null}));
+    for (const content of [{text:''},{text:' \n\t '},{text:'',images:[]}]) {
+      assert.throws(() => store.createSession({...topic,threadId:18},'Invalid',{kind:'managed'},content,42),/An initial task requires text or images/);
+      assert.equal(store.getTopic({botId,destination:topicDestination(chatId,18)}),undefined);
+    }
+    const text = {text:'  Preserve task whitespace  '};
+    const pending = store.createSession({...topic,threadId:18},'Text task',{kind:'managed'},text);
+    assert.equal(store.hasPendingInitialTask(pending.id),true);
+    assert.equal(store.db.prepare('SELECT initial_task FROM sessions WHERE id=?').get(pending.id)?.initial_task,text.text);
+    assert.deepEqual(store.claimInitialTask(pending.id),text);
+    assert.equal(store.hasPendingInitialTask(pending.id),false);
+    const cancelled = store.createSession({...topic,threadId:19},'Cancelled',{kind:'managed'},{text:'Do not send'});
+    store.cancelInitialTask(cancelled.id);
+    assert.equal(store.hasPendingInitialTask(cancelled.id),false);
+    assert.equal(store.claimInitialTask(cancelled.id),undefined);
+    assert.equal(store.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(cancelled.id)?.initial_state,'cancelled');
+  } finally {
+    store.close();
   }
 });
 
@@ -207,7 +253,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   const filename = join(directory, 'telegram.sqlite');
   let store = new Store(filename);
   try {
-    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, 'Pending instruction', 123, undefined, 456);
+    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, {text:'Pending instruction'}, 123, 456);
     store.markSnapshot(original.id);
     store.rememberReply(original.id, 'saved-reply');
     store.advanceSessionGeneration(original.id);
@@ -224,7 +270,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.getReplyTarget(original.id), 77);
     assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
-    assert.equal(store.claimInitialTask(original.id), 'Pending instruction');
+    assert.deepEqual(store.claimInitialTask(original.id), {text:'Pending instruction'});
     assert.equal(store.claimInitialTask(original.id), undefined);
   } finally {
     store.close();

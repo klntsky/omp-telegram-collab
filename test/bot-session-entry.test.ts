@@ -8,6 +8,7 @@ import { createBot } from '../src/bot.js';
 import { Store } from '../src/store.js';
 import { join } from 'node:path';
 import { botToken } from './telegram-data.js';
+import type { GuestFrame } from '@oh-my-pi/pi-wire';
 
 test('enrollment requires permission to pin the session entry', async () => {
   const app = await createSmokeApp({ botCanPinMessages: false });
@@ -39,7 +40,7 @@ test('reconciliation admits pending initial tasks without eagerly launching othe
     await app.update({text:'/setup'});
     const instancePath = Object.keys(app.config.instances)[0]!;
     app.store.createSession({botId,chatId,threadId:42,instancePath},'Empty topic');
-    const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},'Restore pending task',123,undefined,ownerId);
+    const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},{text:'Restore pending task'},123,ownerId);
     await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Restore pending task'}]);
@@ -48,6 +49,41 @@ test('reconciliation admits pending initial tasks without eagerly launching othe
   } finally {
     await app.close();
   }
+});
+
+test('a replacement bot starts a persisted image-only task and preserves it through startup retry', async () => {
+  const app = await createSmokeApp({persistentStore:true});
+  try {
+    await app.update({text:'/setup'});
+    const instancePath = Object.keys(app.config.instances)[0]!;
+    const content = {text:'',images:[{type:'image' as const,data:'aW1hZ2U=',mimeType:'image/png'}]};
+    const session = app.store.createSession({botId,chatId,threadId:44,instancePath},'Image task',undefined,content,ownerId,ownerId);
+    await app.service.close();
+    const store = new Store(join(app.config.dataDir,'telegram.sqlite'));
+    const bot = new Bot(botToken,{client:{apiRoot:app.telegramUrl}});
+    const attempts: GuestFrame[] = [];
+    const service = createBot({
+      config:app.config,botConfig:app.config.bots[0]!,token:botToken,store,runtime:app.runtime,bot,
+      connect:async (_binding,name,handlers) => ({
+        send(frame) {
+          if (frame.t !== 'prompt') return;
+          attempts.push(frame);
+          queueMicrotask(() => handlers.onFrame(attempts.length === 1
+            ? {t:'error',message:'prompting is unavailable until the host finishes starting up'}
+            : {t:'entry',entry:{type:'custom_message',customType:'collab-prompt',content:[{type:'text',text:frame.text},...frame.images!],details:{from:name},display:true,id:'image-admitted',parentId:null,timestamp:new Date().toISOString()}}));
+        },
+        close() {},
+      }),
+    });
+    try {
+      await service.initialize();
+      await service.reconcileConfiguration();
+      await eventually(() => attempts.length === 2);
+      assert.deepEqual(attempts,[{t:'prompt',...content},{t:'prompt',...content}]);
+      assert.equal(store.hasPendingInitialTask(session.id),false);
+      assert.equal(store.getInitialAuthority(session.id),ownerId);
+    } finally { await service.close(); store.close(); }
+  } finally { await app.close(); }
 });
 
 test('retirement admission rejection preserves an unsent initial task for the next listener attempt', async t => {

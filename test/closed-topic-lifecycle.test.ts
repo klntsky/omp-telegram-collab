@@ -42,7 +42,7 @@ test('closed-session reconciliation cancels pending tasks and does not repeatedl
   try {
     await app.update({text:'/setup'});
     const instancePath = Object.keys(app.config.instances)[0]!;
-    const session = app.store.createSession({botId,chatId,threadId:42,instancePath},'Pending',{kind:'managed'},'Never submit',ownerId);
+    const session = app.store.createSession({botId,chatId,threadId:42,instancePath},'Pending',{kind:'managed'},{text:'Never submit'},ownerId);
     assert.equal(app.store.hasPendingInitialTask(session.id),true);
     app.store.updateSession(session.id,{status:'closed'});
     let stops = 0;

@@ -99,20 +99,18 @@ export class SkillPicker {
     await this.select(ctx, match[2]!, match[1] === 'clear' ? undefined : Number(match[3]), session);
     return true;
   }
-  async message(ctx: Context, text: string, session?: TopicSession): Promise<boolean> {
-    if (!/^\/skill:[^\s]+$/.test(text)) return false;
+  async selection(ctx: Context, text: string, session?: TopicSession): Promise<void> {
     const message = ctx.message;
     if (!message || !('via_bot' in message) || message.via_bot?.id !== this.options.botId()) {
       await replyTo(ctx, contextDestination(ctx), 'Use /skills to select a skill for your next prompt.');
-      return true;
+      return;
     }
     const entity = 'entities' in message ? message.entities?.find(entity => entity.type === 'text_link' && entity.offset === 0 && entity.length === text.length) : undefined;
     const match = entity && 'url' in entity ? entity.url.match(/\?start=skill_([a-f0-9]{24})_(\d+)$/) : undefined;
-    if (!match) { await replyTo(ctx, contextDestination(ctx), 'This skill selection is invalid. Open /skills again.'); return true; }
+    if (!match) { await replyTo(ctx, contextDestination(ctx), 'This skill selection is invalid. Open /skills again.'); return; }
     const picker = this.pickers.get(match[1]!);
-    if (picker?.skills[Number(match[2])]?.name !== text.slice(7)) { await replyTo(ctx, contextDestination(ctx), 'This skill selection expired. Open /skills again.'); return true; }
+    if (picker?.skills[Number(match[2])]?.name !== text.slice(7)) { await replyTo(ctx, contextDestination(ctx), 'This skill selection expired. Open /skills again.'); return; }
     await this.select(ctx, match[1]!, Number(match[2]), session);
-    return true;
   }
   private async select(ctx: Context, token: string, index: number | undefined, session?: TopicSession): Promise<void> {
     this.prune();

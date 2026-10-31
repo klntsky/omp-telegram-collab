@@ -4,7 +4,6 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
-import type { ImageContent } from '@oh-my-pi/pi-wire';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -91,19 +90,20 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: string, initialUserId?: number, images?: ImageContent[], authorityUserId = initialUserId): TopicSession {
+  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId): TopicSession {
     if (!key.instancePath) throw new Error('A session requires its configured instance path');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
+    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length) throw new Error('An initial task requires text or images');
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask ?? null, initialTask ? 'pending' : null, key.instancePath);
+      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instancePath);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
-      if (Number(result.changes) && initialTask && initialUserId) {
+      if (Number(result.changes) && initialTask?.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(initialTask.images));
+      if (Number(result.changes) && initialTask !== undefined && initialUserId !== undefined) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
-        if (authorityUserId) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
-        if (images?.length) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(images));
+        if (authorityUserId !== undefined) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
       }
       this.db.exec('COMMIT');
       return created;
@@ -171,9 +171,21 @@ export class Store {
       throw error;
     }
   }
-  claimInitialTask(id: string): string | undefined {
-    const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' RETURNING initial_task").get(id) as Row | undefined;
-    return row?.initial_task === undefined ? undefined : String(row.initial_task);
+  claimInitialTask(id: string): PromptContent | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' RETURNING initial_task").get(id) as Row | undefined;
+      let content: PromptContent | undefined;
+      if (row) {
+        const imageRow = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);
+        content = {text:String(row.initial_task),...(imageRow ? {images:JSON.parse(String(imageRow.images)) as PromptContent['images']} : {})};
+      }
+      this.db.exec('COMMIT');
+      return content;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   cancelInitialTask(id: string): void {
     this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
@@ -181,10 +193,6 @@ export class Store {
   getInitialAuthority(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_authorities WHERE session_id=?').get(id);
     return row ? Number(row.user_id) : undefined;
-  }
-  getInitialImages(id: string): ImageContent[] | undefined {
-    const row = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);
-    return row ? JSON.parse(String(row.images)) as ImageContent[] : undefined;
   }
   getInitialUser(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);
@@ -229,6 +237,9 @@ export class Store {
   addTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): void {
     this.db.prepare('DELETE FROM task_requests WHERE created_at<?').run(Date.now() - 3600000);
     this.db.prepare('INSERT OR REPLACE INTO task_requests VALUES (?,?,?,?,?,?)').run(botId, destination.chatId, messageId, userId, storedThreadId(destination), Date.now());
+  }
+  hasTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM task_requests WHERE bot_id=? AND chat_id=? AND thread_id=? AND message_id=? AND user_id=? AND created_at>?').get(botId, destination.chatId, storedThreadId(destination), messageId, userId, Date.now() - 3600000));
   }
   takeTaskRequest(botId: number, destination: TopicDestination, messageId: number, userId: number): boolean {
     return Number(this.db.prepare('DELETE FROM task_requests WHERE bot_id=? AND chat_id=? AND thread_id=? AND message_id=? AND user_id=? AND created_at>? RETURNING message_id').get(botId, destination.chatId, storedThreadId(destination), messageId, userId, Date.now() - 3600000)?.message_id) === messageId;

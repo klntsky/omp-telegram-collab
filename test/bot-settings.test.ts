@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { readConfig, writeConfig } from '../src/config.js';
 import { botId, chatId } from './telegram-data.js';
-import { clickSettings, setForumSetting, settingsButton } from './bot-test-helpers.js';
+import { clickSettings, eventually, setForumSetting, settingsButton } from './bot-test-helpers.js';
 import type { AppConfig } from '../shared/contracts.js';
 
 function saved(app: { config: AppConfig }) {
@@ -153,39 +153,97 @@ for (const catalog of ['skill','preset'] as const) {
   });
 }
 
-test('settings replies remain control input rather than session prompts', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const panel = app.messages.at(-1)!;
-    await app.update({text:'Do not submit this',reply_to_message:panel});
-    assert.deepEqual(app.store.listSessions(botId),[]);
-    assert.deepEqual(app.accepted,[]);
-  } finally { await app.close(); }
-});
+for (const explicit of [false,true]) {
+  test(`settings replies follow normal prompt routing in ${explicit ? 'explicit' : 'all-message'} mode`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      if (explicit) await setForumSetting(app,0,1);
+      await app.update({text:'/settings'});
+      const panel = app.messages.at(-1)!;
+      const before = saved(app).config;
+      await app.update({text:'Implement this reply',reply_to_message:panel});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      assert.equal(app.store.listSessions(botId).length,1);
+      const prompts = app.accepted.filter(frame => frame.t === 'prompt');
+      assert.equal(prompts.length,1);
+      assert.ok(prompts[0]!.text.endsWith('Implement this reply'));
+      assert.deepEqual(saved(app).config,before);
+    } finally { await app.close(); }
+  });
+}
 
-test('live session limits accept granular increases and decreases without submitting work', async () => {
+for (const [limit,choice,target] of [[8,0,7],[8,1,9],[8,2,1],[8,3,18],[8,4,16],[Number.MAX_SAFE_INTEGER-1,1,Number.MAX_SAFE_INTEGER]] as const) {
+  test(`live session capacity button ${choice} proposes ${target} before confirmation`, async () => {
+    const app = await createSmokeApp({maxSessions:limit});
+    try {
+      await app.update({text:'/setup'});
+      await clickSettings(app, 4);
+      await clickSettings(app, choice);
+      assert.equal(saved(app).config.omp.maxSessions,limit);
+      assert.equal(app.runtime.getSessionLimit(),limit);
+      await clickSettings(app, 0);
+      assert.equal(saved(app).config.omp.maxSessions,target);
+      assert.equal(app.runtime.getSessionLimit(),target);
+      assert.deepEqual(app.accepted,[]);
+      assert.deepEqual(app.store.listSessions(botId),[]);
+      assert.equal(app.connectionCount,0);
+    } finally { await app.close(); }
+  });
+}
+
+for (const [limit,choice] of [[1,0],[1,2],[Number.MAX_SAFE_INTEGER,1],[Number.MAX_SAFE_INTEGER,3],[Number.MAX_SAFE_INTEGER,4]] as const) {
+  test(`capacity button ${choice} preserves valid bounds at ${limit}`, async () => {
+    const app = await createSmokeApp({maxSessions:limit});
+    try {
+      await app.update({text:'/setup'});
+      await clickSettings(app, 4);
+      await clickSettings(app, choice);
+      assert.equal(saved(app).config.omp.maxSessions,limit);
+      assert.equal(app.runtime.getSessionLimit(),limit);
+      assert.deepEqual(app.accepted,[]);
+      assert.equal(app.connectionCount,0);
+    } finally { await app.close(); }
+  });
+}
+
+test('canceling a capacity proposal leaves the live and persisted limits unchanged', async () => {
   const app = await createSmokeApp({maxSessions:8});
   try {
     await app.update({text:'/setup'});
-    for (const target of [11,1]) {
-      const panel = await clickSettings(app, 4);
-      const previous = app.runtime.getSessionLimit();
-      for (const text of ['0','-1','1.5','9007199254740992','no']) {
-        await app.update({text,reply_to_message:panel});
-        assert.equal(saved(app).config.omp.maxSessions,previous);
-        assert.equal(app.runtime.getSessionLimit(),previous);
-      }
-      await app.update({text:String(target),reply_to_message:panel});
-      assert.equal(saved(app).config.omp.maxSessions,previous);
-      await clickSettings(app, 0, panel);
-      assert.equal(saved(app).config.omp.maxSessions,target);
-      assert.equal(app.runtime.getSessionLimit(),target);
-    }
+    await clickSettings(app, 4);
+    await clickSettings(app, 4);
+    await clickSettings(app, -2);
+    assert.equal(saved(app).config.omp.maxSessions,8);
+    assert.equal(app.runtime.getSessionLimit(),8);
     assert.deepEqual(app.accepted,[]);
     assert.equal(app.connectionCount,0);
   } finally { await app.close(); }
 });
+
+for (const change of ['role','limit'] as const) {
+  test(`capacity confirmation rejects a stale ${change} without mutating runtime`, async () => {
+    const app = await createSmokeApp({maxSessions:8});
+    try {
+      await app.update({text:'/setup'});
+      await clickSettings(app, 4);
+      await clickSettings(app, 1);
+      const confirmation = app.messages.at(-1)!;
+      const choice = settingsButton(confirmation,0);
+      const updated = saved(app).config;
+      if (change === 'role') app.setCurrentMember({status:'member'});
+      else {
+        updated.omp.maxSessions = 12;
+        writeConfig(updated);
+      }
+      await app.callback(choice,confirmation);
+      assert.deepEqual(readConfig(app.config.configPath),updated);
+      assert.equal(app.runtime.getSessionLimit(),8);
+      assert.deepEqual(app.accepted,[]);
+      assert.equal(app.connectionCount,0);
+    } finally { await app.close(); }
+  });
+}
 
 test('catalog lookup failure preserves the saved default and permits retry', async t => {
   const app = await createSmokeApp();

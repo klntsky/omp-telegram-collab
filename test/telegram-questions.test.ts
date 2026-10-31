@@ -59,7 +59,7 @@ for (const allMessagesArePrompts of [true,false]) {
     const editor = app.messages.at(-1)!;
     assert.equal(editor.message_thread_id, session.threadId);
     assert.equal(z.object({force_reply:z.boolean()}).parse(editor.reply_markup).force_reply, true);
-    const text = '/new this is an answer, not a new session\n  Keep <literal> **text** 😀  ';
+    const text = 'This is an answer, not a new session\n  Keep <literal> **text** 😀  ';
     const before = app.accepted.length;
     await app.update({ message_id:8200,message_thread_id:session.threadId,text,reply_to_message:{message_id:editor.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}} });
     assert.deepEqual(app.accepted.slice(before), [{ t: 'ui-response', reqId: 82, value: text }]);

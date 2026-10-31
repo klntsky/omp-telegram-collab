@@ -1824,9 +1824,12 @@ export class BotService {
       return;
     }
     if (intent.kind === 'question-answer') {
-      const pending = this.questions.get(intent.token);
-      if (!pending) return;
       await this.authorize(ctx.chat.id,ctx.from.id);
+      const pending = this.questions.get(intent.token);
+      if (!pending) {
+        await replyTo(ctx,destination,'This question is no longer active. Answer the latest question instead.');
+        return;
+      }
       if (pending.request.kind === 'editor') this.submitAnswer(intent.token,intent.text,undefined,message.message_id);
       else await replyTo(ctx,destination,'Use the numbered answer buttons on the question.');
       return;

@@ -32,7 +32,7 @@ const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(
   { botId: 123, chatId: -100123, threadId: 7, instancePath: dir },
-  'Local smoke', { kind: 'managed' }, 'Preserved pending instruction',
+  'Local smoke', { kind: 'managed' }, {text:'Preserved pending instruction'},
 );
 initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();

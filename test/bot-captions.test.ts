@@ -7,17 +7,18 @@ import { eventually, setForumSetting } from './bot-test-helpers.js';
 const photo = [{ file_id: 'photo', file_unique_id: 'photo', width: 100, height: 100 }];
 const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 
-test('caption commands submit downloaded images through initial startup rejection and retry', async t => {
+test('image-only caption commands preserve empty text through initial startup rejection and retry', async t => {
   const app = await createSmokeApp();
   app.mockFiles(t, imageData);
   try {
     await app.update({ photo, caption: '/setup' });
-    await app.update({ message_id: 7001, photo, caption: '/new@FixtureOmpBot Inspect this image' });
+    await app.update({ message_id: 7001, photo, caption: '/new@FixtureOmpBot' });
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{ t: 'prompt', text: 'Inspect this image', images: [{ type: 'image', data: imageData, mimeType: 'image/jpeg' }] }]);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{ t: 'prompt', text: '', images: [{ type: 'image', data: imageData, mimeType: 'image/jpeg' }] }]);
     const session = app.store.listSessions(botId)[0]!;
     assert.ok(session);
-    assert.ok(app.messages.some(message => message.message_thread_id === session.threadId && message.forwarded_message_id === 7001));
+    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.deepEqual(app.fileRequests, ['photo']);
   } finally {
     await app.close();
   }
@@ -86,21 +87,24 @@ test('unapproved image proposals cannot reach the model', async t => {
   }
 });
 
-test('host admission failure retains image bytes for later reconciliation', async t => {
+test('host admission failure retains image-only content for later reconciliation and startup retry', async t => {
   const app = await createSmokeApp();
   app.mockFiles(t, imageData);
   try {
     await app.update({text:'/setup'});
     const startup = t.mock.method(app.runtime,'ensure',async () => { throw new Error('Host temporarily unavailable'); });
-    await app.update({photo,caption:'/new Keep the image'});
+    await app.update({photo,caption:'/new'});
     const session = app.store.listSessions(botId)[0]!;
     assert.equal(app.store.hasPendingInitialTask(session.id),true);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
     startup.mock.restore();
     await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{
-      t:'prompt',text:'Keep the image',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
+      t:'prompt',text:'',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
     }]);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.fileRequests,['photo']);
   } finally {
     await app.close();
   }
@@ -156,7 +160,7 @@ test('captionless photos use the largest size in all-message sessions', async t 
       ...photo,{file_id:'largest',file_unique_id:'largest',width:1000,height:1000},
     ]});
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{
-      t:'prompt',text:'Describe this image.',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
+      t:'prompt',text:'',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
     });
     assert.deepEqual(app.fileRequests, ['largest']);
   } finally {

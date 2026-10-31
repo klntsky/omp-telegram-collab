@@ -1,4 +1,9 @@
-import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
+import type { GuestFrame, HostFrame, ImageContent } from '@oh-my-pi/pi-wire';
+
+export interface PromptContent {
+  text: string;
+  images?: ImageContent[];
+}
 
 export interface BotConfig {
   id: number;
