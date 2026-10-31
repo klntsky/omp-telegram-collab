@@ -138,6 +138,21 @@ test('topic titles seed managed sessions and bidirectional updates preserve full
     await eventually(() => app.store.getPendingSessionTitle(session.id) === undefined);
     await app.update({message_thread_id:42,forum_topic_edited:{name:'Delayed bot echo'}},{id:botId,first_name:'OMP',is_bot:true});
     assert.equal(app.sessionTitles.get(session.id),'Human wins');
+    app.topicTitleStatuses.set(session.id,{worktree:true,branch:'feature/custom'});
+    app.emit({t:'state',state});
+    await eventually(() => app.store.getTopicTitlePrefix(session.id) === '🌳 feature/custom');
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'🌳 feature/custom Rename with prefix'}});
+    await eventually(() => app.sessionTitles.get(session.id) === 'Rename with prefix');
+    assert.equal(app.sessionTitles.get(session.id),'Rename with prefix');
+    app.topicTitleStatuses.set(session.id,{worktree:true,branch:`t.me/c/${String(session.chatId).replace(/^-100/,'')}/${session.threadId}`});
+    app.emit({t:'state',state});
+    await eventually(() => app.store.getTopicTitlePrefix(session.id) === '🌳');
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'🌳 Rename topic branch'}});
+    await eventually(() => app.sessionTitles.get(session.id) === 'Rename topic branch');
+    assert.equal(app.sessionTitles.get(session.id),'Rename topic branch');
+    await app.update({message_thread_id:42,forum_topic_edited:{name:'Rename without prefix'}});
+    await eventually(() => app.sessionTitles.get(session.id) === 'Rename without prefix');
+    assert.equal(app.sessionTitles.get(session.id),'Rename without prefix');
   } finally {
     await app.close();
   }
