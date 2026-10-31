@@ -13,6 +13,7 @@ import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js
 import { configWritable, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { TelegramDelivery } from './telegram-delivery.js';
+import { installTelegramRetry } from './telegram-retry.js';
 import { SkillPicker, type SkillCatalogEntry } from './skill-picker.js';
 import { topicDestination, sameTopicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
@@ -201,6 +202,7 @@ export class BotService {
   private readonly questions = new Map<string, PendingQuestion>();
   private readonly endedQuestionReplies = new Set<string>();
   private readonly delivery: TelegramDelivery;
+  private readonly telegramRetry = new AbortController();
   private readonly topicIcons = new Map<string, TopicIconProjection>();
   private readonly hostObservations = new Map<string, Promise<void>>();
   private readonly sessionInvalidationHandlers = new Set<(sessionId: string, reason?: string) => void>();
@@ -444,6 +446,7 @@ export class BotService {
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
+    installTelegramRetry(this.bot, this.telegramRetry.signal);
     this.delivery = new TelegramDelivery();
     this.config = options.botConfig;
     this.token = options.token;
@@ -849,6 +852,7 @@ export class BotService {
     }
   }
   async close(): Promise<void> {
+    this.telegramRetry.abort();
     this.stopped = true;
     for (const id of this.topicIcons.keys()) this.invalidateTopicStatus(id);
     this.background.abort(new Error('Bot background maintenance stopped'));
