@@ -91,13 +91,30 @@ test('YAML supports multiple bots and multiple chats', t => {
   assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
   assert.equal(findInstance(loaded, botId, -999), undefined);
   assert.deepEqual(loaded.instances[dir]!.chats, [
-    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false },
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false },
-    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false },
+    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false, typing_indicators: 'disabled' },
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true, typing_indicators: 'disabled' },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false, typing_indicators: 'disabled' },
+    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false, typing_indicators: 'disabled' },
   ]);
   writeConfig(loaded);
   assert.deepEqual(readConfig(path), loaded);
+});
+
+test('typing indicators default to disabled and accept only supported modes', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  writeConfig(config);
+  assert.equal(readConfig(path).instances[dir]!.chats[0]!.typing_indicators, 'disabled');
+  for (const mode of ['disabled', 'streaming', 'inference'] as const) {
+    config.instances[dir]!.chats[0]!.typing_indicators = mode;
+    writeConfig(config);
+    assert.equal(readConfig(path).instances[dir]!.chats[0]!.typing_indicators, mode);
+  }
+  const { configPath: _, ...input } = config;
+  for (const mode of ['enabled', '', true, null, 1]) {
+    writeFileSync(path, stringify({...input, instances: {[dir]: {chats: [{botId, chatId, typing_indicators: mode}]}}}));
+    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.typing_indicators`);
+  }
 });
 
 test('obsolete administrator configuration keys are rejected', t => {

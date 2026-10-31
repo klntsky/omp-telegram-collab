@@ -37,6 +37,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
+  const chatActions: Record<string, unknown>[] = [];
   const reopenedTopics: Record<string, unknown>[] = [];
   const pins: Record<string, unknown>[] = [];
   const topicEdits: Record<string, unknown>[] = [];
@@ -152,6 +153,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         topic.icon_custom_emoji_id = params.icon_custom_emoji_id;
       remoteTopics.set(key, topic);
       events.emit('topic');
+      result = true;
+    }
+    else if (method === 'sendChatAction') {
+      chatActions.push(params);
       result = true;
     }
     else if (method === 'deleteMessage') {
@@ -393,6 +398,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     reactions,
     pins,
     topicEdits,
+    chatActions,
     deletedMessages,
     accepted,
     events,

@@ -238,7 +238,6 @@ test('busy streaming delivers every state frame without starving live output', {
     const state = { cwd: '/fixture/project', isStreaming: true, participants: [] };
     for (let sequence = 1; sequence <= 220; sequence++) {
       app.emit({ t: 'state', state: { ...state, queuedMessageCount: sequence } });
-      await delay(2);
     }
     await eventually(() => frames.some(frame => frame.state?.queuedMessageCount === 220) || socket!.readyState !== WebSocket.OPEN);
     assert.equal(socket.readyState, WebSocket.OPEN, 'membership checks must not starve live output');

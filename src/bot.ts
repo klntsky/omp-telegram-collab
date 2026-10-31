@@ -4,7 +4,15 @@ import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent } from '../shared/contracts.js';
+import type {
+  AppConfig,
+  BotConfig,
+  TopicSession,
+  HostBinding,
+  CollabConnection,
+  PromptContent,
+  TypingMode,
+} from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
@@ -81,10 +89,18 @@ interface Listener {
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
-  pendingPrompts: { content: PromptContent; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
+  pendingPrompts: {
+    content: PromptContent;
+    messageId?: number;
+    onStartupRejected?: () => void;
+    observation: TaskObservation;
+  }[];
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
+  typingText?: boolean;
+  typingNextAt?: number;
+  typingTimer?: NodeJS.Timeout;
   initial?: {
     content: PromptContent;
     userId: number;
@@ -123,11 +139,29 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-type SettingsKey = 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees';
-type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity';
-type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
-  | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees'; value: boolean }
+const typingLabels: Record<TypingMode, string> = {
+  disabled: 'Disabled',
+  streaming: 'While typing',
+  inference: 'While working',
+};
+type SettingsKey =
+  | 'prompts'
+  | 'proposals'
+  | 'skills'
+  | 'presets'
+  | 'capacity'
+  | 'worktrees'
+  | 'typing';
+type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing';
+type SettingsAction =
+  | { kind: 'page'; page: SettingsPage; offset?: number }
+  | {
+      kind: 'set';
+      field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
+      value: boolean;
+    }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
+  | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
   | { kind: 'propose-capacity'; limit: number; target: number }
   | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
@@ -264,53 +298,131 @@ export class BotService {
     const persisted = await this.settingsAccess(ctx, panel);
     await this.renderSettings(panel, persisted);
   }
-  private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
+  private async renderSettings(
+    panel: SettingsPanel,
+    config: AppConfig,
+    page: SettingsPage = 'root',
+    offset = 0,
+    proposal?: { limit: number; target: number },
+  ): Promise<void> {
     const assigned = findInstance(config, this.id, panel.chatId)!;
-    const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-    const rows: {text: string; callback_data: string}[][] = [];
+    const chat = assigned.instance.chats.find(
+      (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+    )!;
+    const rows: { text: string; callback_data: string }[][] = [];
     const choices: SettingsAction[] = [];
     const revision = panel.revision + 1;
     const button = (text: string, action: SettingsAction, current = false) => {
       const index = choices.push(action) - 1;
-      rows.push([{text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100), callback_data: `settings:${panel.token}:${revision}:${index}`}]);
+      rows.push([
+        {
+          text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100),
+          callback_data: `settings:${panel.token}:${revision}:${index}`,
+        },
+      ]);
     };
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
-      button(`Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`, {kind:'set',field:'all_messages_are_prompts',value:chat.all_messages_are_prompts === false});
-      button(`Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`, {kind:'set',field:'users_can_propose_prompts',value:chat.users_can_propose_prompts !== true});
-      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {kind:'page',page:'skills'});
-      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {kind:'page',page:'presets'});
-      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {kind:'page',page:'capacity'});
-      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'create_topic_worktrees',value:chat.create_topic_worktrees !== true});
+      button(
+        `Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`,
+        {
+          kind: 'set',
+          field: 'all_messages_are_prompts',
+          value: chat.all_messages_are_prompts === false,
+        },
+      );
+      button(
+        `Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
+        {
+          kind: 'set',
+          field: 'users_can_propose_prompts',
+          value: chat.users_can_propose_prompts !== true,
+        },
+      );
+      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {
+        kind: 'page',
+        page: 'skills',
+      });
+      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {
+        kind: 'page',
+        page: 'presets',
+      });
+      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {
+        kind: 'page',
+        page: 'capacity',
+      });
+      button(`Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
+        kind: 'set',
+        field: 'create_topic_worktrees',
+        value: chat.create_topic_worktrees !== true,
+      });
+      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {
+        kind: 'page',
+        page: 'typing',
+      });
+    } else if (page === 'typing') {
+      text =
+        'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
+      for (const value of ['disabled', 'streaming', 'inference'] as const) {
+        button(
+          typingLabels[value],
+          { kind: 'typing', field: 'typing_indicators', value },
+          (chat.typing_indicators ?? 'disabled') === value,
+        );
+      }
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
-      const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
-      if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
+      const names = skill
+        ? (await this.options.runtime.listSkills(panel.instancePath))
+            .map((entry) => entry.name)
+            .filter(isMentionableSkillName)
+        : await this.options.runtime.availableModelPresets(panel.instancePath);
+      if (this.assignedPath(panel.chatId) !== panel.instancePath)
+        throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
       text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
-      for (const name of names.slice(offset, offset + 8)) button(name, {kind:'default',field,value:name}, chat[field] === name);
-      button(skill ? 'No default skill' : 'Use host default', {kind:'default',field}, chat[field] === undefined);
-      if (offset > 0) button('Previous', {kind:'page',page,offset:Math.max(0,offset-8)});
-      if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
+      for (const name of names.slice(offset, offset + 8))
+        button(name, { kind: 'default', field, value: name }, chat[field] === name);
+      button(
+        skill ? 'No default skill' : 'Use host default',
+        { kind: 'default', field },
+        chat[field] === undefined,
+      );
+      if (offset > 0) button('Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
+      if (offset + 8 < names.length) button('Next', { kind: 'page', page, offset: offset + 8 });
     } else {
       const limit = this.options.runtime.getSessionLimit();
       if (proposal) {
         text = `Maximum live sessions: ${proposal.limit} → ${proposal.target}?\nService-wide.`;
-        button(`Set limit to ${proposal.target}`, {kind:'capacity',limit:proposal.limit,target:proposal.target});
+        button(`Set limit to ${proposal.target}`, {
+          kind: 'capacity',
+          limit: proposal.limit,
+          target: proposal.target,
+        });
       } else {
         text = `Maximum live sessions: ${limit}\nService-wide.`;
-        for (const [label,target] of [['−',limit-1],['+',limit+1]] as const) {
-          button(label, Number.isSafeInteger(target) && target >= 1 && target !== limit
-            ? {kind:'propose-capacity',limit,target}
-            : {kind:'page',page:'capacity'});
+        for (const [label, target] of [
+          ['−', limit - 1],
+          ['+', limit + 1],
+        ] as const) {
+          button(
+            label,
+            Number.isSafeInteger(target) && target >= 1 && target !== limit
+              ? { kind: 'propose-capacity', limit, target }
+              : { kind: 'page', page: 'capacity' },
+          );
         }
         rows.splice(0, 2, [...rows[0]!, ...rows[1]!]);
       }
     }
-    if (page !== 'root') button(proposal ? 'Cancel' : 'Back to settings', {kind:'page',page:proposal ? 'capacity' : 'root'});
-    button('Close', {kind:'close'});
+    if (page !== 'root')
+      button(proposal ? 'Cancel' : 'Back to settings', {
+        kind: 'page',
+        page: proposal ? 'capacity' : 'root',
+      });
+    button('Close', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
-    const extra = {reply_markup:{inline_keyboard:rows}};
+    const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
       const message = await sendTo(this.bot.api, panel.destination, body, extra);
       panel.messageId = message.message_id;
@@ -324,25 +436,55 @@ export class BotService {
   }
   private async settingsCallback(ctx: Context, data: string): Promise<void> {
     const match = data.match(/^settings:([A-Za-z0-9_-]{22}):(\d+):(\d+)$/);
-    const stored = match ? this.options.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(this.id, match[1]!) : undefined;
-    const decoded = stored ? JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {changes: [SettingsKey, {label: string; before: string; after: string}][]} : undefined;
-    const panel: SettingsPanel | undefined = decoded ? {...decoded, changes: new Map(decoded.changes)} : undefined;
-    const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-    if (!match || !message || !ctx.chat || ctx.chat.type !== 'supergroup' ||
-        !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
+    const stored = match
+      ? this.options.store.db
+          .prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
+          .get(this.id, match[1]!)
+      : undefined;
+    const decoded = stored
+      ? (JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
+          changes: [SettingsKey, { label: string; before: string; after: string }][];
+        })
+      : undefined;
+    const panel: SettingsPanel | undefined = decoded
+      ? { ...decoded, changes: new Map(decoded.changes) }
+      : undefined;
+    const message =
+      ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+    if (
+      !match ||
+      !message ||
+      !ctx.chat ||
+      ctx.chat.type !== 'supergroup' ||
+      !('from' in message) ||
+      message.from?.id !== this.id ||
+      'forward_origin' in message ||
+      'forward_date' in message
+    )
+      return;
     if (!panel) {
       const recovered: SettingsPanel = {
-        token: match[1]!, chatId: ctx.chat.id, destination: contextDestination(ctx),
-        messageId: message.message_id, instancePath: this.assignedPath(ctx.chat.id),
-        revision: Number(match[2]), offset: 0, choices: [], changes: new Map(),
+        token: match[1]!,
+        chatId: ctx.chat.id,
+        destination: contextDestination(ctx),
+        messageId: message.message_id,
+        instancePath: this.assignedPath(ctx.chat.id),
+        revision: Number(match[2]),
+        offset: 0,
+        choices: [],
+        changes: new Map(),
       };
       const config = await this.settingsAccess(ctx, recovered);
       await this.renderSettings(recovered, config);
       await ctx.answerCallbackQuery();
       return;
     }
-    if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
-        !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
+    if (
+      ctx.chat.id !== panel.chatId ||
+      message.message_id !== panel.messageId ||
+      !sameTopicDestination(contextDestination(ctx), panel.destination)
+    )
+      return;
     if (Number(match[2]) !== panel.revision) {
       const config = await this.settingsAccess(ctx, panel);
       await this.renderSettings(panel, config);
@@ -351,77 +493,155 @@ export class BotService {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
-    const config = await this.settingsAccess(ctx, panel, action.kind === 'set' || action.kind === 'default' || action.kind === 'capacity');
+    const config = await this.settingsAccess(
+      ctx,
+      panel,
+      action.kind === 'set' ||
+        action.kind === 'default' ||
+        action.kind === 'typing' ||
+        action.kind === 'capacity',
+    );
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
-      else panel.changes.set(page, {label, before: original, after});
+      else panel.changes.set(page, { label, before: original, after });
     };
     if (action.kind === 'close') {
-      const changes = [...panel.changes.values()].map(({label,before,after}) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`);
-      const summary = changes.length ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}` : 'Settings closed.\nNo settings changed.';
-      await this.bot.api.editMessageText(panel.chatId,panel.messageId,summary,{reply_markup:{inline_keyboard:[]}});
+      const changes = [...panel.changes.values()].map(
+        ({ label, before, after }) => `${label}: ${before.slice(0, 200)} → ${after.slice(0, 200)}`,
+      );
+      const summary = changes.length
+        ? `Settings closed.\n\nSaved changes\n${changes.join('\n')}`
+        : 'Settings closed.\nNo settings changed.';
+      await this.bot.api.editMessageText(panel.chatId, panel.messageId, summary, {
+        reply_markup: { inline_keyboard: [] },
+      });
       panel.choices = [];
       this.saveSettingsPanel(panel);
       return;
     }
-    if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
+    if (action.kind === 'page') {
+      await this.renderSettings(panel, config, action.page, action.offset);
+      return;
+    }
     if (action.kind === 'propose-capacity') {
-      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
-      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
-      await this.renderSettings(panel,config,'capacity',0,action);
+      if (
+        this.options.runtime.getSessionLimit() !== action.limit ||
+        config.omp.maxSessions !== action.limit
+      )
+        throw new Error(
+          'The live session count limit changed. Open Live session count limit again.',
+        );
+      if (!Number.isSafeInteger(action.target) || action.target < 1)
+        throw new Error('The live session count limit must be a positive safe integer.');
+      await this.renderSettings(panel, config, 'capacity', 0, action);
       return;
     }
     if (action.kind === 'capacity') {
-      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
-      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
+      if (!Number.isSafeInteger(action.target) || action.target < 1)
+        throw new Error('The live session count limit must be a positive safe integer.');
+      if (
+        this.options.runtime.getSessionLimit() !== action.limit ||
+        config.omp.maxSessions !== action.limit
+      )
+        throw new Error(
+          'The live session count limit changed. Open Live session count limit again.',
+        );
       config.omp.maxSessions = action.target;
       writeConfig(config);
       this.options.config.omp.maxSessions = action.target;
       this.options.runtime.setSessionLimit(action.target);
-      recordChange('capacity', 'Maximum live sessions (service-wide)', String(action.limit), String(action.target));
+      recordChange(
+        'capacity',
+        'Maximum live sessions (service-wide)',
+        String(action.limit),
+        String(action.target),
+      );
       this.saveSettingsPanel(panel);
     } else {
       if (action.kind === 'default' && action.value !== undefined) {
-        const names = action.field === 'default_new_topic_skill'
-          ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name)
-          : await this.options.runtime.availableModelPresets(panel.instancePath);
-        if (!names.includes(action.value)) throw new Error(`Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`);
+        const names =
+          action.field === 'default_new_topic_skill'
+            ? (await this.options.runtime.listSkills(panel.instancePath)).map((entry) => entry.name)
+            : await this.options.runtime.availableModelPresets(panel.instancePath);
+        if (!names.includes(action.value))
+          throw new Error(
+            `Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`,
+          );
       }
-      const current = await this.settingsAccess(ctx,panel,true);
-      const chat = findInstance(current,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
-      const page: SettingsKey = action.kind === 'default'
-        ? action.field === 'default_new_topic_skill' ? 'skills' : 'presets'
-        : action.field === 'all_messages_are_prompts' ? 'prompts'
-        : action.field === 'users_can_propose_prompts' ? 'proposals' : 'worktrees';
+      const current = await this.settingsAccess(ctx, panel, true);
+      const chat = findInstance(current, this.id, panel.chatId)!.instance.chats.find(
+        (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+      )!;
+      const page: SettingsKey =
+        action.kind === 'typing'
+          ? 'typing'
+          : action.kind === 'default'
+            ? action.field === 'default_new_topic_skill'
+              ? 'skills'
+              : 'presets'
+            : action.field === 'all_messages_are_prompts'
+              ? 'prompts'
+              : action.field === 'users_can_propose_prompts'
+                ? 'proposals'
+                : 'worktrees';
       const labels = {
         prompts: 'Message handling',
         proposals: 'Who can send requests',
         skills: 'Default skill',
         presets: 'Default model preset',
         worktrees: 'Worktrees',
+        typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
-        if (action.kind === 'default') return setting === undefined ? page === 'skills' ? 'No default skill' : 'Use host default' : String(setting);
-        if (page === 'prompts') return setting === false ? 'Commands and replies only' : 'All messages';
-        if (page === 'proposals') return setting === true ? 'Members with admin approval' : 'Admins only';
+        if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
+        if (action.kind === 'default')
+          return setting === undefined
+            ? page === 'skills'
+              ? 'No default skill'
+              : 'Use host default'
+            : String(setting);
+        if (page === 'prompts')
+          return setting === false ? 'Commands and replies only' : 'All messages';
+        if (page === 'proposals')
+          return setting === true ? 'Members with admin approval' : 'Admins only';
         return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
-      if (action.kind === 'set') chat[action.field] = action.value;
+      if (action.kind === 'typing') chat.typing_indicators = action.value;
+      else if (action.kind === 'set') chat[action.field] = action.value;
       else if (action.value === undefined) delete chat[action.field];
       else chat[action.field] = action.value;
       writeConfig(current);
       recordChange(page, labels[page], before, value(chat[action.field]));
       this.saveSettingsPanel(panel);
-      Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
-      if (action.kind === 'default' && action.value === undefined) delete findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)![action.field];
+      Object.assign(
+        findInstance(this.options.config, this.id, panel.chatId)!.instance.chats.find(
+          (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+        )!,
+        chat,
+      );
+      if (action.kind === 'default' && action.value === undefined)
+        delete findInstance(this.options.config, this.id, panel.chatId)!.instance.chats.find(
+          (chat) => chat.botId === this.id && chat.chatId === panel.chatId,
+        )![action.field];
       await this.syncCommandMenus();
       const offset = action.kind === 'default' ? panel.offset : 0;
-      await this.renderSettings(panel,current,action.kind === 'set' ? 'root' : action.field === 'default_new_topic_skill' ? 'skills' : 'presets',offset);
+      await this.renderSettings(
+        panel,
+        current,
+        action.kind === 'typing'
+          ? 'typing'
+          : action.kind === 'set'
+            ? 'root'
+            : action.field === 'default_new_topic_skill'
+              ? 'skills'
+              : 'presets',
+        offset,
+      );
       return;
     }
-    await this.renderSettings(panel,config,'capacity');
+    await this.renderSettings(panel, config, 'capacity');
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
@@ -435,15 +655,32 @@ export class BotService {
     this.bot = options.bot ?? new Bot(options.token);
     installTelegramRetry(this.bot, this.telegramRetry.signal);
     this.delivery = new TelegramDelivery();
+    this.bot.api.config.use((previous, method, payload, signal) => {
+      if (
+        method !== 'sendChatAction' &&
+        /^(send|copyMessage|forwardMessage)/.test(method) &&
+        'chat_id' in payload &&
+        typeof payload.chat_id === 'number'
+      ) {
+        const threadId =
+          'message_thread_id' in payload && typeof payload.message_thread_id === 'number'
+            ? payload.message_thread_id
+            : 1;
+        this.delivery.invalidateTyping(payload.chat_id, threadId);
+      }
+      return previous(method, payload, signal);
+    });
     this.config = options.botConfig;
     this.token = options.token;
     this.skills = new SkillPicker({
-      store: options.store, botId: () => this.id, username: () => this.bot.botInfo!.username,
+      store: options.store,
+      botId: () => this.id,
+      username: () => this.bot.botInfo!.username,
       authorize: (chatId, userId) => this.authorize(chatId, userId),
-      instancePath: chatId => this.assignedPath(chatId),
+      instancePath: (chatId) => this.assignedPath(chatId),
       listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
     });
-    this.bot.use(async ctx => {
+    this.bot.use(async (ctx) => {
       let callbackAnswered = false;
       const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
       ctx.answerCallbackQuery = async (...args) => {
@@ -454,15 +691,25 @@ export class BotService {
       if (this.collectAlbum(ctx)) return;
       const intent = this.classifyInput(ctx);
       const urgent = intent.kind === 'command' && intent.action === 'terminate';
-      if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
-      const received = this.receiveMessage(ctx,intent);
-      const process = async () => { await received; await this.handle(ctx, intent); };
+      if (++this.queuedUpdates > 256 && !urgent) {
+        this.queuedUpdates--;
+        return;
+      }
+      const received = this.receiveMessage(ctx, intent);
+      const process = async () => {
+        await received;
+        await this.handle(ctx, intent);
+      };
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
-      try { await task; } catch (error) { await this.reportError(ctx,error); }
-      finally {
+      try {
+        await task;
+      } catch (error) {
+        await this.reportError(ctx, error);
+      } finally {
         this.queuedUpdates--;
-        if (ctx.callbackQuery && !callbackAnswered) await ctx.answerCallbackQuery().catch(() => undefined);
+        if (ctx.callbackQuery && !callbackAnswered)
+          await ctx.answerCallbackQuery().catch(() => undefined);
       }
     });
   }
@@ -956,6 +1203,7 @@ export class BotService {
     const listeners = [...this.listeners.values()];
     for (const item of listeners) {
       clearTimeout(item.initial?.timer);
+      clearInterval(item.typingTimer);
       item.connection?.close();
     }
     this.listeners.clear();
@@ -2816,6 +3064,57 @@ export class BotService {
     timer.unref();
     this.reconnects.set(session.id, timer);
   }
+  private typingActive(session: TopicSession, listener: Listener): boolean {
+    if (this.options.store.getSessionGeneration(session.id) !== listener.generation) return false;
+    if (
+      this.stopped ||
+      this.options.config.terminated ||
+      this.listeners.get(session.id) !== listener ||
+      !this.sessionAssigned(session) ||
+      this.options.store.getSession(session.id)?.status !== 'open'
+    )
+      return false;
+    const mode =
+      findInstance(this.options.config, this.id, session.chatId)?.instance.chats.find(
+        (chat) => chat.botId === this.id && chat.chatId === session.chatId,
+      )?.typing_indicators ?? 'disabled';
+    return mode === 'inference'
+      ? this.hostActivity.get(session.id)?.value === 'running'
+      : mode === 'streaming' && listener.typingText === true;
+  }
+
+  private refreshTyping(session: TopicSession, listener: Listener): void {
+    if (this.stopped || this.listeners.get(session.id) !== listener) return;
+    const active = this.typingActive(session, listener);
+    const delay = active ? Math.max(0, (listener.typingNextAt ?? 0) - Date.now()) : 4000;
+    if (!listener.typingTimer) {
+      listener.typingTimer = setTimeout(() => {
+        listener.typingTimer = undefined;
+        this.refreshTyping(session, listener);
+      }, delay || 4000);
+      listener.typingTimer.unref();
+    }
+    if (!active) {
+      this.delivery.invalidateTyping(session.chatId, session.threadId);
+      return;
+    }
+    if ((listener.typingNextAt ?? 0) > Date.now()) return;
+    listener.typingNextAt = Date.now() + 4000;
+    void this.delivery
+      .typing(
+        session.chatId,
+        session.threadId,
+        () =>
+          this.bot.api.sendChatAction(session.chatId, 'typing', {
+            message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+          }),
+        () => this.typingActive(session, listener),
+      )
+      .catch((error) => {
+        console.warn(`Could not send typing action (${session.id}).`, error);
+      });
+  }
+
   private dropListener(id: string): void {
     this.invalidateActivity(id);
     clearTimeout(this.reconnects.get(id));
@@ -2826,6 +3125,9 @@ export class BotService {
     this.listeners.delete(id);
     clearTimeout(listener?.initial?.timer);
     if (listener) listener.initial = undefined;
+    clearTimeout(listener?.typingTimer);
+    const session = this.options.store.getSession(id);
+    if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
     for (const [token, question] of this.questions) {
       if (question.listener === listener) this.endQuestion(token);
     }
@@ -2859,6 +3161,7 @@ export class BotService {
       queuedMessages: 0,
     };
     this.listeners.set(session.id, listener);
+    this.refreshTyping(session, listener);
     void this.setTopicStatus(
       session,
       this.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
@@ -3361,6 +3664,27 @@ export class BotService {
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
       void this.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
     }
+    if (frame.t === 'event') {
+      const event = frame.event;
+      if (
+        (event.type === 'message_start' || event.type === 'message_update') &&
+        event.message.role === 'assistant'
+      ) {
+        listener.typingText = event.message.content.some(
+          (part) => part.type === 'text' && part.text.length > 0,
+        );
+      } else if (
+        event.type === 'message_end' ||
+        event.type === 'agent_end' ||
+        event.type === 'tool_execution_start' ||
+        interruptedBy
+      ) {
+        listener.typingText = false;
+      }
+    } else if ((frame.t === 'welcome' || frame.t === 'state') && !frame.state.isStreaming) {
+      listener.typingText = false;
+    }
+    this.refreshTyping(session, listener);
     if (frame.t === 'error') {
       const observation = this.activityObservation(session);
       observation.suspect = true;

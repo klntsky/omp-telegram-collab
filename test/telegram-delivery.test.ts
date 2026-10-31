@@ -729,3 +729,475 @@ test('reentrant eligibility yields to a shared cooldown before both lanes resume
   await icon;
   assert.deepEqual(calls, ['ordinary', 'icon']);
 });
+
+test('typing waits for ordinary, name, and icon lanes and replaces queued same-topic refreshes', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const ordinaryGate = Promise.withResolvers<void>();
+  const nameGate = Promise.withResolvers<void>();
+  const iconGate = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const initial = delivery.run(
+    1,
+    () => {
+      calls.push('ordinary');
+      return ordinaryGate.promise;
+    },
+    () => true,
+  );
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    () => {
+      calls.push('name');
+      return nameGate.promise;
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    () => {
+      calls.push('icon');
+      return iconGate.promise;
+    },
+    () => true,
+  );
+  const old = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push('old');
+    },
+    () => true,
+  );
+  const fresh = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push('typing');
+    },
+    () => true,
+  );
+  const foreground = delivery.run(
+    1,
+    async () => {
+      calls.push('foreground');
+    },
+    () => true,
+  );
+  assert.equal(await old, undefined);
+  assert.deepEqual(calls, ['ordinary', 'name', 'icon']);
+  ordinaryGate.resolve();
+  await Promise.all([initial, foreground]);
+  await advance(1000);
+  assert.deepEqual(calls, ['ordinary', 'name', 'icon', 'foreground']);
+  nameGate.resolve();
+  await name;
+  await advance(1000);
+  assert.deepEqual(calls, ['ordinary', 'name', 'icon', 'foreground']);
+  iconGate.resolve();
+  await Promise.all([icon, fresh]);
+  assert.deepEqual(calls, ['ordinary', 'name', 'icon', 'foreground', 'typing']);
+});
+
+test('in-flight typing does not block newly arriving ordinary, name, or icon output', async (t) => {
+  clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const gate = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const typing = delivery.typing(
+    1,
+    10,
+    () => {
+      calls.push('typing');
+      return gate.promise;
+    },
+    () => true,
+  );
+  const nextTyping = delivery.typing(
+    1,
+    20,
+    async () => {
+      calls.push('next-typing');
+    },
+    () => true,
+  );
+  const ordinary = delivery.run(
+    1,
+    async () => {
+      calls.push('ordinary');
+      return 'message';
+    },
+    () => true,
+  );
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    async () => {
+      calls.push('name');
+      return 'name applied';
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    async () => {
+      calls.push('icon');
+      return 'icon applied';
+    },
+    () => true,
+  );
+  assert.deepEqual(await Promise.all([ordinary, name, icon]), [
+    'message',
+    'name applied',
+    'icon applied',
+  ]);
+  assert.deepEqual(calls, ['typing', 'ordinary', 'name', 'icon']);
+  gate.resolve();
+  await Promise.all([typing, nextTyping]);
+  assert.deepEqual(calls, ['typing', 'ordinary', 'name', 'icon', 'next-typing']);
+});
+
+test('typing expires four seconds after enqueue even behind an in-flight message', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const gate = Promise.withResolvers<void>();
+  const initial = delivery.run(
+    1,
+    () => gate.promise,
+    () => true,
+  );
+  const pending = delivery.typing(
+    1,
+    10,
+    async () => assert.fail('expired typing'),
+    () => true,
+  );
+  await advance(4000);
+  assert.equal(await pending, undefined);
+  gate.resolve();
+  await initial;
+});
+
+test('typing invalidation discards prior refreshes but permits a later fresh refresh', async (t) => {
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const gate = Promise.withResolvers<void>();
+  const initial = delivery.run(
+    1,
+    () => gate.promise,
+    () => true,
+  );
+  const calls: number[] = [];
+  const old = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push(1);
+    },
+    () => true,
+  );
+  const other = delivery.typing(
+    1,
+    20,
+    async () => {
+      calls.push(2);
+    },
+    () => true,
+  );
+  delivery.invalidateTyping(1, 10);
+  assert.equal(await old, undefined);
+  const fresh = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push(3);
+    },
+    () => true,
+  );
+  gate.resolve();
+  await Promise.all([initial, other, fresh]);
+  assert.deepEqual(calls, [2, 3]);
+});
+
+test('typing caps topics per chat until sent indicators expire, including inactive topics', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const calls: number[] = [];
+  let firstActive = true;
+  await delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push(10);
+    },
+    () => firstActive,
+  );
+  await delivery.typing(
+    1,
+    20,
+    async () => {
+      calls.push(20);
+    },
+    () => true,
+  );
+  await delivery.typing(
+    1,
+    25,
+    async () => {
+      calls.push(25);
+    },
+    () => true,
+  );
+  assert.equal(
+    await delivery.typing(
+      1,
+      30,
+      async () => assert.fail('over capacity'),
+      () => true,
+    ),
+    undefined,
+  );
+  await delivery.typing(
+    2,
+    30,
+    async () => {
+      calls.push(230);
+    },
+    () => true,
+  );
+  firstActive = false;
+  assert.equal(
+    await delivery.typing(
+      1,
+      30,
+      async () => assert.fail('inactive indicator still visible'),
+      () => true,
+    ),
+    undefined,
+  );
+  await advance(4000);
+  assert.equal(
+    await delivery.typing(
+      1,
+      40,
+      async () => assert.fail('stale indicator still visible'),
+      () => true,
+    ),
+    undefined,
+  );
+  await advance(1000);
+  await delivery.typing(
+    1,
+    40,
+    async () => {
+      calls.push(40);
+    },
+    () => true,
+  );
+  assert.deepEqual(calls, [10, 20, 25, 230, 40]);
+});
+
+test('typing staggers same-topic sends without delaying ready topics or foreground', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const calls: [string, number][] = [];
+  await delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push(['first', Date.now()]);
+    },
+    () => true,
+  );
+  await advance(1000);
+  const refresh = delivery.typing(
+    1,
+    10,
+    async () => {
+      calls.push(['refresh', Date.now()]);
+    },
+    () => true,
+  );
+  await delivery.typing(
+    1,
+    20,
+    async () => {
+      calls.push(['other', Date.now()]);
+    },
+    () => true,
+  );
+  await delivery.run(
+    1,
+    async () => {
+      calls.push(['foreground', Date.now()]);
+    },
+    () => true,
+  );
+  assert.deepEqual(calls, [
+    ['first', 0],
+    ['other', 1000],
+    ['foreground', 1000],
+  ]);
+  await advance(2999);
+  assert.equal(calls.length, 3);
+  await advance(1);
+  await refresh;
+  assert.deepEqual(calls.at(-1), ['refresh', 4000]);
+});
+
+test('typing 429 rejects the original error, sets shared cooldown, and never retries', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const failure = limited(5);
+  let attempts = 0;
+  const pending = delivery.typing(
+    1,
+    10,
+    async () => {
+      attempts++;
+      throw failure;
+    },
+    () => true,
+  );
+  await assert.rejects(pending, (error) => error === failure);
+  const calls: number[] = [];
+  const question = delivery.run(
+    1,
+    async () => {
+      calls.push(Date.now());
+    },
+    () => true,
+  );
+  const expired = delivery.typing(
+    1,
+    20,
+    async () => assert.fail('typing past expiry'),
+    () => true,
+  );
+  await advance(4000);
+  assert.equal(await expired, undefined);
+  assert.deepEqual(calls, []);
+  await advance(1000);
+  await question;
+  assert.equal(attempts, 1);
+  assert.deepEqual(calls, [5000]);
+});
+
+test('typing failures retain diagnostics and inactive or closed typing resolves without sending', async (t) => {
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  const failure = new HttpError('Network failed', new Error('ECONNRESET'));
+  await assert.rejects(
+    delivery.typing(
+      1,
+      10,
+      async () => {
+        throw failure;
+      },
+      () => true,
+    ),
+    (error) => error === failure,
+  );
+  await assert.rejects(
+    delivery.typing(
+      1,
+      20,
+      async () => {},
+      () => {
+        throw failure;
+      },
+    ),
+    (error) => error === failure,
+  );
+  assert.equal(
+    await delivery.typing(
+      1,
+      20,
+      async () => assert.fail('inactive typing'),
+      () => false,
+    ),
+    undefined,
+  );
+  const gate = Promise.withResolvers<void>();
+  const initial = delivery.run(
+    1,
+    () => gate.promise,
+    () => true,
+  );
+  const queued = delivery.typing(
+    1,
+    20,
+    async () => assert.fail('closed typing'),
+    () => true,
+  );
+  delivery.close();
+  assert.equal(await queued, undefined);
+  assert.equal(
+    await delivery.typing(
+      1,
+      30,
+      async () => assert.fail('after close'),
+      () => true,
+    ),
+    undefined,
+  );
+  gate.resolve();
+  await initial;
+});
+
+test('typing rechecks queued activity and preserves staggering across inactive admission reclamation', async (t) => {
+  const advance = clock(t);
+  const delivery = new TelegramDelivery();
+  t.after(() => delivery.close());
+  let active = true;
+  const starts: number[] = [];
+  await delivery.typing(
+    1,
+    10,
+    async () => {
+      starts.push(Date.now());
+    },
+    () => active,
+  );
+  await advance(1000);
+  const canceled = delivery.typing(
+    1,
+    10,
+    async () => assert.fail('inactive refresh'),
+    () => active,
+  );
+  active = false;
+  await delivery.typing(
+    1,
+    20,
+    async () => {},
+    () => true,
+  );
+  assert.equal(await canceled, undefined);
+  const refreshed = delivery.typing(
+    1,
+    10,
+    async () => {
+      starts.push(Date.now());
+    },
+    () => true,
+  );
+  await advance(2999);
+  assert.deepEqual(starts, [0]);
+  await advance(1);
+  await refreshed;
+  assert.deepEqual(starts, [0, 4000]);
+});
