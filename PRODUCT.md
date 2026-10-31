@@ -19,7 +19,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | --- | --- |
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
 | `/worktree [branch]` | Run OMP's native worktree operation in the current topic's managed session. In General, create an empty session topic first. The optional argument is a branch name, not a task. |
-| Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
+| Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit, or immediately when automatic topic worktrees are enabled. |
 | `/p <prompt>` | Submit a prompt in either prompt mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/settings` | Open interactive forum settings, defaults, and the live session count limit. Requires the current supergroup owner or an administrator. |
@@ -43,11 +43,13 @@ Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as ima
 
 General never becomes a session: accepted prompts there create separate session topics. `/new` always creates a new topic, including when invoked from an existing session topic. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
-New session topics get a quietly pinned OPEN AGENT message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
+New session topics get a quietly pinned OPEN AGENT message before the initial prompt. Automatic worktree creation can start OMP before that message is pinned. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions.
 
 `/worktree` delegates worktree creation, uncommitted-change transfer, and session relocation to OMP's own command. In a session topic it keeps the same topic and conversation history. The session retains its configured project assignment and authorization while its execution directory changes. Worktree location, branch defaults, change transfer, and source-checkout cleanup follow OMP's settings. Worktrees are not automatically removed when sessions stop or the service restarts.
 
 A current supergroup owner or administrator can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same administrator or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.
+
+Each forum can enable automatic topic worktrees through `/settings`. The `create_topic_worktrees` setting defaults to `false`. When enabled, every new managed session topic, including a manually created topic, invokes OMP's native `/worktree` before its initial prompt. The branch name is `t.me/c/<internal chat>/<topic>`, where the internal chat ID is the supergroup chat ID without its `-100` prefix and the topic is its thread ID. Attached sessions and existing topics are unchanged. Explicit `/worktree [branch]` keeps its normal branch-argument semantics.
 
 The pinned message contains only “Use /p to submit a prompt” in explicit-prompt mode or “Send a message to prompt the agent” in all-messages mode, plus the OPEN AGENT button.
 
@@ -77,7 +79,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, and Live session count limit. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, automatic topic worktrees, default new-topic skill, default model preset, and Live session count limit. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
 
 Live session count limit applies across all bots and instances. Administrators adjust its pending value with `-1`, `+1`, `-10`, `+10`, or double buttons, then confirm the change. The value stays between 1 and JavaScript's maximum safe integer. Both increases and decreases are supported. Lowering the limit leaves existing sessions running and prevents new starts until usage falls below the limit. Settings button actions do not submit or retry tasks.
 
@@ -87,6 +89,7 @@ Settings catalog failures preserve the displayed controls so administrators can 
 | --- | --- | --- |
 | `all_messages_are_prompts` | `true` | Ordinary text and images create a new session topic from General or prompt the existing session in a session topic. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
 | `users_can_propose_prompts` | `false` | Prompts without sufficient administrator scope are ignored. When `true`, an authorized admin must approve them. Authorized admin prompts run directly. |
+| `create_topic_worktrees` | `false` | New managed session topics run native `/worktree` before their initial prompt, including manually created topics. Attached sessions and existing topics are unchanged. |
 
 `/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote. Quoted content is context only: slash commands in a quote never determine the new message's command or prompt mode.
 

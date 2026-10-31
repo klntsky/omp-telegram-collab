@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { TopicKey, TopicSession } from '../shared/contracts.js';
+import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import type { ImageContent } from '@oh-my-pi/pi-wire';
 
@@ -155,6 +155,21 @@ export class Store {
   }
   hasPendingInitialTask(id: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND initial_state='pending'").get(id));
+  }
+  setInitialTask(id: string, task: PromptContent, userId: number, authorityUserId = userId): void {
+    if (!task.text.trim() && !task.images?.length) throw new Error('An initial task requires text or images');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.db.prepare("UPDATE sessions SET initial_task=?,initial_state='pending' WHERE id=? AND initial_state IS NULL AND status='open'").run(task.text,id);
+      if (!Number(result.changes)) throw new Error('Session cannot accept an initial task');
+      if (task.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(id,JSON.stringify(task.images));
+      this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(id,userId);
+      this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(id,authorityUserId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   claimInitialTask(id: string): string | undefined {
     const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' RETURNING initial_task").get(id) as Row | undefined;

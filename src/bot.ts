@@ -115,9 +115,9 @@ interface PromptProposal {
   messageId: number;
   expires: number;
 }
-type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity';
+type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'capacity' | 'worktrees';
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
-  | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts'; value: boolean }
+  | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'propose-capacity'; limit: number; target: number }
   | { kind: 'capacity'; limit: number; target: number }
@@ -267,8 +267,8 @@ export class BotService {
     };
     let text = 'Settings\nForum defaults apply to this forum, not the current topic. Existing topic skills and running models are unchanged.';
     if (page === 'root') {
-      text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nLive session count limit: ${config.omp.maxSessions} sessions across all instances`;
-      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Live session count limit','capacity']] as const) {
+      text += `\n\nPrompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}\nUser proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}\nDefault new-topic skill: ${chat.default_new_topic_skill ?? '(not set)'}\nDefault model preset: ${chat.default_model_preset ?? '(not set)'}\nLive session count limit: ${config.omp.maxSessions} sessions across all instances\nNew-topic worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`;
+      for (const [label, target] of [['Prompt mode','prompts'],['User proposals','proposals'],['Default new-topic skill','skills'],['Default model preset','presets'],['Live session count limit','capacity'],['New-topic worktrees','worktrees']] as const) {
         button(label, {kind:'page',page:target});
       }
     } else if (page === 'prompts' || page === 'proposals') {
@@ -276,6 +276,10 @@ export class BotService {
       text = prompts ? `Forum prompt mode: ${chat.all_messages_are_prompts === false ? 'Only /p' : 'All messages'}` : `Forum user proposals: ${chat.users_can_propose_prompts === true ? 'Allowed' : 'Ignored'}`;
       button(prompts ? 'All messages' : 'Allow user proposals', {kind:'set',field:prompts ? 'all_messages_are_prompts' : 'users_can_propose_prompts',value:true});
       button(prompts ? 'Only /p' : 'Ignore non-admin prompts', {kind:'set',field:prompts ? 'all_messages_are_prompts' : 'users_can_propose_prompts',value:false});
+    } else if (page === 'worktrees') {
+      text = `Create worktrees for new managed topics: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`;
+      button('Enable', {kind:'set',field:'create_topic_worktrees',value:true});
+      button('Disable', {kind:'set',field:'create_topic_worktrees',value:false});
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill ? (await this.options.runtime.listSkills(panel.instancePath)).map(entry => entry.name).filter(isMentionableSkillName) : await this.options.runtime.availableModelPresets(panel.instancePath);
@@ -971,6 +975,15 @@ export class BotService {
     return findInstance(this.options.config, this.id, chatId)?.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.users_can_propose_prompts === true;
   }
+  private createsTopicWorktrees(chatId: number): boolean {
+    return findInstance(this.options.config, this.id, chatId)?.instance.chats
+      .find(chat => chat.botId === this.id && chat.chatId === chatId)?.create_topic_worktrees === true;
+  }
+  private async createTopicWorktree(session: TopicSession): Promise<void> {
+    this.requireSessionAssignment(session);
+    await this.options.runtime.worktree(session, `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`);
+    this.options.store.setSessionRuntime(session.id, session.runtime);
+  }
   private promptHelp(chatId: number): string {
     const input = this.allMessagesArePrompts(chatId)
       ? 'Text messages in a session topic are treated as prompts.'
@@ -1366,7 +1379,19 @@ export class BotService {
     if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree ? undefined : task, ctx.from!.id, authority.from!.id);
+    const automaticWorktree = !attached && !worktree && this.createsTopicWorktrees(ctx.chat!.id);
+    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree || automaticWorktree ? undefined : task, ctx.from!.id, authority.from!.id);
+    if (automaticWorktree) {
+      await this.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
+      await this.createTopicWorktree(session);
+      if (task !== undefined) {
+        await this.authorize(ctx.chat!.id, ctx.from!.id);
+        if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+        this.requireSessionAssignment(session);
+        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+      }
+    }
     if (worktree) {
       const text = await this.options.runtime.worktree(session, task?.text || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);

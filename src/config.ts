@@ -57,6 +57,7 @@ const configSchema = z.object({
       chatId: z.number().int().safe().refine(value => value !== 0),
       all_messages_are_prompts: z.boolean().default(true),
       users_can_propose_prompts: z.boolean().default(false),
+      create_topic_worktrees: z.boolean().default(false),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
       default_new_topic_skill: z.string().refine(isMentionableSkillName).optional(),
     }).strict()),

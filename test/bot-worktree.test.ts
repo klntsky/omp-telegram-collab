@@ -149,3 +149,118 @@ test('archived topics cannot move their session into a worktree', async t => {
     assert.equal(app.store.getSession(session.id)!.status,'closed');
   } finally { await app.close(); }
 });
+
+test('forum worktree setting gates native creation before skill-bearing initial prompts', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    const calls: Array<{id:string;branch?:string}> = [];
+    t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+      assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
+      calls.push({id:session.id,branch});
+      session.runtime = {kind:'managed',worktreePath:'/fixture/automatic'};
+      return '';
+    });
+    await app.update({text:'/new Default disabled'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    assert.deepEqual(calls,[]);
+    await setForumSetting(app,5,0);
+    await setForumSetting(app,2,0);
+    await app.update({text:'/skill_pdf_tools'});
+    await app.update({text:'/new Isolated task'});
+    const isolated = app.store.listSessions(botId).find(session => session.runtime.kind === 'managed' && session.runtime.worktreePath === '/fixture/automatic')!;
+    assert.deepEqual(calls,[{id:isolated.id,branch:`t.me/c/${String(chatId).replace(/^-100/,'')}/${isolated.threadId}`}]);
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text.endsWith('Isolated task')));
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\nIsolated task'});
+    assert.deepEqual(app.store.getPendingSkills({botId,destination:{kind:'general',chatId},userId:ownerId}),[]);
+    await setForumSetting(app,5,1);
+    await app.update({text:'/new Disabled again'});
+    await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 3);
+    assert.equal(calls.length,1);
+  } finally { await app.close(); }
+});
+
+test('manual topic creation uses its topic branch once and does not submit a task', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await setForumSetting(app,5,0);
+    const calls: Array<{id:string;branch?:string}> = [];
+    t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
+      calls.push({id:session.id,branch});
+      session.runtime = {kind:'managed',worktreePath:'/fixture/manual'};
+      return '';
+    });
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
+    const session = app.store.listSessions(botId)[0]!;
+    assert.deepEqual(calls,[{id:session.id,branch:`t.me/c/${String(chatId).replace(/^-100/,'')}/42`}]);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    assert.deepEqual(app.store.getSession(session.id)!.runtime,{kind:'managed',worktreePath:'/fixture/manual'});
+  } finally { await app.close(); }
+});
+
+for (const branch of ['', ' feature/explicit']) {
+  test(`explicit General worktree${branch} overrides automatic topic branches`, async t => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      await setForumSetting(app,5,0);
+      const calls: Array<string | undefined> = [];
+      t.mock.method(app.runtime,'worktree',async (session: TopicSession, name?: string) => {
+        calls.push(name);
+        session.runtime = {kind:'managed',worktreePath:'/fixture/explicit'};
+        return '';
+      });
+      await app.update({text:`/worktree${branch}`});
+      assert.deepEqual(calls,[branch.trim() || undefined]);
+      const session = app.store.listSessions(botId)[0]!;
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    } finally { await app.close(); }
+  });
+}
+
+test('automatic worktree failure does not admit the initial task or consume selected skills', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await setForumSetting(app,5,0);
+    await app.update({text:'/skill_pdf_tools'});
+    t.mock.method(app.runtime,'worktree',async () => {
+      throw new Error('Native worktree failure\nOriginal diagnostic');
+    });
+    await app.update({text:'/new Retained task'});
+    const session = app.store.listSessions(botId)[0]!;
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+    assert.deepEqual(app.store.getPendingSkills({botId,destination:{kind:'general',chatId},userId:ownerId}),['pdf-tools']);
+  } finally { await app.close(); }
+});
+
+test('automatic worktrees exclude attached sessions and the bot status topic', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await app.update({text:'/new Existing host'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    await setForumSetting(app,5,0);
+    const calls: string[] = [];
+    t.mock.method(app.runtime,'worktree',async (session: TopicSession) => {
+      calls.push(session.id);
+      return '';
+    });
+    await app.update({text:'/attach existing-host Attached history'});
+    const attached = app.store.listSessions(botId).find(session => session.runtime.kind === 'attached')!;
+    assert.ok(attached);
+    await app.update({message_thread_id:attached.threadId,forum_topic_created:{name:'Attached history'}});
+    await app.service.sendStatusNotice(chatId,'Online');
+    const threadId = app.store.getBotStatusTopic(botId,chatId)!;
+    await app.update({message_thread_id:threadId,forum_topic_created:{name:'Bot status'}});
+    assert.deepEqual(calls,[]);
+    assert.equal(app.store.listSessions(botId).length,2);
+    assert.equal(app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId}}),undefined);
+  } finally { await app.close(); }
+});

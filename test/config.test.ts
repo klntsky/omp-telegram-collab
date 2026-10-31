@@ -82,8 +82,8 @@ test('YAML supports multiple bots and multiple chats', t => {
   const config = validConfig(path, dir);
   config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
   config.instances[dir]!.chats.push(
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true },
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false },
     { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false },
   );
   writeConfig(config);
@@ -91,10 +91,10 @@ test('YAML supports multiple bots and multiple chats', t => {
   assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
   assert.equal(findInstance(loaded, botId, -999), undefined);
   assert.deepEqual(loaded.instances[dir]!.chats, [
-    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false },
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true },
-    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false },
+    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false },
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false },
+    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false },
   ]);
   writeConfig(loaded);
   assert.deepEqual(readConfig(path), loaded);
@@ -185,13 +185,14 @@ test('new-topic skill defaults reject whitespace, controls, backslashes, and non
   }
 });
 
-test('YAML defaults prompt options independently and rejects nonboolean values', t => {
+test('YAML defaults forum boolean options independently and rejects nonboolean values', t => {
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);
   writeFileSync(path, stringify(config));
   assert.equal(readConfig(path).instances[dir]!.chats[0]!.all_messages_are_prompts, true);
   assert.equal(readConfig(path).instances[dir]!.chats[0]!.users_can_propose_prompts, false);
-  for (const option of ['all_messages_are_prompts', 'users_can_propose_prompts']) {
+  assert.equal(readConfig(path).instances[dir]!.chats[0]!.create_topic_worktrees, false);
+  for (const option of ['all_messages_are_prompts', 'users_can_propose_prompts', 'create_topic_worktrees']) {
     for (const mode of ['true', 'false', '', 0, 1, null, [], {}]) {
       writeFileSync(path, stringify({
         ...config,
