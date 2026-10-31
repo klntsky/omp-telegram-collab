@@ -13,7 +13,6 @@ export interface GuestTransport {
 	send(frame: GatewayAction): void;
 }
 
-const MAX_BUFFERED_BYTES = 1024 * 1024;
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 
@@ -128,10 +127,6 @@ export class GatewaySocket implements GuestTransport {
 			return;
 		}
 		const text = JSON.stringify(frame);
-		if (ws.bufferedAmount + text.length > MAX_BUFFERED_BYTES) {
-			this.reconnect("The connection is too slow. Reconnecting; the action was not sent.");
-			return;
-		}
 		try {
 			ws.send(text);
 		} catch {

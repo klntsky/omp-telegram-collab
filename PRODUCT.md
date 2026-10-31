@@ -237,6 +237,8 @@ The Mini App retains its transcript and draft during transient failures. Automat
 
 Transient connection notices disappear once the Mini App finishes reconnecting and loading the session snapshot. Unrelated session notices remain visible.
 
+Mini App transport has no custom queue-count, byte-backlog, WebSocket payload-size, or buffered-data disconnect limits. Snapshot and live-update bursts do not disconnect a session merely because pending data crosses a threshold. Authorization and protocol validation remain enforced.
+
 Transient Telegram authorization lookup failures fail closed without becoming permanent access denials. Transport failures, ten-second lookup deadlines, Telegram rate limits (429), and Telegram server errors (5xx) refuse gateway admission with HTTP 503 or close an active socket with code 1013, retaining the original diagnostic. The Mini App silently retries through its existing reconnect flow and rechecks current access; it does not replay the blocked action. Other Telegram 4xx responses, confirmed membership loss, and local access denials remain non-recoverable access failures. Abandoned Mini App authentication requests cancel their lookups and promptly release authentication capacity.
 
 ## 4. Attached sessions and transcript
