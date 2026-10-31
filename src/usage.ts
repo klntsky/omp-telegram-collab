@@ -14,7 +14,7 @@ export function formatUsage(result: unknown, now = new Date()): { heading: strin
   const sections: { heading: string; table: string }[] = [];
   for (const report of result.reports) {
     if (!record(report) || typeof report.provider !== 'string' || !Array.isArray(report.limits)) throw new Error('Invalid OMP usage report');
-    const lines = [`${'Quota'.padEnd(13)}${'Left'.padStart(6)}  Reset`, '─'.repeat(26)];
+    const lines = ['| Quota | Left | Reset |', '|---|---:|---|'];
     const rows = new Map<string, { label: string; left: string; reset: string; count: number; status?: string }>();
     for (const limit of report.limits) {
       if (!record(limit) || !record(limit.amount)) throw new Error('Invalid OMP usage limit');
@@ -35,7 +35,7 @@ export function formatUsage(result: unknown, now = new Date()): { heading: strin
     }
     for (const row of rows.values()) {
       const label = row.label + (row.count > 1 ? ` ×${row.count}` : '');
-      lines.push(`${label.padEnd(13)}${row.left.padStart(6)}  ${row.reset.padStart(5)}`);
+      lines.push(`| ${label} | ${row.left} | ${row.reset} |`);
       if (row.status) lines.push(`  ⚠ ${row.status}`);
     }
     if (!report.limits.length) lines.push('  No quota data available.');

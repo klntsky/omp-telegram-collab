@@ -1803,21 +1803,8 @@ export class BotService {
       if (action === 'usage') {
         if (arg) { await replyTo(ctx, destination, 'Usage: /usage'); return; }
         const usage = await this.options.runtime.providerUsage(assigned.path);
-        for (const section of usage) {
-          for (let offset = 0; offset < section.table.length;) {
-            const prefix = section.heading ? `${section.heading}\n\n` : '';
-            let end = Math.min(offset + 4000 - prefix.length, section.table.length);
-            if (end < section.table.length && /[\uD800-\uDBFF]/.test(section.table[end - 1]!)) --end;
-            const chunk = section.table.slice(offset, end);
-            await replyTo(ctx, destination, prefix + chunk, {
-              entities: [
-                ...(section.heading ? [{ type: 'bold' as const, offset: 0, length: section.heading.length }] : []),
-                { type: 'pre', offset: prefix.length, length: chunk.length },
-              ],
-            });
-            offset = end;
-          }
-        }
+        const text = usage.map(section => `${section.heading ? `**${section.heading}**\n\n` : ''}${section.table}`).join('\n\n');
+        await replyTo(ctx, destination, text);
         return;
       }
       const skillAlias = this.skillAliases.get(ctx.chat.id)?.get(action);
