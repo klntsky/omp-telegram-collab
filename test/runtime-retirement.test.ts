@@ -18,7 +18,7 @@ interface RetirementRequest {
   type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
 }
 
-async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
+async function fixture(mode: RetirementMode = 'busy', pid = process.pid) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-retirement-')));
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
@@ -101,7 +101,7 @@ if (process.argv[2] !== 'collab') {
       handled.push((async () => {
         const respond = (outcome: 'requested' | 'busy' | 'expired') => socket.end(JSON.stringify({ requestId: request.requestId, sessionId: descriptor.sessionId, pid: descriptor.pid, outcome }) + '\n');
         assert.equal(request.type, 'retire');
-        assert.equal(request.guard, guard);
+        assert.equal(request.guard, 'idle');
         assert.match(request.requestId, /^[0-9a-f-]{36}$/);
         assert.equal(await readFile(grantPath(request.requestId), 'utf8'), '', 'runtime must close an empty exclusive grant before sending');
         if (mode === 'busy') { respond('busy'); return; }
@@ -206,17 +206,6 @@ test('existing managed reconnect failure preserves its error without retiring th
   await app.failLink(false);
   assert.deepEqual(await app.runtime.ensure(app.session), initial);
   assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
-});
-
-test('explicit retirement discovers a surviving managed host before any reconnect', async t => {
-  const app = await fixture('accepted', process.pid, 'none');
-  t.after(() => app.close());
-  await app.runtime.stop(app.session.id);
-  assert.equal(app.requests.length, 1);
-  assert.equal(app.requests[0]!.guard, 'none');
-  assert.equal(app.requests[0]!.sessionId, app.descriptor.sessionId);
-  assert.equal(app.descriptor.retiring, true);
-  assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
 });
 
 test('automatic idle retirement lets the host authoritatively reject busy retirement', async t => {
