@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
@@ -1555,7 +1556,10 @@ export class BotService {
   }
   private localCliCommand(): string {
     const configPath = this.options.config.configPath;
-    return configPath === defaultConfigPath() ? 'omp-telegram' : `omp-telegram --config '${configPath.replaceAll("'", "'\\''")}'`;
+    const executable = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
+    const entryPoint = "'" + fileURLToPath(new URL('../dist/cli.js', import.meta.url)).replaceAll("'", "'\\''") + "'";
+    const command = `${executable} ${entryPoint}`;
+    return configPath === defaultConfigPath() ? command : `${command} --config '${configPath.replaceAll("'", "'\\''")}'`;
   }
   private async setup(ctx: Context): Promise<void> {
     if (!ctx.chat || !ctx.from || ctx.from.is_bot || ctx.chat.type !== 'supergroup') return;
@@ -1575,7 +1579,8 @@ export class BotService {
       const request = this.options.store.createSetupRequest({ botId: this.id, chatId: ctx.chat.id, userId: member.user.id, ...(member.user.username ? { username: member.user.username.toLowerCase() } : {}), title: ctx.chat.title });
       const quotedInstancePath = "'" + process.cwd().replaceAll("'", "'\\''") + "'";
       const command = `${this.localCliCommand()} approve ${request.code} --path ${quotedInstancePath}`;
-      await replyTo(ctx, contextDestination(ctx), `Setup requested. Ask the local operator to approve within 10 minutes:\n${command}\nThe command defaults to the bot's working directory. Change --path to use another instance directory.`, { entities: [{ type: 'code', offset: 'Setup requested. Ask the local operator to approve within 10 minutes:\n'.length, length: command.length }] });
+      const prefix = "Setup requested. On the agent's computer, approve within 10 minutes:\n";
+      await replyTo(ctx, contextDestination(ctx), `${prefix}${command}\nThe project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.`, { entities: [{ type: 'code', offset: prefix.length, length: command.length }] });
       return;
     }
     if (!(await this.currentAdmin(ctx))) {

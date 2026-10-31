@@ -2,7 +2,9 @@
 
 This document defines current user-visible behavior. See the [README](README.md#setup) for consumer setup and operations, and [Development](DEVELOPMENT.md) for contributor operations.
 
-`pnpm cli setup` edits service settings through interactive configuration prompts or command-line options. Bot registration, project creation, and enrollment approval use `pnpm cli bot add`, `pnpm cli create`, and `pnpm cli approve`.
+`pnpm cli setup` edits service settings through interactive configuration prompts or command-line options. It does not ask for the session limit; configure that in Telegram `/settings`, or pass the explicit `--max-sessions` flag for automation. On completion, setup directs users to register a bot with `pnpm cli bot add` when none are configured, then start the service; otherwise it directs users to start the service and send `/setup` in Telegram.
+
+First-time enrollment needs no separate project-creation step: `pnpm cli approve` automatically registers the existing project directory. `pnpm cli create` remains available for explicit registration outside enrollment.
 
 The Mini App is optional. `pnpm cli setup` explains that it adds a live transcript, tool details, and subagent controls before asking whether to enable it. New services default to Telegram-only.
 
@@ -10,7 +12,7 @@ An empty public HTTPS origin selects Telegram-only operation for every bot in th
 
 The `/cli` command works in both modes. Its code block and copy button contain only the chat and topic IDs. Requesting the command leaves the host unchanged. Executing it locally resolves the current assignment through the running service, resumes a managed host when needed, and joins the live conversation. Closed, detached, missing, ambiguous, unassigned, and terminated sessions are rejected. Leaving the terminal client leaves the host and Telegram conversation running.
 
-Local terminal access uses the service account's operating-system permissions. Copying the Telegram command grants no access on another machine. Connection capabilities are resolved on the service machine and passed to the local OMP client; local process inspection is within that machine's trust boundary.
+Local terminal access uses the service account's operating-system permissions. Copying the Telegram command grants no access on another machine. Connection capabilities are resolved on the agent's computer and passed to the local OMP client; local process inspection is within that computer's trust boundary.
 
 ## 1. Telegram sessions
 
@@ -39,7 +41,9 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/usage` | Send all providers in one Telegram rich Markdown message: a bold provider heading and a rendered table with columns `Quota`, `Left`, and `Reset` for each provider, separated by blank lines. No monospace blocks, introduction, or legend. Reset dates use UTC, with same-day resets shown as `Today`. Percentages and dollar balances are shown directly; unknown quota is `?` and an unavailable reset is `—`. Identical quota entries are collapsed with a multiplicity suffix. Healthy status markers and redundant used/limit values are omitted; provider errors and non-healthy statuses remain visible. Available to authorized forum members in General and topics; accepts no arguments and never starts a session host. Account emails and IDs are omitted. Reports may be cached by OMP. |
 | `/help` | Show commands and prompt settings. |
 
-For an unassigned forum, `/setup` sends an approval command with `--path` set to the bot process's working directory. Generated local commands include `--config` only when the service uses a non-default config path. The operator can change `--path` before approval.
+For an unassigned forum, `/setup` sends an approval command with `--path` set to the bot process's working directory. Generated shell commands use the shell-quoted absolute Node.js executable (`process.execPath`) and installed `dist/cli.js` path, so they do not depend on a globally installed command or the terminal's working directory. They include `--config` only when the service uses a non-default config path. Run approval on the agent's computer in a second terminal while the bot remains running; change `--path` to the existing project directory where OMP should run.
+
+Approval verifies the bot, forum, and current requesting administrator. If `--path` is omitted, its directory prompt is “Project directory where OMP will run”. It prints the resolved project directory and warns that the agent will have the service account's filesystem and credential access on the agent's computer before asking for confirmation. Approval asks neither prompt-policy question. Explicit `--all-messages-are-prompts` and `--users-can-propose-prompts` flags still work; omitted flags preserve existing values, or default to `true` and `false`, respectively, for new assignments. After approval, the bot directs administrators to `/settings` for prompt permissions and the session limit, then `/new <task>` to start a session.
 
 Commands are recognized at the start of message text or media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands. Commands take precedence over reply handling. Unknown slash commands and commands targeting another bot are ignored, not submitted as prompts.
 

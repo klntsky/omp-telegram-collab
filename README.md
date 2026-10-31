@@ -88,13 +88,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 ## Setup
 
-
-1. Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
-2. Open [BotFather](https://t.me/BotFather) in Telegram and send `/newbot`.
-   1. Enter a display name for your bot.
-   2. Enter an available username ending in `bot`.
-   3. Save the API token BotFather returns. Keep it private. You will enter it in `pnpm cli bot add`.
-3. Clone and build this project.
+1. **Agent's computer:** Install Node.js 22.13 or newer, pnpm, and [OMP](https://github.com/can1357/oh-my-pi). Configure OMP's model credentials for the account that will run the bot.
+2. **Telegram:** Open [BotFather](https://t.me/BotFather) and send `/newbot`. Enter a display name and an available username ending in `bot`. Save the API token privately; you will enter it on the agent's computer.
+3. **Agent's computer:** Clone and build this project.
 
    ```sh
    git clone https://github.com/klntsky/omp-telegram-collab.git
@@ -103,20 +99,15 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    pnpm build
    ```
 
-4. Configure the service, register the bot, and choose an existing project directory. Replace `/path/to/project` with your directory.
-
-   `pnpm cli setup` explains the Mini App and asks whether to enable it. Telegram-only is the default. You can send prompts and images, read replies, and answer agent questions in Telegram. Enable the Mini App if you also want a live transcript, tool details, and subagent controls.
-
-   If you enable it, enter your public HTTPS address, such as `https://omp.example.com`, at the `Public HTTPS origin` prompt. Set the listen host and port for your reverse proxy or tunnel.
+4. **Agent's computer:** Configure Telegram-only mode, register the bot with its BotFather token, and start it.
 
    ```sh
    pnpm cli setup
    pnpm cli bot add
-   pnpm cli create /path/to/project
    pnpm start
    ```
 
-   Enter the BotFather token when `bot add` asks. If you enabled the Mini App, keep the default short name, `app`.
+   Answer **No** to `Enable Mini App?`; Telegram supports prompts, images, replies, and agent questions without it. Keep `pnpm start` running in this terminal. You do not need to register a project separately: approval registers your existing project directory automatically.
 
    <details>
    <summary>Example CLI commands and output</summary>
@@ -128,22 +119,86 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
    The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
    Enable Mini App? [y/N]: n
    Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
+   Next on the agent's computer: run pnpm cli bot add, then pnpm cli start. Leave it running. In Telegram, add the bot to your forum and send /setup.
 
    $ pnpm cli bot add
    Bot token (hidden):
    Added @example_omp_bot (123456789).
+   ```
 
-   $ pnpm cli create /srv/projects/backend
-   Created /srv/projects/backend
+   When bots are already registered, setup instead directs you to start the service and send `/setup` in Telegram.
 
-   $ pnpm cli list
-   /srv/projects/backend
-     chats: (none)
+   </details>
+
+
+5. **Telegram:** Add the bot to a supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting; administrator bots receive ordinary group messages.
+6. **Telegram:** As a group administrator, send `/setup`. Copy the approval command it returns.
+7. **Agent's computer, second terminal:** Leave `pnpm start` running in the first terminal. Paste the approval command into a second terminal on the same computer. Change `--path` to the existing project directory where OMP should run, not the bot's checkout.
+
+   The command uses absolute paths to Node.js and the installed CLI, so it works outside the bot checkout. It includes `--config` only for a non-default configuration file. Its initial `--path` is the bot process's working directory. Requests expire after ten minutes.
+
+   Approval verifies the bot, forum, and requesting administrator. It asks for a project directory only if `--path` is missing, resolves that directory, warns about filesystem and credential access, and asks you to confirm the forum's connection to that resolved project. Review both the path and access warning before confirming. This does not create a directory or isolate the agent from the rest of the computer.
+
+   <details>
+   <summary>Example Telegram setup messages</summary>
+
+   All names, IDs, paths, and request codes below are filler values. This example assumes the bot runs in `/srv/projects/backend`.
+
+
+   If Topics or bot permissions are missing:
+
+   ```text
+   Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.
+   ```
+
+   After a group administrator sends `/setup` in an unassigned forum:
+
+   ```text
+   Setup requested. On the agent's computer, approve within 10 minutes:
+   '/usr/bin/node' '/opt/omp-telegram/dist/cli.js' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   The project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.
+   ```
+
+   After approval:
+
+   ```text
+   Setup approved. This forum is connected to OMP. Use /settings to choose prompt permissions and the session limit. Send /new <task> to start a coding session.
    ```
 
    </details>
 
-5. If you enabled the Mini App, choose how to expose the service over HTTPS.
+   <details>
+   <summary>Example approval command and output</summary>
+
+   Run the command from the bot on the agent's computer in the second terminal. These paths and identifiers are filler values.
+
+   ```text
+   $ '/usr/bin/node' '/opt/omp-telegram/dist/cli.js' approve EXAMPLE_CODE --path '/srv/projects/backend'
+   Verified bot @example_omp_bot (123456789)
+   Verified forum Example project (-1001234567890)
+   Verified requester 42, current group administrator.
+   Project directory where OMP will run: /srv/projects/backend
+   The agent will have the service account's filesystem and credential access on the agent's computer.
+   Connect this forum to /srv/projects/backend? [y/N] yes
+   Approved EXAMPLE_CODE: /srv/projects/backend
+   ```
+
+   Without `--path`, the directory prompt is `Project directory where OMP will run`. Approval does not ask either prompt-policy question. Omitted policy flags preserve existing values; new assignments default to ordinary messages as prompts and no non-admin prompt proposals.
+
+   </details>
+
+8. **Telegram:** Review `/settings`, including prompt policy, session limit, and forum defaults. Then send `/new <task>`, replacing `<task>` with what you want the agent to do. Confirm that the reply appears in the new topic.
+
+   Interactive setup does not ask for a session limit; `/settings` owns that choice. Automation can still pass `pnpm cli setup --max-sessions N`.
+
+<details>
+<summary>Optional: enable the Mini App</summary>
+
+The Mini App adds a live transcript, tool details, and subagent controls. It is not required for the Telegram setup above.
+
+**Agent's computer:** Run `pnpm cli setup`, enable the Mini App, and enter your public HTTPS origin, such as `https://omp.example.com`. Configure the listen host and port for your reverse proxy or tunnel. Enabling the Mini App supplies the short name `app` for existing bots that have none; existing registered short names are preserved. You do not need to add the same bot again.
+
+**Agent's computer:** Choose how to expose the service over HTTPS.
 
    <details>
    <summary>Option 1: Use cloudflared</summary>
@@ -185,79 +240,23 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
    </details>
 
-6. If you enabled the Mini App, send `/newapp` in BotFather to register it.
+**Telegram:** Send `/newapp` in BotFather to register the Mini App.
+
    1. Select the bot you created, or send its `@username`.
    2. Enter an app title, such as `OMP Telegram Collab`.
    3. Enter a description, such as `Run coding sessions from Telegram`.
    4. Download the [prepared app photo](assets/botfather-mini-app.png) and upload it when BotFather asks for a photo. It is already 640 × 360 pixels.
    5. Send `/empty` to skip the optional GIF.
    6. For the web URL, paste the complete HTTPS URL printed by `pnpm start`, including `?bot=...`. It looks like `https://omp.example.com/?bot=123456789`.
-   7. For the short name, enter `app`, matching the value you accepted in `pnpm cli bot add`.
+   7. For the short name, enter `app`, or the bot's existing configured short name if you previously registered another name.
    8. BotFather returns the Telegram launch link, such as `https://t.me/your_bot/app`.
 
    The topic buttons use this named app's direct link to select the session.
 
-7. Add the bot to a Telegram supergroup with Topics enabled. Promote it to administrator with Manage Topics and Pin Messages permissions. Keep BotFather's default privacy setting. Administrator bots receive ordinary group messages.
-8. As a group administrator, send `/setup`. Run the approval command it returns on the service machine.
+**Telegram:** On mobile data, open a session topic's **OPEN AGENT** button and confirm that its transcript loads. Keep it open while sending another prompt from a second Telegram client; confirm that the new reply appears live. This checks WebSocket forwarding.
 
-   The command includes `--config` only for a non-default service config path and defaults `--path` to the bot process's working directory. Change `--path` to your project directory if the bot runs from its own checkout. Approval asks for prompt settings and confirmation, not a directory when `--path` is supplied. Requests expire after ten minutes.
+</details>
 
-   <details>
-   <summary>Example Telegram setup messages</summary>
-
-   All names, IDs, paths, and request codes below are filler values. This example assumes the bot runs in `/srv/projects/backend`.
-
-   When the bot joins the group:
-
-   ```text
-   A current group administrator can run /setup to request instance assignment from the local operator.
-   ```
-
-   If Topics or bot permissions are missing:
-
-   ```text
-   Use a supergroup with Topics enabled, then grant this bot Manage Topics and Pin Messages permissions.
-   ```
-
-   After a group administrator sends `/setup` in an unassigned forum:
-
-   ```text
-   Setup requested. Ask the local operator to approve within 10 minutes:
-   omp-telegram approve EXAMPLE_CODE --path '/srv/projects/backend'
-   The command defaults to the bot's working directory. Change --path to use another instance directory.
-   ```
-
-   After local approval:
-
-   ```text
-   Setup approved. This forum is connected to OMP. Create a topic to start a coding session.
-   ```
-
-   </details>
-
-   <details>
-   <summary>Example local approval command and output</summary>
-
-   Run the command from the bot on the service machine. If `omp-telegram` is not on your shell's `PATH`, use `pnpm cli` from the built checkout instead. This example uses filler values and accepts the default prompt settings by pressing Enter.
-
-   ```text
-   $ pnpm cli approve EXAMPLE_CODE --path '/srv/projects/backend'
-   Verified bot @example_omp_bot (123456789)
-   Verified forum Example project (-1001234567890)
-   Verified requester 42, current group administrator.
-   Treat all session-topic messages as prompts? true = ordinary messages, false = /p only [true]:
-   Allow non-admin users to propose prompts for administrator approval? [false]:
-   Connect this forum to /srv/projects/backend? [y/N] yes
-   Approved EXAMPLE_CODE: /srv/projects/backend
-   ```
-
-   </details>
-
-9. Send `/new <your task>` in the group to start a session. Replace `<your task>` with what you want the agent to do.
-10. Verify the connection in Telegram.
-    1. Send a prompt asking the agent to reply with a short greeting. Confirm that its reply appears in the topic.
-    2. If you enabled the Mini App, switch your phone to mobile data and open the topic's **OPEN AGENT** button. Confirm that the Mini App loads the session transcript and the greeting.
-    3. If you enabled the Mini App, keep it open and send another prompt from a second Telegram client. Confirm that the new reply appears in the open Mini App. This checks live updates through the WebSocket connection.
 
 Examples below use `pnpm cli` from this checkout. The build also provides `./dist/cli.js` and the `omp-telegram` executable.
 
@@ -274,6 +273,8 @@ Examples below use `pnpm cli` from this checkout. The build also provides `./dis
 
 A project's canonical absolute directory path identifies it. Relative paths and symlinks resolve to that path. There are no separate project aliases or IDs.
 
+Approval automatically registers an existing project directory. For explicit project registration outside enrollment, use `pnpm cli create /srv/projects/backend`; this registers the directory rather than creating it.
+
 ```sh
 pnpm cli list
 pnpm cli show /srv/projects/backend
@@ -286,7 +287,7 @@ pnpm cli chat remove /srv/projects/backend --chat -1001111111111
 
 See [Product](PRODUCT.md#2-projects-and-access) for project identity, shared working files, and chat assignment constraints.
 
-Interactive chat assignment and request approval ask for both prompt settings. Assigned forums change them through `/settings`; `/setup` completes enrollment and opens that panel. Scripts can pass `--all-messages-are-prompts true|false` and `--users-can-propose-prompts true|false` to `chat add` or `approve`. Repeating `chat add` updates the assignment; omitted flags preserve existing values. Command menus update on configuration reload.
+Interactive `chat add` asks for both prompt settings; `approve` does not. Assigned forums change them through `/settings`; `/setup` completes enrollment and opens that panel. Scripts can pass `--all-messages-are-prompts true|false` and `--users-can-propose-prompts true|false` to `chat add` or `approve`. Omitted flags preserve existing values, or default to `true` and `false`, respectively, for a new assignment. Repeating `chat add` updates the assignment. Command menus update on configuration reload.
 
 Register more bots with `pnpm cli bot add`. `bot list` shows numeric IDs without tokens. With multiple bots, pass `--bot ID` on scripted chat commands. Noninteractive registration accepts `--token-stdin` or `--token-env VARIABLE` and optional `--mini-app-short-name NAME`. The environment option copies the token into configuration; it does not retain an environment reference.
 

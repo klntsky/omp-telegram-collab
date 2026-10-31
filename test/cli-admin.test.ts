@@ -157,6 +157,31 @@ test('changing Mini App mode preserves registered names and fills only missing n
   assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, 'app');
 });
 
+test('interactive setup preserves the session limit while updating service settings', async t => {
+  const f = fixture(t);
+  await f.run(['setup', '--max-sessions', '37']);
+  const dataDir = join(f.root, 'interactive data');
+  const answers = ['no', dataDir, 'custom-omp', '["--model","selected model"]', '23456', 'wss://relay.example'];
+  await f.run(['setup'], {
+    interactive: true,
+    question: async () => {
+      const next = answers.shift();
+      assert.notEqual(next, undefined);
+      return next!;
+    },
+  });
+  assert.deepEqual(answers, []);
+  const config = readConfig(f.configPath);
+  assert.equal(config.dataDir, dataDir);
+  assert.deepEqual(config.omp, {
+    executable: 'custom-omp',
+    args: ['--model', 'selected model'],
+    maxSessions: 37,
+    startupTimeoutMs: 23456,
+    relayUrl: 'wss://relay.example',
+  });
+});
+
 test('interactive setup defaults to Telegram-only and preserves the current mode', async t => {
   const f = fixture(t);
   await f.run(['setup'], {interactive: true, question: async () => ''});
@@ -285,22 +310,17 @@ test('interactive chat add selects both options with current defaults and flags 
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
 });
 
-test('invalid interactive proposal choices leave assignments and approval requests unchanged', async t => {
+test('invalid interactive chat proposal choices leave assignments and approval requests unchanged', async t => {
   const f = fixture(t);
   f.seed();
   const original = readFileSync(f.configPath, 'utf8');
   const store = f.store();
   const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   store.close();
-  for (const args of [
-    ['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'true'],
-    ['approve', pending.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'true'],
-  ]) {
-    await assert.rejects(f.run(args, {
-      interactive: true,
-      question: async () => 'yes',
-    }), /--users-can-propose-prompts must be true or false/);
-  }
+  await assert.rejects(f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'true'], {
+    interactive: true,
+    question: async () => 'yes',
+  }), /--users-can-propose-prompts must be true or false/);
   assert.equal(readFileSync(f.configPath, 'utf8'), original);
   const preserved = f.store();
   assert.ok(preserved.getSetupRequest(pending.code));
@@ -378,14 +398,14 @@ test('approval flags independently update existing options without duplicates an
   }
 });
 
-test('interactive approval defaults to the current mode and explicit approval flags preserve choices', async t => {
+test('interactive approval preserves both current policies and explicit flags update choices without prompts', async t => {
   const f = fixture(t);
   f.seed();
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false']);
+  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false', '--users-can-propose-prompts', 'true']);
   const store = f.store();
   const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   store.close();
-  const answers = ['', 'true', 'yes'];
+  const answers = ['yes'];
   await f.run(['approve', pending.code, '--path', f.project], {
     interactive: true,
     question: async () => { const next = answers.shift(); assert.notEqual(next, undefined); return next!; },
@@ -397,7 +417,7 @@ test('interactive approval defaults to the current mode and explicit approval fl
   nextStore.close();
   await f.run(['approve', next.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'true'], {
     interactive: true,
-    question: async () => '',
+    question: async () => { assert.fail('Explicit approval must not ask any questions'); },
   });
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: true}]);
   const explicitStore = f.store();
@@ -405,7 +425,7 @@ test('interactive approval defaults to the current mode and explicit approval fl
   explicitStore.close();
   await f.run(['approve', explicit.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'true', '--users-can-propose-prompts', 'false'], {
     interactive: true,
-    question: async () => '',
+    question: async () => { assert.fail('Explicit approval must not ask any questions'); },
   });
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
 });
@@ -486,16 +506,24 @@ test('interactive approval can register an existing directory and cancel without
   const store = f.store();
   const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
   store.close();
-  let answers = [f.other, '', '', 'no'];
-  const prompts: string[] = [];
-  const question = async (prompt: string) => { prompts.push(prompt); const next = answers.shift(); assert.notEqual(next, undefined); return next!; };
+  const original = readFileSync(f.configPath, 'utf8');
+  let answers = [f.other, 'no'];
+  const question = async () => { const next = answers.shift(); assert.notEqual(next, undefined); return next!; };
   await f.run(['approve', pending.code], {interactive: true, question});
+  assert.deepEqual(answers, []);
+  assert.equal(readFileSync(f.configPath, 'utf8'), original);
   const preserved = f.store();
   assert.ok(preserved.getSetupRequest(pending.code));
+  assert.equal(preserved.isEnrolled(123456789, -1001), false);
   preserved.close();
-  answers = [f.other, 'false', 'true', 'yes'];
+  answers = [f.other, 'yes'];
   await f.run(['approve', pending.code], {interactive: true, question});
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
+  assert.deepEqual(answers, []);
+  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.other)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
+  const approved = f.store();
+  assert.equal(approved.getSetupRequest(pending.code), undefined);
+  assert.equal(approved.isEnrolled(123456789, -1001), true);
+  approved.close();
 });
 
 test('local approval registers a selected directory for a creator or administrator without a username', async t => {
