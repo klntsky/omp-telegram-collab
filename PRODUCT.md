@@ -20,7 +20,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
 | `/worktree [branch]` | Run OMP's native worktree operation in the current topic's managed session. In General, create an empty session topic first. The optional argument is a branch name, not a task. |
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit. |
-| `/p <prompt>` | Submit a prompt in explicit-command mode. In General, create a topic like `/new`. |
+| `/p <prompt>` | Submit a prompt in either prompt mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/settings` | Open interactive forum settings, defaults, and the live session count limit. Requires the current supergroup owner or an administrator. |
 | `/session` | Get the current topic's Mini App link when the Mini App is enabled. |
@@ -37,11 +37,11 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/usage` | Send all providers in one Telegram rich Markdown message: a bold provider heading and a rendered table with columns `Quota`, `Left`, and `Reset` for each provider, separated by blank lines. No monospace blocks, introduction, or legend. Reset dates use UTC, with same-day resets shown as `Today`. Percentages and dollar balances are shown directly; unknown quota is `?` and an unavailable reset is `—`. Identical quota entries are collapsed with a multiplicity suffix. Healthy status markers and redundant used/limit values are omitted; provider errors and non-healthy statuses remain visible. Available to authorized forum members in General and topics; accepts no arguments and never starts a session host. Account emails and IDs are omitted. Reports may be cached by OMP. |
 | `/help` | Show commands and prompt settings. |
 
-Commands are recognized in message text and at the start of media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands.
+Commands are recognized at the start of message text or media captions, even without Telegram command entities. Caption commands use the same bot targeting, permissions, prompt settings, and handlers as text commands. Commands take precedence over reply handling. Unknown slash commands and commands targeting another bot are ignored, not submitted as prompts.
 
-Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with their instructions. In all-message mode, session-topic images use their caption as the prompt, or “Describe this image.” when no caption is present. Explicit-command mode ignores images without a prompt command unless they reply to this bot. The largest photo size is used; image documents retain their original bytes. Image albums are combined as described in [Prompts and permissions](#12-prompts-and-permissions). Model image support is required.
+Photos and JPEG, PNG, WebP, or GIF image documents accompany their prompt as image content, not links or filenames. `/new` and `/p` captions submit the image with any supplied instructions. Images without captions remain image-only prompts; the bot does not invent instructions for them. In all-message mode, ordinary text and images create a new session topic from General or prompt the existing session in a session topic. Explicit-command mode ignores images without a prompt command unless they reply to this bot or answer an interactive task request. The largest photo size is used; image documents retain their original bytes. Image albums are combined as described in [Prompts and permissions](#12-prompts-and-permissions). Model image support is required.
 
-General never becomes a session. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
+General never becomes a session: accepted prompts there create separate session topics. `/new` always creates a new topic, including when invoked from an existing session topic. `/stop` and `/kill` work only in session topics and require current group membership. Neither starts an idle host. Both cancel pending initial tasks, startup retries, and capacity confirmations.
 
 New session topics get a quietly pinned OPEN AGENT message before OMP starts. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic, including an interactive task reply. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions. Interactive task replies do not forward the bot's task-request message.
 
@@ -79,16 +79,16 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same forum-wide controls from General or any topic. The root panel shows current values. Buttons open choices for prompt policy, user proposals, default new-topic skill, default model preset, and Live session count limit. Back returns to the root panel, and Close dismisses the controls. Changes edit the existing panel rather than posting a new menu for each click.
 
-Live session count limit applies across all bots and instances. Administrators reply to its panel with any whole number ≥1 within JavaScript's safe integer range, then confirm the change. Both increases and decreases are supported. Lowering the limit leaves existing sessions running and prevents new starts until usage falls below the limit. Settings changes do not submit or retry tasks.
+Live session count limit applies across all bots and instances. Administrators adjust its pending value with `-1`, `+1`, `-10`, `+10`, or double buttons, then confirm the change. The value stays between 1 and JavaScript's maximum safe integer. Both increases and decreases are supported. Lowering the limit leaves existing sessions running and prevents new starts until usage falls below the limit. Settings button actions do not submit or retry tasks.
 
-Settings catalog failures preserve the displayed controls so administrators can retry or close the panel. Panels lost after a service restart explicitly direct users to reopen `/settings`. Replies to settings panels remain control input and never become agent tasks.
+Settings catalog failures preserve the displayed controls so administrators can retry or close the panel. Panels lost after a service restart explicitly direct users to reopen `/settings`. Free-form replies to settings panels do not change settings; they follow the ordinary command, reply, and prompt rules.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `all_messages_are_prompts` | `true` | Session-topic text and images become prompts. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
+| `all_messages_are_prompts` | `true` | Ordinary text and images create a new session topic from General or prompt the existing session in a session topic. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
 | `users_can_propose_prompts` | `false` | Prompts without sufficient administrator scope are ignored. When `true`, an authorized admin must approve them. Authorized admin prompts run directly. |
 
-`/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote.
+`/p` works in either prompt mode, including `/p@YourBot <prompt>`. Both `/p` and `/new`, including bot-qualified forms, prepend replied-to text or media captions with `> ` on each line, followed by a blank line and any supplied instructions. Bare commands with a text or caption reply submit just the quote. For `/new`, or `/p` in General, the combined text becomes the new session's initial task. Existing authorization and proposal approval still apply. Replies without text or a caption contribute no quote. Quoted content is context only: slash commands in a quote never determine the new message's command or prompt mode.
 
 Reply quotes never attach the quoted message's photos or image documents to the AI prompt. Only images uploaded in the new prompt message or its album are attached. Forwarding the quoted message into a newly created topic does not submit its media to the AI.
 
@@ -170,6 +170,8 @@ Telegram delivery uses a per-chat queue with no fixed delay between operations. 
 The Default model preset picker in `/settings` saves or clears the default for that bot/chat assignment. New managed hosts apply its models and thinking settings before accepting work, including when resuming history. It overrides restored settings and model-selection flags. Running hosts do not change. A missing saved preset fails startup rather than selecting another one.
 
 In a session topic, `/model_preset` starts the host if needed and lists presets and the current selection. `/model_preset <name>` switches only that idle session. Usage replies include available presets. The command-menu description explains both forms and includes as many complete preset names as fit Telegram's limit, preferring shorter names. Menu preset names refresh in the background; discovery failures retain the last successful names and their original diagnostics. Neither form changes the forum default. Attached hosts must use `/modelpreset` in their local terminal. Older managed hosts that cannot switch without changing shared settings must be restarted first.
+
+Busy model-preset switches reply “Can't change model preset while busy. /stop first” without the generic service-failure wrapper.
 
 
 ## 2. Projects and access

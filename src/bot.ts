@@ -4,7 +4,7 @@ import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { COLLAB_PROMPT_MESSAGE_TYPE, type ImageContent, type CollabUiRequest, type HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection } from '../shared/contracts.js';
+import type { AppConfig, BotConfig, TopicSession, HostBinding, CollabConnection, PromptContent } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
 import { connectCollab, isStartupRejection } from './collab.js';
@@ -18,6 +18,7 @@ import { topicDestination, sameTopicDestination, type TopicDestination } from '.
 import { contextDestination, replyTo, sendTo, forwardTo } from './telegram-destination.js';
 import { isMentionableSkillName, skillCommandAliases } from './skill-commands.js';
 import { withCancellation } from './cancellation.js';
+import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -71,14 +72,13 @@ interface Listener {
   sessionTitle?: string;
   queued: number;
   recovering: boolean;
-  pendingPrompts: { text: string; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
+  pendingPrompts: { content: PromptContent; messageId?: number; onStartupRejected?: () => void; observation: TaskObservation }[];
   pendingAnswers: Map<number, number>;
   pendingStops: number[];
   queuedMessages: number;
   activity: TopicActivity;
   initial?: {
-    text: string;
-    images?: ImageContent[];
+    content: PromptContent;
     userId: number;
     authorityUserId: number;
     messageId?: number;
@@ -106,8 +106,7 @@ interface CapacityRequest {
 }
 interface PromptProposal {
   source: Context;
-  text: string;
-  images?: ImageContent[];
+  content: PromptContent;
   instancePath: string;
   sessionId?: string;
   worktree?: boolean;
@@ -120,6 +119,7 @@ type SettingsPage = 'root' | 'prompts' | 'proposals' | 'skills' | 'presets' | 'c
 type SettingsAction = { kind: 'page'; page: SettingsPage; offset?: number }
   | { kind: 'set'; field: 'all_messages_are_prompts' | 'users_can_propose_prompts'; value: boolean }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
+  | { kind: 'propose-capacity'; limit: number; target: number }
   | { kind: 'capacity'; limit: number; target: number }
   | { kind: 'close' };
 interface SettingsPanel {
@@ -131,7 +131,6 @@ interface SettingsPanel {
   expires: number;
   revision: number;
   choices: SettingsAction[];
-  capacityLimit?: number;
 }
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — list presets, or switch this idle session by name (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
@@ -159,13 +158,6 @@ const groupCommands = [
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
-function messageText(message: Context['message']): string | undefined {
-  if (!message) return undefined;
-  if ('text' in message) return message.text;
-  if ('caption' in message && message.caption !== undefined) return message.caption;
-  if (message.photo || message.document?.mime_type?.startsWith('image/')) return 'Describe this image.';
-  return undefined;
-}
 function optionMarker(index: number): string {
   const number = index+1;
   return number === 10 ? '🔟' : String(number).replace(/\d/g, digit => `${digit}\uFE0F\u20E3`);
@@ -227,12 +219,10 @@ export class BotService {
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
   private readonly promptProposals = new Map<string, PromptProposal>();
-  private readonly receivedMessages = new WeakSet<Context>();
-  private readonly directedReplies = new WeakSet<Context>();
+  private readonly inputIntents = new WeakMap<Context, InputIntent>();
   private readonly albums = new Map<string, {contexts:Context[];ready:Promise<void>;resolve:()=>void;timer?:NodeJS.Timeout}>();
-  private readonly albumPrompts = new WeakMap<Context, {contexts:Context[];text:string}>();
+  private readonly albumPrompts = new WeakMap<Context, {contexts:Context[]}>();
   private readonly settingsPanels = new Map<string, SettingsPanel>();
-  private readonly settingsMessages = new Set<string>();
   private async settingsAccess(ctx: Context, panel: SettingsPanel, writable = false): Promise<AppConfig> {
     await this.authorize(panel.chatId, ctx.from!.id);
     if (writable && !(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
@@ -262,12 +252,10 @@ export class BotService {
     if (this.settingsPanels.size >= 256) this.settingsPanels.delete(this.settingsPanels.keys().next().value!);
     const message = await replyTo(ctx, panel.destination, 'Opening settings…');
     panel.messageId = message.message_id;
-    this.settingsMessages.add(`${panel.chatId}:${panel.messageId}`);
-    if (this.settingsMessages.size > 4096) this.settingsMessages.delete(this.settingsMessages.values().next().value!);
     this.settingsPanels.set(panel.token, panel);
     await this.renderSettings(panel, persisted);
   }
-  private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0): Promise<void> {
+  private async renderSettings(panel: SettingsPanel, config: AppConfig, page: SettingsPage = 'root', offset = 0, proposal?: {limit: number; target: number}): Promise<void> {
     const assigned = findInstance(config, this.id, panel.chatId)!;
     const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
     const rows: {text: string; callback_data: string}[][] = [];
@@ -300,15 +288,24 @@ export class BotService {
       if (offset + 8 < names.length) button('Next', {kind:'page',page,offset:offset+8});
     } else {
       const limit = this.options.runtime.getSessionLimit();
-      text = `Live session count limit: ${limit}.\nThis limit applies to all bots and instances in this service, not just this forum. Reply to this message with a whole number ≥1. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
+      if (proposal) {
+        text = `Change Live session count limit from ${proposal.limit} to ${proposal.target} for every bot and instance?`;
+        button('Confirm change', {kind:'capacity',limit:proposal.limit,target:proposal.target});
+      } else {
+        text = `Live session count limit: ${limit}.\nThis limit applies to all bots and instances in this service, not just this forum. Lowering it does not stop existing sessions. Changing it does not submit or retry tasks.`;
+        for (const [label,target] of [['-1',Math.max(1,limit-1)],['+1',limit+1],['-10',Math.max(1,limit-10)],['+10',limit+10],['Double limit',limit*2]] as const) {
+          button(label, Number.isSafeInteger(target) && target >= 1 && target !== limit
+            ? {kind:'propose-capacity',limit,target}
+            : {kind:'page',page:'capacity'});
+        }
+      }
     }
-    if (page !== 'root') button('Back', {kind:'page',page:'root'});
+    if (page !== 'root') button('Back', {kind:'page',page:proposal ? 'capacity' : 'root'});
     button('Close', {kind:'close'});
     try {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text.startsWith('Settings\n') ? text : `Settings\n${text}`, {reply_markup:{inline_keyboard:rows}});
       panel.choices = choices;
       panel.revision = revision;
-      panel.capacityLimit = page === 'capacity' ? this.options.runtime.getSessionLimit() : undefined;
     } catch (error) {
       this.settingsPanels.delete(panel.token);
       throw error;
@@ -339,7 +336,14 @@ export class BotService {
       return;
     }
     if (action.kind === 'page') { await this.renderSettings(panel,config,action.page,action.offset); return; }
+    if (action.kind === 'propose-capacity') {
+      if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
+      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
+      await this.renderSettings(panel,config,'capacity',0,action);
+      return;
+    }
     if (action.kind === 'capacity') {
+      if (!Number.isSafeInteger(action.target) || action.target < 1) throw new Error('The live session count limit must be a positive safe integer.');
       if (this.options.runtime.getSessionLimit() !== action.limit || config.omp.maxSessions !== action.limit) throw new Error('The live session count limit changed. Open Live session count limit again.');
       config.omp.maxSessions = action.target;
       writeConfig(config);
@@ -365,35 +369,6 @@ export class BotService {
       return;
     }
     await this.renderSettings(panel,config);
-  }
-  private async settingsReply(ctx: Context): Promise<boolean> {
-    const message = ctx.message;
-    const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
-    if (!reply || !ctx.chat || !(this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
-        (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return false;
-    const panel = [...this.settingsPanels.values()].find(value => value.chatId === ctx.chat!.id && value.messageId === reply.message_id);
-    if (!panel || panel.capacityLimit === undefined || panel.expires <= Date.now() ||
-        reply.from?.id !== this.id || !sameTopicDestination(contextDestination(ctx), panel.destination)) return true;
-    const config = await this.settingsAccess(ctx, panel);
-    const text = message && 'text' in message ? (message.text ?? '').trim() : '';
-    const target = Number(text);
-    if (!/^\d+$/.test(text) || !Number.isSafeInteger(target) || target < 1) {
-      await replyTo(ctx, panel.destination, 'Enter a whole number ≥1 within the supported safe integer range.');
-      return true;
-    }
-    if (config.omp.maxSessions !== panel.capacityLimit || this.options.runtime.getSessionLimit() !== panel.capacityLimit) {
-      throw new Error('The live session count limit changed. Open Live session count limit again.');
-    }
-    panel.revision++;
-    panel.choices = [{kind:'capacity',limit:panel.capacityLimit,target},{kind:'page',page:'capacity'},{kind:'close'}];
-    panel.capacityLimit = undefined;
-    try {
-      await this.bot.api.editMessageText(panel.chatId,panel.messageId,`Settings\nChange Live session count limit from ${config.omp.maxSessions} to ${target} for every bot and instance?`,{reply_markup:{inline_keyboard:panel.choices.map((_,index) => [{text:['Confirm change','Back','Close'][index]!,callback_data:`settings:${panel.token}:${panel.revision}:${index}`}])}});
-    } catch (error) {
-      this.settingsPanels.delete(panel.token);
-      throw error;
-    }
-    return true;
   }
   private readonly skills: SkillPicker;
   private iconIds?: Promise<Record<KnownTopicActivity, string>>;
@@ -426,11 +401,12 @@ export class BotService {
         callbackAnswered = true;
         return result;
       };
-      const urgent = /^\/terminate(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(messageText(ctx.message) ?? '');
+      if (this.collectAlbum(ctx)) return;
+      const intent = this.classifyInput(ctx);
+      const urgent = intent.kind === 'command' && intent.action === 'terminate';
       if (++this.queuedUpdates > 256 && !urgent) { this.queuedUpdates--; return; }
-      if (!urgent && this.collectAlbum(ctx)) { this.queuedUpdates--; return; }
-      const received = this.receiveMessage(ctx);
-      const process = async () => { await received; await this.handle(ctx); };
+      const received = this.receiveMessage(ctx,intent);
+      const process = async () => { await received; await this.handle(ctx, intent); };
       const task = urgent ? process() : this.updateTail.then(process);
       if (!urgent) this.updateTail = task.catch(() => undefined);
       try { await task; } catch (error) { await this.reportError(ctx,error); }
@@ -442,7 +418,8 @@ export class BotService {
   }
   private async reportError(ctx: Context, error: unknown): Promise<void> {
     console.error('Telegram operation failed.', error);
-    if (ctx.chat && ctx.message && !/^\/status(?:@|\s|$)/i.test(messageText(ctx.message) ?? '')) {
+    const intent = this.inputIntents.get(ctx);
+    if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
       const session = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
       if (session && this.sessionAssigned(session)) this.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
     }
@@ -478,10 +455,10 @@ export class BotService {
         await pending.ready;
         this.albums.delete(key);
         const source = pending.contexts.find(part => part.message && 'caption' in part.message && part.message.caption) ?? pending.contexts[0]!;
-        const text = pending.contexts.flatMap(part => part.message && 'caption' in part.message && part.message.caption ? [part.message.caption] : []).join('\n\n') || 'Describe this image.';
-        this.albumPrompts.set(source,{contexts:pending.contexts,text});
-        await this.receiveMessage(source);
-        await this.handle(source);
+        this.albumPrompts.set(source,{contexts:pending.contexts});
+        const intent = this.classifyInput(source);
+        await this.receiveMessage(source,intent);
+        await this.handle(source,intent);
       });
       this.updateTail = task.catch(error => this.reportError(ctx,error)).finally(() => { this.queuedUpdates--; });
     }
@@ -490,27 +467,39 @@ export class BotService {
     album.timer = setTimeout(album.resolve,250);
     return true;
   }
-  private async receiveMessage(ctx: Context, interaction = false): Promise<void> {
+  private classifyInput(ctx: Context): InputIntent {
     const message = ctx.message;
-    const text = messageText(message);
-    const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
-    if (reply && ctx.chat && (this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
-        (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return;
-    if (this.options.config.terminated) return;
-    if (this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
-        !text || 'forward_origin' in message || 'forward_date' in message) return;
-    if (this.receivedMessages.has(ctx)) return;
+    if (!message || !ctx.chat) return {kind:'event'};
+    const reply = message.reply_to_message;
+    const question = reply?.from?.id === this.id ? [...this.questions.entries()].find(([,pending]) =>
+      pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
+      pending.messageIds.includes(reply.message_id)) : undefined;
+    const messages = (this.albumPrompts.get(ctx)?.contexts ?? [ctx]).flatMap(part => part.message ? [part.message] : []);
+    const intent = classifyMessage(message,normalizeMessage(messages),{
+      botId:this.id,username:this.bot.botInfo!.username,
+      allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat.id),
+      commands:new Set([...groupCommands.map(command => command.command),'cli']),
+      skillAliases:this.skillAliases.get(ctx.chat.id) ?? new Map(),
+      question:question?.[0],
+      endedQuestion:Boolean(reply?.from?.id === this.id && this.endedQuestionReplies.has(`${ctx.chat.id}:${reply.message_id}`)),
+      taskRequest:Boolean(reply && ctx.from && this.options.store.hasTaskRequest(this.id,contextDestination(ctx),reply.message_id,ctx.from.id)),
+    });
+    this.inputIntents.set(ctx,intent);
+    return intent;
+  }
+  private async receiveMessage(ctx: Context, intent: InputIntent): Promise<void> {
+    if (intent.kind === 'ignore' || intent.kind === 'event' || intent.kind === 'ended-question') return;
+    const message = ctx.message;
+    if (this.options.config.terminated || this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.options.config,this.id,ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id,ctx.chat.id)) return;
     const topic = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
     if (topic && topic.status !== 'open') return;
-    if (!interaction && !this.allMessagesArePrompts(ctx.chat.id) && !text.startsWith('/')) return;
-    const promptInput = !text.startsWith('/') || /^\/(?:new|worktree|p)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text);
-    if (!interaction && promptInput && !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
+    if ((intent.kind === 'new-task' || intent.kind === 'session-prompt') &&
+        !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.path === assigned.path).catch(() => undefined);
-    this.receivedMessages.add(ctx);
   }
   async applyTermination(): Promise<void> {
     if (!this.options.config.terminated) { this.termination = undefined; return; }
@@ -1366,22 +1355,22 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
   }
-  private async newSession(ctx: Context, task: string, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, images?: ImageContent[], accepted?: () => void, worktree = false, authority = ctx): Promise<void> {
+  private async newSession(ctx: Context, task?: PromptContent, attached?: { instanceId: string; sessionId: string; instancePath: string }, name?: string, accepted?: () => void, worktree = false, authority = ctx): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath) throw new Error('The group instance assignment changed');
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
-    const initialIcon = task && !worktree ? (await this.getIconIds()).running : undefined;
+    const title = (name ?? task?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
+    const initialIcon = task !== undefined && !worktree ? (await this.getIconIds()).running : undefined;
     if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
-    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree ? undefined : task, ctx.from!.id, images, authority.from!.id);
+    const session = this.options.store.createSession({ botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath }, title, attached ? { kind:'attached', instanceId:attached.instanceId, sessionId:attached.sessionId } : {kind:'managed'}, attached || worktree ? undefined : task, ctx.from!.id, authority.from!.id);
     if (worktree) {
-      const text = await this.options.runtime.worktree(session, task || undefined);
+      const text = await this.options.runtime.worktree(session, task?.text || undefined);
       this.options.store.setSessionRuntime(session.id, session.runtime);
-      task = '';
+      task = undefined;
       await replyTo(ctx,topicDestination(session.chatId,session.threadId),text);
     }
     if (worktree) {
@@ -1393,24 +1382,23 @@ export class BotService {
       if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
     }
     accepted?.();
-    if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
+    if (task !== undefined && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
     await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
       reply_parameters: { message_id: ctx.message!.message_id, allow_sending_without_reply: true },
       link_preview_options: { is_disabled: true },
     });
     await this.announce(session);
     const source = ctx.message;
-    if (task && source && 'reply_to_message' in source && source.reply_to_message &&
-        (/^\/(?:new|worktree|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
-          this.directedReplies.has(ctx))) {
+    const intent = this.inputIntents.get(ctx);
+    if (task !== undefined && source?.reply_to_message && !(intent?.kind === 'new-task' && intent.requestId !== undefined)) {
       await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
     }
-    if (task) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
+    if (task !== undefined) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
       if (original.message) await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, original.message.message_id);
     }
-    await this.setTopicStatus(session, task ? 'running' : 'unknown', initialIcon);
+    await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown', initialIcon);
     await this.listen(session);
     await this.sendInitial(session);
   }
@@ -1525,34 +1513,24 @@ export class BotService {
     await this.listen(session);
     await this.sendInitial(session);
   }
-  private async promptImages(ctx: Context, albumPart = false): Promise<ImageContent[] | undefined> {
-    const album = !albumPart && this.albumPrompts.get(ctx);
-    if (album) {
-      const images = (await Promise.all(album.contexts.map(part => this.promptImages(part,true)))).flatMap(parts => parts ?? []);
-      return images.length ? images : undefined;
-    }
-    const message = ctx.message;
-    if (!message) return undefined;
-    const photo = message.photo?.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
-    const document = message.document?.mime_type?.startsWith('image/') ? message.document : undefined;
-    if (!photo && !document) return undefined;
-    const mimeType = photo ? 'image/jpeg' : document!.mime_type!;
-    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
-    const file = await this.bot.api.getFile((photo ?? document)!.file_id);
-    if (!file.file_path) throw new Error('Telegram image file path is unavailable');
-    const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
-    if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
-    return [{type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType}];
+  private async promptImages(attachments: TelegramImage[]): Promise<ImageContent[]> {
+    return Promise.all(attachments.map(async ({fileId,mimeType}): Promise<ImageContent> => {
+      if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
+      const file = await this.bot.api.getFile(fileId);
+      if (!file.file_path) throw new Error('Telegram image file path is unavailable');
+      const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+      if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
+      return {type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType};
+    }));
   }
   private defaultNewTopicSkill(chatId: number): string | undefined {
     return findInstance(this.options.config,this.id,chatId)?.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
-  private async routePrompt(ctx: Context, text: string, session?: TopicSession, immediateSkill?: string, worktree = false): Promise<void> {
+  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, immediateSkill?: string, worktree = false): Promise<void> {
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     await this.authorize(ctx.chat!.id, ctx.from!.id);
-    await this.receiveMessage(ctx,true);
     if (session) {
       this.requireSessionAssignment(session);
       if (session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
@@ -1567,16 +1545,15 @@ export class BotService {
       const available = await this.options.runtime.listSkills(instancePath, session);
       const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
       if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
-      text = `${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${text}`;
+      content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
     }
-    const images = worktree ? undefined : await this.promptImages(ctx);
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (await this.currentAdmin(ctx)) {
       if (session) {
-        await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills,topicSkill});
-      } else await this.newSession(ctx, text, undefined, undefined, images, !worktree && text ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
+        await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
+      } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
       return;
     }
     if (!this.usersCanProposePrompts(ctx.chat!.id)) return;
@@ -1589,7 +1566,7 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-      source:ctx,text,images,instancePath,worktree,
+      source:ctx,content,instancePath,worktree,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
@@ -1623,14 +1600,14 @@ export class BotService {
     await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
     if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before prompt approval.');
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.text,proposal.images,undefined,ctx))) {
+      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,undefined,ctx))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.newSession(proposal.source,proposal.text,undefined,undefined,proposal.images,undefined,proposal.worktree,ctx);
+    } else await this.newSession(proposal.source,proposal.content,undefined,undefined,undefined,proposal.worktree,ctx);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
-  private async submitSessionPrompt(ctx: Context, session: TopicSession, prompt: string, images?: ImageContent[], selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
+  private async submitSessionPrompt(ctx: Context, session: TopicSession, content: PromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
     await this.authorize(ctx.chat!.id,ctx.from!.id);
     this.requireSessionAssignment(session);
     await this.listen(session);
@@ -1656,7 +1633,7 @@ export class BotService {
       if (selected.topicSkill) this.options.store.clearNewTopicSkill(session.id);
     }
     try {
-      this.sendPrompt(this.listeners.get(session.id)!,prompt,messageId,images,restore);
+      this.sendPrompt(this.listeners.get(session.id)!,content,messageId,restore);
     } catch (error) {
       this.options.store.setReplyTarget(session.id,previousTarget);
       restore?.();
@@ -1664,20 +1641,17 @@ export class BotService {
     }
     return true;
   }
-  private async handle(ctx: Context): Promise<void> {
-    if (this.stopped) return;
-    const statusCommand = messageText(ctx.message)?.match(/^\/status(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
-    if (statusCommand && ctx.chat && ctx.chat.type !== 'private' && ctx.from && !ctx.from.is_bot && ctx.message &&
-        !('forward_origin' in ctx.message) && !('forward_date' in ctx.message)) {
-      if (statusCommand[1] && statusCommand[1].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
-      if (statusCommand[2]?.trim()) { await replyTo(ctx,contextDestination(ctx),'Usage: /status'); return; }
+  private async handle(ctx: Context, intent: InputIntent): Promise<void> {
+    if (this.stopped || intent.kind === 'ignore') return;
+    if (intent.kind === 'command' && intent.action === 'status' && ctx.chat?.type !== 'private') {
+      if (intent.argument) { await replyTo(ctx,contextDestination(ctx),'Usage: /status'); return; }
       await this.showStatus(ctx);
       return;
     }
     if (refreshTermination(this.options.config)) {
       try { await this.applyTermination(); }
       finally {
-        if (ctx.chat && (ctx.callbackQuery || messageText(ctx.message))) await replyTo(ctx, contextDestination(ctx), terminationMessage);
+        if (ctx.chat && (ctx.callbackQuery || intent.kind !== 'event')) await replyTo(ctx, contextDestination(ctx), terminationMessage);
       }
       return;
     }
@@ -1713,52 +1687,9 @@ export class BotService {
     }
     const message = ctx.message;
     if (!message || !ctx.chat) return;
-    const topicLifecycle = 'forum_topic_created' in message || 'forum_topic_edited' in message || 'forum_topic_closed' in message || 'forum_topic_reopened' in message;
-    if ('forward_origin' in message || 'forward_date' in message || (ctx.from?.is_bot && !topicLifecycle)) return;
-    if (await this.settingsReply(ctx)) return;
-    const text = this.albumPrompts.get(ctx)?.text ?? messageText(message);
-    if (text && !text.startsWith('/') && this.options.store.getTopic({
-      botId:this.id,destination:contextDestination(ctx),
-    })?.status === 'detached') {
-      if (ctx.from && 'reply_to_message' in message && message.reply_to_message &&
-          this.options.store.takeTaskRequest(this.id,contextDestination(ctx),message.reply_to_message.message_id,ctx.from.id)) {
-        await this.routePrompt(ctx,text);
-      }
-      return;
-    }
-    if (ctx.from && !ctx.from.is_bot && text && 'reply_to_message' in message && message.reply_to_message?.from?.id === this.id) {
-      const replyId = message.reply_to_message.message_id;
-      const question = [...this.questions.entries()].find(([, pending]) =>
-        pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
-        pending.messageIds.includes(replyId));
-      if (question) {
-        const [token, pending] = question;
-        await this.delivery.run(ctx.chat.id, () => this.authorize(ctx.chat!.id,ctx.from!.id),
-          () => !this.stopped && this.questions.get(token) === pending);
-        await this.receiveMessage(ctx, true);
-        if (pending.request.kind === 'editor') this.submitAnswer(token,text,undefined,message.message_id);
-        else await replyTo(ctx, contextDestination(ctx), 'Use the numbered answer buttons on the question.');
-        return;
-      }
-      if (this.endedQuestionReplies.has(`${ctx.chat.id}:${replyId}`)) {
-        await this.authorize(ctx.chat.id, ctx.from.id);
-        await replyTo(ctx, contextDestination(ctx), 'This question is no longer active. Answer the latest question instead.');
-        return;
-      }
-    }
-    if (ctx.from && text && !text.startsWith('/') && 'reply_to_message' in message && message.reply_to_message &&
-        this.options.store.takeTaskRequest(this.id,contextDestination(ctx),message.reply_to_message.message_id,ctx.from.id)) {
-      await this.routePrompt(ctx,text);
-      return;
-    }
-    const directedReply = text && !text.startsWith('/') && 'reply_to_message' in message &&
-      message.reply_to_message?.from?.id === this.id &&
-      !('forum_topic_created' in message.reply_to_message) &&
-      message.reply_to_message.message_id !== message.message_thread_id;
-    if (directedReply) this.directedReplies.add(ctx);
-    const command = (directedReply ? `/p ${text}` : text)?.match(/^\/([a-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
-    if (command?.[2] && command[2].toLowerCase() !== this.bot.botInfo!.username.toLowerCase()) return;
-    if (command?.[1]?.toLowerCase() === 'terminate') {
+    const topicLifecycle = intent.kind === 'event';
+    const command = intent.kind === 'command' ? {action:intent.action,argument:intent.argument} : undefined;
+    if (command?.action === 'terminate') {
       if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Termination requires a current group administrator.'); return; }
       const member = await this.bot.api.getChatMember(ctx.chat.id, ctx.from!.id);
       const persisted = readConfig(this.options.config.configPath);
@@ -1777,15 +1708,15 @@ export class BotService {
     if (ctx.chat.type === 'private') {
       await replyTo(ctx, contextDestination(ctx), `Add me to your own supergroup, enable Topics, grant Manage Topics and Pin Messages, then run /setup.${this.options.config.publicUrl ? ' Configure the Mini App URL in BotFather for this bot.' : ''}`, {reply_markup:{inline_keyboard:[[{text:'Add to Group',url:`https://t.me/${this.bot.botInfo!.username}?startgroup=setup&admin=manage_topics+pin_messages`}]]}}); return;
     }
-    if (command?.[1]?.toLowerCase() === 'setup') { await this.setup(ctx); return; }
+    if (command?.action === 'setup') { await this.setup(ctx); return; }
     const assigned = findInstance(this.options.config, this.id, ctx.chat.id);
     if (!assigned || !this.options.store.isEnrolled(this.id, ctx.chat.id)) {
-      if (command?.[1]?.toLowerCase() === 'help') {
+      if (command?.action === 'help') {
         await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n${this.promptHelp(ctx.chat.id)}`);
       }
       return;
     }
-    if (command?.[1]?.toLowerCase() === 'settings') { await this.openSettings(ctx); return; }
+    if (command?.action === 'settings') { await this.openSettings(ctx); return; }
     const destination = contextDestination(ctx);
     let session = this.options.store.getTopic({botId:this.id,destination});
     const detached = session?.status === 'detached';
@@ -1862,18 +1793,54 @@ export class BotService {
       this.closedSessions.delete(session.id);
       return;
     }
-    if (!ctx.from || ctx.from.is_bot || !text || 'forward_origin' in message || 'forward_date' in message) return;
-    if (session?.status === 'closed' && !['status','help'].includes(command?.[1]?.toLowerCase() ?? '')) {
+    if (!ctx.from || ctx.from.is_bot) return;
+    if (session?.status === 'closed' && !['status','help'].includes(command?.action ?? '')) {
       await replyTo(ctx,destination,'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.');
       return;
     }
-    if (!detached && await this.skills.message(ctx, text, session)) return;
-    const allMessagesArePrompts = this.allMessagesArePrompts(ctx.chat.id);
-    let prompt = '';
+    if (intent.kind === 'question-answer') {
+      const pending = this.questions.get(intent.token);
+      if (!pending) return;
+      await this.authorize(ctx.chat.id,ctx.from.id);
+      if (pending.request.kind === 'editor') this.submitAnswer(intent.token,intent.text,undefined,message.message_id);
+      else await replyTo(ctx,destination,'Use the numbered answer buttons on the question.');
+      return;
+    }
+    if (intent.kind === 'ended-question') {
+      await this.authorize(ctx.chat.id,ctx.from.id);
+      await replyTo(ctx,destination,'This question is no longer active. Answer the latest question instead.');
+      return;
+    }
+    if (intent.kind === 'skill-selection') {
+      if (!detached) await this.skills.selection(ctx,intent.text,session);
+      return;
+    }
+    if (intent.kind === 'new-task' || intent.kind === 'session-prompt') {
+      if (detached && intent.kind !== 'new-task') return;
+      if (intent.kind === 'session-prompt' && destination.kind !== 'general' && !session) {
+        await replyTo(ctx,destination,'No session in this topic. Use /new to create one.');
+        return;
+      }
+      if (!this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
+      if (!intent.content.text.trim() && !intent.content.images.length) {
+        if (intent.kind === 'new-task' || destination.kind === 'general') await this.askTask(ctx);
+        else await replyTo(ctx,destination,'Usage: /p <prompt>');
+        return;
+      }
+      await this.authorize(ctx.chat.id,ctx.from.id);
+      if (intent.requestId !== undefined && !this.options.store.takeTaskRequest(this.id,destination,intent.requestId,ctx.from.id)) return;
+      const instancePath = this.assignedPath(ctx.chat.id);
+      const generation = session && this.options.store.getSessionGeneration(session.id);
+      const images = await this.promptImages(intent.content.images);
+      if (this.assignedPath(ctx.chat.id) !== instancePath ||
+          (session && this.options.store.getSessionGeneration(session.id) !== generation)) throw new Error('The session or group assignment changed while downloading the image');
+      await this.routePrompt(ctx,{text:intent.content.text,...(images.length ? {images} : {})},intent.kind === 'new-task' ? undefined : session,intent.skill);
+      return;
+    }
     if (command) {
       await this.authorize(ctx.chat.id, ctx.from.id);
-      const action = command[1]!.toLowerCase();
-      let arg = command[3]?.trim() ?? '';
+      const action = command.action;
+      const arg = command.argument;
       if (action === 'list_admins') {
         if (arg) { await replyTo(ctx, destination, 'Usage: /list_admins'); return; }
         await this.listAdmins(ctx);
@@ -1902,22 +1869,6 @@ export class BotService {
         await this.skills.open(ctx, session, arg === 'clear');
         return;
       }
-      if ((action === 'p' || action === 'new' || skillAlias) && 'reply_to_message' in message && message.reply_to_message) {
-        const reply = message.reply_to_message;
-        const quoted = 'text' in reply ? reply.text : 'caption' in reply ? reply.caption : undefined;
-        if (quoted) {
-          const quote = quoted.split(/\r?\n/).map(line => `> ${line}`).join('\n');
-          arg = arg ? `${quote}\n\n${arg}` : quote;
-        }
-      }
-      if (skillAlias) {
-        if (destination.kind !== 'general' && !session) {
-          await replyTo(ctx, destination, 'No session in this topic. Use /new to create one.');
-          return;
-        }
-        await this.routePrompt(ctx,arg,destination.kind === 'general' ? undefined : session,skillAlias.name);
-        return;
-      }
       if (action === 'detach') {
         if (!(await this.currentAdmin(ctx))) { await replyTo(ctx, contextDestination(ctx), 'Detaching requires a group administrator.'); return; }
         if (destination.kind === 'general' || !session) { await replyTo(ctx, contextDestination(ctx), 'Use /detach inside a session topic, not General or an unrelated chat.'); return; }
@@ -1929,11 +1880,8 @@ export class BotService {
         await replyTo(ctx, contextDestination(ctx), 'This topic is conversation-only. Use /new to create a separate session topic.');
         return;
       }
-      if ((action === 'new' || action === 'p') && !this.usersCanProposePrompts(ctx.chat.id) &&
-          !(await this.currentAdmin(ctx))) return;
-      if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
       if (action === 'worktree') {
-        if (destination.kind === 'general') { await this.routePrompt(ctx,arg,undefined,undefined,true); return; }
+        if (destination.kind === 'general') { await this.routePrompt(ctx,{text:arg},undefined,undefined,true); return; }
         if (!session || detached) { await replyTo(ctx,destination,'Use /worktree inside an active session topic, or General to create one.'); return; }
         if (!(await this.currentAdmin(ctx))) { await replyTo(ctx,destination,'Worktree commands require a group administrator.'); return; }
         await this.authorize(ctx.chat.id,ctx.from.id);
@@ -1956,7 +1904,7 @@ export class BotService {
         if (!match) { await replyTo(ctx, contextDestination(ctx), 'Usage: /attach instanceId [topic name]. Get the instance ID from omp collab list.'); return; }
         const instancePath = this.assignedPath(ctx.chat.id);
         const binding = await this.options.runtime.attach(match[1]!, instancePath);
-        await this.newSession(ctx,'',{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
+        await this.newSession(ctx,undefined,{instanceId:binding.instanceId,sessionId:binding.sessionId,instancePath},match[2] ?? 'Attached OMP session'); return;
       }
       if (action === 'help' || action === 'start') { await replyTo(ctx, contextDestination(ctx), `${this.commandHelp()}\n${settingsHelp}\n${adminHelp}${await this.currentAdmin(ctx) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${this.promptHelp(ctx.chat.id)}`); return; }
       if (action === 'cli') {
@@ -2003,6 +1951,9 @@ export class BotService {
             text = `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\n${text}`;
           }
           await this.replyPresetText(ctx, text);
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
+          await replyTo(ctx, contextDestination(ctx), "Can't change model preset while busy. /stop first");
         } finally { release(); }
         return;
       }
@@ -2056,23 +2007,7 @@ export class BotService {
         await replyTo(ctx, contextDestination(ctx), 'Abort requested. The session process is still running.');
         return;
       }
-      if (action !== 'p') return;
-      if (!session) { await replyTo(ctx, contextDestination(ctx), 'Use /p inside a session topic, or in General to create a new session.'); return; }
-      if (!arg) { await replyTo(ctx, contextDestination(ctx), 'Usage: /p <prompt>'); return; }
-      prompt = arg;
-    } else {
-      if (!allMessagesArePrompts || !session) return;
-      const entities = 'entities' in message ? message.entities ?? [] : [];
-      const mentions = entities.filter(entity =>
-        (entity.type === 'mention' && text.slice(entity.offset,entity.offset+entity.length).toLowerCase() === `@${this.bot.botInfo!.username.toLowerCase()}`) ||
-        (entity.type === 'text_mention' && entity.user.id === this.id),
-      );
-      prompt = text;
-      for (const entity of [...mentions].reverse()) prompt = prompt.slice(0,entity.offset) + prompt.slice(entity.offset+entity.length);
-      prompt = prompt.trim();
     }
-    if (!session) return;
-    if (prompt) await this.routePrompt(ctx,prompt,session);
   }
   private scheduleReconnect(session: TopicSession, attempt = 0): void {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
@@ -2172,7 +2107,7 @@ export class BotService {
     });
     return listener.promise;
   }
-  private sendPrompt(listener: Listener, text: string, messageId?: number, images?: ImageContent[], onStartupRejected?: () => void): void {
+  private sendPrompt(listener: Listener, content: PromptContent, messageId?: number, onStartupRejected?: () => void): void {
     const session = this.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
     this.requireSessionAssignment(session);
@@ -2181,13 +2116,13 @@ export class BotService {
         listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     const observation: TaskObservation = {state:'waiting for acceptance'};
     this.sessionObservation(session.id).task = observation;
-    const pending = {text,messageId,onStartupRejected,observation};
+    const pending = {content,messageId,onStartupRejected,observation};
     listener.pendingPrompts.push(pending);
     let attempted = false;
     try {
       this.options.runtime.markPrompt(listener.sessionId);
       attempted = true;
-      listener.connection!.send({t:'prompt',text,...(images?.length ? {images} : {})});
+      listener.connection!.send({t:'prompt',text:content.text,...(content.images?.length ? {images:content.images} : {})});
     } catch (error) {
       observation.state = attempted ? 'acceptance unknown' : 'not accepted';
       const index = listener.pendingPrompts.indexOf(pending);
@@ -2225,13 +2160,12 @@ export class BotService {
         listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     this.options.runtime.markPrompt(session.id);
     const task = this.options.store.claimInitialTask(session.id);
-    if (!task) return;
+    if (task === undefined) return;
     const messageId = this.options.store.getReplyTarget(session.id);
-    const images = this.options.store.getInitialImages(session.id);
-    listener.initial = {text:task,images,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
+    listener.initial = {content:task,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.options.config.omp.startupTimeoutMs);
     listener.initial.timer.unref();
-    this.sendPrompt(listener,task,messageId,images);
+    this.sendPrompt(listener,task,messageId);
   }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.delivery.run(session.chatId,
@@ -2551,7 +2485,7 @@ export class BotService {
             initial.timer = setTimeout(() => { listener.initial = undefined; },initial.deadline-Date.now());
             initial.timer.unref();
             initial.phase = 'sent';
-            this.sendPrompt(listener,initial.text,initial.messageId,initial.images);
+            this.sendPrompt(listener,initial.content,initial.messageId);
           }).catch(() => {
             clearTimeout(initial.timer);
             if (listener.initial === initial) listener.initial = undefined;
@@ -2574,10 +2508,14 @@ export class BotService {
       const entry = frame.entry;
       const content = typeof entry.content === 'string' ? entry.content
         : entry.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+      const images = typeof entry.content === 'string' ? undefined : entry.content.filter(part => part.type === 'image');
+      const matchesContent = (prompt: PromptContent): boolean => prompt.text === content &&
+        (images === undefined || (prompt.images?.length ?? 0) === images.length &&
+          images.every((image,index) => image.data === prompt.images![index]!.data && image.mimeType === prompt.images![index]!.mimeType));
       const details = entry.details;
       if (details && typeof details === 'object' &&
           'from' in details && details.from === `Telegram @${this.bot.botInfo!.username}`) {
-        const index = listener.pendingPrompts.findIndex(pending => pending.text === content);
+        const index = listener.pendingPrompts.findIndex(pending => matchesContent(pending.content));
         if (index !== -1) {
           const [pending] = listener.pendingPrompts.splice(index,1);
           pending!.observation.state = 'accepted; completion unknown';
@@ -2585,7 +2523,7 @@ export class BotService {
             this.acknowledgeMessage(session,pending!.messageId,listener);
           }
         }
-        if (listener.initial?.phase === 'sent' && content === listener.initial.text) {
+        if (listener.initial?.phase === 'sent' && matchesContent(listener.initial.content)) {
           clearTimeout(listener.initial.timer);
           listener.initial = undefined;
         }
