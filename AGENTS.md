@@ -17,6 +17,7 @@
 - Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.
 - When referring to a GitHub branch in user-facing responses, link its full GitHub branch URL rather than mentioning only its name.
 - When the user says "remember" a preference or instruction, update AGENTS.md with the durable rule rather than only acknowledging it in chat.
+- When the user asks why you did something, quote the literal relevant AGENTS.md lines and include their line numbers. If no AGENTS.md rule supports the decision, say so explicitly rather than attributing it to an instruction.
 - Do not add temporary scripts, verification artifacts, or scratch files to `.gitignore`. Keep them outside the checkout or delete them when finished.
 - Keep README.md focused on a brief product introduction, useful features, and consumer setup. Consumer installation, configuration, credentials, deployment, upgrades, restarts, and other normal deployment lifecycle operations belong in README.md, not DEVELOPMENT.md. Link to the other documents for developer operations and detailed product requirements.
 - Keep current observable behavior and user-facing requirements in PRODUCT.md. Use meaningful numbered sections and bullets. Remove superseded requirements when behavior changes.
