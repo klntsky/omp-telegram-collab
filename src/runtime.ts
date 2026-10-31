@@ -12,6 +12,7 @@ import { parseCollabLink } from './vendor/link.js';
 import { findInstance, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { withCancellation } from './cancellation.js';
+import { formatUsage } from './usage.js';
 
 export class SessionCapacityError extends Error {
   constructor(readonly limit: number) {
@@ -632,28 +633,7 @@ export class OmpRuntime {
       maxBuffer: 2 * 1024 * 1024, encoding: 'utf8',
     }, (error, stdout) => error ? reject(error) : resolve(stdout));
     const output = await promise;
-    const result: unknown = JSON.parse(output);
-    if (!record(result) || !Array.isArray(result.reports)) throw new Error('Invalid OMP usage response');
-    const lines: string[] = [];
-    for (const report of result.reports) {
-      if (!record(report) || typeof report.provider !== 'string' || !Array.isArray(report.limits)) {
-        throw new Error('Invalid OMP usage report');
-      }
-      lines.push(report.provider);
-      for (const limit of report.limits) {
-        if (!record(limit) || !record(limit.amount)) throw new Error('Invalid OMP usage limit');
-        const amount = limit.amount;
-        const unit = typeof amount.unit === 'string' ? amount.unit : '';
-        const value = (number: unknown) => typeof number === 'number' && Number.isFinite(number) ? `${number}${unit === 'percent' ? '%' : unit ? ` ${unit}` : ''}` : 'unknown';
-        const window = record(limit.window) ? limit.window : {};
-        const reset = typeof window.resetsAt === 'number' ? new Date(window.resetsAt).toISOString() : undefined;
-        lines.push(`  ${limit.label ?? window.label ?? 'Quota'}: ${value(amount.used)} used; ${value(amount.remaining)} remaining; limit ${value(amount.limit)}${reset ? `; resets ${reset}` : ''}${typeof limit.status === 'string' ? ` [${limit.status}]` : ''}`);
-      }
-      if (!report.limits.length) lines.push('  No quota data available.');
-      if (typeof report.error === 'string') lines.push(report.error);
-      lines.push('');
-    }
-    return lines.join('\n').trim() || 'No provider usage data available.';
+    return formatUsage(JSON.parse(output));
   }
 
   async availableModelPresets(instancePath: string): Promise<string[]> {

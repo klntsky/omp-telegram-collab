@@ -1705,7 +1705,8 @@ export class BotService {
         for (let offset = 0; offset < usage.length;) {
           let end = Math.min(offset + 4000, usage.length);
           if (end < usage.length && /[\uD800-\uDBFF]/.test(usage[end - 1]!)) --end;
-          await replyTo(ctx, destination, usage.slice(offset, end));
+          const chunk = usage.slice(offset, end);
+          await replyTo(ctx, destination, chunk, { entities: [{ type: 'pre', offset: 0, length: chunk.length }] });
           offset = end;
         }
         return;
