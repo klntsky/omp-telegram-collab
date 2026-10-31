@@ -42,6 +42,8 @@ The inbound Telegram boundary normalizes raw text, media captions, and image ref
 
 Receipt delivery and execution consume that same classified intent. The receipt consumer owns the received-message acknowledgement and its eligibility checks; it does not independently reinterpret the message or admit a task. Dispatch owns command execution, interactive answers, and authorized prompt admission. Receiving a Telegram message remains distinct from Collab accepting its prompt.
 
+Receipt ingestion owns the durable destination for agent replies. Submission retains message provenance without advancing that destination; confirmed admission advances it before reaction delivery. The adapter snapshots the destination when queuing a reply so subsequent inputs cannot retarget its remaining chunks.
+
 After prompt authorization, the adapter resolves Telegram image files and attaches their bytes to the Collab prompt. Prompt content can contain text, images, or both, without synthetic image instructions. Proposals, capacity waits, initial-task admission, persistence, and recovery retain the entire content; none may reduce an image-only task to missing text.
 
 The inbound bot adapter distinguishes intentional replies from Telegram's implicit reply to a forum topic's creation message. Topic-root metadata establishes routing context, not user intent, even when the bot created the topic. The single classification boundary owns that distinction so metadata cannot bypass the configured prompt mode. The runtime receives only prompts admitted by that boundary.

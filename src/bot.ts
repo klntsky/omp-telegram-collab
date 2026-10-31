@@ -1867,7 +1867,7 @@ export class BotService {
     }
     accepted?.();
     if (task !== undefined && ctx.message)
-      this.options.store.setReplyTarget(session.id, ctx.message.message_id);
+      this.options.store.setInitialMessage(session.id, ctx.message.message_id);
     await replyTo(
       ctx,
       contextDestination(ctx),
@@ -2109,9 +2109,7 @@ export class BotService {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
-    const previousTarget = this.options.store.getReplyTarget(session.id);
     const messageId = ctx.message!.message_id;
-    this.options.store.setReplyTarget(session.id,messageId);
     const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
       if (selected.names.length) {
         const current = this.options.store.getPendingSkills(selected.key);
@@ -2127,7 +2125,6 @@ export class BotService {
     try {
       this.sendPrompt(this.listeners.get(session.id)!,content,messageId,restore);
     } catch (error) {
-      this.options.store.setReplyTarget(session.id,previousTarget);
       restore?.();
       throw error;
     }
@@ -3051,13 +3048,14 @@ export class BotService {
     this.options.runtime.markPrompt(session.id);
     const task = this.options.store.claimInitialTask(session.id);
     if (task === undefined) return;
-    const messageId = this.options.store.getReplyTarget(session.id);
+    const messageId = this.options.store.getInitialMessage(session.id);
     listener.initial = {content:task,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.options.config.omp.startupTimeoutMs);
     listener.initial.timer.unref();
     this.sendPrompt(listener,task,messageId);
   }
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
+    this.options.store.setReplyTarget(session.id, messageId);
     void this.delivery.run(session.chatId,
       () => this.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.stopped && this.sessionAssigned(session) && (listener === undefined || this.listeners.get(session.id) === listener)).catch(() => undefined);

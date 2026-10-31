@@ -42,6 +42,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
@@ -208,6 +209,17 @@ export class Store {
   getInitialUser(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);
     return row ? Number(row.user_id) : undefined;
+  }
+  setInitialMessage(id: string, messageId: number): void {
+    this.db
+      .prepare(
+        'INSERT INTO initial_messages VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET message_id=excluded.message_id',
+      )
+      .run(id, messageId);
+  }
+  getInitialMessage(id: string): number | undefined {
+    const row = this.db.prepare('SELECT message_id FROM initial_messages WHERE session_id=?').get(id);
+    return row ? Number(row.message_id) : undefined;
   }
   getSessionEntry(id: string): {messageId: number; markup: string} | undefined {
     const row = this.db.prepare('SELECT message_id,markup FROM session_entries WHERE session_id=?').get(id);

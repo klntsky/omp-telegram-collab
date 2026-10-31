@@ -106,6 +106,25 @@ test('topic identity survives a service restart and closing preserves its histor
   }
 });
 
+test('initial task message provenance survives restart without acknowledging it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-initial-message-'));
+  const filename = join(directory, 'topics.sqlite');
+  let store = new Store(filename);
+  try {
+    const task = { text: 'Initial task awaiting admission' };
+    const session = store.createSession(topic, 'Pending task', { kind: 'managed' }, task, 42);
+    store.setInitialMessage(session.id, 7101);
+    store.close();
+    store = new Store(filename);
+    assert.equal(store.getInitialMessage(session.id), 7101);
+    assert.equal(store.getReplyTarget(session.id), undefined);
+    assert.deepEqual(store.claimInitialTask(session.id), task);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('image-only initial content survives reopening storage and stays session-scoped', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-image-task-'));
   const filename = join(directory,'topics.sqlite');
