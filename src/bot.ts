@@ -163,7 +163,7 @@ function messageText(message: Context['message']): string | undefined {
   if (!message) return undefined;
   if ('text' in message) return message.text;
   if ('caption' in message && message.caption !== undefined) return message.caption;
-  if (message.photo || message.document?.mime_type?.startsWith('image/')) return 'Describe this image.';
+  if (message.photo || message.document?.mime_type?.startsWith('image/')) return '';
   return undefined;
 }
 function optionMarker(index: number): string {
@@ -367,6 +367,7 @@ export class BotService {
   }
   private async settingsReply(ctx: Context): Promise<boolean> {
     const message = ctx.message;
+    if (messageText(message)?.startsWith('/')) return false;
     const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
     if (!reply || !ctx.chat || !(this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
         (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return false;
@@ -477,7 +478,7 @@ export class BotService {
         await pending.ready;
         this.albums.delete(key);
         const source = pending.contexts.find(part => part.message && 'caption' in part.message && part.message.caption) ?? pending.contexts[0]!;
-        const text = pending.contexts.flatMap(part => part.message && 'caption' in part.message && part.message.caption ? [part.message.caption] : []).join('\n\n') || 'Describe this image.';
+        const text = pending.contexts.flatMap(part => part.message && 'caption' in part.message && part.message.caption ? [part.message.caption] : []).join('\n\n');
         this.albumPrompts.set(source,{contexts:pending.contexts,text});
         await this.receiveMessage(source);
         await this.handle(source);
@@ -493,7 +494,7 @@ export class BotService {
     const message = ctx.message;
     const text = messageText(message);
     const reply = message && 'reply_to_message' in message ? message.reply_to_message : undefined;
-    if (reply && ctx.chat && (this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
+    if (!text?.startsWith('/') && reply && ctx.chat && (this.settingsMessages.has(`${ctx.chat.id}:${reply.message_id}`) ||
         (reply.from?.id === this.id && 'text' in reply && /^(?:Settings\n|Settings closed\.|Opening settings…)/.test(reply.text ?? '')))) return;
     if (this.options.config.terminated) return;
     if (this.stopped || !message || !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
@@ -1300,7 +1301,8 @@ export class BotService {
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
     const title = (name ?? task).replace(/\s+/g, ' ').trim().slice(0, 128) || 'OMP session';
-    const initialIcon = task && !worktree ? (await this.getIconIds()).running : undefined;
+    const hasTask = !attached && !worktree && Boolean(task || images?.length);
+    const initialIcon = hasTask ? (await this.getIconIds()).running : undefined;
     if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before topic creation.');
     const topic = await this.bot.api.createForumTopic(ctx.chat!.id, title, initialIcon ? {icon_custom_emoji_id:initialIcon} : {});
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
@@ -1320,24 +1322,24 @@ export class BotService {
       if (defaultSkill) this.options.store.setNewTopicSkill(session.id,defaultSkill);
     }
     accepted?.();
-    if (task && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
+    if (hasTask && ctx.message) this.options.store.setReplyTarget(session.id,ctx.message.message_id);
     await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, {
       reply_parameters: { message_id: ctx.message!.message_id, allow_sending_without_reply: true },
       link_preview_options: { is_disabled: true },
     });
     await this.announce(session);
     const source = ctx.message;
-    if (task && source && 'reply_to_message' in source && source.reply_to_message &&
+    if (hasTask && source && 'reply_to_message' in source && source.reply_to_message &&
         (/^\/(?:new|worktree|p|skill_[a-z0-9_]+)(?:@\w+)?(?:\s|$)/i.test(messageText(source) ?? '') ||
           this.directedReplies.has(ctx))) {
       await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, source.reply_to_message.message_id);
     }
-    if (task) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
+    if (hasTask) for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
       if (original.message) await forwardTo(this.bot.api, topicDestination(session.chatId, session.threadId),
         ctx.chat!.id, original.message.message_id);
     }
-    await this.setTopicStatus(session, task ? 'running' : 'unknown', initialIcon);
+    await this.setTopicStatus(session, hasTask ? 'running' : 'unknown', initialIcon);
     await this.listen(session);
     await this.sendInitial(session);
   }
@@ -1503,7 +1505,7 @@ export class BotService {
     if (await this.currentAdmin(ctx)) {
       if (session) {
         await this.submitSessionPrompt(ctx, session, text, images, {key:skillKey,names:pendingSkills,topicSkill});
-      } else await this.newSession(ctx, text, undefined, undefined, images, !worktree && text ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
+      } else await this.newSession(ctx, text, undefined, undefined, images, !worktree && (text || images?.length) ? () => this.options.store.clearPendingSkills(skillKey) : undefined, worktree);
       return;
     }
     if (!this.usersCanProposePrompts(ctx.chat!.id)) return;
@@ -1787,7 +1789,8 @@ export class BotService {
       await this.refreshTopicStatus(session);
       return;
     }
-    if (!ctx.from || ctx.from.is_bot || !text || 'forward_origin' in message || 'forward_date' in message) return;
+    const hasImages = Boolean(message.photo?.length || message.document?.mime_type?.startsWith('image/'));
+    if (!ctx.from || ctx.from.is_bot || (text === undefined || (!text && !hasImages)) || 'forward_origin' in message || 'forward_date' in message) return;
     if (!detached && await this.skills.message(ctx, text, session)) return;
     const allMessagesArePrompts = this.allMessagesArePrompts(ctx.chat.id);
     let prompt = '';
@@ -1852,7 +1855,7 @@ export class BotService {
       }
       if ((action === 'new' || action === 'p') && !this.usersCanProposePrompts(ctx.chat.id) &&
           !(await this.currentAdmin(ctx))) return;
-      if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
+      if (action === 'new' || (action === 'p' && destination.kind === 'general')) { if (arg || hasImages) await this.routePrompt(ctx,arg); else await this.askTask(ctx); return; }
       if (action === 'worktree') {
         if (destination.kind === 'general') { await this.routePrompt(ctx,arg,undefined,undefined,true); return; }
         if (!session || detached) { await replyTo(ctx,destination,'Use /worktree inside an active session topic, or General to create one.'); return; }
@@ -1979,7 +1982,7 @@ export class BotService {
       }
       if (action !== 'p') return;
       if (!session) { await replyTo(ctx, contextDestination(ctx), 'Use /p inside a session topic, or in General to create a new session.'); return; }
-      if (!arg) { await replyTo(ctx, contextDestination(ctx), 'Usage: /p <prompt>'); return; }
+      if (!arg && !hasImages) { await replyTo(ctx, contextDestination(ctx), 'Usage: /p <prompt>'); return; }
       prompt = arg;
     } else {
       if (!allMessagesArePrompts || !session) return;
@@ -1993,7 +1996,7 @@ export class BotService {
       prompt = prompt.trim();
     }
     if (!session) return;
-    if (prompt) await this.routePrompt(ctx,prompt,session);
+    if (prompt || hasImages) await this.routePrompt(ctx,prompt,session);
   }
   private scheduleReconnect(session: TopicSession, attempt = 0): void {
     if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
@@ -2143,7 +2146,7 @@ export class BotService {
         listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     this.options.runtime.markPrompt(session.id);
     const task = this.options.store.claimInitialTask(session.id);
-    if (!task) return;
+    if (task === undefined) return;
     const messageId = this.options.store.getReplyTarget(session.id);
     const images = this.options.store.getInitialImages(session.id);
     listener.initial = {text:task,images,userId,authorityUserId,messageId,deadline:Date.now()+this.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};

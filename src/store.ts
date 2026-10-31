@@ -96,11 +96,12 @@ export class Store {
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask ?? null, initialTask ? 'pending' : null, key.instancePath);
+      const hasTask = Boolean(initialTask || images?.length);
+      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask ?? null, hasTask ? 'pending' : null, key.instancePath);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
-      if (Number(result.changes) && initialTask && initialUserId) {
+      if (Number(result.changes) && hasTask && initialUserId) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
         if (authorityUserId) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
         if (images?.length) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(images));
