@@ -56,24 +56,43 @@ test('delivery serializes each chat without delaying starts or blocking other ch
 });
 
 
-test('explicit 429 retains the active question through repeated chat-wide cooldowns', async t => {
+test('explicit 429 retains the active question through repeated chat-wide cooldowns', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const calls: [string, number][] = [];
   let attempts = 0;
-  const question = delivery.run(1, async () => {
-    calls.push(['question', Date.now()]);
-    attempts++;
-    if (attempts === 1) throw limited(3);
-    if (attempts === 2) throw limited(2);
-    return 'question delivered';
-  }, () => true);
-  const following = delivery.run(1, async () => { calls.push(['following', Date.now()]); }, () => true);
+  const question = delivery.run(
+    1,
+    async () => {
+      calls.push(['question', Date.now()]);
+      attempts++;
+      if (attempts === 1) throw limited(3);
+      if (attempts === 2) throw limited(2);
+      return 'question delivered';
+    },
+    () => true,
+  );
+  const following = delivery.run(
+    1,
+    async () => {
+      calls.push(['following', Date.now()]);
+    },
+    () => true,
+  );
   await settle();
-  await delivery.run(2, async () => { calls.push(['other-chat', Date.now()]); }, () => true);
+  await delivery.run(
+    2,
+    async () => {
+      calls.push(['other-chat', Date.now()]);
+    },
+    () => true,
+  );
   await advance(2999);
-  assert.deepEqual(calls, [['question', 0], ['other-chat', 0]]);
+  assert.deepEqual(calls, [
+    ['question', 0],
+    ['other-chat', 0],
+  ]);
   await advance(1);
   assert.deepEqual(calls.at(-1), ['question', 3000]);
   await advance(1999);
@@ -82,8 +101,11 @@ test('explicit 429 retains the active question through repeated chat-wide cooldo
   assert.equal(await question, 'question delivered');
   await following;
   assert.deepEqual(calls, [
-    ['question', 0], ['other-chat', 0], ['question', 3000],
-    ['question', 5000], ['following', 5000],
+    ['question', 0],
+    ['other-chat', 0],
+    ['question', 3000],
+    ['question', 5000],
+    ['following', 5000],
   ]);
 });
 
@@ -171,19 +193,53 @@ test('a question canceled during its 429 cooldown is not retried', async t => {
   assert.equal(await delivery.run(1, async () => 'next', () => true), 'next');
 });
 
-test('close aborts cooldown and resolves every pending job without waiting or later delivery', async t => {
+test('close aborts cooldown and resolves every pending job without waiting or later delivery', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const calls: string[] = [];
-  const retrying = delivery.run(1, async () => { calls.push('limited'); throw limited(60); }, () => true);
-  const question = delivery.run(1, async () => { calls.push('question'); }, () => true);
+  const retrying = delivery.run(
+    1,
+    async () => {
+      calls.push('limited');
+      throw limited(60);
+    },
+    () => true,
+  );
+  const question = delivery.run(
+    1,
+    async () => {
+      calls.push('question');
+    },
+    () => true,
+  );
   await settle();
-  const icon = delivery.runTopic(1, 'icon', 'topic', async () => { calls.push('icon'); }, () => true);
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'topic',
+    async () => {
+      calls.push('icon');
+    },
+    () => true,
+  );
   delivery.close();
   delivery.close();
-  assert.deepEqual(await Promise.all([retrying, question, icon]), [undefined, undefined, undefined]);
-  assert.equal(await delivery.run(2, async () => { calls.push('after-close'); }, () => true), undefined);
+  assert.deepEqual(await Promise.all([retrying, question, icon]), [
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  assert.equal(
+    await delivery.run(
+      2,
+      async () => {
+        calls.push('after-close');
+      },
+      () => true,
+    ),
+    undefined,
+  );
   await advance(60000);
   assert.deepEqual(calls, ['limited']);
 });
@@ -204,36 +260,100 @@ test('close during an in-flight 429 does not requeue or leave its promise unreso
   assert.equal(attempts, 1);
 });
 
-test('topic lanes start independently of held ordinary and name requests', async t => {
+test('topic lanes start independently of held ordinary and name requests', async (t) => {
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const held = Promise.withResolvers<void>();
   const calls: string[] = [];
-  const ordinary = delivery.run(1, () => { calls.push('ordinary'); return held.promise; }, () => true);
-  const name = delivery.runTopic(1, 'name', 'a', () => { calls.push('name'); return held.promise; }, () => true);
-  const icon = delivery.runTopic(1, 'icon', 'a', async signal => {
-    assert.equal(typeof signal.addEventListener, 'function');
-    calls.push('icon');
-    return 'applied';
-  }, () => true);
+  const ordinary = delivery.run(
+    1,
+    () => {
+      calls.push('ordinary');
+      return held.promise;
+    },
+    () => true,
+  );
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    () => {
+      calls.push('name');
+      return held.promise;
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    async (signal) => {
+      assert.equal(typeof signal.addEventListener, 'function');
+      calls.push('icon');
+      return 'applied';
+    },
+    () => true,
+  );
   assert.equal(await icon, 'applied');
   assert.deepEqual(calls, ['ordinary', 'name', 'icon']);
   held.resolve();
   await Promise.all([ordinary, name]);
 });
 
-test('topic 429 rejects the original error and gates all lanes but not other chats', async t => {
+test('topic 429 rejects the original error and gates all lanes but not other chats', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const error = limited(2);
   let attempts = 0;
-  await assert.rejects(delivery.runTopic(1, 'name', 'a', async () => { attempts++; throw error; }, () => true), value => value === error);
+  await assert.rejects(
+    delivery.runTopic(
+      1,
+      'name',
+      'a',
+      async () => {
+        attempts++;
+        throw error;
+      },
+      () => true,
+    ),
+    (value) => value === error,
+  );
   const calls: string[] = [];
-  const ordinary = delivery.run(1, async () => { calls.push('ordinary'); }, () => true);
-  const name = delivery.runTopic(1, 'name', 'b', async () => { calls.push('name'); }, () => true);
-  const icon = delivery.runTopic(1, 'icon', 'a', async () => { calls.push('icon'); }, () => true);
-  await delivery.runTopic(2, 'icon', 'a', async () => { calls.push('other'); }, () => true);
+  const ordinary = delivery.run(
+    1,
+    async () => {
+      calls.push('ordinary');
+    },
+    () => true,
+  );
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'b',
+    async () => {
+      calls.push('name');
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    async () => {
+      calls.push('icon');
+    },
+    () => true,
+  );
+  await delivery.runTopic(
+    2,
+    'icon',
+    'a',
+    async () => {
+      calls.push('other');
+    },
+    () => true,
+  );
   await advance(1999);
   assert.deepEqual(calls, ['other']);
   await advance(1);
@@ -242,53 +362,129 @@ test('topic 429 rejects the original error and gates all lanes but not other cha
   assert.equal(attempts, 1);
 });
 
-test('topic pending keys coalesce while preserving FIFO across topics and caller retries', async t => {
+test('topic pending keys coalesce while preserving FIFO across topics and caller retries', async (t) => {
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const held = Promise.withResolvers<void>();
-  const first = delivery.runTopic(1, 'name', 'held', () => held.promise, () => true);
+  const first = delivery.runTopic(
+    1,
+    'name',
+    'held',
+    () => held.promise,
+    () => true,
+  );
   const calls: string[] = [];
-  const old = delivery.runTopic(1, 'name', 'a', async () => { calls.push('obsolete'); }, () => true);
-  const b = delivery.runTopic(1, 'name', 'b', async () => { calls.push('b'); }, () => true);
-  const latest = delivery.runTopic(1, 'name', 'a', async () => { calls.push('latest'); throw limited(0); }, () => true);
-  const failed = assert.rejects(latest, error => error instanceof GrammyError);
+  const old = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    async () => {
+      calls.push('obsolete');
+    },
+    () => true,
+  );
+  const b = delivery.runTopic(
+    1,
+    'name',
+    'b',
+    async () => {
+      calls.push('b');
+    },
+    () => true,
+  );
+  const latest = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    async () => {
+      calls.push('latest');
+      throw limited(0);
+    },
+    () => true,
+  );
+  const failed = assert.rejects(latest, (error) => error instanceof GrammyError);
   assert.equal(await old, undefined);
   held.resolve();
   await first;
   await failed;
-  const retry = delivery.runTopic(1, 'name', 'a', async () => { calls.push('retry'); }, () => true);
+  const retry = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    async () => {
+      calls.push('retry');
+    },
+    () => true,
+  );
   await Promise.all([b, retry]);
   assert.deepEqual(calls, ['latest', 'b', 'retry']);
 });
 
-test('topic admission rechecks stale queued eligibility and preserves thrown errors', async t => {
+test('topic admission rechecks stale queued eligibility and preserves thrown errors', async (t) => {
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const held = Promise.withResolvers<void>();
-  const first = delivery.runTopic(1, 'icon', 'held', () => held.promise, () => true);
+  const first = delivery.runTopic(
+    1,
+    'icon',
+    'held',
+    () => held.promise,
+    () => true,
+  );
   let active = true;
-  const stale = delivery.runTopic(1, 'icon', 'stale', async () => assert.fail('stale side effect'), () => active);
+  const stale = delivery.runTopic(
+    1,
+    'icon',
+    'stale',
+    async () => assert.fail('stale side effect'),
+    () => active,
+  );
   const failure = new HttpError('original transport diagnostic', new Error('socket'));
-  const bad = delivery.runTopic(1, 'icon', 'bad', async () => { throw failure; }, () => true);
-  const rejected = assert.rejects(bad, error => error === failure);
+  const bad = delivery.runTopic(
+    1,
+    'icon',
+    'bad',
+    async () => {
+      throw failure;
+    },
+    () => true,
+  );
+  const rejected = assert.rejects(bad, (error) => error === failure);
   active = false;
   held.resolve();
   await first;
   assert.equal(await stale, undefined);
   await rejected;
-  assert.equal(await delivery.runTopic(1, 'icon', 'next', async () => 'side effect', () => true), 'side effect');
+  assert.equal(
+    await delivery.runTopic(
+      1,
+      'icon',
+      'next',
+      async () => 'side effect',
+      () => true,
+    ),
+    'side effect',
+  );
 });
 
-test('topic timeout aborts locally and observes late 429 before admitting any lane', async t => {
+test('topic timeout aborts locally and observes late 429 before admitting any lane', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   const raw = Promise.withResolvers<void>();
   let aborted = false;
-  const pending = delivery.runTopic(1, 'name', 'slow', signal => {
-    signal.addEventListener('abort', () => { aborted = true; });
-    return raw.promise;
-  }, () => true);
+  const pending = delivery.runTopic(
+    1,
+    'name',
+    'slow',
+    (signal) => {
+      signal.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return raw.promise;
+    },
+    () => true,
+  );
   const timeout = assert.rejects(pending, /timed out after 5000ms/);
   await advance(5000);
   await timeout;
@@ -296,9 +492,31 @@ test('topic timeout aborts locally and observes late 429 before admitting any la
   raw.reject(limited(3));
   await settle();
   const calls: string[] = [];
-  const ordinary = delivery.run(1, async () => { calls.push('ordinary'); }, () => true);
-  const name = delivery.runTopic(1, 'name', 'next', async () => { calls.push('name'); }, () => true);
-  const icon = delivery.runTopic(1, 'icon', 'next', async () => { calls.push('icon'); }, () => true);
+  const ordinary = delivery.run(
+    1,
+    async () => {
+      calls.push('ordinary');
+    },
+    () => true,
+  );
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'next',
+    async () => {
+      calls.push('name');
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'next',
+    async () => {
+      calls.push('icon');
+    },
+    () => true,
+  );
   await advance(2999);
   assert.deepEqual(calls, []);
   await advance(1);
@@ -306,37 +524,86 @@ test('topic timeout aborts locally and observes late 429 before admitting any la
   assert.deepEqual(calls, ['ordinary', 'name', 'icon']);
 });
 
-test('close aborts running topic requests and cancels coalesced work without replay', async t => {
+test('close aborts running topic requests and cancels coalesced work without replay', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   const raw = Promise.withResolvers<void>();
   let aborted = false;
-  const pending = delivery.runTopic(1, 'icon', 'a', signal => {
-    signal.addEventListener('abort', () => { aborted = true; });
-    return raw.promise;
-  }, () => true);
-  const queued = delivery.runTopic(1, 'icon', 'b', async () => assert.fail('closed side effect'), () => true);
+  const pending = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    (signal) => {
+      signal.addEventListener('abort', () => {
+        aborted = true;
+      });
+      return raw.promise;
+    },
+    () => true,
+  );
+  const queued = delivery.runTopic(
+    1,
+    'icon',
+    'b',
+    async () => assert.fail('closed side effect'),
+    () => true,
+  );
   delivery.close();
   assert.deepEqual(await Promise.all([pending, queued]), [undefined, undefined]);
   assert.equal(aborted, true);
   raw.reject(limited(3));
   await advance(10000);
-  assert.equal(await delivery.runTopic(1, 'name', 'c', async () => assert.fail('reopened side effect'), () => true), undefined);
+  assert.equal(
+    await delivery.runTopic(
+      1,
+      'name',
+      'c',
+      async () => assert.fail('reopened side effect'),
+      () => true,
+    ),
+    undefined,
+  );
 });
 
-test('ordinary 429 cooldown gates both metadata lanes without blocking another chat', async t => {
+test('ordinary 429 cooldown gates both metadata lanes without blocking another chat', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
   let attempts = 0;
-  const ordinary = delivery.run(1, async () => {
-    if (++attempts === 1) throw limited(2);
-  }, () => true);
+  const ordinary = delivery.run(
+    1,
+    async () => {
+      if (++attempts === 1) throw limited(2);
+    },
+    () => true,
+  );
   await settle();
   const calls: string[] = [];
-  const name = delivery.runTopic(1, 'name', 'a', async () => { calls.push('name'); }, () => true);
-  const icon = delivery.runTopic(1, 'icon', 'a', async () => { calls.push('icon'); }, () => true);
-  await delivery.run(2, async () => { calls.push('other'); }, () => true);
+  const name = delivery.runTopic(
+    1,
+    'name',
+    'a',
+    async () => {
+      calls.push('name');
+    },
+    () => true,
+  );
+  const icon = delivery.runTopic(
+    1,
+    'icon',
+    'a',
+    async () => {
+      calls.push('icon');
+    },
+    () => true,
+  );
+  await delivery.run(
+    2,
+    async () => {
+      calls.push('other');
+    },
+    () => true,
+  );
   await advance(1999);
   assert.deepEqual(calls, ['other']);
   await advance(1);
@@ -346,61 +613,119 @@ test('ordinary 429 cooldown gates both metadata lanes without blocking another c
 });
 
 for (const outcome of ['true', 'false', 'throw'] as const) {
-  test(`reentrant same-key replacement survives an eligibility callback returning ${outcome}`, async t => {
+  test(`reentrant same-key replacement survives an eligibility callback returning ${outcome}`, async (t) => {
     const delivery = new TelegramDelivery();
     t.after(() => delivery.close());
     const calls: string[] = [];
     let replacement: Promise<string | undefined> | undefined;
-    const old = delivery.runTopic(1,'icon','same',async () => { calls.push('obsolete'); },() => {
-      replacement = delivery.runTopic(1,'icon','same',async () => { calls.push('replacement'); return 'sent'; },() => true);
-      if (outcome === 'throw') throw new Error('Replaced eligibility failed');
-      return outcome === 'true';
-    });
+    const old = delivery.runTopic(
+      1,
+      'icon',
+      'same',
+      async () => {
+        calls.push('obsolete');
+      },
+      () => {
+        replacement = delivery.runTopic(
+          1,
+          'icon',
+          'same',
+          async () => {
+            calls.push('replacement');
+            return 'sent';
+          },
+          () => true,
+        );
+        if (outcome === 'throw') throw new Error('Replaced eligibility failed');
+        return outcome === 'true';
+      },
+    );
     await settle();
-    assert.deepEqual(calls,['replacement']);
-    assert.equal(await old,undefined);
-    assert.equal(await replacement,'sent');
+    assert.deepEqual(calls, ['replacement']);
+    assert.equal(await old, undefined);
+    assert.equal(await replacement, 'sent');
   });
 }
 
 for (const outcome of ['false', 'throw'] as const) {
-  test(`reentrant admission revisits earlier lanes after eligibility returns ${outcome}`, async t => {
+  test(`reentrant admission revisits earlier lanes after eligibility returns ${outcome}`, async (t) => {
     const delivery = new TelegramDelivery();
     t.after(() => delivery.close());
     const calls: string[] = [];
     const failure = new Error('Eligibility failed after enqueue');
     let ordinary: Promise<string | undefined> | undefined;
-    const icon = delivery.runTopic(1,'icon','same',async () => assert.fail('Ineligible icon dispatched'),() => {
-      ordinary = delivery.run(1,async () => { calls.push('ordinary'); return 'sent'; },() => true);
-      if (outcome === 'throw') throw failure;
-      return false;
-    });
-    if (outcome === 'throw') await assert.rejects(icon,error => error === failure);
-    else assert.equal(await icon,undefined);
+    const icon = delivery.runTopic(
+      1,
+      'icon',
+      'same',
+      async () => assert.fail('Ineligible icon dispatched'),
+      () => {
+        ordinary = delivery.run(
+          1,
+          async () => {
+            calls.push('ordinary');
+            return 'sent';
+          },
+          () => true,
+        );
+        if (outcome === 'throw') throw failure;
+        return false;
+      },
+    );
+    if (outcome === 'throw') await assert.rejects(icon, (error) => error === failure);
+    else assert.equal(await icon, undefined);
     await settle();
-    assert.deepEqual(calls,['ordinary']);
-    assert.equal(await ordinary,'sent');
+    assert.deepEqual(calls, ['ordinary']);
+    assert.equal(await ordinary, 'sent');
   });
 }
 
-test('reentrant eligibility yields to a shared cooldown before both lanes resume', async t => {
+test('reentrant eligibility yields to a shared cooldown before both lanes resume', async (t) => {
   const advance = clock(t);
   const delivery = new TelegramDelivery();
   t.after(() => delivery.close());
-  await assert.rejects(delivery.runTopic(1,'name','limited',async () => { throw limited(1); },() => true));
+  await assert.rejects(
+    delivery.runTopic(
+      1,
+      'name',
+      'limited',
+      async () => {
+        throw limited(1);
+      },
+      () => true,
+    ),
+  );
   const calls: string[] = [];
   let budget = 100;
   let icon: Promise<void | undefined> | undefined;
-  const ordinary = delivery.run(1,async () => { calls.push('ordinary'); return 'sent'; },() => {
-    if (--budget === 0) throw new Error('Eligibility spun without yielding to the cooldown');
-    icon = delivery.runTopic(1,'icon','same',async () => { calls.push('icon'); },() => true);
-    return true;
-  });
-  const outcome = ordinary.then(value => ({value}),error => ({error}));
+  const ordinary = delivery.run(
+    1,
+    async () => {
+      calls.push('ordinary');
+      return 'sent';
+    },
+    () => {
+      if (--budget === 0) throw new Error('Eligibility spun without yielding to the cooldown');
+      icon = delivery.runTopic(
+        1,
+        'icon',
+        'same',
+        async () => {
+          calls.push('icon');
+        },
+        () => true,
+      );
+      return true;
+    },
+  );
+  const outcome = ordinary.then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
   await settle();
-  assert.deepEqual(calls,[]);
+  assert.deepEqual(calls, []);
   await advance(1000);
-  assert.deepEqual(await outcome,{value:'sent'});
+  assert.deepEqual(await outcome, { value: 'sent' });
   await icon;
-  assert.deepEqual(calls,['ordinary','icon']);
+  assert.deepEqual(calls, ['ordinary', 'icon']);
 });

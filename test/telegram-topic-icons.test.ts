@@ -147,42 +147,61 @@ test('maintenance restores a missing mirror without host admission or prompt rep
   } finally { await restarted?.close(); await app.close(); }
 });
 
-test('maintenance retries a dirty icon while unrelated frames arrive during host lookup', {timeout:15000}, async t => {
-  t.mock.timers.enable({apis:['setInterval']});
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  t.mock.method(Date,'now',() => now()+offset);
-  const app = await createSmokeApp();
-  const failed = Promise.withResolvers<void>();
-  const failure = new Error('Temporary icon delivery failure');
-  const warn = console.warn.bind(console);
-  t.mock.method(console,'warn',(...args: unknown[]) => {
-    warn(...args);
-    if (args.includes(failure)) failed.resolve();
-  });
-  try {
-    await liveTopic(app);
-    let reject = true;
-    app.bot.api.config.use(async (previous,method,payload,signal) => {
-      if (reject && method === 'editForumTopic' && 'icon_custom_emoji_id' in payload && payload.icon_custom_emoji_id === runningIcon) {
-        reject = false;
-        throw failure;
-      }
-      return previous(method,payload,signal);
+test(
+  'maintenance retries a dirty icon while unrelated frames arrive during host lookup',
+  { timeout: 15000 },
+  async (t) => {
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const now = Date.now.bind(Date);
+    let offset = 0;
+    t.mock.method(Date, 'now', () => now() + offset);
+    const app = await createSmokeApp();
+    const failed = Promise.withResolvers<void>();
+    const failure = new Error('Temporary icon delivery failure');
+    const warn = console.warn.bind(console);
+    t.mock.method(console, 'warn', (...args: unknown[]) => {
+      warn(...args);
+      if (args.includes(failure)) failed.resolve();
     });
-    app.emit({t:'event',event:{type:'agent_start'}});
-    await failed.promise;
-    const resolve = app.runtime.resolveExisting.bind(app.runtime);
-    t.mock.method(app.runtime,'resolveExisting',async (session: TopicSession) => {
-      app.emit({t:'event',event:{type:'notice',level:'info',source:'fixture',message:'Unrelated host output'}});
-      return resolve(session);
-    });
-    offset = 30_000;
-    t.mock.timers.tick(30000);
-    await eventually(() => lastIcon(app) === runningIcon);
-    assert.deepEqual(app.accepted,[]);
-  } finally { await app.close(); }
-});
+    try {
+      await liveTopic(app);
+      let reject = true;
+      app.bot.api.config.use(async (previous, method, payload, signal) => {
+        if (
+          reject &&
+          method === 'editForumTopic' &&
+          'icon_custom_emoji_id' in payload &&
+          payload.icon_custom_emoji_id === runningIcon
+        ) {
+          reject = false;
+          throw failure;
+        }
+        return previous(method, payload, signal);
+      });
+      app.emit({ t: 'event', event: { type: 'agent_start' } });
+      await failed.promise;
+      const resolve = app.runtime.resolveExisting.bind(app.runtime);
+      t.mock.method(app.runtime, 'resolveExisting', async (session: TopicSession) => {
+        app.emit({
+          t: 'event',
+          event: {
+            type: 'notice',
+            level: 'info',
+            source: 'fixture',
+            message: 'Unrelated host output',
+          },
+        });
+        return resolve(session);
+      });
+      offset = 30_000;
+      t.mock.timers.tick(30000);
+      await eventually(() => lastIcon(app) === runningIcon);
+      assert.deepEqual(app.accepted, []);
+    } finally {
+      await app.close();
+    }
+  },
+);
 
 
 test('maintenance retries pending initial authorization with an already connected listener', {timeout:15000}, async t => {

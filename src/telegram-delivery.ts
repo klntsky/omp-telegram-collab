@@ -1,5 +1,8 @@
 import { GrammyError } from 'grammy';
-import { AbortController as TelegramAbortController, type AbortSignal as TelegramAbortSignal } from 'abort-controller';
+import {
+  AbortController as TelegramAbortController,
+  type AbortSignal as TelegramAbortSignal,
+} from 'abort-controller';
 
 type LaneName = 'ordinary' | 'name' | 'icon';
 
@@ -34,7 +37,13 @@ export class TelegramDelivery {
     return this.enqueue(chatId, 'ordinary', String(this.sequence++), action, active);
   }
 
-  runTopic<T>(chatId: number, field: 'name' | 'icon', key: string, action: (signal: TelegramAbortSignal) => Promise<T>, active: () => boolean): Promise<T | undefined> {
+  runTopic<T>(
+    chatId: number,
+    field: 'name' | 'icon',
+    key: string,
+    action: (signal: TelegramAbortSignal) => Promise<T>,
+    active: () => boolean,
+  ): Promise<T | undefined> {
     return this.enqueue(chatId, field, key, action, active);
   }
 
@@ -52,14 +61,24 @@ export class TelegramDelivery {
     this.chats.clear();
   }
 
-  private enqueue<T>(chatId: number, name: LaneName, key: string, action: (signal: TelegramAbortSignal) => Promise<T>, active: () => boolean): Promise<T | undefined> {
+  private enqueue<T>(
+    chatId: number,
+    name: LaneName,
+    key: string,
+    action: (signal: TelegramAbortSignal) => Promise<T>,
+    active: () => boolean,
+  ): Promise<T | undefined> {
     if (this.closed) return Promise.resolve(undefined);
     let chat = this.chats.get(chatId);
     if (!chat) {
       chat = {
-        lanes: { ordinary: { pending: new Map() }, name: { pending: new Map() }, icon: { pending: new Map() } },
+        lanes: {
+          ordinary: { pending: new Map() },
+          name: { pending: new Map() },
+          icon: { pending: new Map() },
+        },
         nextStartAt: 0,
-        admission: {kind:'idle'},
+        admission: { kind: 'idle' },
       };
       this.chats.set(chatId, chat);
     }
@@ -85,7 +104,9 @@ export class TelegramDelivery {
           outcome();
         };
         const timer = setTimeout(() => {
-          finish(() => finished.reject(new Error('Telegram topic delivery timed out after 5000ms')));
+          finish(() =>
+            finished.reject(new Error('Telegram topic delivery timed out after 5000ms')),
+          );
           controller.abort();
         }, 5000);
         job.abort = () => {
@@ -95,8 +116,8 @@ export class TelegramDelivery {
         try {
           const raw = action(controller.signal);
           void raw.then(
-            value => finish(() => finished.resolve(value)),
-            error => {
+            (value) => finish(() => finished.resolve(value)),
+            (error) => {
               this.observeRateLimit(owner, error);
               finish(() => finished.reject(error));
             },
@@ -129,7 +150,7 @@ export class TelegramDelivery {
       chat.admission.requested = true;
       return;
     }
-    const pass: {kind:'running';requested:boolean} = {kind:'running',requested:false};
+    const pass: { kind: 'running'; requested: boolean } = { kind: 'running', requested: false };
     chat.admission = pass;
     clearTimeout(chat.timer);
     chat.timer = undefined;
@@ -160,23 +181,27 @@ export class TelegramDelivery {
           }
           lane.pending.delete(key);
           lane.running = job;
-          void job.execute().catch(error => {
-            if (name === 'ordinary' && this.observeRateLimit(chat, error)) {
-              if (this.closed) job.cancel();
-              else lane.pending = new Map([[key, job], ...lane.pending]);
-            } else {
-              job.reject(error);
-            }
-          }).finally(() => {
-            lane.running = undefined;
-            this.admit(chat);
-          });
+          void job
+            .execute()
+            .catch((error) => {
+              if (name === 'ordinary' && this.observeRateLimit(chat, error)) {
+                if (this.closed) job.cancel();
+                else lane.pending = new Map([[key, job], ...lane.pending]);
+              } else {
+                job.reject(error);
+              }
+            })
+            .finally(() => {
+              lane.running = undefined;
+              this.admit(chat);
+            });
           break;
         }
       }
     } finally {
-      chat.admission = {kind:'idle'};
-      if (pass.requested && !this.closed && chat.timer === undefined) queueMicrotask(() => this.admit(chat));
+      chat.admission = { kind: 'idle' };
+      if (pass.requested && !this.closed && chat.timer === undefined)
+        queueMicrotask(() => this.admit(chat));
     }
   }
 }

@@ -139,8 +139,8 @@ export class Store {
   setTopicTitle(id: string, name: string, prefix: string): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(name,id);
-      this.setTopicTitlePrefix(id,prefix);
+      this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(name, id);
+      this.setTopicTitlePrefix(id, prefix);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
