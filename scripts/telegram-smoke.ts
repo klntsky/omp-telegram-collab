@@ -14,7 +14,7 @@ import type { SessionState, HostFrame, GuestFrame, AssistantMessage, SessionEntr
 import type { AppConfig, CollabHandlers, HostBinding, TopicSession } from '../shared/contracts.js';
 import { createBot } from '../src/bot.js';
 import type { readCollabState } from '../src/collab.js';
-import { createServer } from '../src/server.js';
+import { createServer, type GatewayServer } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { SessionCapacityError } from '../src/runtime.js';
 import { writeConfig } from '../src/config.js';
@@ -374,17 +374,35 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     return { ...state, sessionName: sessionTitles.get(binding.sessionId) ?? state.sessionName };
   });
   const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,readState,bot});
-  await service.initialize();
-  service.startBackground();
-  await service.refreshSkillCatalogs();
-  const reservation = createHttpServer();
-  const reservedUrl = await listen(reservation);
-  const port = Number(new URL(reservedUrl).port);
-  await close(reservation);
-  config.publicUrl = reservedUrl.replace('http:', 'https:');
-  writeConfig(config);
-  const server = createServer({ config, bots: [service], store, runtime, connect });
-  const url = await listen(server, port);
+  let server: GatewayServer | undefined;
+  const disposeFixture = async () => {
+    const errors: unknown[] = [];
+    for (const dispose of [
+      () => server?.closeConnections(),
+      async () => { if (server?.listening) await close(server); },
+      () => service.close(),
+      () => store.close(),
+      () => close(telegram),
+      () => rm(directory, { recursive: true, force: true }),
+    ]) {
+      try { await dispose(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Fixture cleanup failed');
+  };
+  let url: string;
+  try {
+    await service.initialize();
+    service.startBackground();
+    await service.refreshSkillCatalogs();
+    server = createServer({ config, bots: [service], store, runtime, connect });
+    url = await listen(server);
+  } catch (error) {
+    try { await disposeFixture(); } catch (cleanupError) {
+      console.error('Could not clean up failed fixture startup.', cleanupError);
+    }
+    throw error;
+  }
   async function update(message: Record<string, unknown>, from = user) {
     const created = message.forum_topic_created as
       | { name: string; icon_custom_emoji_id?: string }
@@ -503,14 +521,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     initData(sessionId: string) {
       return signedInitData(sessionId);
     },
-    async close() {
-      await server.closeConnections();
-      await close(server);
-      await service.close();
-      store.close();
-      await close(telegram);
-      await rm(directory, { recursive: true, force: true });
-    },
+    close: disposeFixture,
   };
 }
 

@@ -43,6 +43,8 @@ Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After ch
 
 The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
 
+Local fixtures use OS-assigned ephemeral ports and keep each listener bound until teardown. Use the returned `app.url` for loopback transport and `app.config.publicUrl` for the gateway Origin header; the configured public origin is independent of the listening port. Bot or gateway initialization failures close the resources already started and preserve the original startup diagnostic.
+
 Run one file or select a test by name (a regular expression), with flags before paths:
 
 ```sh
