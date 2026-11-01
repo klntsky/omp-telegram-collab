@@ -538,7 +538,7 @@ export class BotService {
     const decoded = JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
       changes: [SettingsKey, { label: string; before: string; after: string }][];
     };
-    if ((!decoded.capacityInput && !decoded.folderInput) || !sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    if (!sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
     return { ...decoded, changes: new Map(decoded.changes) };
   }
   private async saveSettingsReply(ctx: Context, panel: SettingsPanel): Promise<void> {
@@ -651,8 +651,11 @@ export class BotService {
       });
       button('Runtime folders', {kind:'page',page:'folders'});
     } else if (page === 'folders') {
-      text = `Runtime folders\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${(chat.folder_options ?? []).slice(offset,offset+8).map(path => path.slice(0,250)).join('\n') || '(none)'}`;
-      (chat.folder_options ?? []).slice(offset,offset+8).forEach((path,index) => button(`Remove ${path}`,{kind:'folders',remove:offset+index}));
+      const folders = chat.folder_options ?? [];
+      const sole = folders[0] ?? '.';
+      const summary = folders.length > 1 ? 'Ask when starting a session.' : `Uses ${sole === '.' ? '<Default>' : sole}.`;
+      text = `Runtime folders\n${summary}\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${folders.slice(offset,offset+8).map(path => path === '.' ? '<Default>' : path.slice(0,250)).join('\n') || '(no explicit folders)'}`;
+      folders.slice(offset,offset+8).forEach((path,index) => button(`Remove ${path === '.' ? '<Default>' : path}`,{kind:'folders',remove:offset+index}));
       if (offset > 0) button('Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
       if (offset+8 < (chat.folder_options ?? []).length) button('Next folders',{kind:'page',page:'folders',offset:offset+8});
       button('Clear folders',{kind:'folders',clear:true});
@@ -891,12 +894,13 @@ export class BotService {
       const config = await this.settingsAccess(ctx,panel,true);
       if (action.input) {
         panel.folderInput = action.input;
-        panel.choices = [];
+        panel.revision++;
+        panel.choices = [{kind:'page',page:'folders'}];
         this.saveSettingsPanel(panel);
         await ctx.answerCallbackQuery();
         await this.bot.api.editMessageText(panel.chatId,panel.messageId,
           action.input === 'append' ? 'Reply to this message with paths relative to the forum instance, one per line, to add folders.' : 'Reply to this message with paths relative to the forum instance, one per line, to replace all folders.',
-          {reply_markup:{inline_keyboard:[]}});
+          {reply_markup:{inline_keyboard:[[{text:'Cancel',callback_data:`settings:${panel.token}:${panel.revision}:0`}]]}});
         return;
       }
       const chat = findInstance(config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
@@ -2951,7 +2955,7 @@ export class BotService {
     this.termination = undefined;
     const settingsPanel = this.settingsReplyPanel(ctx);
     if (settingsPanel) {
-      await this.saveSettingsReply(ctx, settingsPanel);
+      if (settingsPanel.capacityInput || settingsPanel.folderInput) await this.saveSettingsReply(ctx, settingsPanel);
       return;
     }
     if (ctx.inlineQuery) {

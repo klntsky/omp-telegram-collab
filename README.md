@@ -282,6 +282,8 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
 Open `/settings` as a group administrator and select **Runtime folders**. Choose **Add folder**, then reply to that exact message with a relative path on the agent's computer. Adding appends without replacing existing options. To replace all options, explicitly choose **Replace folders** and reply with relative paths, one per line. Use **Remove** to delete any option, including `.`, or **Clear folders** to empty the list. Missing folders are allowed in the list. Equivalent relative paths are normalized and deduplicated in order.
 
+The folder page summarizes the effective behavior: **Uses `<Default>`**, **Uses projects/backend**, or **Ask when starting a session**. Both **Add folder** and **Replace folders** offer **Cancel**, which returns to the list without saving the pending entry.
+
 <details>
 <summary>Example folder settings and selection</summary>
 
@@ -297,7 +299,7 @@ Paths and task names below are filler values. These are label excerpts; other se
 3. After `/new Inspect the example project`, the bot offers **`<Default>`** for `.` and `projects/new-service` as buttons. No default option is added implicitly.
 4. Selecting the missing `projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it. Creation requires that separate confirmation.
 5. If folder access fails, the task stays pending. **Retry** retries the choice; **Choose another folder** returns to the available options when there is more than one.
-6. Remove `.` to leave only `projects/new-service`: future sessions use that folder automatically, without a picker.
+6. Choose **Remove `<Default>`** to leave only `projects/new-service`: future sessions use that folder without a picker.
 
 For a member's proposed task with multiple options, an administrator selects a folder in the combined approval-and-selection screen. Selecting an existing folder both approves the task and chooses its directory; there is no separate **Approve** step first. With zero or one stored option, normal administrator approval is still required, then the sole effective folder is used automatically.
 

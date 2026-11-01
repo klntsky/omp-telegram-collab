@@ -600,3 +600,25 @@ test('manual folder creation rechecks administrator authority before registering
     assert.equal(app.connectionCount,0);
   } finally { await app.close(); }
 });
+
+for (const mode of ['append','replace'] as const) {
+  test(`cancelling folder ${mode} ignores a late reply and permits a fresh edit`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      configure(app,['.']);
+      await app.update({text:'/settings'});
+      await clickSettings(app,7);
+      await clickSettings(app,mode === 'append' ? 2 : 3);
+      const input = panel(app,'settings:');
+      await app.callback(callbacks(input)[0]!,input);
+      await app.update({text:'cancelled-folder',reply_to_message:input});
+      assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.']);
+      await clickSettings(app,mode === 'append' ? 2 : 3);
+      await app.update({text:'accepted-folder',reply_to_message:panel(app,'settings:')});
+      assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,
+        mode === 'append' ? ['.','accepted-folder'] : ['accepted-folder']);
+      assert.deepEqual(app.store.listSessions(botId),[]);
+    } finally { await app.close(); }
+  });
+}
