@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { accessSync, constants, mkdirSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, normalize, resolve } from 'node:path';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
@@ -111,6 +111,7 @@ interface SessionObservation { task?: TaskObservation; failure?: StatusFailure; 
 interface Listener {
   sessionId: string;
   generation: number;
+  ompSessionId?: string;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   tail: Promise<void>;
@@ -207,6 +208,7 @@ interface SettingsPanel {
   capacityInput?: boolean;
   changes: Map<SettingsKey, {label: string; before: string; after: string}>;
   folderInput?: 'append' | 'replace';
+  folderInputEnded?: boolean;
 }
 type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default'};
 interface PresetPanel {
@@ -254,12 +256,11 @@ function optionMarker(index: number): string {
   const number = index+1;
   return number === 10 ? '🔟' : String(number).replace(/\d/g, digit => `${digit}\uFE0F\u20E3`);
 }
-function assistantText(message: unknown): { text: string; fingerprint: string } | undefined {
+function assistantText(message: unknown): string | undefined {
   if (!message || typeof message !== 'object' || !('role' in message) || message.role !== 'assistant' || !('content' in message) || !Array.isArray(message.content)) return undefined;
   const text = message.content.filter((part): part is {type:'text';text:string} => Boolean(part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')).map(part => part.text).join('\n');
   if (!text.trim()) return undefined;
-  const timestamp = 'timestamp' in message ? message.timestamp : null;
-  return { text, fingerprint: createHash('sha256').update(JSON.stringify([timestamp, text])).digest('hex') };
+  return text;
 }
 
 function retryDelay(ms: number, signal: TelegramAbortController['signal']): Promise<void> {
@@ -539,6 +540,8 @@ export class BotService {
       changes: [SettingsKey, { label: string; before: string; after: string }][];
     };
     if (!sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    if (!decoded.capacityInput && !decoded.folderInput &&
+        (!decoded.folderInputEnded || message.text?.startsWith('/'))) return;
     return { ...decoded, changes: new Map(decoded.changes) };
   }
   private async saveSettingsReply(ctx: Context, panel: SettingsPanel): Promise<void> {
@@ -712,6 +715,7 @@ export class BotService {
     panel.revision = revision;
     panel.offset = offset;
     panel.capacityInput = page === 'capacity';
+    if (panel.folderInput) panel.folderInputEnded = true;
     panel.folderInput = undefined;
     this.saveSettingsPanel(panel);
   }
@@ -1232,6 +1236,7 @@ export class BotService {
   }
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
+    this.options.store.recoverInitialTaskPreparations(this.id);
     await this.syncCommandMenus();
     await this.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
@@ -2459,91 +2464,101 @@ export class BotService {
       ctx.from!.id,
       authority.from!.id,
     );
-    reservation?.bind(session.id);
-    if (automaticWorktree) {
-      await this.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.currentAdmin(authority)))
-        throw new Error('Administrator access changed before worktree creation.');
-      await this.createTopicWorktree(session);
-      if (task !== undefined && !extensions.length) {
+    this.options.store.beginInitialTaskPreparation(session.id);
+    try {
+      reservation?.bind(session.id);
+      if (automaticWorktree) {
         await this.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.currentAdmin(authority)))
-          throw new Error('Administrator access changed before initial task submission.');
-        this.requireSessionAssignment(session);
-        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+          throw new Error('Administrator access changed before worktree creation.');
+        await this.createTopicWorktree(session);
+        if (task !== undefined && !extensions.length) {
+          await this.authorize(ctx.chat!.id, ctx.from!.id);
+          if (!(await this.currentAdmin(authority)))
+            throw new Error('Administrator access changed before initial task submission.');
+          this.requireSessionAssignment(session);
+          this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+        }
       }
-    }
-    if (extensions.length) {
-      try {
-        await this.preparePrompt(ctx, session, extensions, authority);
-      } catch (error) {
-        await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
-          console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
-        });
-        throw error;
+      if (extensions.length) {
+        try {
+          await this.preparePrompt(ctx, session, extensions, authority);
+        } catch (error) {
+          await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
+            console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
+          });
+          throw error;
+        }
+        if (task !== undefined) {
+          await this.authorize(ctx.chat!.id, ctx.from!.id);
+          if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+          this.requireSessionAssignment(session);
+          this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+        }
       }
-      if (task !== undefined) {
-        await this.authorize(ctx.chat!.id, ctx.from!.id);
-        if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
-        this.requireSessionAssignment(session);
-        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+      if (worktree) {
+        const text = await this.options.runtime.worktree(session, task?.text || undefined);
+        this.options.store.setSessionRuntime(session.id, session.runtime);
+        task = undefined;
+        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
       }
-    }
-    if (worktree) {
-      const text = await this.options.runtime.worktree(session, task?.text || undefined);
-      this.options.store.setSessionRuntime(session.id, session.runtime);
-      task = undefined;
-      await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
-    }
-    if (worktree) {
-      const sourceKey = this.skills.key(ctx);
-      const destinationKey = {
-        ...sourceKey,
-        destination: topicDestination(session.chatId, session.threadId),
-      };
-      for (const skill of this.options.store.getPendingSkills(sourceKey))
-        this.options.store.addPendingSkill(destinationKey, skill);
-      this.options.store.clearPendingSkills(sourceKey);
-      const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
-      if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
-    }
-    accepted?.();
-    if (task !== undefined && ctx.message)
-      this.options.store.setInitialMessage(session.id, ctx.message.message_id);
-    await replyTo(
-      ctx,
-      contextDestination(ctx),
-      `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`,
-      {
-        reply_parameters: {
-          message_id: ctx.message!.message_id,
-          allow_sending_without_reply: true,
+      if (worktree) {
+        const sourceKey = this.skills.key(ctx);
+        const destinationKey = {
+          ...sourceKey,
+          destination: topicDestination(session.chatId, session.threadId),
+        };
+        for (const skill of this.options.store.getPendingSkills(sourceKey))
+          this.options.store.addPendingSkill(destinationKey, skill);
+        this.options.store.clearPendingSkills(sourceKey);
+        const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
+        if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
+      }
+      accepted?.();
+      if (task !== undefined && ctx.message)
+        this.options.store.setInitialMessage(session.id, ctx.message.message_id);
+      if (task !== undefined && ctx.message)
+        for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
+          if (original.message && original.message.message_id !== ctx.message.message_id)
+            this.options.store.recordPromptMessageAlias(session.id, ctx.message.message_id, original.message.message_id);
+      await replyTo(
+        ctx,
+        contextDestination(ctx),
+        `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`,
+        {
+          reply_parameters: {
+            message_id: ctx.message!.message_id,
+            allow_sending_without_reply: true,
+          },
+          link_preview_options: { is_disabled: true },
         },
-        link_preview_options: { is_disabled: true },
-      },
-    );
-    await this.announce(session);
-    const source = ctx.message;
-    if (task !== undefined && source?.reply_to_message) {
-      await forwardTo(
-        this.bot.api,
-        topicDestination(session.chatId, session.threadId),
-        ctx.chat!.id,
-        source.reply_to_message.message_id,
       );
-    }
-    if (task !== undefined)
-      for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-        if (original.message)
-          await forwardTo(
+      await this.announce(session);
+      const source = ctx.message;
+      if (task !== undefined && source?.reply_to_message) {
+        await forwardTo(
+          this.bot.api,
+          topicDestination(session.chatId, session.threadId),
+          ctx.chat!.id,
+          source.reply_to_message.message_id,
+        );
+      }
+      if (task !== undefined)
+        for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
+          if (!original.message) continue;
+          const forwarded = await forwardTo(
             this.bot.api,
             topicDestination(session.chatId, session.threadId),
             ctx.chat!.id,
             original.message.message_id,
           );
-      }
-    await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
-    await this.listen(session);
+          this.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
+        }
+      await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
+      await this.listen(session);
+    } finally {
+      this.options.store.finishInitialTaskPreparation(session.id);
+    }
     await this.sendInitial(session);
   }
   private localCliCommand(): string {
@@ -2925,6 +2940,9 @@ export class BotService {
       this.consumePendingSkills(selected.key,selected.names);
       if (selected.topicSkill) this.options.store.clearNewTopicSkill(session.id);
     }
+    for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
+      if (original.message && original.message.message_id !== messageId)
+        this.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
     try {
       this.sendPrompt(this.listeners.get(session.id)!,content,messageId,restore);
     } catch (error) {
@@ -3842,7 +3860,7 @@ export class BotService {
       tail: Promise.resolve(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
-      receiptBoundary: this.options.store.beginPromptReceiptSnapshot(session.id),
+      receiptBoundary: 0,
       snapshotReplyTarget: this.options.store.getReplyTarget(session.id),
       pendingPrompts: [],
       pendingAnswers: new Map(),
@@ -3872,6 +3890,7 @@ export class BotService {
         if (!active()) throw closed;
         await this.applySessionTitle(session);
         if (!active()) throw closed;
+        listener.ompSessionId = binding.sessionId;
         return (this.options.connect ?? connectCollab)(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
@@ -3944,8 +3963,10 @@ export class BotService {
       listener.generation !== this.options.store.getSessionGeneration(session.id)
     )
       throw new Error('Session closed');
+    if (listener.ompSessionId === undefined) throw new Error('OMP session is not connected');
     const submissionId = this.options.store.recordPromptSubmission(
       session.id,
+      listener.ompSessionId,
       `Telegram @${this.bot.botInfo!.username}`,
       content,
       messageId,
@@ -4014,6 +4035,7 @@ export class BotService {
     listener: Listener,
     entry: CustomMessageEntry,
     replay: boolean,
+    ompSessionId: string,
   ): void {
     const text =
       typeof entry.content === 'string'
@@ -4036,7 +4058,7 @@ export class BotService {
         : undefined;
     const receipt = this.options.store.recordPromptReceipt(
       session.id,
-      entry.id,
+      {ompSessionId,entryId:entry.id,parentEntryId:entry.parentId},
       sender,
       { text, ...(images === undefined ? {} : { images }) },
       replay ? listener.receiptBoundary : undefined,
@@ -4373,6 +4395,12 @@ export class BotService {
       this.options.store.getSessionGeneration(session.id) !== listener.generation
     )
       return;
+    const ompSessionId = listener.ompSessionId;
+    if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
+    if (frame.t === 'welcome') {
+      listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
+      listener.snapshotReplyTarget = this.options.store.getReplyTarget(session.id);
+    }
     this.options.runtime.observeFrame(session.id, frame);
     if (
       frame.t === 'welcome' ||
@@ -4534,7 +4562,7 @@ export class BotService {
       frame.entry.type === 'custom_message' &&
       frame.entry.customType === COLLAB_PROMPT_MESSAGE_TYPE
     )
-      this.reconcilePromptReceipt(session, listener, frame.entry, replay);
+      this.reconcilePromptReceipt(session, listener, frame.entry, replay, ompSessionId);
     if (frame.t === 'error') {
       listener.pendingAnswers.clear();
       listener.pendingStops.length = 0;
@@ -4558,7 +4586,9 @@ export class BotService {
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
-          if (result) this.options.store.rememberReply(session.id, result.fingerprint);
+          if (result) this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
+            text: result, timestamp: entry.message.timestamp,
+          });
         }
       }
       if (frame.final) {
@@ -4567,13 +4597,16 @@ export class BotService {
       }
       return;
     }
-    const result =
-      frame.t === 'event' && frame.event.type === 'message_end'
-        ? assistantText(frame.event.message)
-        : frame.t === 'entry' && frame.entry.type === 'message'
-          ? assistantText(frame.entry.message)
-          : undefined;
-    if (!result || !this.options.store.rememberReply(session.id, result.fingerprint)) return;
+    if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
+    const entry = frame.entry;
+    const text = assistantText(entry.message);
+    if (!text) return;
+    const unseen = replay
+      ? this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
+          text, timestamp: entry.message.timestamp,
+        })
+      : this.options.store.rememberReply(session.id, ompSessionId, entry.id);
+    if (!unseen) return;
     const replyTarget = replay
       ? listener.snapshotReplyTarget
       : this.options.store.getReplyTarget(session.id);
@@ -4597,14 +4630,15 @@ export class BotService {
           !this.sessionAssigned(current)
         )
           return;
-        for (const text of renderTelegramMarkdown(result.text)) {
+        let partIndex = 0;
+        for (const part of renderTelegramMarkdown(text)) {
           if (!this.sessionAssigned(current)) return;
-          await this.delivery.run(
+          const sent = await this.delivery.run(
             session.chatId,
             () =>
               this.bot.api.sendRichMessage(
                 session.chatId,
-                { markdown: text },
+                { markdown: part },
                 {
                   message_thread_id: session.threadId === 1 ? undefined : session.threadId,
                   ...(replyTarget === undefined
@@ -4622,9 +4656,14 @@ export class BotService {
               this.sessionAssigned(current) &&
               this.listeners.get(session.id) === listener,
           );
+          if (!sent) return;
+          this.options.store.recordMessageAnchor(session.id, sent.chat.id, sent.message_id, {
+            ompSessionId, entryId:entry.id, parentEntryId:entry.parentId,
+            kind:'assistant', partIndex:partIndex++,
+          });
         }
       })
-      .catch(() => undefined)
+      .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
       .finally(() => {
         listener.queued--;
       });

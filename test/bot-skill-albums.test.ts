@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
-import { botId } from './telegram-data.js';
+import { botId, chatId } from './telegram-data.js';
 
 for (const general of [false,true]) {
   test(`image albums consume skills once and preserve all images in ${general ? 'General initial tasks' : 'session prompts'}`, {timeout:15000}, async t => {
@@ -27,10 +27,17 @@ for (const general of [false,true]) {
         images:[{type:'image',data:bytes,mimeType:'image/jpeg'},{type:'image',data:bytes,mimeType:'image/jpeg'}],
       });
       assert.deepEqual(downloads,['first','second']);
-      if (general) {
-        const created = app.store.listSessions(botId).find(session=>session.threadId!==threadId && session.name!=='Seed')!;
-        assert.ok(created);
-      }
+      const session = general
+        ? app.store.listSessions(botId).find(session => session.threadId !== threadId && session.name !== 'Seed')!
+        : app.store.listSessions(botId).find(session => session.threadId === threadId)!;
+      const binding = await app.runtime.ensure(session);
+      const expected = {ompSessionId:binding.sessionId,entryId:`accepted-${app.accepted.length}`,parentEntryId:null,kind:'collab-prompt',partIndex:0};
+      for (const messageId of [8001,8002])
+        assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, messageId), expected);
+      if (general)
+        for (const forwarded of app.messages.filter(message => [8001,8002].includes(Number(message.forwarded_message_id))))
+          assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(forwarded.message_id)), expected);
+      assert.equal(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, 7999), undefined);
       await app.update({text:'/p Next',message_thread_id:threadId});
       assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{t:'prompt',text:'Next'});
     } finally {
