@@ -194,7 +194,7 @@ type SettingsAction =
     }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
-  | { kind: 'folders'; remove?: number; clear?: boolean }
+  | { kind: 'folders'; remove?: number; clear?: boolean; input?: 'append' | 'replace' }
   | { kind: 'close' };
 interface SettingsPanel {
   token: string;
@@ -207,7 +207,7 @@ interface SettingsPanel {
   choices: SettingsAction[];
   capacityInput?: boolean;
   changes: Map<SettingsKey, {label: string; before: string; after: string}>;
-  folderInput?: boolean;
+  folderInput?: 'append' | 'replace';
 }
 type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default'};
 interface PresetPanel {
@@ -315,10 +315,11 @@ export class BotService {
   private readonly albums = new Map<string, {contexts:Context[];ready:Promise<void>;resolve:()=>void;timer?:NodeJS.Timeout}>();
   private readonly albumPrompts = new WeakMap<Context, {contexts:Context[]}>();
   private readonly folderRequests = new Map<string, {
-    state: {kind:'choose';offset:number} | {kind:'create';path:string};
-    source: Context; authority: Context; messageId: number; expires: number;
+    state: {kind:'choose';offset:number} | {kind:'create';path:string} | {kind:'failed';path:string;create:boolean} | {kind:'setup'} | {kind:'input'};
+    source: Context; authority?: Context; messageId: number; expires: number;
     epoch: number; instancePath: string; fingerprint: string; options: string[]; required: boolean;
-    resume: (cwd: string) => Promise<void>;
+    resume: (cwd: string, authority: Context) => Promise<void>;
+    active?: () => boolean;
   }>();
   private folderSettings(chatId: number) {
     const assigned = findInstance(readConfig(this.options.config.configPath), this.id, chatId);
@@ -334,92 +335,196 @@ export class BotService {
     rows.push([{text:'Cancel',callback_data:`folder:${token}:cancel`}]);
     return rows;
   }
-  private async chooseFolder(source: Context, authority: Context, resume: (cwd: string) => Promise<void>): Promise<boolean> {
+  private async chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean> {
     const epoch = this.admissionEpoch;
     const settings = this.folderSettings(source.chat!.id);
     if (!settings.required && !settings.options.length) return false;
-    if (!settings.options.length) throw new Error('Folder selection is required, but no folders are configured. Ask a group administrator to add folders in /settings.');
     const token = randomBytes(16).toString('base64url');
-    const rows = this.folderKeyboard(token,settings.options,settings.required,0);
-    const message = await replyTo(source, contextDestination(source), 'Choose the runtime folder for this session.', {reply_markup:{inline_keyboard:rows}});
+    const rows = settings.options.length ? this.folderKeyboard(token,settings.options,settings.required,0) :
+      [[{text:'Add folder',callback_data:`folder:${token}:add`}],[{text:'Cancel',callback_data:`folder:${token}:cancel`}]];
+    const message = await replyTo(source, contextDestination(source), settings.options.length ?
+      (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.') :
+      'A runtime folder is required, but none are configured. Ask a group administrator to Add folder here; your task will remain pending.', {reply_markup:{inline_keyboard:rows}});
     if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch ||
         JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
       throw new Error('Folder settings or service state changed. Send the command again.');
-    this.folderRequests.set(token, {...settings,state:{kind:'choose',offset:0},source,authority,messageId:message.message_id,
-      expires:Date.now()+300000,epoch,fingerprint:JSON.stringify(settings),resume});
-    setTimeout(() => this.folderRequests.delete(token),300000).unref();
+    const request = {...settings,state:settings.options.length ? {kind:'choose' as const,offset:0} : {kind:'setup' as const},source,authority,messageId:message.message_id,
+      expires:Date.now()+300000,epoch,fingerprint:JSON.stringify(settings),resume,active};
+    this.folderRequests.set(token,request);
+    setTimeout(() => {
+      let pending = false;
+      for (const [activeToken,active] of this.folderRequests) {
+        if (active === request) { this.folderRequests.delete(activeToken); pending = true; }
+      }
+      if (!pending) return;
+      void source.api.editMessageText(source.chat!.id,message.message_id,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}})
+        .catch(error => console.error('Could not retire expired folder controls.',error));
+    },300000).unref();
     return true;
   }
   private async folderCallback(ctx: Context, data: string): Promise<void> {
-    const match = /^folder:([A-Za-z0-9_-]{22}):(\d+|default|create|cancel|page\d+)$/.exec(data);
-    const request = match && this.folderRequests.get(match[1]!);
+    const match = /^folder:([A-Za-z0-9_-]{22}):(\d+|default|create|retry|other|add|cancel|page\d+)$/.exec(data);
     const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
-    if (!match || !request || !message || !ctx.from || ctx.from.is_bot || ctx.from.id !== request.authority.from!.id ||
-        ctx.chat?.id !== request.source.chat!.id || message.message_id !== request.messageId ||
-        !sameTopicDestination(contextDestination(ctx),contextDestination(request.source)) ||
-        !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
-    if (request.state.kind === 'create' && match[2] !== 'create' && match[2] !== 'cancel') return;
-    if (request.state.kind === 'choose' && (match[2] === 'create' ||
-        (match[2] === 'default' && request.required))) return;
-    if (request.state.kind === 'choose' && /^\d+$/.test(match[2]!) &&
-        (Number(match[2]) < request.state.offset || Number(match[2]) >= request.state.offset+8 ||
-          request.options[Number(match[2])] === undefined)) return;
-    this.folderRequests.delete(match[1]!);
-    await ctx.answerCallbackQuery();
-    if (match[2] === 'cancel') {
-      await ctx.editMessageText('Folder selection cancelled.', {reply_markup:{inline_keyboard:[]}});
+    if (!match || !ctx.from || ctx.from.is_bot) return;
+    if (!message || !ctx.chat || !('from' in message) || message.from?.id !== this.id ||
+        'forward_origin' in message || 'forward_date' in message) {
+      await ctx.answerCallbackQuery('This folder request cannot be recovered. Send the original task again.');
       return;
     }
-    await this.authorize(ctx.chat!.id,request.source.from!.id);
-    if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before folder selection.');
-    if (request.expires <= Date.now() || request.epoch !== this.admissionEpoch || this.stopped ||
-        refreshTermination(this.options.config) || JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
-      throw new Error('This folder request is stale. Send the command again.');
-    if (request.state.kind === 'choose' && match[2]!.startsWith('page')) {
-      const offset = Number(match[2]!.slice(4));
-      if (!Number.isSafeInteger(offset) || offset < 0 || offset >= request.options.length || offset % 8 !== 0) return;
-      request.state.offset = offset;
-      await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:this.folderKeyboard(match[1]!,request.options,request.required,offset)}});
-      this.folderRequests.set(match[1]!,request);
-      return;
-    }
-    let path: string;
-    if (request.state.kind === 'create') {
-      if (match[2] !== 'create') return;
-      path = request.state.path;
-      mkdirSync(path,{recursive:true});
-    } else {
-      if (match[2] === 'default' && !request.required) path = request.instancePath;
-      else if (/^\d+$/.test(match[2]!) && Number(match[2]) >= request.state.offset &&
-          Number(match[2]) < request.state.offset+8 && request.options[Number(match[2])]) path = request.options[Number(match[2])]!;
-      else return;
-      try { statSync(path); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        let ancestor = dirname(path);
-        while (true) {
-          try { statSync(ancestor); break; } catch (ancestorError) {
-            if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor) throw ancestorError;
-            ancestor = dirname(ancestor);
-          }
-        }
-        accessSync(ancestor,constants.W_OK | constants.X_OK);
-        request.state = {kind:'create',path};
-        await ctx.editMessageText(`${error instanceof Error ? error.message : String(error)}\nCreate folder ${path}?`, {reply_markup:{inline_keyboard:[[
-          {text:'Create folder',callback_data:`folder:${match[1]}:create`},
-          {text:'Cancel',callback_data:`folder:${match[1]}:cancel`},
-        ]]}});
-        this.folderRequests.set(match[1]!,request);
+    let token = match[1]!;
+    const action = match[2]!;
+    const request = this.folderRequests.get(token);
+    if (!request) {
+      await this.authorize(ctx.chat.id,ctx.from.id);
+      if (!(await this.currentAdmin(ctx))) {
+        await ctx.answerCallbackQuery('This request is no longer active. Ask an administrator to send the task again.');
         return;
       }
+      if ([...this.folderRequests.values()].some(active => active.source.chat!.id === ctx.chat!.id && active.messageId === message.message_id)) {
+        await ctx.answerCallbackQuery('This selection is outdated. Use the current folder buttons.');
+        return;
+      }
+      await ctx.answerCallbackQuery('This request expired or was discarded when the bot restarted. Send the task again.');
+      const rows = 'reply_markup' in message ? message.reply_markup?.inline_keyboard : undefined;
+      if (rows?.length && rows.flat().every(button => 'callback_data' in button && button.callback_data.startsWith(`folder:${token}:`)))
+        await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
+      return;
     }
-    opendirSync(path).closeSync();
-    accessSync(path,constants.R_OK | constants.X_OK);
-    const cwd = realpathSync(path);
-    await ctx.editMessageText(`Runtime folder: ${cwd}`, {reply_markup:{inline_keyboard:[]}});
+    if (ctx.chat.id !== request.source.chat!.id || message.message_id !== request.messageId ||
+        !sameTopicDestination(contextDestination(ctx),contextDestination(request.source)) ||
+        (request.authority && ctx.from.id !== request.authority.from!.id)) return;
+    await this.authorize(ctx.chat.id,ctx.from.id);
+    await this.authorize(ctx.chat.id,request.source.from!.id);
+    if (!(await this.currentAdmin(ctx))) {
+      await ctx.answerCallbackQuery('Ask a current group administrator to choose or add a folder for this pending task.');
+      return;
+    }
+    if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.admissionEpoch || this.stopped ||
+        refreshTermination(this.options.config) || JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint) {
+      this.folderRequests.delete(token);
+      await ctx.answerCallbackQuery('This request expired or its settings changed. Send the task again.');
+      await ctx.editMessageText('This folder request is no longer active. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+      return;
+    }
+    const state = request.state;
+    if (action !== 'cancel' && !(
+      (state.kind === 'choose' && (action.startsWith('page') || (action === 'default' && !request.required) ||
+        (/^\d+$/.test(action) && Number(action) >= state.offset && Number(action) < state.offset+8 && request.options[Number(action)] !== undefined))) ||
+      (state.kind === 'create' && (action === 'create' || action === 'other')) ||
+      (state.kind === 'failed' && (action === 'retry' || action === 'other')) ||
+      (state.kind === 'setup' && action === 'add'))) return;
+    this.folderRequests.delete(token);
+    await ctx.answerCallbackQuery();
+    if (action === 'cancel') {
+      await ctx.editMessageText('Folder selection cancelled.',{reply_markup:{inline_keyboard:[]}});
+      return;
+    }
+    token = randomBytes(16).toString('base64url');
+    const restore = async (text: string, rows: {text:string;callback_data:string}[][]) => {
+      await ctx.editMessageText(text,{reply_markup:{inline_keyboard:rows}});
+      if (request.expires <= Date.now()) {
+        await ctx.editMessageText('This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+        return;
+      }
+      this.folderRequests.set(token,request);
+    };
+    if (action === 'add') {
+      request.state = {kind:'input'};
+      await restore('Reply to this exact message with absolute folder paths, one per line. They will be added without replacing existing folders.',[[{text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
+      return;
+    }
+    if (action === 'other' || action.startsWith('page')) {
+      const offset = action === 'other' ? 0 : Number(action.slice(4));
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset >= request.options.length || offset % 8 !== 0) return;
+      request.state = {kind:'choose',offset};
+      await restore('Choose the runtime folder for this session.',this.folderKeyboard(token,request.options,request.required,offset));
+      return;
+    }
+    request.authority = ctx;
+    const path = state.kind === 'create' || state.kind === 'failed' ? state.path :
+      action === 'default' ? request.instancePath : request.options[Number(action)]!;
+    const create = state.kind === 'create' || (state.kind === 'failed' && state.create);
+    let cwd: string;
+    try {
+      if (create) mkdirSync(path,{recursive:true});
+      else {
+        try { statSync(path); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          let ancestor = dirname(path);
+          while (true) {
+            try { statSync(ancestor); break; } catch (ancestorError) {
+              if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor) throw ancestorError;
+              ancestor = dirname(ancestor);
+            }
+          }
+          accessSync(ancestor,constants.W_OK | constants.X_OK);
+          request.state = {kind:'create',path};
+          await restore(`${error instanceof Error ? error.message : String(error)}\nCreate folder ${path}?`,[[
+            {text:'Create folder',callback_data:`folder:${token}:create`},
+            {text:'Choose another folder',callback_data:`folder:${token}:other`},
+            {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
+          return;
+        }
+      }
+      opendirSync(path).closeSync();
+      accessSync(path,constants.R_OK | constants.X_OK);
+      cwd = realpathSync(path);
+    } catch (error) {
+      console.error('Runtime folder selection failed.',error);
+      request.state = {kind:'failed',path,create};
+      await restore(`${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`,[[
+        {text:'Retry',callback_data:`folder:${token}:retry`},
+        {text:'Choose another folder',callback_data:`folder:${token}:other`},
+        {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
+      return;
+    }
+    await ctx.editMessageText(`Runtime folder: ${cwd}`,{reply_markup:{inline_keyboard:[]}});
     if (request.epoch !== this.admissionEpoch || this.stopped || refreshTermination(this.options.config) ||
-        JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
+        JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint)
       throw new Error('This folder request is stale. Send the command again.');
-    await request.resume(cwd);
+    await request.resume(cwd,ctx);
+  }
+  private folderReplyRequest(ctx: Context) {
+    const message = ctx.message;
+    const reply = message?.reply_to_message;
+    if (!message || !ctx.chat || !ctx.from || ctx.from.is_bot || !reply || reply.from?.id !== this.id ||
+        'forward_origin' in reply || 'forward_date' in reply || 'forward_origin' in message || 'forward_date' in message) return;
+    return [...this.folderRequests].find(([,request]) => request.state.kind === 'input' &&
+      request.messageId === reply.message_id && request.source.chat!.id === ctx.chat!.id &&
+      sameTopicDestination(contextDestination(ctx),contextDestination(request.source)));
+  }
+  private async folderReply(ctx: Context): Promise<boolean> {
+    const entry = this.folderReplyRequest(ctx);
+    if (!entry || !ctx.chat || !ctx.from || !ctx.message) return false;
+    const [token,request] = entry;
+    const message = ctx.message!;
+    if (request.authority && request.authority.from!.id !== ctx.from!.id) return true;
+    await this.authorize(ctx.chat.id,request.source.from!.id);
+    const config = await this.settingsAccess(ctx,{chatId:ctx.chat.id,instancePath:request.instancePath},true);
+    if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.admissionEpoch ||
+        this.stopped || refreshTermination(this.options.config)) {
+      this.folderRequests.delete(token);
+      await this.bot.api.editMessageText(ctx.chat.id,request.messageId,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+      return true;
+    }
+    const paths = [...new Set(('text' in message ? message.text ?? '' : '').split('\n').map(path => path.trim()).filter(Boolean))];
+    if (!paths.length || paths.some(path => !isAbsolute(path))) throw new Error('Reply with absolute folder paths, one per line.');
+    const chat = findInstance(config,this.id,ctx.chat.id)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!;
+    chat.folder_options = [...new Set([...(chat.folder_options ?? []),...paths.map(path => normalize(path))])];
+    writeConfig(config);
+    Object.assign(findInstance(this.options.config,this.id,ctx.chat.id)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === ctx.chat!.id)!,chat);
+    const settings = this.folderSettings(ctx.chat.id);
+    Object.assign(request,settings,{fingerprint:JSON.stringify(settings),state:{kind:'choose',offset:0}});
+    this.folderRequests.delete(token);
+    const next = randomBytes(16).toString('base64url');
+    await this.bot.api.editMessageText(ctx.chat.id,request.messageId,'Choose the runtime folder to continue the pending task.',{
+      reply_markup:{inline_keyboard:this.folderKeyboard(next,request.options,request.required,0)}});
+    if (request.expires <= Date.now()) {
+      await this.bot.api.editMessageText(ctx.chat.id,request.messageId,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+      return true;
+    }
+    this.folderRequests.set(next,request);
+    return true;
   }
   private saveSettingsPanel(panel: SettingsPanel): void {
     this.options.store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?) ON CONFLICT(bot_id,token) DO UPDATE SET panel=excluded.panel')
@@ -463,7 +568,7 @@ export class BotService {
       const config = await this.settingsAccess(ctx,panel,true);
       const chat = findInstance(config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
       const before = (chat.folder_options ?? []).join('\n') || '(none)';
-      chat.folder_options = paths.map(path => normalize(path));
+      chat.folder_options = [...new Set([...(panel.folderInput === 'append' ? chat.folder_options ?? [] : []),...paths.map(path => normalize(path))])];
       panel.changes.set('folders',{label:'Runtime folders',before:panel.changes.get('folders')?.before ?? before,after:chat.folder_options.join('\n')});
       writeConfig(config);
       Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
@@ -565,12 +670,14 @@ export class BotService {
       });
       button('Runtime folders', {kind:'page',page:'folders'});
     } else if (page === 'folders') {
-      text = `Runtime folders\nReply to this message with absolute paths, one per line, to replace the list.\n${(chat.folder_options ?? []).slice(offset,offset+8).map(path => path.slice(0,250)).join('\n') || '(none)'}`;
+      text = `Runtime folders\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${(chat.folder_options ?? []).slice(offset,offset+8).map(path => path.slice(0,250)).join('\n') || '(none)'}`;
       button(`Require folder choice: ${chat.require_folder_choice === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'require_folder_choice',value:chat.require_folder_choice !== true});
       (chat.folder_options ?? []).slice(offset,offset+8).forEach((path,index) => button(`Remove ${path}`,{kind:'folders',remove:offset+index}));
       if (offset > 0) button('Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
       if (offset+8 < (chat.folder_options ?? []).length) button('Next folders',{kind:'page',page:'folders',offset:offset+8});
       button('Clear folders',{kind:'folders',clear:true});
+      button('Add folder',{kind:'folders',input:'append'});
+      button('Replace folders',{kind:'folders',input:'replace'});
     } else if (page === 'typing') {
       text =
         'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
@@ -622,7 +729,7 @@ export class BotService {
     panel.revision = revision;
     panel.offset = offset;
     panel.capacityInput = page === 'capacity';
-    panel.folderInput = page === 'folders';
+    panel.folderInput = undefined;
     this.saveSettingsPanel(panel);
   }
   private presetSession(panel: PresetPanel): TopicSession {
@@ -798,6 +905,16 @@ export class BotService {
     if (!action) return;
     if (action.kind === 'folders') {
       const config = await this.settingsAccess(ctx,panel,true);
+      if (action.input) {
+        panel.folderInput = action.input;
+        panel.choices = [];
+        this.saveSettingsPanel(panel);
+        await ctx.answerCallbackQuery();
+        await this.bot.api.editMessageText(panel.chatId,panel.messageId,
+          action.input === 'append' ? 'Reply to this message with absolute paths, one per line, to add folders.' : 'Reply to this message with absolute paths, one per line, to replace all folders.',
+          {reply_markup:{inline_keyboard:[]}});
+        return;
+      }
       const chat = findInstance(config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
       const before = (chat.folder_options ?? []).join('\n') || '(none)';
       chat.folder_options = action.clear ? [] : (chat.folder_options ?? []).filter((_,index) => index !== action.remove);
@@ -833,7 +950,7 @@ export class BotService {
       });
       panel.choices = [];
       panel.capacityInput = false;
-      panel.folderInput = false;
+      panel.folderInput = undefined;
       this.saveSettingsPanel(panel);
       return;
     }
@@ -1050,7 +1167,7 @@ export class BotService {
   private classifyInput(ctx: Context): InputIntent {
     const message = ctx.message;
     if (!message || !ctx.chat) return {kind:'event'};
-    if (this.settingsReplyPanel(ctx)) return {kind:'event'};
+    if (this.settingsReplyPanel(ctx) || this.folderReplyRequest(ctx)) return {kind:'event'};
     const reply = message.reply_to_message;
     const question = reply?.from?.id === this.id ? [...this.questions.entries()].find(([,pending]) =>
       pending.session.chatId === ctx.chat!.id && pending.session.threadId === message.message_thread_id &&
@@ -2656,9 +2773,22 @@ export class BotService {
     const skillKey = this.skills.key(ctx);
     const pendingSkills = frozenSkills?.names ?? this.options.store.getPendingSkills(skillKey);
     const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
-    if (admin && !session && cwd === undefined && await this.chooseFolder(ctx,ctx,selected =>
-      this.routePrompt(ctx,structuredClone(content),undefined,extensions,worktree,{names:[...pendingSkills],topicSkill},selected))) return;
     const originalContent = structuredClone(content);
+    const originalExtensions = structuredClone(extensions);
+    if (admin && !session && cwd === undefined && await this.chooseFolder(ctx,ctx,selected =>
+      this.routePrompt(ctx,originalContent,undefined,originalExtensions,worktree,{names:[...pendingSkills],topicSkill},selected))) return;
+    if (!admin && !session && this.folderSettings(ctx.chat!.id).required) {
+      const selectedSkills = {key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill};
+      const proposalMode = this.allMessagesArePrompts(ctx.chat!.id);
+      await this.chooseFolder(ctx,undefined,async (selected,authority) => {
+        if (!this.usersCanProposePrompts(ctx.chat!.id) || this.allMessagesArePrompts(ctx.chat!.id) !== proposalMode)
+          throw new Error('This prompt proposal is no longer active.');
+        const names = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []),...selectedSkills.names])];
+        const approvedContent = names.length ? {...originalContent,text:`${names.map(name => `/skill:${name}`).join(' ')}\n\n${originalContent.text}`} : originalContent;
+        await this.newSession(ctx,approvedContent,undefined,undefined,() => this.consumePendingSkills(skillKey,selectedSkills.names),worktree,authority,[],undefined,selected,selectedSkills);
+      },() => this.usersCanProposePrompts(ctx.chat!.id) && this.allMessagesArePrompts(ctx.chat!.id) === proposalMode);
+      return;
+    }
     if (extensions.some(extension => extension.kind === 'model-preset')) {
       const names = await this.options.runtime.availableModelPresets(cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath);
       for (const extension of extensions) {
@@ -2739,7 +2869,7 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-      source:ctx,content,instancePath,worktree,
+      source:ctx,content:structuredClone(content),instancePath,worktree,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
       skills:{key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill},
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
@@ -2836,6 +2966,7 @@ export class BotService {
       return;
     }
     this.termination = undefined;
+    if (await this.folderReply(ctx)) return;
     const settingsPanel = this.settingsReplyPanel(ctx);
     if (settingsPanel) {
       await this.saveSettingsReply(ctx, settingsPanel);

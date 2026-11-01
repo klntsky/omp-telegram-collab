@@ -280,20 +280,25 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
 ## Choose a session folder
 
-Open `/settings` as a group administrator and select **Runtime folders**. Reply to that settings message with absolute paths on the agent's computer, one per line. The reply replaces the list. Use **Remove** to delete an option or **Clear folders** to empty the list. Missing folders are allowed in the list.
+Open `/settings` as a group administrator and select **Runtime folders**. Choose **Add folder**, then reply to that exact message with an absolute path on the agent's computer. Adding preserves existing options. To replace all options, explicitly choose **Replace folders** and reply with absolute paths, one per line. Use **Remove** to delete an option or **Clear folders** to empty the list. Missing folders are allowed in the list.
 
 <details>
 <summary>Example folder settings and selection</summary>
 
-Paths and task names below are filler values. The settings reply contains:
+Paths and task names below are filler values. These are label excerpts; other settings controls and prompts are omitted.
 
-```text
-/srv/projects/backend
-/srv/projects/frontend
-/srv/projects/new-service
-```
+1. In **Runtime folders**, choose **Add folder** and reply to the same message:
 
-After `/new Inspect the project`, the bot offers those paths as buttons. With optional choice, it also offers **Use forum default**. Selecting the missing `/srv/projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it.
+   ```text
+   /srv/projects/backend
+   ```
+
+2. Choose **Add folder** again and reply with `/srv/projects/new-service`. The first option remains configured.
+3. After `/new Inspect the example project`, the bot offers those paths as buttons. With optional choice, it also offers **Use forum default**.
+4. Selecting the missing `/srv/projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it. Creation requires that separate confirmation.
+5. If folder access fails, the task stays pending. **Retry** retries the choice; **Choose another folder** returns to the available options.
+
+With **Require folder choice** enabled and no configured folders, the bot instead guides an administrator through **Add folder**, keeps the original task, and returns to folder selection after setup. A member who cannot edit settings is directed to ask a group administrator. For a member's proposed task, adding a folder does not approve the task: an administrator selects a folder in the combined approval-and-selection screen. Selecting an existing folder both approves the task and chooses its directory; there is no separate **Approve** step first.
 
 </details>
 
@@ -303,4 +308,6 @@ Enable **Require folder choice** to require a listed folder for every command-cr
 
 The bot checks that the selected path is an accessible directory. Missing folders require explicit creation confirmation. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
 
-When folder choice is required but no folders are configured, configure an option before creating a session. Manual Telegram topics do not acquire sessions while choice is required. Use `/new <task>` instead. Attached hosts keep their terminal-owned directory.
+Failed choices retain the task for **Retry** or **Choose another folder**. Expired requests and pending requests discarded by a service restart explain why the old controls no longer work; they never replay the task. After an expiry or restart-discard notice, send the task again. While selection remains active, use its controls instead of submitting a duplicate task.
+
+Manual Telegram topics do not acquire sessions while choice is required. Use `/new <task>` instead. Attached hosts keep their terminal-owned directory.
