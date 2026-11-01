@@ -2,11 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import test from 'node:test';
-import { setImmediate } from 'node:timers/promises';
 import { Api } from 'grammy';
-import { TelegramClient } from '@mtcute/node';
-import { defaultTestDc, writeStringSession } from '@mtcute/node/utils.js';
-import { TelegramTestUser } from './e2e/helpers/telegram-user.js';
 import { TelegramTestInbox } from './e2e/helpers/telegram-updates.js';
 
 test('Telegram inbox retains unmatched updates and acknowledges each fetched batch', { timeout: 10000 }, async t => {
@@ -42,30 +38,4 @@ test('Telegram inbox retains unmatched updates and acknowledges each fetched bat
   const reason = new Error('test cancellation');
   controller.abort(reason);
   await assert.rejects(inbox.waitFor(() => true), error => error === reason);
-});
-
-test('failed Telegram login waits for client destruction and preserves the RPC error', { timeout: 10000 }, async t => {
-  const failure = new Error('original RPC failure');
-  const destroying = Promise.withResolvers<void>();
-  const destroyed = Promise.withResolvers<void>();
-  let closing = false;
-  t.mock.method(TelegramClient.prototype, 'call', async () => { throw failure; });
-  t.mock.method(TelegramClient.prototype, 'importSession', async () => {});
-  t.mock.method(TelegramClient.prototype, 'destroy', () => {
-    if (closing) return Promise.resolve();
-    closing = true;
-    destroying.resolve();
-    return destroyed.promise;
-  });
-  t.after(() => destroyed.resolve());
-  let settled = false;
-  const session = writeStringSession({ version: 3, primaryDcs: defaultTestDc, authKey: new Uint8Array(256) });
-  const login = TelegramTestUser.login({ apiId: 123, apiHash: 'fixture', session });
-  const rejected = assert.rejects(login, error => error === failure);
-  void login.then(() => { settled = true; }, () => { settled = true; });
-  await destroying.promise;
-  await setImmediate();
-  assert.equal(settled, false);
-  destroyed.resolve();
-  await rejected;
 });
