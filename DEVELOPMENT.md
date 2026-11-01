@@ -56,21 +56,36 @@ Live Telegram verification requires a BotFather token and forum groups. Mini App
 
 ## Run tests against Telegram's test network
 
-Obtain an application `api_id` and `api_hash` from [Telegram's application settings](https://my.telegram.org/apps). Set them only for the test process:
+Register a real phone number in Telegram's [separate test environment](https://core.telegram.org/bots/features#testing-your-bot) and keep an official client logged into that account. Reserved fixed-code test accounts are [disabled](https://github.com/tdlib/td/issues/3083#issuecomment-3710841964).
+
+Obtain an application `api_id` and `api_hash` from [Telegram's application settings](https://my.telegram.org/apps). Put them in this checkout's untracked `.env`:
+
+```dotenv
+TELEGRAM_TEST_API_ID=YOUR_APPLICATION_ID
+TELEGRAM_TEST_API_HASH=YOUR_APPLICATION_HASH
+```
+
+Run the source-controlled login command in an interactive terminal:
 
 ```sh
-export TELEGRAM_TEST_API_ID='YOUR_APPLICATION_ID'
-export TELEGRAM_TEST_API_HASH='YOUR_APPLICATION_HASH'
+pnpm telegram:test:login
+```
+
+Enter the registered test-network phone number with its country code, the actual verification code delivered to the account, and its two-step verification password if requested. Code and password input are hidden. The command verifies the test network and appends `TELEGRAM_TEST_SESSION` to `.env` without printing it. It preserves existing configuration and sets `.env` permissions to `0600`. Rerunning the command appends a refreshed session; the latest entry is used.
+
+The saved session grants access to the test account. Never log it, commit it, send it in chat, or publish it as an artifact. Revoke the authorization in the account's device settings if it leaks.
+
+Run live tests after login:
+
+```sh
 timeout 240s pnpm test:e2e
 ```
 
-`test:e2e` is separate from `test` and `verify`. Missing credentials fail the command instead of skipping live tests. These tests use Telegram's [separate test environment](https://core.telegram.org/bots/features#testing-your-bot), never the production Bot API. They do not launch OMP or invoke inference.
-
-The helpers use in-memory MTProto sessions and generate a reserved test phone number by default. Set `TELEGRAM_TEST_PHONE` to a number in the `99966XYYYY` format to select an account. `X` is the test datacenter number from 1 to 3. Do not use personal phone numbers. Test accounts have publicly predictable login codes and Telegram periodically wipes their data. Never put private data in them.
+Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from `test` and `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. These tests do not launch OMP or invoke inference.
 
 Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environment. Otherwise, the fixture creates a uniquely named bot through that environment's BotFather. Created bots remain in the test account for reuse; the helpers do not issue BotFather's irreversible bot-deletion command. Retrieve a reusable token through BotFather in the test environment. Never log tokens or commit them.
 
-Each fixture creates its own forum and deletes that forum during teardown, including after partial setup failure. Teardown closes the owned user session. Do not run concurrent fixtures with the same fixed phone account while they are creating bots, or run another `getUpdates` consumer against the fixture's bot token. Give parallel workers separate accounts and bots.
+Each fixture creates its own forum and deletes that forum during teardown, including after partial setup failure. Teardown closes the owned user client without logging the account out or revoking its saved session. Do not run concurrent fixtures with the same account while they are creating bots, or run another `getUpdates` consumer against the fixture's bot token. Give parallel workers separate accounts and bots.
 
 Import `setupTelegramTest` from `test/e2e/helpers/telegram-fixture.ts` in live tests. It registers teardown with the Node test context and returns the authenticated user, bot, test Bot API client, forum, and update inbox. Lower-level login and provisioning helpers are available in the same directory when a test needs different ownership. Keep domain scenarios and assertions in test files, not in the setup helpers.
 

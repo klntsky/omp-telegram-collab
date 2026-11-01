@@ -5,6 +5,7 @@ import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { Api } from 'grammy';
 import { TelegramClient } from '@mtcute/node';
+import { defaultTestDc, writeStringSession } from '@mtcute/node/utils.js';
 import { TelegramTestUser } from './e2e/helpers/telegram-user.js';
 import { TelegramTestInbox } from './e2e/helpers/telegram-updates.js';
 
@@ -49,6 +50,7 @@ test('failed Telegram login waits for client destruction and preserves the RPC e
   const destroyed = Promise.withResolvers<void>();
   let closing = false;
   t.mock.method(TelegramClient.prototype, 'call', async () => { throw failure; });
+  t.mock.method(TelegramClient.prototype, 'importSession', async () => {});
   t.mock.method(TelegramClient.prototype, 'destroy', () => {
     if (closing) return Promise.resolve();
     closing = true;
@@ -57,7 +59,8 @@ test('failed Telegram login waits for client destruction and preserves the RPC e
   });
   t.after(() => destroyed.resolve());
   let settled = false;
-  const login = TelegramTestUser.login({ apiId: 123, apiHash: 'fixture', phone: '9996621234' });
+  const session = writeStringSession({ version: 3, primaryDcs: defaultTestDc, authKey: new Uint8Array(256) });
+  const login = TelegramTestUser.login({ apiId: 123, apiHash: 'fixture', session });
   const rejected = assert.rejects(login, error => error === failure);
   void login.then(() => { settled = true; }, () => { settled = true; });
   await destroying.promise;
