@@ -371,7 +371,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   try {
     const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, {text:'Pending instruction'}, 123, 456);
     store.markSnapshot(original.id);
-    store.rememberReply(original.id, 'saved-reply');
+    store.rememberReply(original.id, 'omp-session', 'saved-reply');
     store.advanceSessionGeneration(original.id);
     store.setReplyTarget(original.id, 77);
     store.close();
@@ -382,7 +382,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.getInitialUser(original.id), 123);
     assert.equal(store.getInitialAuthority(original.id), 456);
     assert.equal(store.hasSnapshot(original.id), true);
-    assert.equal(store.rememberReply(original.id, 'saved-reply'), false);
+    assert.equal(store.rememberReply(original.id, 'omp-session', 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
     assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);

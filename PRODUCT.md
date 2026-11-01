@@ -64,6 +64,8 @@ The bot does not send welcome messages or interactive initial-task requests. `/n
 
 New session topics get a quietly pinned OPEN AGENT message before the initial prompt. Automatic worktree creation can start OMP before that message is pinned. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions.
 
+Background recovery waits for in-progress topic preparation and task forwarding before admitting the initial prompt. A service restart can recover an interrupted preparation without replaying a task already submitted or reviving a cancelled task.
+
 `/worktree` delegates worktree creation, uncommitted-change transfer, and session relocation to OMP's own command. In a session topic it keeps the same topic and conversation history. The session retains its configured project assignment and authorization while its execution directory changes. Worktree location, branch defaults, change transfer, and source-checkout cleanup follow OMP's settings. Worktrees are not automatically removed when sessions stop or the service restarts.
 
 A current supergroup owner or administrator can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same administrator or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.
@@ -77,6 +79,8 @@ Admin-only button denials appear as callback-query toasts, not chat messages. Co
 The service becomes ready after mandatory runtime/history checks, bot identity and cached-command setup, HTTP binding, and the first successful Telegram poll for every configured bot. Session restoration, status maintenance, and fresh skill discovery run afterward without delaying readiness. A slow project's discovery does not delay another project's command-menu refresh.
 
 Store startup automatically upgrades its database through increasing schema versions before use. An upgrade failure leaves the previous schema, data, and version intact. A database created by a newer application version is rejected. Database downgrades are not supported.
+
+Database upgrades preserve pending prompt admission, recorded reply destinations, and previously recorded reply deduplication.
 
 Online notices are sent after readiness; slow notice delivery does not hold startup open. An orderly shutdown cancels unfinished background refreshes and online notices, drains input acknowledgements, and attempts winding-down notices while teardown proceeds. Restart notices retain the end-to-end downtime measurement; readiness does not imply that every session has already reconnected. Assignment removal disables access immediately and listener cleanup and configuration acknowledgement do not wait for skill discovery.
 
@@ -195,6 +199,8 @@ Ordinary group members retain watch-only Mini App access and the Telegram `/stop
 ### 1.3. Replies, questions, and activity
 
 The bot mirrors agent replies into the topic using Telegram rich messages with native rich Markdown, including headings, lists, tables, formulas, and media supported by Telegram. Agent Markdown is sent directly, not converted into ordinary-message HTML or flattened preformatted tables. Long replies split at Markdown block boundaries where possible within the rich-message text limit; oversized code blocks remain fenced and Unicode characters are not split. A single oversized non-code block may span messages. Replies retain their native reply target across service restarts. Telegram failure replies include the underlying operation error as a literal code block.
+
+Mirroring distinguishes persisted reply entries rather than comparing their text. Distinct entries with identical replies remain separate messages. Replayed copies of the same entry do not send another reply.
 
 Agent replies target the most recent Telegram prompt accepted by OMP, not the most recently submitted message. Pending or rejected submissions do not move that target. Acknowledged answers to agent questions, `/stop`, and `/kill` retain their handshake reactions but do not retarget agent replies. Submission provenance survives relay disconnects and bot restarts, including an initial task already claimed for submission. Recovered receipt entries reconcile that provenance without replaying prompts; repeated receipt entries are idempotent. Each reply keeps its selected target across all chunks, and recovered output uses the prompt preceding it in recovered history. Inputs from outside Telegram clear the target. The host supplies no client submission identifier and can shrink large replicated payloads. If a receipt cannot be uniquely correlated, including interrupted identical submissions, the bot sends output without a reply target rather than guessing.
 

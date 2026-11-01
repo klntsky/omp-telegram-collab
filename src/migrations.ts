@@ -27,6 +27,23 @@ const migrations: readonly string[] = [
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
   `,
+  `
+      ALTER TABLE prompt_submissions RENAME TO pending_upgrade_prompt_submissions;
+      ALTER TABLE prompt_receipts RENAME TO pending_upgrade_prompt_receipts;
+      ALTER TABLE replies RENAME TO pending_upgrade_replies;
+      CREATE TABLE provenance_upgrades (session_id TEXT PRIMARY KEY NOT NULL,omp_session_id TEXT);
+      INSERT INTO provenance_upgrades (session_id)
+        SELECT session_id FROM pending_upgrade_prompt_submissions UNION SELECT session_id FROM pending_upgrade_prompt_receipts UNION SELECT session_id FROM pending_upgrade_replies;
+      CREATE TABLE prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
+      INSERT INTO sqlite_sequence (name,seq) SELECT 'prompt_submissions',seq FROM sqlite_sequence WHERE name='pending_upgrade_prompt_submissions';
+      CREATE TABLE prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,omp_session_id,entry_id));
+      CREATE TABLE replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
+      CREATE TABLE prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
+      CREATE TABLE message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
+  `,
+  `
+      CREATE TABLE initial_task_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id));
+  `,
 ];
 
 export function migrateDatabase(db: DatabaseSync, steps: readonly string[] = migrations): void {
