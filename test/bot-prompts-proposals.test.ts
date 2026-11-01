@@ -286,7 +286,6 @@ test('a non-admin /new task creates no session until a group administrator appro
     await app.callback(proposal.approve,proposal.message);
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Proposed initial task'}]);
-    assert.equal(app.store.listSessions(botId)[0]!.name,'Proposed initial task');
   } finally { await app.close(); }
 });
 

@@ -280,7 +280,7 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
 ## Choose a session folder
 
-Open `/settings` as a group administrator and select **Runtime folders**. Choose **Add folder**, then reply to that exact message with an absolute path on the agent's computer. Adding preserves existing options. To replace all options, explicitly choose **Replace folders** and reply with absolute paths, one per line. Use **Remove** to delete an option or **Clear folders** to empty the list. Missing folders are allowed in the list.
+Open `/settings` as a group administrator and select **Runtime folders**. Choose **Add folder**, then reply to that exact message with a relative path on the agent's computer. Adding appends without replacing existing options. To replace all options, explicitly choose **Replace folders** and reply with relative paths, one per line. Use **Remove** to delete any option, including `.`, or **Clear folders** to empty the list. Missing folders are allowed in the list. Equivalent relative paths are normalized and deduplicated in order.
 
 <details>
 <summary>Example folder settings and selection</summary>
@@ -290,24 +290,25 @@ Paths and task names below are filler values. These are label excerpts; other se
 1. In **Runtime folders**, choose **Add folder** and reply to the same message:
 
    ```text
-   /srv/projects/backend
+   .
    ```
 
-2. Choose **Add folder** again and reply with `/srv/projects/new-service`. The first option remains configured.
-3. After `/new Inspect the example project`, the bot offers those paths as buttons. With optional choice, it also offers **Use forum default**.
-4. Selecting the missing `/srv/projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it. Creation requires that separate confirmation.
-5. If folder access fails, the task stays pending. **Retry** retries the choice; **Choose another folder** returns to the available options.
+2. Choose **Add folder** again and reply with `projects/new-service`. The `.` option remains configured.
+3. After `/new Inspect the example project`, the bot offers **`<Default>`** for `.` and `projects/new-service` as buttons. No default option is added implicitly.
+4. Selecting the missing `projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it. Creation requires that separate confirmation.
+5. If folder access fails, the task stays pending. **Retry** retries the choice; **Choose another folder** returns to the available options when there is more than one.
+6. Remove `.` to leave only `projects/new-service`: future sessions use that folder automatically, without a picker.
 
-With **Require folder choice** enabled and no configured folders, the bot instead guides an administrator through **Add folder**, keeps the original task, and returns to folder selection after setup. A member who cannot edit settings is directed to ask a group administrator. For a member's proposed task, adding a folder does not approve the task: an administrator selects a folder in the combined approval-and-selection screen. Selecting an existing folder both approves the task and chooses its directory; there is no separate **Approve** step first.
+For a member's proposed task with multiple options, an administrator selects a folder in the combined approval-and-selection screen. Selecting an existing folder both approves the task and chooses its directory; there is no separate **Approve** step first. With zero or one stored option, normal administrator approval is still required, then the sole effective folder is used automatically.
 
 </details>
 
-Enable **Require folder choice** to require a listed folder for every command-created session. With the requirement disabled and the list empty, sessions start in the forum's assigned project directory without a picker. These settings default to `require_folder_choice: false` and `folder_options: []`.
+The only folder setting is `folder_options`, defaulting to `[]`. An empty list behaves as `["."]`. Exactly one effective folder is used automatically with no chooser; adding a second distinct entry enables the picker. `["projects/backend"]` uses that folder directly, while `[".", "projects/backend"]` offers **`<Default>`** and `projects/backend`. Removing the final `.` leaves an empty stored list, which again uses the effective default.
 
-`/new` from any topic and `/p` in General use the picker. `/p` in an existing session keeps its directory. The chosen folder survives restarts. Worktree preparation starts there and then uses OMP's resulting worktree directory.
+`/new` from any topic and `/p` in General follow this cardinality rule. `/p` in an existing session keeps its directory. The chosen folder survives restarts. Worktree preparation starts there and then uses OMP's resulting worktree directory.
 
-The bot checks that the selected path is an accessible directory. Missing folders require explicit creation confirmation. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
+All folder entries resolve relative to the forum's configured project directory (`instancePath`), never the bot process's working directory. `.` means that configured directory; `..` and paths such as `../sibling` are explicitly allowed. Operating-system user permissions are the security boundary, not containment within the project directory. The bot checks that the resolved path is an accessible directory. Missing folders require explicit creation confirmation, even when there is only one effective folder; that folder is validated before creating a topic or preparing a worktree. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
 
-Failed choices retain the task for **Retry** or **Choose another folder**. Expired requests and pending requests discarded by a service restart explain why the old controls no longer work; they never replay the task. After an expiry or restart-discard notice, send the task again. While selection remains active, use its controls instead of submitting a duplicate task.
+Failed choices retain the task for **Retry**, and offer **Choose another folder** only when multiple effective options exist. Expired requests and pending requests discarded by a service restart explain why the old controls no longer work; they never replay the task. After an expiry or restart-discard notice, send the task again. While selection remains active, use its controls instead of submitting a duplicate task.
 
-Manual Telegram topics do not acquire sessions while choice is required. Use `/new <task>` instead. Attached hosts keep their terminal-owned directory.
+Manual Telegram topics use the sole effective folder without a chooser. If it is missing, an administrator must explicitly consent to creation before the session is registered or started; continuation stays in the same Telegram topic. With multiple effective folders, manual topics remain unregistered and direct users to `/new <task>`. Attached hosts keep their terminal-owned directory.

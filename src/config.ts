@@ -19,6 +19,7 @@ const literal = z.string().refine(value => !value.includes('\0'));
 const nonempty = literal.refine(value => value.trim().length > 0);
 const positiveInteger = z.number().int().safe().positive();
 const absolutePath = nonempty.refine(value => isAbsolute(value) && normalize(value) === value);
+const relativeFolderPath = nonempty.refine(value => !isAbsolute(value)).transform(value => normalize(value).replace(/\/+$/, '') || '.');
 const publicUrlSchema = z.string().refine(value => {
   if (value === '') return true;
   if (!/^https:\/\/[^/?#\\@]+\/?$/i.test(value)) return false;
@@ -58,8 +59,7 @@ const configSchema = z.object({
       all_messages_are_prompts: z.boolean().default(true),
       users_can_propose_prompts: z.boolean().default(false),
       create_topic_worktrees: z.boolean().default(false),
-      require_folder_choice: z.boolean().default(false),
-      folder_options: z.array(absolutePath).default([]),
+      folder_options: z.array(relativeFolderPath).default([]).transform(paths => [...new Set(paths)]),
       typing_indicators: z.enum(['disabled', 'streaming', 'inference']).default('disabled'),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
       default_new_topic_skill: z.string().refine(isMentionableSkillName).optional(),

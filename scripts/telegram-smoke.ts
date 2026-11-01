@@ -235,7 +235,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       };
     },
     async topicTitleStatus(session: TopicSession): Promise<{worktree:boolean;branch?:string}> {
-      return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.cwd};
+      return topicTitleStatuses.get(session.id) ?? {worktree:false};
     },
     async worktree(session: TopicSession, _branch?: string) {
       session.runtime = {kind:'managed',cwd:`/fixture/worktrees/${randomUUID()}`};

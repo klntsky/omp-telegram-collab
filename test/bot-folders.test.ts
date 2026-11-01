@@ -11,11 +11,10 @@ import { botId } from './telegram-data.js';
 import { clickSettings, eventually } from './bot-test-helpers.js';
 
 interface App { config: AppConfig; messages: Record<string,unknown>[] }
-function configure(app: App, options: string[], required = false) {
+function configure(app: App, options: string[]) {
   const config = readConfig(app.config.configPath);
   const chat = Object.values(config.instances)[0]!.chats[0]!;
   chat.folder_options = options;
-  chat.require_folder_choice = required;
   writeConfig(config);
   Object.assign(Object.values(app.config.instances)[0]!.chats[0]!,chat);
 }
@@ -36,7 +35,7 @@ for (const command of ['/new task','/p task']) {
     try {
       await app.update({text:'/setup'});
       const root = Object.keys(app.config.instances)[0]!;
-      configure(app,[root]);
+      configure(app,['.','other']);
       await app.update({text:command});
       assert.equal(app.store.listSessions(botId).length,0);
       assert.equal(app.connectionCount,0);
@@ -62,20 +61,14 @@ test('missing folder requires explicit confirmation and cancellation never creat
   try {
     await app.update({text:'/setup'});
     const path = join(Object.keys(app.config.instances)[0]!,'chosen','nested');
-    configure(app,[path],true);
+    configure(app,['chosen/nested']);
     await app.update({text:'/new task'});
     let message = panel(app);
-    await app.callback(button(message,'0'),message);
     assert.equal(existsSync(path),false);
     assert.equal(app.store.listSessions(botId).length,0);
-    message = panel(app);
     await app.callback(button(message,'cancel'),message);
     assert.equal(existsSync(path),false);
     await app.update({text:'/new task'});
-    message = panel(app);
-    const oldChoice = button(message,'0');
-    await app.callback(oldChoice,message);
-    await app.callback(oldChoice,message);
     message = panel(app);
     const create = button(message,'create');
     await app.callback(create,message);
@@ -91,8 +84,7 @@ for (const invalidation of ['role','settings','assignment','expired','actor'] as
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
-      configure(app,[root],true);
+      configure(app,['.','other']);
       await app.update({text:'/new task'});
       const message = panel(app);
       const choice = button(message,'0');
@@ -102,7 +94,7 @@ for (const invalidation of ['role','settings','assignment','expired','actor'] as
         writeConfig(config);
       }
       if (invalidation === 'role') app.setCurrentMember({status:'member'});
-      if (invalidation === 'settings') configure(app,[root],false);
+      if (invalidation === 'settings') configure(app,['other']);
       if (invalidation === 'expired') { const now = Date.now(); t.mock.method(Date,'now',() => now+300001); }
       if (invalidation === 'actor') await app.callback(choice,message,{id:77,is_bot:false,first_name:'Other'});
       else await app.callback(choice,message);
@@ -112,42 +104,6 @@ for (const invalidation of ['role','settings','assignment','expired','actor'] as
   });
 }
 
-test('required empty configuration and manual topics never start a default session', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    configure(app,[],true);
-    await app.update({text:'/new task'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
-    await app.update({text:'/p task',message_thread_id:42});
-    assert.equal(app.store.listSessions(botId).length,0);
-    assert.equal(app.connectionCount,0);
-  } finally { await app.close(); }
-});
-
-test('folder settings use explicit message-bound replacement, removal and toggle', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await clickSettings(app,7);
-    let message = panel(app,'settings:');
-    await clickSettings(app,3,message);
-    const root = Object.keys(app.config.instances)[0]!;
-    await app.update({text:`${root}\n${root}/missing`,reply_to_message:message});
-    let config = readConfig(app.config.configPath);
-    assert.deepEqual(Object.values(config.instances)[0]!.chats[0]!.folder_options,[root,`${root}/missing`]);
-    await clickSettings(app,0);
-    config = readConfig(app.config.configPath);
-    assert.equal(Object.values(config.instances)[0]!.chats[0]!.require_folder_choice,true);
-    await clickSettings(app,1);
-    config = readConfig(app.config.configPath);
-    assert.deepEqual(Object.values(config.instances)[0]!.chats[0]!.folder_options,[`${root}/missing`]);
-    message = panel(app,'settings:');
-    await clickSettings(app,2,message);
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,[]);
-    assert.equal(app.connectionCount,0);
-  } finally { await app.close(); }
-});
 
 test('non-admin proposals obtain approval before folder or session effects', async () => {
   const app = await createSmokeApp();
@@ -156,7 +112,7 @@ test('non-admin proposals obtain approval before folder or session effects', asy
     await clickSettings(app,1);
     const root = Object.keys(app.config.instances)[0]!;
     const path = join(root,'approved-folder');
-    configure(app,[path],true);
+    configure(app,['approved-folder','.']);
     const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
     app.setCurrentMember({username:'participant',status:'member'});
     await app.update({text:'/new proposed'},proposer);
@@ -184,7 +140,7 @@ test('folder selection precedes command capacity reservation and survives approv
     await app.update({text:'/new running'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[root],true);
+    configure(app,['.','other']);
     t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
     const presets = t.mock.method(app.runtime,'modelPresets',async () => 'Fast');
     await app.update({text:'/new /model_preset Fast waiting'});
@@ -211,8 +167,7 @@ test('folder lists are paginated without creating a session until a visible choi
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,Array.from({length:24},(_,index) => join(root,String(index))),true);
+    configure(app,Array.from({length:24},(_,index) => String(index)));
     await app.update({text:'/new task'});
     let selection = panel(app);
     let markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(selection.reply_markup);
@@ -228,25 +183,24 @@ test('folder lists are paginated without creating a session until a visible choi
   } finally { await app.close(); }
 });
 
-test('optional choices can explicitly retain forum default and unconfigured forums need no picker', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({text:'/new unchanged'});
-    assert.equal(panel(app),undefined);
-    const original = app.store.listSessions(botId)[0]!;
-    assert.deepEqual(original.runtime,{kind:'managed'});
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[join(root,'unused')]);
-    await app.update({text:'/new default'});
-    const selection = panel(app);
-    await app.callback(button(selection,'default'),selection);
-    assert.equal(existsSync(join(root,'unused')),false);
-    const session = app.store.listSessions(botId).find(session => session.id !== original.id)!;
-    assert.equal(session.instancePath,root);
-    assert.deepEqual(session.runtime,{kind:'managed',cwd:realpathSync(root)});
-  } finally { await app.close(); }
-});
+for (const options of [[],['.'],['sub','sub/'],['..']] ) {
+  test(`sole effective folder ${JSON.stringify(options)} starts without controls`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      const root = Object.keys(app.config.instances)[0]!;
+      await mkdir(join(root,'sub'));
+      configure(app,options);
+      await app.update({text:'/new automatic'});
+      assert.equal(panel(app),undefined);
+      const sessions = app.store.listSessions(botId);
+      assert.equal(sessions.length,1);
+      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,options[0] ?? '.'))});
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'automatic'}]);
+    } finally { await app.close(); }
+  });
+}
 
 test('a selected canonical folder cannot redirect through a replaced symlink before topic creation', async t => {
   const app = await createSmokeApp();
@@ -257,7 +211,7 @@ test('a selected canonical folder cannot redirect through a replaced symlink bef
     const other = join(root,'other');
     await mkdir(selected);
     await mkdir(other);
-    configure(app,[selected],true);
+    configure(app,['selected','.']);
     t.mock.method(app.runtime,'availableModelPresets',async () => {
       await rename(selected,join(root,'previous'));
       await symlink(other,selected);
@@ -279,11 +233,11 @@ test('folder settings changed during capacity confirmation cannot authorize an o
     await app.update({text:'/new running'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[root],true);
+    configure(app,['.','other']);
     t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
     t.mock.method(app.runtime,'modelPresets',async () => 'Fast');
     app.bot.api.config.use(async (previous,method,payload,signal) => {
-      if (method === 'sendMessage' && JSON.stringify(payload).includes('capacity:approve:')) configure(app,[],true);
+      if (method === 'sendMessage' && JSON.stringify(payload).includes('capacity:approve:')) configure(app,[]);
       return previous(method,payload,signal);
     });
     await app.update({text:'/new /model_preset Fast pending'});
@@ -306,7 +260,7 @@ test('folder creation rejects denied access and permissions revoked after confir
     await app.update({text:'/setup'});
     await mkdir(parent);
     const selected = join(parent,'project');
-    configure(app,[selected],true);
+    configure(app,['restricted/project','.']);
     await chmod(parent,0o500);
     await app.update({text:'/new denied'});
     let selection = panel(app);
@@ -345,7 +299,7 @@ test('failed pre-admission selection retains task, rotates callbacks and support
     const root = Object.keys(app.config.instances)[0]!;
     const blocked = join(root,'blocked');
     await writeFile(blocked,'not a directory');
-    configure(app,[blocked,root],true);
+    configure(app,['blocked','.']);
     await app.update({text:'/new original task'});
     const selection = panel(app);
     const choose = button(selection,'0');
@@ -367,54 +321,32 @@ test('failed pre-admission selection retains task, rotates callbacks and support
   } finally { await app.close(); }
 });
 
-test('empty required folders retain task through exact-message append setup', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[],true);
-    await app.update({text:'/new bootstrap task'});
-    let selection = panel(app);
-    await app.callback(button(selection,'add'),selection);
-    selection = panel(app);
-    await app.update({text:root,reply_to_message:selection});
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,[root]);
-    assert.deepEqual(app.store.listSessions(botId),[]);
-    selection = panel(app);
-    await app.callback(button(selection,'0'),selection);
-    assert.equal(app.store.listSessions(botId).length,1);
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'bootstrap task'}]);
-  } finally { await app.close(); }
-});
 
 test('Add folder appends freshly read configuration and rejects unauthorized replies', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[root]);
+    configure(app,['.']);
     await app.update({text:'/settings'});
     await clickSettings(app,7);
     const input = panel(app,'settings:');
-    await clickSettings(app,3,input);
+    await clickSettings(app,2,input);
     app.setCurrentMember({status:'member'});
-    await app.update({text:`${root}/denied`,reply_to_message:input});
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,[root]);
+    await app.update({text:'denied',reply_to_message:input});
+    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.']);
     app.setCurrentMember({status:'creator'});
-    configure(app,[root,`${root}/concurrent`]);
-    await app.update({text:`${root}/added`,reply_to_message:input});
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,[root,`${root}/concurrent`,`${root}/added`]);
+    configure(app,['.','concurrent']);
+    await app.update({text:'added',reply_to_message:input});
+    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.','concurrent','added']);
   } finally { await app.close(); }
 });
 
-test('any current admin combines required-folder approval with one existing-folder choice', async () => {
+test('any current admin combines multi-folder approval with one existing-folder choice', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
     await clickSettings(app,1);
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[root],true);
+    configure(app,['.','other']);
     app.setCurrentMember({status:'member'});
     await app.update({text:'/new combined task'},{id:77,is_bot:false,first_name:'Participant'});
     const selection = panel(app);
@@ -434,7 +366,7 @@ test('expired known folder requests retire controls and cannot replay', async t 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    configure(app,[Object.keys(app.config.instances)[0]!],true);
+    configure(app,['.','other']);
     await app.update({text:'/new expired task'});
     const selection = panel(app);
     const choose = button(selection,'0');
@@ -454,8 +386,7 @@ test('folder waiting freezes pending skills, quoted context and downloaded media
   app.mockFiles(t,data);
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[root],true);
+    configure(app,['.','other']);
     await app.update({text:'/skill_find_skills'});
     await app.update({photo:[{file_id:'photo',file_unique_id:'photo',width:10,height:10}],caption:'/new Explain',
       reply_to_message:{message_id:9900,text:'Original context'}});
@@ -501,7 +432,7 @@ test('queued stale callback snapshots cannot clear replacement folder controls',
     const root = Object.keys(app.config.instances)[0]!;
     const blocked = join(root,'blocked');
     await writeFile(blocked,'not a directory');
-    configure(app,[blocked],true);
+    configure(app,['blocked','.']);
     await app.update({text:'/new pending'});
     const selection = panel(app);
     const snapshot = structuredClone(selection);
@@ -515,38 +446,8 @@ test('queued stale callback snapshots cannot clear replacement folder controls',
   } finally { await app.close(); }
 });
 
-test('bootstrap append preserves configuration changed during proposer authorization', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await clickSettings(app,1);
-    const root = Object.keys(app.config.instances)[0]!;
-    configure(app,[],true);
-    const proposer = {id:77,is_bot:false,first_name:'Participant'};
-    await app.update({text:'/new pending'},proposer);
-    let selection = panel(app);
-    await app.callback(button(selection,'add'),selection);
-    selection = panel(app);
-    let changed = false;
-    app.bot.api.config.use(async (previous,method,payload,signal) => {
-      if (!changed && method === 'getChatMember' && 'user_id' in payload && Number(payload.user_id) === proposer.id) {
-        changed = true;
-        const config = readConfig(app.config.configPath);
-        config.port = 34567;
-        Object.values(config.instances)[0]!.chats[0]!.folder_options = [`${root}/concurrent`];
-        writeConfig(config);
-      }
-      return previous(method,payload,signal);
-    });
-    await app.update({text:`${root}/added`,reply_to_message:selection});
-    const saved = readConfig(app.config.configPath);
-    assert.equal(saved.port,34567);
-    assert.deepEqual(Object.values(saved.instances)[0]!.chats[0]!.folder_options,[`${root}/concurrent`,`${root}/added`]);
-    assert.deepEqual(app.store.listSessions(botId),[]);
-  } finally { await app.close(); }
-});
 
-for (const transition of ['recovery','bootstrap'] as const) {
+for (const transition of ['recovery'] as const) {
   test(`folder transition crossing expiry retires ${transition} controls`, async t => {
     const app = await createSmokeApp();
     try {
@@ -554,26 +455,148 @@ for (const transition of ['recovery','bootstrap'] as const) {
       const root = Object.keys(app.config.instances)[0]!;
       const blocked = join(root,'blocked');
       await writeFile(blocked,'not a directory');
-      configure(app,transition === 'recovery' ? [blocked] : [],true);
+      configure(app,['blocked','.']);
       await app.update({text:'/new pending'});
-      let selection = panel(app);
-      if (transition === 'bootstrap') {
-        await app.callback(button(selection,'add'),selection);
-        selection = panel(app);
-      }
+      const selection = panel(app);
       const now = Date.now();
       let expired = false;
       t.mock.method(Date,'now',() => now+(expired ? 300001 : 0));
       app.bot.api.config.use(async (previous,method,payload,signal) => {
         const result = await previous(method,payload,signal);
-        if (method === 'editMessageText' && JSON.stringify(payload).includes(transition === 'recovery' ? ':retry' : ':0')) expired = true;
+        if (method === 'editMessageText' && JSON.stringify(payload).includes(':retry')) expired = true;
         return result;
       });
-      if (transition === 'recovery') await app.callback(button(selection,'0'),selection);
-      else await app.update({text:root,reply_to_message:selection});
+      await app.callback(button(selection,'0'),selection);
       assert.deepEqual(selection.reply_markup,{inline_keyboard:[]});
       assert.deepEqual(app.store.listSessions(botId),[]);
       assert.deepEqual(app.createdTopics,[]);
     } finally { await app.close(); }
   });
 }
+
+test('removing dot leaves a sole nondefault option and no chooser', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    const root = Object.keys(app.config.instances)[0]!;
+    await mkdir(join(root,'project'));
+    configure(app,['.','project']);
+    await app.update({text:'/settings'});
+    await clickSettings(app,7);
+    await clickSettings(app,0);
+    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['project']);
+    await app.update({text:'/new project task'});
+    assert.equal(panel(app),undefined);
+    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'project'))});
+  } finally { await app.close(); }
+});
+
+for (const missing of [false,true]) {
+  test(`manual singleton stays in its original topic, missing=${missing}`, async () => {
+    const app = await createSmokeApp();
+    try {
+      await app.update({text:'/setup'});
+      const root = Object.keys(app.config.instances)[0]!;
+      const path = join(root,'manual');
+      if (!missing) await mkdir(path);
+      configure(app,['manual']);
+      await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
+      if (missing) {
+        assert.deepEqual(app.store.listSessions(botId),[]);
+        assert.equal(existsSync(path),false);
+        const consent = panel(app);
+        assert.equal(button(consent,'0'),undefined);
+        assert.equal(button(consent,'other'),undefined);
+        await app.callback(button(consent,'create'),consent);
+      } else assert.equal(panel(app),undefined);
+      const sessions = app.store.listSessions(botId);
+      assert.equal(sessions.length,1);
+      assert.equal(sessions[0]!.threadId,42);
+      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(path)});
+      assert.deepEqual(app.createdTopics,[]);
+    } finally { await app.close(); }
+  });
+}
+
+test('singleton proposal requires normal approval then autouses its folder', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await clickSettings(app,1);
+    const root = Object.keys(app.config.instances)[0]!;
+    await mkdir(join(root,'approved'));
+    configure(app,['approved']);
+    app.setCurrentMember({status:'member'});
+    await app.update({text:'/new single proposal'},{id:77,is_bot:false,first_name:'Participant'});
+    assert.deepEqual(app.store.listSessions(botId),[]);
+    assert.equal(panel(app),undefined);
+    const approval = panel(app,'prompt:approve:');
+    assert.ok(approval);
+    app.setCurrentMember({status:'creator'});
+    await app.callback(callbacks(approval)[0]!,approval);
+    assert.equal(panel(app),undefined);
+    assert.equal(app.store.listSessions(botId).length,1);
+    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'approved'))});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'single proposal'}]);
+  } finally { await app.close(); }
+});
+
+test('sole folder filesystem failure retains task for retry without another choice', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    const root = Object.keys(app.config.instances)[0]!;
+    const path = join(root,'blocked');
+    await writeFile(path,'not a directory');
+    configure(app,['blocked']);
+    await app.update({text:'/new retained'});
+    const recovery = panel(app);
+    assert.ok(button(recovery,'retry'));
+    assert.equal(button(recovery,'other'),undefined);
+    assert.deepEqual(app.store.listSessions(botId),[]);
+    await rename(path,join(root,'old-file'));
+    await mkdir(path);
+    await app.callback(button(recovery,'retry'),recovery);
+    assert.equal(app.store.listSessions(botId).length,1);
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'retained'}]);
+  } finally { await app.close(); }
+});
+
+test('automatic folder admission never turns downstream preparation errors into folder retries', async t => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    configure(app,['.']);
+    const presets = t.mock.method(app.runtime,'availableModelPresets',async () => { throw new Error('Preset discovery failed'); });
+    await app.update({text:'/new /model_preset Fast task'});
+    assert.equal(presets.mock.callCount(),1);
+    assert.equal(panel(app),undefined);
+    assert.deepEqual(app.store.listSessions(botId),[]);
+    assert.deepEqual(app.createdTopics,[]);
+  } finally { await app.close(); }
+});
+
+test('manual folder creation rechecks administrator authority before registering the session', async () => {
+  const app = await createSmokeApp();
+  try {
+    app.setCurrentMember({status:'administrator'});
+    await app.update({text:'/setup'});
+    const root = Object.keys(app.config.instances)[0]!;
+    const path = join(root,'manual');
+    configure(app,['manual']);
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
+    const consent = panel(app);
+    app.bot.api.config.use(async (previous,method,payload,signal) => {
+      const result = await previous(method,payload,signal);
+      if (method === 'editMessageText') app.setCurrentMember({status:'member'});
+      return result;
+    });
+    await app.callback(button(consent,'create'),consent);
+    assert.equal(existsSync(path),true);
+    assert.deepEqual(app.store.listSessions(botId),[]);
+    assert.deepEqual(app.createdTopics,[]);
+    assert.equal(app.connectionCount,0);
+  } finally { await app.close(); }
+});
