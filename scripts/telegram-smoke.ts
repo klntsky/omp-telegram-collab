@@ -33,7 +33,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean; readState?: typeof readCollabState } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean; readState?: typeof readCollabState; prepareDatabase?: (filename: string, instancePath: string) => void; initialEntries?: SessionEntry[] } = {}) {
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
@@ -201,7 +201,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   });
   const telegramUrl = await listen(telegram);
   const directory = await mkdtemp(join(tmpdir(), 'omp-telegram-fixture-'));
-  const store = new Store(options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:');
+  const databasePath = options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:';
+  options.prepareDatabase?.(databasePath, directory);
+  const store = new Store(databasePath);
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'app' }],
     instances: { [directory]: { chats: [{ botId, chatId }] } },
@@ -328,7 +330,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
   };
   assistant.content.push({ type: 'toolCall', id: 'read-fixture', name: 'read', arguments: { path: 'src/auth.ts' }, intent: 'Inspecting the authentication boundary' });
-  const entries: SessionEntry[] = [
+  const entries: SessionEntry[] = options.initialEntries ?? [
     { type: 'message', id: 'user-fixture', parentId: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'Verify the Telegram session renderer.', timestamp: Date.now() } },
     { type: 'message', id: 'assistant-fixture', parentId: 'user-fixture', timestamp: new Date().toISOString(), message: assistant },
     { type: 'message', id: 'tool-fixture', parentId: 'assistant-fixture', timestamp: new Date().toISOString(), message: { role: 'toolResult', toolCallId: 'read-fixture', toolName: 'read', content: [{ type: 'text', text: 'export type SessionAccess = \"member\" | \"denied\";' }], timestamp: Date.now(), isError: false } },

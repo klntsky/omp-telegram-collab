@@ -4,6 +4,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
+import { migrateDatabase } from './migrations.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -49,35 +50,13 @@ export class Store {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
-    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-      BEGIN IMMEDIATE;
-      CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
-      CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
-      CREATE TABLE IF NOT EXISTS detached_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id));
-      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_path TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,initial_task TEXT,initial_state TEXT,UNIQUE(bot_id,chat_id,thread_id));
-      CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
-      CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
-      CREATE TABLE IF NOT EXISTS prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,omp_session_id,entry_id));
-      CREATE TABLE IF NOT EXISTS prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
-      CREATE TABLE IF NOT EXISTS message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
-      CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_pending_close_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
-      CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
-      CREATE TABLE IF NOT EXISTS skill_catalogs (instance_path TEXT PRIMARY KEY,skills TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
-      CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
-      COMMIT;`);
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+    try {
+      migrateDatabase(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     for (const row of this.db
       .prepare('SELECT bot_id,chat_id,thread_id FROM bot_status_topics')
       .all()) {
@@ -348,15 +327,28 @@ export class Store {
       .run(submissionId);
   }
   beginPromptReceiptSnapshot(sessionId: string, ompSessionId: string): number {
-    this.db
-      .prepare(
-        "UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND omp_session_id=? AND state='pending'",
-      )
-      .run(sessionId, ompSessionId);
-    const row = this.db
-      .prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=? AND omp_session_id=?')
-      .get(sessionId, ompSessionId);
-    return Number(row?.boundary ?? 0);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const upgrade = this.db.prepare('SELECT omp_session_id FROM provenance_upgrades WHERE session_id=?').get(sessionId);
+      if (upgrade?.omp_session_id === null) {
+        this.db.prepare('UPDATE provenance_upgrades SET omp_session_id=? WHERE session_id=?').run(ompSessionId, sessionId);
+        this.db.prepare(`INSERT INTO prompt_submissions (id,session_id,omp_session_id,sender,message_id,text,fingerprint,state)
+          SELECT id,session_id,?,sender,message_id,text,fingerprint,state FROM pending_upgrade_prompt_submissions WHERE session_id=?`).run(ompSessionId, sessionId);
+        this.db.prepare(`INSERT INTO prompt_receipts (session_id,omp_session_id,entry_id,message_id)
+          SELECT session_id,?,entry_id,message_id FROM pending_upgrade_prompt_receipts WHERE session_id=?`).run(ompSessionId, sessionId);
+        this.db.prepare('DELETE FROM pending_upgrade_prompt_submissions WHERE session_id=?').run(sessionId);
+        this.db.prepare('DELETE FROM pending_upgrade_prompt_receipts WHERE session_id=?').run(sessionId);
+      }
+      this.db.prepare("UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND omp_session_id=? AND state='pending'")
+        .run(sessionId, ompSessionId);
+      const row = this.db.prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=? AND omp_session_id=?')
+        .get(sessionId, ompSessionId);
+      this.db.exec('COMMIT');
+      return Number(row?.boundary ?? 0);
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   recordPromptReceipt(
     sessionId: string,
@@ -371,6 +363,10 @@ export class Store {
         .prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND omp_session_id=? AND entry_id=?')
         .get(sessionId, anchor.ompSessionId, anchor.entryId);
       if (previous) {
+        if (typeof previous.message_id === 'number') {
+          const session = this.getSession(sessionId)!;
+          this.recordMessageAnchor(sessionId, session.chatId, previous.message_id, {...anchor, kind:'collab-prompt', partIndex:0});
+        }
         this.db.exec('COMMIT');
         return {
           fresh: false,
@@ -484,6 +480,24 @@ export class Store {
   rememberReply(id: string, ompSessionId: string, entryId: string): boolean {
     const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, ompSessionId, entryId);
     return Number(result.changes) === 1;
+  }
+  rememberSnapshotReply(sessionId: string, ompSessionId: string, entryId: string, message: {text: string; timestamp: number}): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const fresh = this.rememberReply(sessionId, ompSessionId, entryId);
+      let historical = false;
+      if (fresh && this.db.prepare(`SELECT 1 FROM pending_upgrade_replies r JOIN provenance_upgrades u ON u.session_id=r.session_id
+        WHERE r.session_id=? AND u.omp_session_id=? LIMIT 1`).get(sessionId, ompSessionId)) {
+        const fingerprint = createHash('sha256').update(JSON.stringify([message.timestamp, message.text])).digest('hex');
+        historical = Boolean(this.db.prepare(`SELECT 1 FROM pending_upgrade_replies r JOIN provenance_upgrades u ON u.session_id=r.session_id
+          WHERE r.session_id=? AND u.omp_session_id=? AND r.fingerprint=?`).get(sessionId, ompSessionId, fingerprint));
+      }
+      this.db.exec('COMMIT');
+      return fresh && !historical;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   hasSnapshot(id: string): boolean {
     return Boolean(this.db.prepare('SELECT 1 FROM snapshot_baselines WHERE session_id=?').get(id));

@@ -3549,7 +3549,6 @@ export class BotService {
         await this.applySessionTitle(session);
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
-        listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, binding.sessionId);
         return (this.options.connect ?? connectCollab)(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
@@ -4056,6 +4055,10 @@ export class BotService {
       return;
     const ompSessionId = listener.ompSessionId;
     if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
+    if (frame.t === 'welcome') {
+      listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
+      listener.snapshotReplyTarget = this.options.store.getReplyTarget(session.id);
+    }
     this.options.runtime.observeFrame(session.id, frame);
     if (
       frame.t === 'welcome' ||
@@ -4241,7 +4244,9 @@ export class BotService {
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
-          if (result) this.options.store.rememberReply(session.id, ompSessionId, entry.id);
+          if (result) this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
+            text: result, timestamp: entry.message.timestamp,
+          });
         }
       }
       if (frame.final) {
@@ -4253,7 +4258,13 @@ export class BotService {
     if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
     const entry = frame.entry;
     const text = assistantText(entry.message);
-    if (!text || !this.options.store.rememberReply(session.id, ompSessionId, entry.id)) return;
+    if (!text) return;
+    const unseen = replay
+      ? this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
+          text, timestamp: entry.message.timestamp,
+        })
+      : this.options.store.rememberReply(session.id, ompSessionId, entry.id);
+    if (!unseen) return;
     const replyTarget = replay
       ? listener.snapshotReplyTarget
       : this.options.store.getReplyTarget(session.id);
