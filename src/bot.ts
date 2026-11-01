@@ -976,6 +976,7 @@ export class BotService {
   }
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
+    this.options.store.recoverInitialTaskPreparations(this.id);
     await this.syncCommandMenus();
     await this.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
@@ -2182,96 +2183,101 @@ export class BotService {
       ctx.from!.id,
       authority.from!.id,
     );
-    reservation?.bind(session.id);
-    if (automaticWorktree) {
-      await this.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.currentAdmin(authority)))
-        throw new Error('Administrator access changed before worktree creation.');
-      await this.createTopicWorktree(session);
-      if (task !== undefined && !extensions.length) {
+    this.options.store.beginInitialTaskPreparation(session.id);
+    try {
+      reservation?.bind(session.id);
+      if (automaticWorktree) {
         await this.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.currentAdmin(authority)))
-          throw new Error('Administrator access changed before initial task submission.');
-        this.requireSessionAssignment(session);
-        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+          throw new Error('Administrator access changed before worktree creation.');
+        await this.createTopicWorktree(session);
+        if (task !== undefined && !extensions.length) {
+          await this.authorize(ctx.chat!.id, ctx.from!.id);
+          if (!(await this.currentAdmin(authority)))
+            throw new Error('Administrator access changed before initial task submission.');
+          this.requireSessionAssignment(session);
+          this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+        }
       }
-    }
-    if (extensions.length) {
-      try {
-        await this.preparePrompt(ctx, session, extensions, authority);
-      } catch (error) {
-        await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
-          console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
-        });
-        throw error;
+      if (extensions.length) {
+        try {
+          await this.preparePrompt(ctx, session, extensions, authority);
+        } catch (error) {
+          await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
+            console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
+          });
+          throw error;
+        }
+        if (task !== undefined) {
+          await this.authorize(ctx.chat!.id, ctx.from!.id);
+          if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+          this.requireSessionAssignment(session);
+          this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+        }
       }
-      if (task !== undefined) {
-        await this.authorize(ctx.chat!.id, ctx.from!.id);
-        if (!(await this.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
-        this.requireSessionAssignment(session);
-        this.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+      if (worktree) {
+        const text = await this.options.runtime.worktree(session, task?.text || undefined);
+        this.options.store.setSessionRuntime(session.id, session.runtime);
+        task = undefined;
+        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
       }
-    }
-    if (worktree) {
-      const text = await this.options.runtime.worktree(session, task?.text || undefined);
-      this.options.store.setSessionRuntime(session.id, session.runtime);
-      task = undefined;
-      await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
-    }
-    if (worktree) {
-      const sourceKey = this.skills.key(ctx);
-      const destinationKey = {
-        ...sourceKey,
-        destination: topicDestination(session.chatId, session.threadId),
-      };
-      for (const skill of this.options.store.getPendingSkills(sourceKey))
-        this.options.store.addPendingSkill(destinationKey, skill);
-      this.options.store.clearPendingSkills(sourceKey);
-      const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
-      if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
-    }
-    accepted?.();
-    if (task !== undefined && ctx.message)
-      this.options.store.setInitialMessage(session.id, ctx.message.message_id);
-    if (task !== undefined && ctx.message)
-      for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
-        if (original.message && original.message.message_id !== ctx.message.message_id)
-          this.options.store.recordPromptMessageAlias(session.id, ctx.message.message_id, original.message.message_id);
-    await replyTo(
-      ctx,
-      contextDestination(ctx),
-      `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`,
-      {
-        reply_parameters: {
-          message_id: ctx.message!.message_id,
-          allow_sending_without_reply: true,
+      if (worktree) {
+        const sourceKey = this.skills.key(ctx);
+        const destinationKey = {
+          ...sourceKey,
+          destination: topicDestination(session.chatId, session.threadId),
+        };
+        for (const skill of this.options.store.getPendingSkills(sourceKey))
+          this.options.store.addPendingSkill(destinationKey, skill);
+        this.options.store.clearPendingSkills(sourceKey);
+        const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
+        if (defaultSkill) this.options.store.setNewTopicSkill(session.id, defaultSkill);
+      }
+      accepted?.();
+      if (task !== undefined && ctx.message)
+        this.options.store.setInitialMessage(session.id, ctx.message.message_id);
+      if (task !== undefined && ctx.message)
+        for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx])
+          if (original.message && original.message.message_id !== ctx.message.message_id)
+            this.options.store.recordPromptMessageAlias(session.id, ctx.message.message_id, original.message.message_id);
+      await replyTo(
+        ctx,
+        contextDestination(ctx),
+        `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`,
+        {
+          reply_parameters: {
+            message_id: ctx.message!.message_id,
+            allow_sending_without_reply: true,
+          },
+          link_preview_options: { is_disabled: true },
         },
-        link_preview_options: { is_disabled: true },
-      },
-    );
-    await this.announce(session);
-    const source = ctx.message;
-    if (task !== undefined && source?.reply_to_message) {
-      await forwardTo(
-        this.bot.api,
-        topicDestination(session.chatId, session.threadId),
-        ctx.chat!.id,
-        source.reply_to_message.message_id,
       );
-    }
-    if (task !== undefined)
-      for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
-        if (!original.message) continue;
-        const forwarded = await forwardTo(
+      await this.announce(session);
+      const source = ctx.message;
+      if (task !== undefined && source?.reply_to_message) {
+        await forwardTo(
           this.bot.api,
           topicDestination(session.chatId, session.threadId),
           ctx.chat!.id,
-          original.message.message_id,
+          source.reply_to_message.message_id,
         );
-        this.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
       }
-    await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
-    await this.listen(session);
+      if (task !== undefined)
+        for (const original of this.albumPrompts.get(ctx)?.contexts ?? [ctx]) {
+          if (!original.message) continue;
+          const forwarded = await forwardTo(
+            this.bot.api,
+            topicDestination(session.chatId, session.threadId),
+            ctx.chat!.id,
+            original.message.message_id,
+          );
+          this.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
+        }
+      await this.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
+      await this.listen(session);
+    } finally {
+      this.options.store.finishInitialTaskPreparation(session.id);
+    }
     await this.sendInitial(session);
   }
   private localCliCommand(): string {

@@ -36,7 +36,7 @@ async function legacy(version: number, run: (store: Store, filename: string) => 
 for (const version of [0, 1]) {
   test(`anchor migration schema ${version} stages provenance without inventing namespaces and preserves allocator and tasks`, async () => {
     await legacy(version, (store, filename) => {
-      assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 2);
+      assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 3);
       assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM prompt_submissions').get()!.n, 0);
       assert.equal(store.db.prepare('SELECT omp_session_id FROM provenance_upgrades WHERE session_id=?').get('local')!.omp_session_id, null);
       assert.deepEqual(store.db.prepare('SELECT id,state FROM pending_upgrade_prompt_submissions ORDER BY id').all().map(row => ({...row})), [

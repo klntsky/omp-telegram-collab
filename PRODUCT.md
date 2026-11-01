@@ -64,6 +64,8 @@ The bot does not send welcome messages or interactive initial-task requests. `/n
 
 New session topics get a quietly pinned OPEN AGENT message before the initial prompt. Automatic worktree creation can start OMP before that message is pinned. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions.
 
+Background recovery waits for in-progress topic preparation and task forwarding before admitting the initial prompt. A service restart can recover an interrupted preparation without replaying a task already submitted or reviving a cancelled task.
+
 `/worktree` delegates worktree creation, uncommitted-change transfer, and session relocation to OMP's own command. In a session topic it keeps the same topic and conversation history. The session retains its configured project assignment and authorization while its execution directory changes. Worktree location, branch defaults, change transfer, and source-checkout cleanup follow OMP's settings. Worktrees are not automatically removed when sessions stop or the service restarts.
 
 A current supergroup owner or administrator can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same administrator or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.

@@ -233,6 +233,15 @@ export class Store {
   hasPendingInitialTask(id: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND initial_state='pending'").get(id));
   }
+  beginInitialTaskPreparation(sessionId: string): void {
+    this.db.prepare('INSERT INTO initial_task_preparations (session_id) VALUES (?)').run(sessionId);
+  }
+  finishInitialTaskPreparation(sessionId: string): void {
+    this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id=?').run(sessionId);
+  }
+  recoverInitialTaskPreparations(botId: number): void {
+    this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
+  }
   setInitialTask(id: string, task: PromptContent, userId: number, authorityUserId = userId): void {
     if (!task.text.trim() && !task.images?.length) throw new Error('An initial task requires text or images');
     this.db.exec('BEGIN IMMEDIATE');
@@ -251,7 +260,7 @@ export class Store {
   claimInitialTask(id: string): PromptContent | undefined {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' RETURNING initial_task").get(id) as Row | undefined;
+      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' AND NOT EXISTS (SELECT 1 FROM initial_task_preparations WHERE session_id=sessions.id) RETURNING initial_task").get(id) as Row | undefined;
       let content: PromptContent | undefined;
       if (row) {
         const imageRow = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);
