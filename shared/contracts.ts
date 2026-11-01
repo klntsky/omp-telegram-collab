@@ -14,7 +14,7 @@ export interface BotConfig {
 export type TypingMode = 'disabled' | 'streaming' | 'inference';
 
 export interface InstanceConfig {
-  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skill?: string }[];
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; folder_options?: string[]; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skill?: string }[];
 }
 
 export interface AppConfig {
@@ -46,7 +46,7 @@ export interface TopicSession extends TopicKey {
   instancePath: string;
   name: string;
   status: 'open' | 'closed' | 'detached';
-  runtime: { kind: 'managed'; worktreePath?: string } | { kind: 'attached'; instanceId: string; sessionId: string };
+  runtime: { kind: 'managed'; cwd?: string } | { kind: 'attached'; instanceId: string; sessionId: string };
   createdAt: number;
 }
 
