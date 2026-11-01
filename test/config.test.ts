@@ -91,10 +91,10 @@ test('YAML supports multiple bots and multiple chats', t => {
   assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
   assert.equal(findInstance(loaded, botId, -999), undefined);
   assert.deepEqual(loaded.instances[dir]!.chats, [
-    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false, typing_indicators: 'disabled' },
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true, typing_indicators: 'disabled' },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false, typing_indicators: 'disabled' },
-    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false, typing_indicators: 'disabled' },
+    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false, require_folder_choice: false, folder_options: [], typing_indicators: 'disabled' },
+    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true, require_folder_choice: false, folder_options: [], typing_indicators: 'disabled' },
+    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false, require_folder_choice: false, folder_options: [], typing_indicators: 'disabled' },
+    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false, require_folder_choice: false, folder_options: [], typing_indicators: 'disabled' },
   ]);
   writeConfig(loaded);
   assert.deepEqual(readConfig(path), loaded);
@@ -114,6 +114,40 @@ test('typing indicators default to disabled and accept only supported modes', t 
   for (const mode of ['enabled', '', true, null, 1]) {
     writeFileSync(path, stringify({...input, instances: {[dir]: {chats: [{botId, chatId, typing_indicators: mode}]}}}));
     assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.typing_indicators`);
+  }
+});
+
+test('folder choices default per forum and preserve normalized missing paths', t => {
+  const { path, dir } = fixture(t);
+  const config = validConfig(path, dir);
+  writeConfig(config);
+  const defaults = readConfig(path).instances[dir]!.chats[0]!;
+  assert.equal(defaults.require_folder_choice, false);
+  assert.deepEqual(defaults.folder_options, []);
+  const selected = join(dir, 'not-created', 'project');
+  config.instances[dir]!.chats.push({ botId, chatId: -10042, require_folder_choice: true, folder_options: [selected, dir] });
+  writeConfig(config);
+  const loaded = readConfig(path);
+  assert.equal(loaded.instances[dir]!.chats[0]!.require_folder_choice, false);
+  assert.deepEqual(loaded.instances[dir]!.chats[1]!.folder_options, [selected, dir]);
+  assert.equal(loaded.instances[dir]!.chats[1]!.require_folder_choice, true);
+  assert.equal(existsSync(selected), false);
+  config.instances[dir]!.chats[1]!.folder_options = [];
+  writeConfig(config);
+  assert.deepEqual(readConfig(path).instances[dir]!.chats[1]!.folder_options, []);
+});
+
+test('folder choice configuration rejects nonboolean flags and nonnormalized or relative paths', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _, ...input } = validConfig(path, dir);
+  for (const fields of [
+    { require_folder_choice: 'true' }, { require_folder_choice: null },
+    { folder_options: 'not-an-array' }, { folder_options: [1] },
+    { folder_options: ['relative'] }, { folder_options: [`${dir}/../project`] },
+    { folder_options: [`${dir}/bad\0path`] },
+  ]) {
+    writeFileSync(path, stringify({ ...input, instances: { [dir]: { chats: [{ botId, chatId, ...fields }] } } }));
+    assertInvalid(path, () => readConfig(path));
   }
 });
 

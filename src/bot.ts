@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, opendirSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, normalize } from 'node:path';
 import { Bot, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
@@ -55,7 +56,7 @@ export interface RuntimeLike {
   availableModelPresets(instancePath: string): Promise<string[]>;
   modelPresetDetails(instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
   providerUsage(instancePath: string): Promise<{ heading: string; table: string }[]>;
-  listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<{name: string; description: string}[]>;
+  listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
   setSessionLimit(limit: number): void;
   increaseSessionLimit(expectedLimit: number): boolean;
@@ -154,7 +155,7 @@ interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
-  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instancePath: string; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}};
+  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instancePath: string; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
 }
 interface PromptProposal {
   source: Context;
@@ -166,6 +167,7 @@ interface PromptProposal {
   allMessagesArePrompts: boolean;
   messageId: number;
   expires: number;
+  skills?: {key:PendingSkillKey;names:string[];topicSkill?:string};
 }
 const typingLabels: Record<TypingMode, string> = {
   disabled: 'Disabled',
@@ -179,17 +181,20 @@ type SettingsKey =
   | 'presets'
   | 'capacity'
   | 'worktrees'
+  | 'folders'
+  | 'folderRequirement'
   | 'typing';
-type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing';
+type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing' | 'folders';
 type SettingsAction =
   | { kind: 'page'; page: SettingsPage; offset?: number }
   | {
       kind: 'set';
-      field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
+      field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees' | 'require_folder_choice';
       value: boolean;
     }
   | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
+  | { kind: 'folders'; remove?: number; clear?: boolean }
   | { kind: 'close' };
 interface SettingsPanel {
   token: string;
@@ -202,6 +207,7 @@ interface SettingsPanel {
   choices: SettingsAction[];
   capacityInput?: boolean;
   changes: Map<SettingsKey, {label: string; before: string; after: string}>;
+  folderInput?: boolean;
 }
 type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default'};
 interface PresetPanel {
@@ -308,6 +314,113 @@ export class BotService {
   private readonly inputIntents = new WeakMap<Context, InputIntent>();
   private readonly albums = new Map<string, {contexts:Context[];ready:Promise<void>;resolve:()=>void;timer?:NodeJS.Timeout}>();
   private readonly albumPrompts = new WeakMap<Context, {contexts:Context[]}>();
+  private readonly folderRequests = new Map<string, {
+    state: {kind:'choose';offset:number} | {kind:'create';path:string};
+    source: Context; authority: Context; messageId: number; expires: number;
+    epoch: number; instancePath: string; fingerprint: string; options: string[]; required: boolean;
+    resume: (cwd: string) => Promise<void>;
+  }>();
+  private folderSettings(chatId: number) {
+    const assigned = findInstance(readConfig(this.options.config.configPath), this.id, chatId);
+    if (!assigned || assigned.path !== this.assignedPath(chatId)) throw new Error('The group instance assignment changed');
+    const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === chatId)!;
+    return {instancePath:assigned.path, options:chat.folder_options ?? [], required:chat.require_folder_choice === true};
+  }
+  private folderKeyboard(token: string, options: string[], required: boolean, offset: number) {
+    const rows = options.slice(offset,offset+8).map((path,index) => [{text:path.slice(0,100),callback_data:`folder:${token}:${offset+index}`}]);
+    if (offset > 0) rows.push([{text:'Previous folders',callback_data:`folder:${token}:page${Math.max(0,offset-8)}`}]);
+    if (offset+8 < options.length) rows.push([{text:'Next folders',callback_data:`folder:${token}:page${offset+8}`}]);
+    if (!required) rows.push([{text:'Use forum default',callback_data:`folder:${token}:default`}]);
+    rows.push([{text:'Cancel',callback_data:`folder:${token}:cancel`}]);
+    return rows;
+  }
+  private async chooseFolder(source: Context, authority: Context, resume: (cwd: string) => Promise<void>): Promise<boolean> {
+    const epoch = this.admissionEpoch;
+    const settings = this.folderSettings(source.chat!.id);
+    if (!settings.required && !settings.options.length) return false;
+    if (!settings.options.length) throw new Error('Folder selection is required, but no folders are configured. Ask a group administrator to add folders in /settings.');
+    const token = randomBytes(16).toString('base64url');
+    const rows = this.folderKeyboard(token,settings.options,settings.required,0);
+    const message = await replyTo(source, contextDestination(source), 'Choose the runtime folder for this session.', {reply_markup:{inline_keyboard:rows}});
+    if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch ||
+        JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
+      throw new Error('Folder settings or service state changed. Send the command again.');
+    this.folderRequests.set(token, {...settings,state:{kind:'choose',offset:0},source,authority,messageId:message.message_id,
+      expires:Date.now()+300000,epoch,fingerprint:JSON.stringify(settings),resume});
+    setTimeout(() => this.folderRequests.delete(token),300000).unref();
+    return true;
+  }
+  private async folderCallback(ctx: Context, data: string): Promise<void> {
+    const match = /^folder:([A-Za-z0-9_-]{22}):(\d+|default|create|cancel|page\d+)$/.exec(data);
+    const request = match && this.folderRequests.get(match[1]!);
+    const message = ctx.callbackQuery && 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
+    if (!match || !request || !message || !ctx.from || ctx.from.is_bot || ctx.from.id !== request.authority.from!.id ||
+        ctx.chat?.id !== request.source.chat!.id || message.message_id !== request.messageId ||
+        !sameTopicDestination(contextDestination(ctx),contextDestination(request.source)) ||
+        !('from' in message) || message.from?.id !== this.id || 'forward_origin' in message || 'forward_date' in message) return;
+    if (request.state.kind === 'create' && match[2] !== 'create' && match[2] !== 'cancel') return;
+    if (request.state.kind === 'choose' && (match[2] === 'create' ||
+        (match[2] === 'default' && request.required))) return;
+    if (request.state.kind === 'choose' && /^\d+$/.test(match[2]!) &&
+        (Number(match[2]) < request.state.offset || Number(match[2]) >= request.state.offset+8 ||
+          request.options[Number(match[2])] === undefined)) return;
+    this.folderRequests.delete(match[1]!);
+    await ctx.answerCallbackQuery();
+    if (match[2] === 'cancel') {
+      await ctx.editMessageText('Folder selection cancelled.', {reply_markup:{inline_keyboard:[]}});
+      return;
+    }
+    await this.authorize(ctx.chat!.id,request.source.from!.id);
+    if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before folder selection.');
+    if (request.expires <= Date.now() || request.epoch !== this.admissionEpoch || this.stopped ||
+        refreshTermination(this.options.config) || JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
+      throw new Error('This folder request is stale. Send the command again.');
+    if (request.state.kind === 'choose' && match[2]!.startsWith('page')) {
+      const offset = Number(match[2]!.slice(4));
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset >= request.options.length || offset % 8 !== 0) return;
+      request.state.offset = offset;
+      await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:this.folderKeyboard(match[1]!,request.options,request.required,offset)}});
+      this.folderRequests.set(match[1]!,request);
+      return;
+    }
+    let path: string;
+    if (request.state.kind === 'create') {
+      if (match[2] !== 'create') return;
+      path = request.state.path;
+      mkdirSync(path,{recursive:true});
+    } else {
+      if (match[2] === 'default' && !request.required) path = request.instancePath;
+      else if (/^\d+$/.test(match[2]!) && Number(match[2]) >= request.state.offset &&
+          Number(match[2]) < request.state.offset+8 && request.options[Number(match[2])]) path = request.options[Number(match[2])]!;
+      else return;
+      try { statSync(path); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        let ancestor = dirname(path);
+        while (true) {
+          try { statSync(ancestor); break; } catch (ancestorError) {
+            if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor) throw ancestorError;
+            ancestor = dirname(ancestor);
+          }
+        }
+        accessSync(ancestor,constants.W_OK | constants.X_OK);
+        request.state = {kind:'create',path};
+        await ctx.editMessageText(`${error instanceof Error ? error.message : String(error)}\nCreate folder ${path}?`, {reply_markup:{inline_keyboard:[[
+          {text:'Create folder',callback_data:`folder:${match[1]}:create`},
+          {text:'Cancel',callback_data:`folder:${match[1]}:cancel`},
+        ]]}});
+        this.folderRequests.set(match[1]!,request);
+        return;
+      }
+    }
+    opendirSync(path).closeSync();
+    accessSync(path,constants.R_OK | constants.X_OK);
+    const cwd = realpathSync(path);
+    await ctx.editMessageText(`Runtime folder: ${cwd}`, {reply_markup:{inline_keyboard:[]}});
+    if (request.epoch !== this.admissionEpoch || this.stopped || refreshTermination(this.options.config) ||
+        JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
+      throw new Error('This folder request is stale. Send the command again.');
+    await request.resume(cwd);
+  }
   private saveSettingsPanel(panel: SettingsPanel): void {
     this.options.store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?) ON CONFLICT(bot_id,token) DO UPDATE SET panel=excluded.panel')
       .run(this.id, panel.token, JSON.stringify({...panel, changes: [...panel.changes]}));
@@ -339,10 +452,25 @@ export class BotService {
     const decoded = JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
       changes: [SettingsKey, { label: string; before: string; after: string }][];
     };
-    if (!decoded.capacityInput || !sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    if ((!decoded.capacityInput && !decoded.folderInput) || !sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
     return { ...decoded, changes: new Map(decoded.changes) };
   }
-  private async saveCapacityReply(ctx: Context, panel: SettingsPanel): Promise<void> {
+  private async saveSettingsReply(ctx: Context, panel: SettingsPanel): Promise<void> {
+    if (panel.folderInput) {
+      const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
+      const paths = [...new Set(input.split('\n').map(path => path.trim()).filter(Boolean))];
+      if (!paths.length || paths.some(path => !isAbsolute(path))) throw new Error('Reply with absolute folder paths, one per line.');
+      const config = await this.settingsAccess(ctx,panel,true);
+      const chat = findInstance(config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+      const before = (chat.folder_options ?? []).join('\n') || '(none)';
+      chat.folder_options = paths.map(path => normalize(path));
+      panel.changes.set('folders',{label:'Runtime folders',before:panel.changes.get('folders')?.before ?? before,after:chat.folder_options.join('\n')});
+      writeConfig(config);
+      Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
+      this.saveSettingsPanel(panel);
+      await this.renderSettings(panel,config,'folders');
+      return;
+    }
     const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
     const target = Number(input);
     if (!/^[0-9]+$/.test(input) || !Number.isSafeInteger(target) || target < 1)
@@ -435,6 +563,14 @@ export class BotService {
         kind: 'page',
         page: 'typing',
       });
+      button('Runtime folders', {kind:'page',page:'folders'});
+    } else if (page === 'folders') {
+      text = `Runtime folders\nReply to this message with absolute paths, one per line, to replace the list.\n${(chat.folder_options ?? []).slice(offset,offset+8).map(path => path.slice(0,250)).join('\n') || '(none)'}`;
+      button(`Require folder choice: ${chat.require_folder_choice === true ? 'Enabled' : 'Disabled'}`, {kind:'set',field:'require_folder_choice',value:chat.require_folder_choice !== true});
+      (chat.folder_options ?? []).slice(offset,offset+8).forEach((path,index) => button(`Remove ${path}`,{kind:'folders',remove:offset+index}));
+      if (offset > 0) button('Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
+      if (offset+8 < (chat.folder_options ?? []).length) button('Next folders',{kind:'page',page:'folders',offset:offset+8});
+      button('Clear folders',{kind:'folders',clear:true});
     } else if (page === 'typing') {
       text =
         'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
@@ -486,6 +622,7 @@ export class BotService {
     panel.revision = revision;
     panel.offset = offset;
     panel.capacityInput = page === 'capacity';
+    panel.folderInput = page === 'folders';
     this.saveSettingsPanel(panel);
   }
   private presetSession(panel: PresetPanel): TopicSession {
@@ -659,6 +796,19 @@ export class BotService {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
+    if (action.kind === 'folders') {
+      const config = await this.settingsAccess(ctx,panel,true);
+      const chat = findInstance(config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+      const before = (chat.folder_options ?? []).join('\n') || '(none)';
+      chat.folder_options = action.clear ? [] : (chat.folder_options ?? []).filter((_,index) => index !== action.remove);
+      panel.changes.set('folders',{label:'Runtime folders',before:panel.changes.get('folders')?.before ?? before,after:chat.folder_options.join('\n') || '(none)'});
+      writeConfig(config);
+      Object.assign(findInstance(this.options.config,this.id,panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!,chat);
+      this.saveSettingsPanel(panel);
+      await ctx.answerCallbackQuery();
+      await this.renderSettings(panel,config,'folders');
+      return;
+    }
     const config = await this.settingsAccess(
       ctx,
       panel,
@@ -683,6 +833,7 @@ export class BotService {
       });
       panel.choices = [];
       panel.capacityInput = false;
+      panel.folderInput = false;
       this.saveSettingsPanel(panel);
       return;
     }
@@ -716,13 +867,14 @@ export class BotService {
               ? 'prompts'
               : action.field === 'users_can_propose_prompts'
                 ? 'proposals'
-                : 'worktrees';
+                : action.field === 'require_folder_choice' ? 'folderRequirement' : 'worktrees';
       const labels = {
         prompts: 'Message handling',
         proposals: 'Who can send requests',
         skills: 'Default skill',
         presets: 'Default model preset',
         worktrees: '🌳 Worktrees',
+        folderRequirement: 'Require folder choice',
         typing: 'Typing indicators',
       };
       const value = (setting: boolean | string | undefined): string => {
@@ -765,7 +917,7 @@ export class BotService {
         action.kind === 'typing'
           ? 'typing'
           : action.kind === 'set'
-            ? 'root'
+            ? action.field === 'require_folder_choice' ? 'folders' : 'root'
             : action.field === 'default_new_topic_skill'
               ? 'skills'
               : 'presets',
@@ -2146,14 +2298,28 @@ export class BotService {
     authority = ctx,
     extensions: readonly PromptExtension[] = [],
     reservation?: {bind(id: string): void},
+    cwd?: string,
+    proposedSkills?: {names:string[];topicSkill?:string},
   ): Promise<void> {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
+    const folderFingerprint = JSON.stringify(this.folderSettings(ctx.chat!.id));
+    const epoch = this.admissionEpoch;
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (attached && attached.instancePath !== instancePath)
       throw new Error('The group instance assignment changed');
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
     if (this.assignedPath(ctx.chat!.id) !== instancePath)
       throw new Error('The group instance assignment changed');
+    if (!attached && cwd === undefined && await this.chooseFolder(ctx,authority,selected =>
+      this.newSession(ctx,task,attached,name,accepted,worktree,authority,extensions,undefined,selected,proposedSkills))) return;
+    if (!attached && !worktree && proposedSkills) {
+      const names = [...new Set([...proposedSkills.names,...(proposedSkills.topicSkill ? [proposedSkills.topicSkill] : [])])];
+      if (names.length) {
+        const available = await this.options.runtime.listSkills(instancePath, undefined, undefined, cwd);
+        const missing = names.filter(name => !available.some(skill => skill.name === name));
+        if (missing.length) throw new Error(`Skills are no longer available: ${missing.join(', ')}`);
+      }
+    }
     const title =
       (name ?? task?.text.replace(/(?:^|\s)\/skill:[^\s]+/g, ' ') ?? '')
         .replace(/\s+/g, ' ')
@@ -2164,6 +2330,13 @@ export class BotService {
     if (!(await this.currentAdmin(authority)))
       throw new Error('Administrator access changed before topic creation.');
     if (this.stopped || refreshTermination(this.options.config)) throw new Error('The service is stopping');
+    if (epoch !== this.admissionEpoch || folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
+      throw new Error('Folder settings changed before topic creation. Send the command again.');
+    if (cwd !== undefined) {
+      opendirSync(cwd).closeSync();
+      accessSync(cwd,constants.R_OK | constants.X_OK);
+      if (realpathSync(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+    }
     const topic = await this.bot.api.createForumTopic(
       ctx.chat!.id,
       title,
@@ -2177,7 +2350,7 @@ export class BotService {
       title,
       attached
         ? { kind: 'attached', instanceId: attached.instanceId, sessionId: attached.sessionId }
-        : { kind: 'managed' },
+        : { kind: 'managed', ...(cwd ? {cwd} : {}) },
       attached || worktree || automaticWorktree || extensions.length ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
@@ -2344,6 +2517,7 @@ export class BotService {
       return;
     }
     await this.authorize(request.chatId,ctx.from!.id);
+    if (this.capacityRequests.get(token) !== request) return;
     this.capacityRequests.delete(token);
     if (action === 'cancel') {
       await replyTo(ctx, contextDestination(ctx), 'Capacity increase cancelled. The session limit is unchanged.');
@@ -2360,6 +2534,12 @@ export class BotService {
       const approver = await this.bot.api.getChatMember(request.chatId, ctx.from!.id);
       if (!isActiveMember(approver) || !isAdministrator(approver)) return;
       if (command.epoch !== this.admissionEpoch || this.stopped || refreshTermination(this.options.config)) return;
+      if (command.folderFingerprint && command.folderFingerprint !== JSON.stringify(this.folderSettings(request.chatId))) return;
+      if (command.cwd !== undefined) {
+        opendirSync(command.cwd).closeSync();
+        accessSync(command.cwd,constants.R_OK | constants.X_OK);
+        if (realpathSync(command.cwd) !== command.cwd) throw new Error('Managed working directory identity changed');
+      }
       const persisted = readConfig(this.options.config.configPath);
       if (findInstance(persisted, this.id, request.chatId)?.path !== command.instancePath ||
           this.assignedPath(request.chatId) !== command.instancePath) return;
@@ -2368,7 +2548,7 @@ export class BotService {
       writeConfig({...persisted, omp:{...persisted.omp,maxSessions:request.limit * 2}});
       this.options.config.omp.maxSessions = request.limit * 2;
       if (!this.options.runtime.increaseSessionLimit(request.limit)) return;
-      await this.routePrompt(command.source, command.content, session, command.extensions, command.worktree, command.skills);
+      await this.routePrompt(command.source, command.content, session, command.extensions, command.worktree, command.skills, command.cwd);
       return;
     }
     const session = this.options.store.getSession(request.sessionId);
@@ -2455,8 +2635,9 @@ export class BotService {
       checkSession();
     }
   }
-  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}): Promise<void> {
+  private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void> {
     const epoch = this.admissionEpoch;
+    const folderFingerprint = !session ? JSON.stringify(this.folderSettings(ctx.chat!.id)) : undefined;
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     const preparations = extensions.filter(extension => extension.kind !== 'skill');
@@ -2472,9 +2653,14 @@ export class BotService {
     const instancePath = this.assignedPath(ctx.chat!.id);
     if (session?.runtime.kind === 'attached' && preparations.length) throw new Error('Attached sessions cannot run prompt preparations.');
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    const skillKey = this.skills.key(ctx);
+    const pendingSkills = frozenSkills?.names ?? this.options.store.getPendingSkills(skillKey);
+    const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
+    if (admin && !session && cwd === undefined && await this.chooseFolder(ctx,ctx,selected =>
+      this.routePrompt(ctx,structuredClone(content),undefined,extensions,worktree,{names:[...pendingSkills],topicSkill},selected))) return;
     const originalContent = structuredClone(content);
     if (extensions.some(extension => extension.kind === 'model-preset')) {
-      const names = await this.options.runtime.availableModelPresets(instancePath);
+      const names = await this.options.runtime.availableModelPresets(cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath);
       for (const extension of extensions) {
         if (extension.kind === 'model-preset' && !names.includes(extension.name)) {
           await this.replyPresetText(ctx, `Unknown model preset: ${extension.name}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
@@ -2482,14 +2668,13 @@ export class BotService {
         }
       }
     }
-    const skillKey = this.skills.key(ctx);
-    const pendingSkills = frozenSkills?.names ?? this.options.store.getPendingSkills(skillKey);
-    const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
     const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
-      const available = await this.options.runtime.listSkills(instancePath, session);
-      const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
-      if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
+      if (admin || session) {
+        const available = await this.options.runtime.listSkills(instancePath, session, undefined, cwd);
+        const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
+        if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
+      }
       content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
     }
     if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
@@ -2500,6 +2685,8 @@ export class BotService {
         await this.authorize(ctx.chat!.id,ctx.from!.id);
         if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('The service is stopping');
         if (!(await this.currentAdmin(ctx)) || this.assignedPath(ctx.chat!.id) !== instancePath || this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('Prompt authority or assignment changed before execution.');
+        if (folderFingerprint && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
+          throw new Error('Folder settings changed before execution. Send the command again.');
         if (session && (this.options.store.getSessionGeneration(session.id) !== generation || this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed before execution.');
       };
       let reservation: {bind(id:string):void;release():void} | undefined;
@@ -2521,11 +2708,12 @@ export class BotService {
               {text:'Cancel',callback_data:`capacity:cancel:${token}`},
             ]]},
           });
-          if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) return;
+          if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch ||
+              (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))) return;
           this.capacityRequests.set(token, {
             sessionId:session?.id ?? '',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
             messageId:message.message_id,limit:error.limit,expires:Date.now()+300000,
-            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instancePath,epoch,generation,skills:{names:[...pendingSkills],topicSkill}},
+            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instancePath,epoch,generation,skills:{names:[...pendingSkills],topicSkill},cwd,folderFingerprint},
           });
           setTimeout(() => this.capacityRequests.delete(token),300000).unref();
           return;
@@ -2536,7 +2724,7 @@ export class BotService {
         if (session) {
           await this.preparePrompt(ctx, session, preparations);
           await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
-        } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation);
+        } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd);
       } finally { reservation?.release(); }
       return;
     }
@@ -2553,10 +2741,9 @@ export class BotService {
     this.promptProposals.set(token, {
       source:ctx,content,instancePath,worktree,
       ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
+      skills:{key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill},
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
-    if (!worktree) this.options.store.clearPendingSkills(skillKey);
-    if (session && topicSkill) this.options.store.clearNewTopicSkill(session.id);
   }
   private async approvePrompt(ctx: Context, token: string): Promise<void> {
     const proposal = this.promptProposals.get(token);
@@ -2581,15 +2768,16 @@ export class BotService {
       return;
     }
     await this.authorize(ctx.chat.id, proposal.source.from!.id);
+    if (this.promptProposals.get(token) !== proposal) return;
     this.promptProposals.delete(token);
     await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
     if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before prompt approval.');
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,undefined,ctx))) {
+      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.newSession(proposal.source,proposal.content,undefined,undefined,undefined,proposal.worktree,ctx);
+    } else await this.newSession(proposal.source,proposal.content,undefined,undefined,proposal.skills ? () => this.consumePendingSkills(proposal.skills!.key,proposal.skills!.names) : undefined,proposal.worktree,ctx,[],undefined,undefined,proposal.skills);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
   private consumePendingSkills(key: PendingSkillKey, names: readonly string[]): void {
@@ -2650,7 +2838,7 @@ export class BotService {
     this.termination = undefined;
     const settingsPanel = this.settingsReplyPanel(ctx);
     if (settingsPanel) {
-      await this.saveCapacityReply(ctx, settingsPanel);
+      await this.saveSettingsReply(ctx, settingsPanel);
       return;
     }
     if (ctx.inlineQuery) {
@@ -2659,6 +2847,10 @@ export class BotService {
     }
     if (ctx.callbackQuery) {
       if (ctx.callbackQuery.data === undefined || !ctx.chat || !ctx.from || ctx.from.is_bot) return;
+      if (ctx.callbackQuery.data.startsWith('folder:')) {
+        await this.folderCallback(ctx,ctx.callbackQuery.data);
+        return;
+      }
       if (ctx.callbackQuery.data.startsWith('skills:')) {
         const message = 'message' in ctx.callbackQuery ? ctx.callbackQuery.message : undefined;
         if (ctx.chat.type !== 'supergroup' || !this.options.store.isEnrolled(this.id, ctx.chat.id))
@@ -2806,6 +2998,10 @@ export class BotService {
     if (detached && topicLifecycle) return;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
+        if (this.folderSettings(ctx.chat.id).required) {
+          await replyTo(ctx,destination,'This forum requires a runtime folder. Use /new with a task to choose a folder before creating a managed session.');
+          return;
+        }
         session = this.options.store.createSession(
           {
             botId: this.id,

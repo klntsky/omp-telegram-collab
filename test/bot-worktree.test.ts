@@ -18,7 +18,7 @@ for (const branch of ['', ' feature/native']) {
       const calls: Array<{id:string;branch?:string}> = [];
       t.mock.method(app.runtime,'worktree',async (session: TopicSession, name?: string) => {
         calls.push({id:session.id,branch:name});
-        session.runtime = {kind:'managed',worktreePath:'/fixture/native-worktree'};
+        session.runtime = {kind:'managed',cwd:'/fixture/native-worktree'};
         return 'Moved to worktree /fixture/native-worktree';
       });
       await app.update({text:`/worktree${branch}`,message_thread_id:before.threadId,
@@ -28,7 +28,7 @@ for (const branch of ['', ' feature/native']) {
       const after = app.store.getSession(before.id)!;
       assert.equal(after.threadId,before.threadId);
       assert.equal(after.instancePath,before.instancePath);
-      assert.deepEqual(after.runtime,{kind:'managed',worktreePath:'/fixture/native-worktree'});
+      assert.deepEqual(after.runtime,{kind:'managed',cwd:'/fixture/native-worktree'});
       assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,count);
       await app.update({text:'/p Continue',message_thread_id:before.threadId});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Continue'));
@@ -49,7 +49,7 @@ test('General creates an empty topic then passes native branch arguments without
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       assert.equal(app.store.getSession(session.id)?.threadId,session.threadId);
       calls.push({id:session.id,branch});
-      session.runtime = {kind:'managed',worktreePath:'/fixture/general-worktree'};
+      session.runtime = {kind:'managed',cwd:'/fixture/general-worktree'};
       return 'Moved to worktree /fixture/general-worktree';
     });
     await app.update({text:'/worktree feature/native',reply_to_message:{message_id:8000,text:'Ignore this quote'}});
@@ -78,7 +78,7 @@ test('General worktree waits for group administrator approval', async t => {
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls++;
       assert.equal(branch,'feature/proposed');
-      session.runtime = {kind:'managed',worktreePath:'/fixture/approved'};
+      session.runtime = {kind:'managed',cwd:'/fixture/approved'};
       return 'Moved to worktree /fixture/approved';
     });
     const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
@@ -159,7 +159,7 @@ test('forum worktree setting gates native creation before skill-bearing initial 
       assert.equal(app.store.hasPendingInitialTask(session.id),false);
       assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
       calls.push({id:session.id,branch});
-      session.runtime = {kind:'managed',worktreePath:'/fixture/automatic'};
+      session.runtime = {kind:'managed',cwd:'/fixture/automatic'};
       return '';
     });
     await app.update({text:'/new Default disabled'});
@@ -169,7 +169,7 @@ test('forum worktree setting gates native creation before skill-bearing initial 
     await setForumSetting(app,2,0);
     await app.update({text:'/skill_pdf_tools'});
     await app.update({text:'/new Isolated task'});
-    const isolated = app.store.listSessions(botId).find(session => session.runtime.kind === 'managed' && session.runtime.worktreePath === '/fixture/automatic')!;
+    const isolated = app.store.listSessions(botId).find(session => session.runtime.kind === 'managed' && session.runtime.cwd === '/fixture/automatic')!;
     assert.deepEqual(calls,[{id:isolated.id,branch:`t.me/c/${String(chatId).replace(/^-100/,'')}/${isolated.threadId}`}]);
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text.endsWith('Isolated task')));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\nIsolated task'});
@@ -189,7 +189,7 @@ test('manual topic creation uses its topic branch once and does not submit a tas
     const calls: Array<{id:string;branch?:string}> = [];
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls.push({id:session.id,branch});
-      session.runtime = {kind:'managed',worktreePath:'/fixture/manual'};
+      session.runtime = {kind:'managed',cwd:'/fixture/manual'};
       return '';
     });
     await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
@@ -198,7 +198,7 @@ test('manual topic creation uses its topic branch once and does not submit a tas
     assert.deepEqual(calls,[{id:session.id,branch:`t.me/c/${String(chatId).replace(/^-100/,'')}/42`}]);
     assert.equal(app.store.hasPendingInitialTask(session.id),false);
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
-    assert.deepEqual(app.store.getSession(session.id)!.runtime,{kind:'managed',worktreePath:'/fixture/manual'});
+    assert.deepEqual(app.store.getSession(session.id)!.runtime,{kind:'managed',cwd:'/fixture/manual'});
   } finally { await app.close(); }
 });
 
@@ -211,7 +211,7 @@ for (const branch of ['', ' feature/explicit']) {
       const calls: Array<string | undefined> = [];
       t.mock.method(app.runtime,'worktree',async (session: TopicSession, name?: string) => {
         calls.push(name);
-        session.runtime = {kind:'managed',worktreePath:'/fixture/explicit'};
+        session.runtime = {kind:'managed',cwd:'/fixture/explicit'};
         return '';
       });
       await app.update({text:`/worktree${branch}`});

@@ -117,6 +117,18 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 - Runtime failures stop the sequence before task submission. Already completed preparations are not rolled back or automatically replayed. Original failure diagnostics are preserved.
 
 
+#### 1.1.2. Session folder choice
+
+- Each forum has `require_folder_choice`, defaulting to `false`, and `folder_options`, defaulting to an empty array of paths. Current group administrators can edit both through `/settings`.
+- Folder options are absolute paths on the agent's computer. A missing directory can remain configured for later creation.
+- With no options and optional choice, new sessions use the forum's assigned project directory without a picker. Configured options produce folder buttons before topic creation. Optional choice also offers the forum default. Required choice permits only configured options and rejects creation when the list is empty.
+- `/new` in any topic and `/p` in General use the picker when enabled. `/p` in an existing session keeps that session's directory. Taskless commands retain their existing behavior.
+- Folder selection preserves the complete task and its images, quoted context, skills, model preset, and worktree preparation. Waiting or cancelling does not create a topic, start a host, reserve capacity, or consume pending skills.
+- Existing paths must resolve to accessible directories. For a missing directory, the bot offers explicit creation confirmation only when the service account can create it. Filesystem operations recheck access and preserve original failure diagnostics. A failure never selects another folder.
+- Folder callbacks expire and are bound to the originating message and authorized user. Session creation and directory creation recheck current permissions, forum assignment, and allowed folders. Non-admin prompt proposals require administrator approval before these side effects.
+- The selected execution directory persists with the session and survives service and host restarts. The forum assignment remains unchanged. Explicit and automatic worktrees start from the selected directory and then retain OMP's resulting worktree directory.
+- Manually created Telegram topics retain the forum default directory when folder choice is optional. When choice is required, the bot leaves manual topics without a session and directs users to `/new`. Attached hosts retain their terminal-owned working directory.
+
 ### 1.2. Prompts and permissions
 
 Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark the saved option with `(current)`, including named skills, model presets, and the options to use no default skill or the host's default model preset. Message handling distinguishes all messages from commands and replies only. Request permissions distinguish admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.

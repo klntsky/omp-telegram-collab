@@ -235,12 +235,12 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       };
     },
     async topicTitleStatus(session: TopicSession): Promise<{worktree:boolean;branch?:string}> {
-      return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.worktreePath};
+      return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.cwd};
     },
     async worktree(session: TopicSession, _branch?: string) {
-      session.runtime = {kind:'managed',worktreePath:`/fixture/worktrees/${randomUUID()}`};
+      session.runtime = {kind:'managed',cwd:`/fixture/worktrees/${randomUUID()}`};
       topicTitleStatuses.set(session.id,{worktree:true,branch:_branch});
-      return `Moved to worktree ${session.runtime.worktreePath}`;
+      return `Moved to worktree ${session.runtime.cwd}`;
     },
     async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
       if (session.status !== 'open') throw new Error('Session closed');

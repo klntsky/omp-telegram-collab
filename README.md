@@ -16,7 +16,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 | Support level | OMP feature | Use from Telegram |
 | --- | --- | --- |
-| ✅ | Create a session (`/new`) | `/new <task>` creates a topic and starts its session. |
+| ✅ | Create a session (`/new`) | `/new <task>` creates a topic and starts its session. Configured runtime folders offer a directory picker first. |
 | 📱 | Inspect session information (`/session`) | Telegram `/session` opens the Mini App for the topic's session. |
 | ✅ | Join a shared session in a terminal (`omp join`) | `/cli` gives administrators a copyable command to join the topic's host from the bot's machine. |
 | ✅ | Resume saved session history (`/resume`) | Send a prompt in an existing managed topic to resume its history. |
@@ -274,7 +274,33 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    </details>
 
-10. **Telegram:** Review `/settings` for prompt permissions, the session limit, and forum defaults. Send `/new <task>` and confirm that the agent replies in the new topic.
+10. **Telegram:** Review `/settings` for prompt permissions, the session limit, runtime folders, and forum defaults. Send `/new <task>` and confirm that the agent replies in the new topic.
 
    If you enabled the Mini App, use mobile data to open the topic's **OPEN AGENT** button and confirm that its transcript loads. Keep it open while sending another prompt from a second Telegram client; confirm that the new reply appears live. This checks WebSocket forwarding.
 
+## Choose a session folder
+
+Open `/settings` as a group administrator and select **Runtime folders**. Reply to that settings message with absolute paths on the agent's computer, one per line. The reply replaces the list. Use **Remove** to delete an option or **Clear folders** to empty the list. Missing folders are allowed in the list.
+
+<details>
+<summary>Example folder settings and selection</summary>
+
+Paths and task names below are filler values. The settings reply contains:
+
+```text
+/srv/projects/backend
+/srv/projects/frontend
+/srv/projects/new-service
+```
+
+After `/new Inspect the project`, the bot offers those paths as buttons. With optional choice, it also offers **Use forum default**. Selecting the missing `/srv/projects/new-service` offers **Create folder** and **Cancel** when the service account has permission to create it.
+
+</details>
+
+Enable **Require folder choice** to require a listed folder for every command-created session. With the requirement disabled and the list empty, sessions start in the forum's assigned project directory without a picker. These settings default to `require_folder_choice: false` and `folder_options: []`.
+
+`/new` from any topic and `/p` in General use the picker. `/p` in an existing session keeps its directory. The chosen folder survives restarts. Worktree preparation starts there and then uses OMP's resulting worktree directory.
+
+The bot checks that the selected path is an accessible directory. Missing folders require explicit creation confirmation. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
+
+When folder choice is required but no folders are configured, configure an option before creating a session. Manual Telegram topics do not acquire sessions while choice is required. Use `/new <task>` instead. Attached hosts keep their terminal-owned directory.

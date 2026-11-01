@@ -48,16 +48,16 @@ test('linked worktree status comes from Git metadata and follows its current bra
   const app = await fixture(t);
   const linked = join(app.directory, 'linked');
   await app.git('worktree', 'add', '-b', 'feature/linked', linked);
-  const session: TopicSession = { ...app.session, runtime: { kind: 'managed', worktreePath: linked } };
+  const session: TopicSession = { ...app.session, runtime: { kind: 'managed', cwd: linked } };
   assert.deepEqual(await app.runtime.topicTitleStatus(session), { worktree: true, branch: 'feature/linked' });
   await app.git('switch', '-c', 'feature/primary');
   await execute('git', ['switch', 'main'], { cwd: linked });
   assert.deepEqual(await app.runtime.topicTitleStatus(session), { worktree: true });
   const subdirectory = join(linked, 'nested');
   await mkdir(subdirectory);
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', worktreePath: subdirectory } }), { worktree: true });
+  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', cwd: subdirectory } }), { worktree: true });
   assert.deepEqual(await app.runtime.topicTitleStatus({ ...app.session, instancePath: linked, runtime: { kind: 'managed' } }), { worktree: true });
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', worktreePath: app.repository } }), { worktree: false, branch: 'feature/primary' });
+  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', cwd: app.repository } }), { worktree: false, branch: 'feature/primary' });
 });
 
 
