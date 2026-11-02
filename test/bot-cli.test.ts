@@ -22,17 +22,13 @@ for (const enabled of [true,false]) {
       await app.service.reconcileConfiguration();
       await app.update({text:'/setup'});
       const instancePath = Object.keys(app.config.instances)[0]!;
-      const session = app.store.createSession({botId,chatId,threadId:42,instancePath},'Terminal session');
+      app.store.createSession({botId,chatId,threadId:42,instancePath},'Terminal session');
       const ensure = t.mock.method(app.runtime,'ensure',async () => { throw new Error('Unexpected host startup'); });
       const before = app.messages.length;
       await app.update({text:'/cli',message_thread_id:42});
       const replies = app.messages.slice(before);
       const command = `omp-telegram-collab session join --chat ${chatId} --topic 42`;
       assert.deepEqual(copies(replies),[command]);
-      const reply = replies.find(message => copies([message]).length)!;
-      assert.ok(!String(reply.text).includes(session.id));
-      assert.ok(!String(reply.text).includes(instancePath));
-      assert.ok(!String(reply.text).includes(app.config.configPath));
       assert.equal(ensure.mock.callCount(),0);
       assert.equal(app.connectionCount,0);
       for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {

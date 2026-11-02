@@ -30,6 +30,7 @@ test('test user provisions a bot and forum with usable topic permissions', { tim
 
 test('userbot task reaches real omp, executes a streamed tool call, and receives the completion in Telegram', { timeout: 240000 }, async t => {
   const evidence = { executedBy: 'real-omp-write-tool', nonce: randomUUID() };
+  const prompt = `Create e2e-result.json in the workspace containing ${JSON.stringify(evidence)}.\n/home/example/project/error.ts:27\n  throw new Error("Original diagnostic");\n    at run (/home/example/project/error.ts:27:11)\n/stop /unknown`;
   const app = await setupCollaborationTest(t, { steps: [
     { type: 'tool', id: 'call_e2e_write', name: 'write', arguments: { i: 'Writing E2E evidence', path: 'e2e-result.json', content: `${JSON.stringify(evidence)}\n` } },
     { type: 'text', text: 'The requested file has been written.' },
@@ -38,7 +39,7 @@ test('userbot task reaches real omp, executes a streamed tool call, and receives
     await app.send('/setup');
     await app.waitForCondition(() => app.store.isEnrolled(app.telegram.bot.id, app.telegram.forum.chatId));
   });
-  const sent = await app.send(`/new Create e2e-result.json in the workspace containing ${JSON.stringify(evidence)}.`);
+  const sent = await app.send(`/new ${prompt}`);
   const reply = await app.omp.step('telegram.await-completion', () => app.waitForReply({ replyToMessageId: sent.id }));
   await app.omp.step('omp.await-agent-end', () => app.waitForCondition(() => app.hostFrames.some(frame => frame.t === 'event' && frame.event.type === 'agent_end')));
 
@@ -56,7 +57,7 @@ test('userbot task reaches real omp, executes a streamed tool call, and receives
   assert.deepEqual(JSON.parse(await readFile(join(app.omp.workspace, 'e2e-result.json'), 'utf8')), evidence);
 
   app.omp.provider.assertComplete();
-  assert.ok(JSON.stringify(app.omp.provider.requests[0]!.messages).includes(evidence.nonce));
+  assert.ok(JSON.stringify(app.omp.provider.requests[0]!.messages).includes(JSON.stringify(prompt).slice(1, -1)));
   const continuation = app.omp.provider.requests[1]!;
   assert.equal(continuation.model, 'e2e-model');
   const messages = continuation.messages as { role: string; tool_call_id?: string }[];
