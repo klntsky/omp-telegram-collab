@@ -242,7 +242,7 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```text
    Setup requested. On the agent's computer, approve within 10 minutes:
-   omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
+   omp-telegram-collab approve r_EXAMPLE_CODE --path '/srv/projects/backend'
    The project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.
    ```
 
@@ -260,14 +260,14 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    Paths and identifiers below are filler values.
 
    ```text
-   $ omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
+   $ omp-telegram-collab approve r_EXAMPLE_CODE --path '/srv/projects/backend'
    Verified bot @example_omp_bot (123456789)
    Verified forum Example project (-1001234567890)
    Verified requester 42, current group administrator.
    Project directory where OMP will run: /srv/projects/backend
    The agent will have the service account's filesystem and credential access on the agent's computer.
    Connect this forum to /srv/projects/backend? [y/N] yes
-   Approved EXAMPLE_CODE: /srv/projects/backend
+   Approved r_EXAMPLE_CODE: /srv/projects/backend
    ```
 
    New forums treat ordinary messages as prompts and do not allow non-admin prompt proposals. Change these policies through `/settings`.

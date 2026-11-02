@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -396,6 +398,27 @@ test('approval verifies live numeric identity, enrolls, confirms, then consumes'
   assert.equal(approved.isEnrolled(123456789, -1001), true);
   approved.close();
   assert.equal(f.calls.filter(call => call.method === 'sendMessage').length, 1);
+});
+
+test('generated setup codes remain valid approval arguments when random bytes encode a leading hyphen', async t => {
+  const f = fixture(t);
+  f.seed();
+  const random = t.mock.method(crypto, 'randomBytes', (size: number) => Buffer.alloc(size, 0xfb));
+  syncBuiltinESMExports();
+  t.after(() => { random.mock.restore(); syncBuiltinESMExports(); });
+  const store = f.store();
+  const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
+  store.close();
+
+  await f.run(['approve', pending.code, '--path', f.project, '--yes']);
+
+  assert.ok(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats.some(
+    chat => chat.botId === 123456789 && chat.chatId === -1001,
+  ));
+  const approved = f.store();
+  assert.equal(approved.isEnrolled(123456789, -1001), true);
+  assert.equal(approved.getSetupRequest(pending.code), undefined);
+  approved.close();
 });
 
 test('approval flags independently update existing options without duplicates and omissions preserve them', async t => {
