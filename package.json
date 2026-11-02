@@ -27,6 +27,7 @@
     "test:one": "tsx --test --test-concurrency=5",
     "test:e2e": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 test/e2e/*.test.ts",
     "telegram:test:login": "node --env-file-if-exists=.env --import tsx scripts/telegram-test-login.ts",
+    "e2e:inspect": "tsx scripts/e2e-inspect.ts",
     "test:integration": "pnpm build && pnpm smoke",
     "verify": "pnpm check && pnpm test && pnpm test:integration",
     "smoke": "tsx scripts/smoke.ts",

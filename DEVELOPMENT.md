@@ -80,10 +80,10 @@ The saved session grants access to the test account. Never log it, commit it, se
 Run live tests after login:
 
 ```sh
-timeout 240s pnpm test:e2e
+timeout 480s pnpm test:e2e
 ```
 
-Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from `test` and `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. These tests do not launch OMP or invoke inference.
+Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from `test` and `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. Install OMP before running the suite; set `OMP_EXECUTABLE` to select a different executable.
 
 Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environment. Otherwise, the fixture creates a uniquely named bot through that environment's BotFather. Created bots remain in the test account for reuse; the helpers do not issue BotFather's irreversible bot-deletion command. Retrieve a reusable token through BotFather in the test environment. Never log tokens or commit them.
 
@@ -92,6 +92,33 @@ Each fixture creates its own forum and deletes that forum during teardown, inclu
 Import `setupTelegramTest` from `test/e2e/helpers/telegram-fixture.ts` in live tests. It registers teardown with the Node test context and returns the authenticated user, bot, test Bot API client, forum, and update inbox. Lower-level login and provisioning helpers are available in the same directory when a test needs different ownership. Keep domain scenarios and assertions in test files, not in the setup helpers.
 
 Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
+
+### Isolated OMP and debug artifacts
+
+The OMP helper launches each child with an allowlisted environment and disposable home, agent, XDG, workspace, and application directories. It does not forward provider credentials or personal OMP configuration. Model requests use a scripted loopback HTTP provider with a fake key. No container or paid model credentials are needed. This configuration isolation is not a filesystem sandbox.
+
+The full-path fixture uses the actual test-network user session and application poller. Keep tests sharing an account and bot in `test/e2e/telegram.test.ts`, where top-level tests run sequentially. Separate files still run with concurrency five; use distinct credentials before adding parallel live fixtures.
+
+`BotOptions.topicActivityEmojis` configures the running and finished topic emojis in code. Normal startup keeps ⚡ and 🏁. The live fixture selects two distinct emojis from the test server's `getForumTopicIconStickers` response and records the selection in the trace. It does not substitute Telegram API responses.
+
+Each application run prints a private debug-artifact directory. `events.jsonl` contains ordered, timestamped test stages, provider requests and SSE frames, Telegram API requests/results and real updates, userbot-received messages, Collab frames, and application console diagnostics. Terminal output and conversation histories are copied under `sessions/` during cleanup. Disposable configuration and workspace files are removed; debug artifacts remain outside the checkout.
+
+Inspect a retained run without rerunning it:
+
+```sh
+pnpm e2e:inspect /tmp/EXAMPLE_E2E_LOG_DIRECTORY
+pnpm e2e:inspect /tmp/EXAMPLE_E2E_LOG_DIRECTORY --event step
+pnpm e2e:inspect /tmp/EXAMPLE_E2E_LOG_DIRECTORY --event fake-llm --full
+pnpm e2e:inspect /tmp/EXAMPLE_E2E_LOG_DIRECTORY --event telegram --full
+```
+
+The inspector lists terminal/history paths and preserves complete error diagnostics. `--event` selects an event-name substring; `--full` prints complete payloads. Known test tokens, API hashes, and saved sessions are redacted from the JSONL trace and captured console output. Artifacts still contain prompts, model responses, and tool output; keep the directory private and do not publish it without inspection.
+
+To run only the OMP scenario, place test-runner flags before the file path:
+
+```sh
+timeout 300s pnpm exec node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 --test-name-pattern '^userbot task' test/e2e/telegram.test.ts
+```
 
 ## Debugging
 
