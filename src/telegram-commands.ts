@@ -82,6 +82,23 @@ export function parseTelegramCommand(
     const request = tree.topNode.firstChild!;
     if (request.name !== 'Prompt' && request.name !== 'SkillPrompt') {
       const argument = tokens.length > 1 ? text.slice(tokens[1]!.start, tokens.at(-1)!.end) : '';
+      switch (request.name) {
+        case 'Inspection':
+        case 'Configuration':
+        case 'Lifecycle':
+        case 'Guidance':
+          if (tokens.length > 1) throw new SyntaxError(`Usage: /${root.action}`);
+          break;
+        case 'Start':
+        case 'OptionalArgument':
+        case 'Skills':
+          if (tokens.length > 2 || (tokens[1] && tokens[1].kind !== 'text'))
+            throw new SyntaxError(`Usage: /${root.action} ${request.name === 'Skills' ? '[clear]' : request.name === 'Start' ? '[payload]' : root.action === 'worktree' ? '[branch]' : '[name]'}`);
+          break;
+        case 'Attach':
+          if (!tokens[1] || tokens[1].kind !== 'text') throw new SyntaxError('Usage: /attach <instanceId> [name]');
+          break;
+      }
       if (request.name === 'Skills' && argument && argument !== 'clear') throw new SyntaxError('Expected clear or no argument');
       if (root.action === 'model_preset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new SyntaxError('Invalid model preset name');
       return { kind: 'command', action: root.action!, argument };

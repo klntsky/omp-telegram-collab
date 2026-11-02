@@ -15,21 +15,15 @@ SkillPrompt { SkillToken Any* }
 
 // Standalone groups cannot appear as prompt extensions. In particular, /stop,
 // /kill, and /terminate never become implicit preparation steps.
-Inspection { command_list_admins | command_session | command_status | command_usage | command_cli }
-Configuration { command_settings | command_setup }
-Lifecycle { command_stop | command_kill | command_detach | command_terminate }
-Guidance { command_help }
-// Telegram deep links supply "/start@Bot payload"; this is not composition.
-Start { command_start Word? }
-// Standalone /worktree may name a branch; standalone /model_preset may name
-// a preset or omit its argument to list choices.
-OptionalArgument { (command_worktree | command_model_preset) Word? }
-// /attach requires an instance ID, then treats the remaining words as a topic
-// name. /skills accepts only no argument or "clear", checked by interpretation.
-Attach { command_attach Word Any* }
-Skills { command_skills Word? }
+Inspection { (command_list_admins | command_session | command_status | command_usage | command_cli) Any* }
+Configuration { (command_settings | command_setup) Any* }
+Lifecycle { (command_stop | command_kill | command_detach | command_terminate) Any* }
+Guidance { command_help Any* }
+Start { command_start Any* }
+OptionalArgument { (command_worktree | command_model_preset) Any* }
+Attach { command_attach Any* }
+Skills { command_skills Any* }
 
-Word { TextToken }
 Any {
   TextToken | command_new | command_p | command_worktree | command_model_preset |
   command_skills | command_attach | command_settings | command_setup |

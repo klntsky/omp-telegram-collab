@@ -49,15 +49,19 @@ test('bare presets compose interactively and repeated extensions start literal t
 test('all standalone command groups enforce their arities', () => {
   for (const action of ['settings', 'setup', 'list_admins', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'cli']) {
     assert.deepEqual(parse(`/${action}`), { kind: 'command', action, argument: '' });
-    assert.equal(parse(`/${action} extra`).kind, 'invalid');
+    for (const argument of ['extra', '/worktree', '/home/work/error.ts:27', '/unknown /kill']) {
+      assert.equal(parse(`/${action} ${argument}`).kind, 'invalid');
+    }
   }
   for (const action of ['worktree', 'model_preset']) {
     for (const argument of ['', 'named']) assert.deepEqual(parse(`/${action}${argument ? ` ${argument}` : ''}`), { kind: 'command', action, argument });
     assert.equal(parse(`/${action} one two`).kind, 'invalid');
+    assert.equal(parse(`/${action} /stop`).kind, 'invalid');
   }
   assert.deepEqual(parse('/attach host label'), { kind: 'command', action: 'attach', argument: 'host label' });
   assert.deepEqual(parse('/attach host'), { kind: 'command', action: 'attach', argument: 'host' });
   assert.equal(parse('/attach').kind, 'invalid');
+  assert.equal(parse('/attach /stop').kind, 'invalid');
   assert.deepEqual(parse('/attach host topic name /literal'), { kind: 'command', action: 'attach', argument: 'host topic name /literal' });
   assert.deepEqual(parse('/skills clear'), { kind: 'command', action: 'skills', argument: 'clear' });
   assert.deepEqual(parse('/skills'), { kind: 'command', action: 'skills', argument: '' });

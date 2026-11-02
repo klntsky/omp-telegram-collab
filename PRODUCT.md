@@ -123,6 +123,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 - The first token that cannot form a supported extension starts the task; all subsequent text is literal, including slash commands. Absolute paths and pasted diagnostics can start a task. There is no separator or escape syntax.
 - Malformed or repeated session-preparation extensions start literal task text instead of rejecting the prompt. Unknown root commands and commands addressed to another bot remain ignored. Unknown tokens inside a prompt start literal task text. Quoted content and attachments never supply executable extensions.
 - Preset and skill names are validated before topic creation, preparation operations, pending-skill consumption, or task submission. An unknown preset requests a corrected sequence and lists available presets; it never falls back to another model.
+- Every recognized command accepts arbitrary argument text at the syntax boundary. Standalone commands execute only with validated arguments; missing or unsupported arguments produce usage or domain-validation guidance, never a generated-parser diagnostic.
 - Runtime failures stop the sequence before task submission. Already completed preparations are not rolled back or automatically replayed. Original failure diagnostics are preserved.
 
 
