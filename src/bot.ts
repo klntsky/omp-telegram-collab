@@ -125,6 +125,7 @@ interface Listener {
     observation: TaskObservation;
   }[];
   pendingAnswers: Map<number, number>;
+  customAnswerMessage?: {messageIds:number[]; messageId:number};
   pendingStops: number[];
   queuedMessages: number;
   typingText?: boolean;
@@ -4099,6 +4100,11 @@ export class BotService {
         : undefined);
     }
     while (this.endedQuestionReplies.size > 512) this.endedQuestionReplies.delete(this.endedQuestionReplies.keys().next().value!);
+    if (question.request.kind === 'select' && question.answer?.kind === 'answer' &&
+        question.answer.text === 'Other (type your own)' && question.buttonIds.at(-1) !== undefined) {
+      question.listener.customAnswerMessage = {messageIds:question.messageIds,messageId:question.buttonIds.at(-1)!};
+      return;
+    }
     const answer = question.answer?.text;
     const receiptId = answer === undefined ? undefined : question.buttonIds[0];
     for (const messageId of question.buttonIds) {
@@ -4172,7 +4178,7 @@ export class BotService {
           this.listeners.get(question.session.id) === question.listener && this.questions.get(token) === question)
         .catch(error => { console.warn(`Could not show question selection receipt (${question.session.id}).`, error); });
       const value = typeof option === 'string' ? option : option.label;
-      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
+      this.submitAnswer(token, value, value === 'Other (type your own)' ? value : `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
     await ctx.answerCallbackQuery();
   }
@@ -4187,6 +4193,19 @@ export class BotService {
         this.listeners.get(session.id) === listener && this.sessionAssigned(session) &&
         this.options.store.getSession(session.id)?.status === 'open';
       if (!active() || !(await this.ready(session.chatId))) { this.endQuestion(token); return; }
+      const previous = listener.customAnswerMessage;
+      listener.customAnswerMessage = undefined;
+      if (request.kind === 'editor' && previous) {
+        question.messageIds.push(...previous.messageIds);
+        question.buttonIds.push(previous.messageId);
+        for (const messageId of previous.messageIds) this.endedQuestionReplies.delete(`${session.chatId}:${messageId}`);
+        const reply_markup = {inline_keyboard:[[{text:'Cancel',callback_data:`ask:${token}:cancel`}]],force_reply:true};
+        await this.delivery.run(session.chatId,
+          () => this.bot.api.editMessageText(session.chatId,previous.messageId,
+            [request.title,request.prefill,'Reply to this message with your answer. Multiline text is supported.'].filter(Boolean).join('\n\n'),
+            {reply_markup}),active);
+        return;
+      }
       const parts = [request.title];
       if (request.kind === 'select') {
         parts.push(...request.options.map((option, index) => {
@@ -4218,9 +4237,9 @@ export class BotService {
         if (offset+80 >= buttons.length) keyboard.push([{text:'Cancel',callback_data:`ask:${token}:cancel`}]);
         const message = await this.delivery.run(session.chatId,
           () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),
-            request.kind === 'editor' ? 'You can type a custom answer below, or cancel here.' : 'Choose an answer by number:', {
+            request.kind === 'editor' ? 'Reply to this message with your answer. Multiline text is supported.' : 'Choose an answer by number:', {
               
-              reply_markup:{inline_keyboard:keyboard},
+              reply_markup:{inline_keyboard:keyboard,...(request.kind === 'editor' ? {force_reply:true} : {})},
             }), active);
         if (!message) return;
         question.messageIds.push(message.message_id);
@@ -4230,15 +4249,6 @@ export class BotService {
             () => this.bot.api.editMessageReplyMarkup(session.chatId,message.message_id,{reply_markup:{inline_keyboard:[]}}),
             () => !this.stopped && this.sessionAssigned(session)).catch(() => undefined);
         }
-      }
-      if (request.kind === 'editor' && active()) {
-        const message = await this.delivery.run(session.chatId,
-          () => sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
-            
-            reply_markup:{force_reply:true,input_field_placeholder:'Type your custom answer'},
-          }), active);
-        if (!message) return;
-        question.messageIds.push(message.message_id);
       }
     }).catch(error => {
       this.endQuestion(token);
