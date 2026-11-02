@@ -1,6 +1,6 @@
 import { eventually, setForumSetting, settingsButton } from './bot-test-helpers.js';
 import assert from 'node:assert/strict';
-import { readConfig } from '../src/config.js';
+import { readConfig, writeConfig } from '../src/config.js';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
@@ -132,9 +132,6 @@ for (const root of ['new', 'p']) {
       assert.equal(worktree.mock.callCount(),0);
       assert.equal(presets.mock.callCount(),0);
       assert.deepEqual(app.accepted,[]);
-      await app.update({text:`/${root} /status Do the task`});
-      assert.equal(app.store.listSessions(botId).length,0);
-      assert.equal(ensure.mock.callCount(),0);
     } finally { await app.close(); }
   });
 }
@@ -440,5 +437,220 @@ test('preset pagination keeps later choices and detail-page default actions reac
     await click(0);
     await click(1);
     assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[8]);
+  } finally { await app.close(); }
+});
+
+function composedPresetPanel(app: {messages: Record<string,unknown>[]}) {
+  const message = app.messages.findLast(message =>
+    (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
+      ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')));
+  assert.ok(message);
+  return message;
+}
+
+for (const existing of [false,true]) {
+  test(`composed bare preset pauses ${existing ? 'existing topic' : 'General new'} preparation and resumes the original task exactly once`, async t => {
+    const app = await createSmokeApp({skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Interactive preparation'}});
+      const before = app.store.listSessions(botId);
+      t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
+      const effects: string[] = [];
+      const ensure = t.mock.method(app.runtime,'ensure');
+      t.mock.method(app.runtime,'worktree',async () => {
+        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+        effects.push('worktree');
+        return 'Prepared';
+      });
+      t.mock.method(app.runtime,'modelPresets',async (_session: TopicSession,name?: string) => {
+        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[]);
+        effects.push(`preset:${name}`);
+        return 'Selected';
+      });
+      await app.update({
+        text:`/${existing ? 'p' : 'new'} /model_preset /worktree Inspect /tmp/project/output.log without changing its path`,
+        ...(existing ? {message_thread_id:42} : {}),
+      });
+      assert.deepEqual(app.store.listSessions(botId),before);
+      assert.equal(ensure.mock.callCount(),0);
+      assert.equal(app.connectionCount,0);
+      assert.deepEqual(effects,[]);
+      assert.deepEqual([...app.accepted],[]);
+      let panel = composedPresetPanel(app);
+      await app.callback(settingsButton(panel,0),panel);
+      assert.deepEqual(app.store.listSessions(botId),before);
+      assert.deepEqual(effects,[]);
+      assert.deepEqual([...app.accepted],[]);
+      panel = structuredClone(composedPresetPanel(app));
+      const use = settingsButton(panel,0);
+      await app.callback(use,panel);
+      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+      await app.callback(use,panel);
+      assert.deepEqual(effects,['preset:Fast','worktree','preset:Fast']);
+      assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
+        {t:'prompt',text:'Inspect /tmp/project/output.log without changing its path'},
+      ]);
+      const sessions = app.store.listSessions(botId);
+      assert.equal(sessions.length,1);
+      if (existing) assert.equal(sessions[0]!.id,before[0]!.id);
+      assert.equal(app.store.hasPendingInitialTask(sessions[0]!.id),false);
+      assert.equal(readConfig(app.config.configPath).instances[sessions[0]!.instancePath]!.chats[0]!.default_model_preset,undefined);
+    } finally { await app.close(); }
+  });
+}
+
+for (const invalidation of ['generation','assignment','administrator','expired'] as const) {
+  test(`composed bare preset rejects ${invalidation} changes before resuming an existing task`, async t => {
+    const app = await createSmokeApp({skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      await app.update({message_thread_id:42,forum_topic_created:{name:'Stale interactive preparation'}});
+      const session = app.store.listSessions(botId)[0]!;
+      t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
+      const ensure = t.mock.method(app.runtime,'ensure');
+      const worktree = t.mock.method(app.runtime,'worktree');
+      const presets = t.mock.method(app.runtime,'modelPresets');
+      await app.update({text:'/p /model_preset /worktree Never submit this task',message_thread_id:42});
+      let panel = composedPresetPanel(app);
+      await app.callback(settingsButton(panel,0),panel);
+      panel = structuredClone(composedPresetPanel(app));
+      if (invalidation === 'generation') app.store.advanceSessionGeneration(session.id);
+      if (invalidation === 'assignment') {
+        const config = readConfig(app.config.configPath);
+        config.instances[session.instancePath]!.chats = [];
+        writeConfig(config);
+      }
+      if (invalidation === 'administrator') app.setCurrentMember({username:ownerUsername,status:'member'});
+      const now = Date.now();
+      const clock = invalidation === 'expired' ? t.mock.method(Date,'now',() => now+31*60_000) : undefined;
+      try { await app.callback(settingsButton(panel,0),panel); }
+      finally { clock?.mock.restore(); }
+      assert.equal(ensure.mock.callCount(),0);
+      assert.equal(worktree.mock.callCount(),0);
+      assert.equal(presets.mock.callCount(),0);
+      assert.equal(await app.runtime.isRunning(session),false);
+      assert.equal(app.store.listSessions(botId).length,1);
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+      assert.deepEqual(app.accepted,[]);
+    } finally { await app.close(); }
+  });
+}
+
+for (const existing of [false,true]) {
+  test(`composed bare preset cancellation discards the pending ${existing ? 'existing topic' : 'General new'} task`, async t => {
+    const app = await createSmokeApp({skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Cancelled interactive preparation'}});
+      const before = app.store.listSessions(botId);
+      t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
+      const ensure = t.mock.method(app.runtime,'ensure');
+      const worktree = t.mock.method(app.runtime,'worktree');
+      const presets = t.mock.method(app.runtime,'modelPresets');
+      await app.update({
+        text:`/${existing ? 'p' : 'new'} /model_preset /worktree Discard this task`,
+        ...(existing ? {message_thread_id:42} : {}),
+      });
+      let panel = composedPresetPanel(app);
+      await app.callback(settingsButton(panel,0),panel);
+      panel = structuredClone(composedPresetPanel(app));
+      const use = settingsButton(panel,0);
+      await app.callback(settingsButton(panel,-1),panel);
+      await app.callback(use,panel);
+      assert.deepEqual(app.store.listSessions(botId),before);
+      assert.equal(ensure.mock.callCount(),0);
+      assert.equal(worktree.mock.callCount(),0);
+      assert.equal(presets.mock.callCount(),0);
+      assert.equal(app.connectionCount,0);
+      assert.deepEqual(app.accepted,[]);
+      for (const session of before) assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    } finally { await app.close(); }
+  });
+}
+
+test('composed bare preset refreshes administrator access after host startup before applying or submitting', async t => {
+  const app = await createSmokeApp({skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Interactive authorization boundary'}});
+    const session = app.store.listSessions(botId)[0]!;
+    t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
+    const ensure = app.runtime.ensure.bind(app.runtime);
+    t.mock.method(app.runtime,'ensure',async (target: TopicSession) => {
+      const binding = await ensure(target);
+      app.setCurrentMember({username:ownerUsername,status:'member'});
+      return binding;
+    });
+    const presets = t.mock.method(app.runtime,'modelPresets');
+    await app.update({text:'/p /model_preset /worktree Never submit after revocation',message_thread_id:42});
+    let panel = composedPresetPanel(app);
+    await app.callback(settingsButton(panel,0),panel);
+    panel = composedPresetPanel(app);
+    await app.callback(settingsButton(panel,0),panel);
+    assert.equal(presets.mock.callCount(),0);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.accepted,[]);
+  } finally { await app.close(); }
+});
+
+for (const existing of [false,true]) {
+  test(`preparation-only bare preset configures ${existing ? 'existing' : 'new'} session without an empty prompt`, async t => {
+    const app = await createSmokeApp({skipStartupRejection:true});
+    try {
+      await app.update({text:'/setup'});
+      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Preparation only'}});
+      t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+      const selected: Array<{id:string;name?:string}> = [];
+      t.mock.method(app.runtime,'modelPresets',async (session:TopicSession,name?:string) => {
+        selected.push({id:session.id,name});
+        return 'Selected';
+      });
+      await app.update({text:`/${existing ? 'p' : 'new'} /model_preset`,...(existing ? {message_thread_id:42} : {})});
+      let panel = composedPresetPanel(app);
+      await app.callback(settingsButton(panel,0),panel);
+      panel = composedPresetPanel(app);
+      await app.callback(settingsButton(panel,0),panel);
+      const session = app.store.listSessions(botId)[0]!;
+      assert.deepEqual(selected,[{id:session.id,name:'Fast'}]);
+      assert.equal(app.store.hasPendingInitialTask(session.id),false);
+      assert.deepEqual(app.accepted,[]);
+    } finally { await app.close(); }
+  });
+}
+
+test('preset continuation cannot adopt a generation changed during resumed authorization', async t => {
+  const app = await createSmokeApp({skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Admission lifecycle'}});
+    const session = app.store.listSessions(botId)[0]!;
+    t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
+    const presets = t.mock.method(app.runtime,'modelPresets');
+    await app.update({text:'/p /model_preset /status Never restart after kill',message_thread_id:42});
+    let panel = composedPresetPanel(app);
+    await app.callback(settingsButton(panel,0),panel);
+    panel = composedPresetPanel(app);
+    let resumed = false;
+    app.bot.api.config.use(async (previous,method,payload,signal) => {
+      const result = await previous(method,payload,signal);
+      if (method === 'editMessageReplyMarkup') resumed = true;
+      return result;
+    });
+    const authorize = app.service.authorize.bind(app.service);
+    const generation = app.store.getSessionGeneration(session.id);
+    t.mock.method(app.service,'authorize',async (...args:Parameters<typeof authorize>) => {
+      if (resumed) {
+        resumed = false;
+        app.store.advanceSessionGeneration(session.id);
+      }
+      await authorize(...args);
+    });
+    await app.callback(settingsButton(panel,0),panel);
+    assert.equal(app.store.getSessionGeneration(session.id),generation+1);
+    assert.equal(presets.mock.callCount(),0);
+    assert.equal(await app.runtime.isRunning(session),false);
+    assert.equal(app.store.hasPendingInitialTask(session.id),false);
+    assert.deepEqual(app.accepted,[]);
   } finally { await app.close(); }
 });

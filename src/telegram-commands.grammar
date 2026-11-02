@@ -10,44 +10,20 @@
 
 // Only /new and /p select the target. A skill shortcut with task content uses
 // /p routing and adds that skill. A bare shortcut keeps its selection behavior.
-Prompt { (command_new | command_p) Extension* Tail? }
-SkillPrompt { Skill Extension* Tail? }
-
-// These are the only commands allowed between the target and the task.
-// /model_preset consumes exactly one name. Chained /worktree consumes no
-// branch name: "/p /worktree Fix login" means an automatically named worktree
-// and the task "Fix login". Repeated preset/worktree extensions are rejected
-// by interpretation; skill extensions accumulate and are deduplicated.
-Extension { Preset | Worktree | Skill }
-Preset { command_model_preset Word }
-Worktree { command_worktree }
-Skill { SkillToken }
+Prompt { (command_new | command_p) Any* }
+SkillPrompt { SkillToken Any* }
 
 // Standalone groups cannot appear as prompt extensions. In particular, /stop,
 // /kill, and /terminate never become implicit preparation steps.
-Inspection { command_list_admins | command_session | command_status | command_usage | command_cli }
-Configuration { command_settings | command_setup }
-Lifecycle { command_stop | command_kill | command_detach | command_terminate }
-Guidance { command_help }
-// Telegram deep links supply "/start@Bot payload"; this is not composition.
-Start { command_start Word? }
-// Standalone /worktree may name a branch; standalone /model_preset may name
-// a preset or omit its argument to list choices.
-OptionalArgument { (command_worktree | command_model_preset) Word? }
-// /attach requires an instance ID, then treats the remaining words as a topic
-// name. /skills accepts only no argument or "clear", checked by interpretation.
-Attach { command_attach Word Any* }
-Skills { command_skills Word? }
+Inspection { (command_list_admins | command_session | command_status | command_usage | command_cli) Any* }
+Configuration { (command_settings | command_setup) Any* }
+Lifecycle { (command_stop | command_kill | command_detach | command_terminate) Any* }
+Guidance { command_help Any* }
+Start { command_start Any* }
+OptionalArgument { (command_worktree | command_model_preset) Any* }
+Attach { command_attach Any* }
+Skills { command_skills Any* }
 
-// A required extension argument is consumed before looking for a task.
-// The first non-slash word starts Tail. From then on, ALL tokens are literal
-// task text, including known and unknown slash commands. There is no "--" or
-// escape syntax. A task that starts with a slash needs a natural-language lead-in.
-//
-// "/p /model_preset openai Explain /stop" selects the preset, then submits
-// "Explain /stop". "/p /stop" is invalid because no literal task has started.
-Word { TextToken }
-Tail { Word Any* }
 Any {
   TextToken | command_new | command_p | command_worktree | command_model_preset |
   command_skills | command_attach | command_settings | command_setup |
@@ -61,8 +37,6 @@ Any {
 // Command matching ignores case and accepts an optional @ThisBot suffix.
 // SkillToken covers registered /skill_* shortcuts and exact /skill:name names.
 // TextToken is one non-slash word; UnknownToken is an unrecognized slash word.
-// An unknown or foreign-bot root is ignored before parsing. The same token in
-// a prefix is rejected, while Any allows it unchanged after the task starts.
 @context commandContext from "./telegram-command-tokens.js"
 @external tokens commandTokenizer from "./telegram-command-tokens.js" {
   command_new, command_p, command_worktree, command_model_preset,

@@ -210,7 +210,7 @@ interface SettingsPanel {
   folderInput?: 'append' | 'replace';
   folderInputEnded?: boolean;
 }
-type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default'};
+type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default' | 'cancel'};
 interface PresetPanel {
   token: string;
   chatId: number;
@@ -225,6 +225,14 @@ interface PresetPanel {
   listOffset: number;
   detailOffset: number;
   choices: PresetAction[];
+  continuation?: {
+    kind: 'prompt';
+    active: boolean;
+    source: Context;
+    cwd: string;
+    check: () => void;
+    resume: (name: string) => Promise<void>;
+  };
 }
 const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — 🌳 move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — browse presets, use one, or make it the forum default; a name switches this idle session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
 const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
@@ -727,8 +735,16 @@ export class BotService {
     this.requireSessionAssignment(session);
     return session;
   }
+  private checkPresetPanel(panel: PresetPanel): void {
+    if (panel.continuation) {
+      if (!panel.continuation.active || panel.expires <= Date.now())
+        throw new Error('This model preset selection is no longer active.');
+      panel.continuation.check();
+    }
+    else this.presetSession(panel);
+  }
   private async renderPresetPanel(panel: PresetPanel): Promise<void> {
-    this.presetSession(panel);
+    this.checkPresetPanel(panel);
     const choices: PresetAction[] = [];
     const rows: Array<Array<{text: string; callback_data: string}>> = [];
     const revision = panel.revision + 1;
@@ -738,10 +754,10 @@ export class BotService {
     };
     let text = 'Model presets are pre-defined groups of models and their effort levels that map to various agent roles';
     if (panel.selected !== undefined) {
-      const preset = await this.options.runtime.modelPresetDetails(panel.instancePath, panel.selected);
+      const preset = await this.options.runtime.modelPresetDetails(panel.continuation?.cwd ?? panel.instancePath, panel.selected);
       text = `${panel.selected}\n\n${Object.entries(preset.modelRoles).map(([role, selector]) => `${role}: ${selector}`).join('\n')}${preset.defaultThinkingLevel === undefined ? '' : `\nDefault effort: ${preset.defaultThinkingLevel}`}`;
       button('Use', {kind: 'use'});
-      button('Make default', {kind: 'default'});
+      if (!panel.continuation) button('Make default', {kind: 'default'});
       button('Back', {kind: 'back'});
       if (panel.detailOffset >= text.length) panel.detailOffset = 0;
       let end = Math.min(panel.detailOffset + 4000, text.length);
@@ -750,14 +766,15 @@ export class BotService {
       if (end < text.length) button('Next', {kind: 'page', offset: end});
       text = text.slice(panel.detailOffset, end);
     } else {
-      const names = await this.options.runtime.availableModelPresets(panel.instancePath);
+      const names = await this.options.runtime.availableModelPresets(panel.continuation?.cwd ?? panel.instancePath);
       if (panel.listOffset >= names.length) panel.listOffset = 0;
       for (const name of names.slice(panel.listOffset, panel.listOffset + 8))
         button(name, {kind: 'select', name});
       if (panel.listOffset > 0) button('Previous', {kind: 'page', offset: Math.max(0, panel.listOffset - 8)});
       if (panel.listOffset + 8 < names.length) button('Next', {kind: 'page', offset: panel.listOffset + 8});
     }
-    this.presetSession(panel);
+    if (panel.continuation) button('Cancel', {kind: 'cancel'});
+    this.checkPresetPanel(panel);
     if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
     const extra = {reply_markup: {inline_keyboard: rows}};
     if (panel.messageId === 0) {
@@ -766,6 +783,7 @@ export class BotService {
     } else {
       await this.bot.api.editMessageText(panel.chatId, panel.messageId, text, extra);
     }
+    if (panel.continuation) this.checkPresetPanel(panel);
     panel.choices = choices;
     panel.revision = revision;
     for (const [token, entry] of this.presetPanels) if (entry.expires <= Date.now()) this.presetPanels.delete(token);
@@ -784,14 +802,26 @@ export class BotService {
     }
     if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
         !sameTopicDestination(contextDestination(ctx), panel.destination)) return;
+    if (panel.continuation && ctx.from?.id !== panel.continuation.source.from?.id) {
+      await ctx.answerCallbackQuery({text: 'Only the original requester can choose this preset.'});
+      return;
+    }
     await this.settingsAccess(ctx, panel);
-    this.presetSession(panel);
+    this.checkPresetPanel(panel);
+    if (panel.continuation && this.presetPanels.get(panel.token) !== panel) return;
     if (Number(match[2]) !== panel.revision) {
       await ctx.answerCallbackQuery({text: 'This selection is stale. Use the current buttons.'});
       return;
     }
     const action = panel.choices[Number(match[3])];
     if (!action) return;
+    if (action.kind === 'cancel') {
+      this.presetPanels.delete(panel.token);
+      if (panel.continuation) panel.continuation.active = false;
+      await ctx.editMessageText('Prompt cancelled.', {reply_markup: {inline_keyboard: []}});
+      await ctx.answerCallbackQuery();
+      return;
+    }
     if (action.kind === 'select') {
       panel.selected = action.name;
       panel.detailOffset = 0;
@@ -803,7 +833,21 @@ export class BotService {
     else {
       const name = panel.selected;
       if (name === undefined) return;
-      await this.options.runtime.modelPresetDetails(panel.instancePath, name);
+      await this.options.runtime.modelPresetDetails(panel.continuation?.cwd ?? panel.instancePath, name);
+      if (panel.continuation) {
+        const pending = panel.continuation;
+        await this.authorize(panel.chatId, pending.source.from!.id);
+        if (!(await this.currentAdmin(pending.source))) throw new Error('Prompt preparations require a group administrator.');
+        pending.check();
+        if (panel.expires <= Date.now() || this.presetPanels.get(panel.token) !== panel) return;
+        this.presetPanels.delete(panel.token);
+        pending.active = false;
+        await ctx.editMessageReplyMarkup({reply_markup: {inline_keyboard: []}});
+        await ctx.answerCallbackQuery();
+        pending.check();
+        await pending.resume(name);
+        return;
+      }
       if (action.kind === 'default') {
         const config = await this.settingsAccess(ctx, panel, true);
         this.presetSession(panel);
@@ -2711,6 +2755,8 @@ export class BotService {
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.default_new_topic_skill;
   }
   private async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
+    if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
+      throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.options.store.getSessionGeneration(session.id);
     const checkSession = () => {
       if (this.stopped || refreshTermination(this.options.config)) throw new Error('The service is stopping');
@@ -2746,6 +2792,7 @@ export class BotService {
         }
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
+        if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');
         await applyPreset(extension.name);
         selectedPreset = extension.name;
       }
@@ -2757,6 +2804,9 @@ export class BotService {
   private async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void> {
     const epoch = this.admissionEpoch;
     const folderFingerprint = !session ? JSON.stringify(this.folderSettings(ctx.chat!.id)) : undefined;
+    const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
+    const instancePath = this.assignedPath(ctx.chat!.id);
+    const hasTask = !!content.text.trim() || !!content.images?.length;
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
     const preparations = extensions.filter(extension => extension.kind !== 'skill');
@@ -2769,9 +2819,7 @@ export class BotService {
       this.requireSessionAssignment(session);
       if (session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
     }
-    const instancePath = this.assignedPath(ctx.chat!.id);
     if (session?.runtime.kind === 'attached' && preparations.length) throw new Error('Attached sessions cannot run prompt preparations.');
-    const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
     const skillKey = this.skills.key(ctx);
     const pendingSkills = frozenSkills?.names ?? this.options.store.getPendingSkills(skillKey);
     const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.options.store.getNewTopicSkill(session.id) : this.defaultNewTopicSkill(ctx.chat!.id);
@@ -2791,10 +2839,44 @@ export class BotService {
       },() => this.usersCanProposePrompts(ctx.chat!.id) && this.allMessagesArePrompts(ctx.chat!.id) === proposalMode);
       return;
     }
+    if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
+      const check = () => {
+        if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch)
+          throw new Error('The service is stopping');
+        if (this.assignedPath(ctx.chat!.id) !== instancePath)
+          throw new Error('The group instance assignment changed');
+        if (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
+          throw new Error('Folder settings changed before execution. Send the command again.');
+        if (session) {
+          this.requireSessionAssignment(session);
+          if (this.options.store.getSessionGeneration(session.id) !== generation ||
+              this.options.store.getTopic({botId: this.id, destination: contextDestination(ctx)})?.id !== session.id ||
+              this.options.store.getSession(session.id)?.status !== 'open')
+            throw new Error('The session changed before the prompt could run');
+        }
+      };
+      const panel: PresetPanel = {
+        token: randomBytes(16).toString('base64url'), chatId: ctx.chat!.id,
+        destination: contextDestination(ctx), messageId: 0, instancePath,
+        sessionId: session?.id ?? '', generation: generation ?? 0,
+        revision: 0, expires: Date.now() + 30 * 60_000, choices: [], listOffset: 0, detailOffset: 0,
+        continuation: {
+          kind: 'prompt', active: true, source: ctx,
+          cwd: cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath,
+          check,
+          resume: name => this.routePrompt(ctx, originalContent, session,
+            originalExtensions.map(extension => extension.kind === 'model-preset' && extension.name === undefined
+              ? {...extension, name} : extension),
+            worktree, {names: [...pendingSkills], topicSkill}, cwd),
+        },
+      };
+      await this.renderPresetPanel(panel);
+      return;
+    }
     if (extensions.some(extension => extension.kind === 'model-preset')) {
       const names = await this.options.runtime.availableModelPresets(cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath);
       for (const extension of extensions) {
-        if (extension.kind === 'model-preset' && !names.includes(extension.name)) {
+        if (extension.kind === 'model-preset' && (extension.name === undefined || !names.includes(extension.name))) {
           await this.replyPresetText(ctx, `Unknown model preset: ${extension.name}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
           return;
         }
@@ -2855,8 +2937,8 @@ export class BotService {
         await authorizeExecution();
         if (session) {
           await this.preparePrompt(ctx, session, preparations);
-          await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
-        } else await this.newSession(ctx, content, undefined, undefined, !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd);
+          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
+        } else await this.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd);
       } finally { reservation?.release(); }
       return;
     }
@@ -3334,7 +3416,8 @@ export class BotService {
         return;
       }
       if (!this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
-      if (!intent.content.text.trim() && !intent.content.images.length) {
+      if (!intent.content.text.trim() && !intent.content.images.length &&
+          !intent.extensions?.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
         if (intent.kind === 'session-prompt' && destination.kind !== 'general')
           await replyTo(ctx, destination, 'Usage: /p <prompt>');
         return;
