@@ -3,15 +3,15 @@ import {LRParser} from "@lezer/lr"
 import {commandTokenizer, commandContext} from "./telegram-command-tokens.js"
 export const parser = LRParser.deserialize({
   version: 14,
-  states: "%pOVQROOOOQP'#Cf'#CfO!gQRO'#CaO!xQRO'#CiOOQO'#Cj'#CjOOQO'#Ck'#CkOOQO'#Cl'#ClOOQO'#Cm'#CmO#ZQRO'#CnO#cQRO'#CoO#kQRO'#CpO#pQRO'#CqQOQQOOOOQP'#Cd'#CdO#kQRO'#CcOOQP'#Ce'#CeOOQP'#Cb'#CbOOQP'#Cr'#CrO#xQRO,58{O%qQRO'#CgOOQO,58{,58{O%xQRO,59TOOQO,59T,59TOOQO,59Y,59YOOQO,59Z,59ZO&ZQRO,59[OOQO,59],59]OOQP,58},58}OOQP-E6p-E6pOOQO1G.g1G.gOOQP'#Ch'#ChOOQP'#Cs'#CsO&bQRO,59ROOQO1G.o1G.oO&iQRO1G.vOOQP-E6q-E6q",
-  stateData: "&p~O}OS~OPPOiQOjQOkXOlXOmZOnYOoTOpTOqSOrUOsSOtSOuSOvUOwUOxUOyVOzWO{SO~OPPOR]Ok_Ol^OhTX~OPPOR]Ok_Ol^Oh]X~OR]OhbX~OR]OhcX~OR]O~OR]OheX~OPPOR]Ok_Ol^OhTa~OPnOQnORnOinOjnOknOlnOmnOnnOonOpnOqnOrnOsnOtnOunOvnOwnOxnOynOznO{nO~OhZX~P$ZOPPOR]Ok_Ol^Oh]a~Ohda~P$ZOhZa~P$ZOhdi~P$ZO",
-  goto: "#`hPPPPPilrxr!_!h!tiiiiiiiii!z#UR[OXaQRbeX`QRbeWcQRbeQgWQhXQiYQjZRk^QROX`QRbeQdQQfRQmbRqeXociprQbQQeRTlbeQpcQriTspr",
-  nodeNames: "⚠ SkillToken UnknownToken TextToken Request Prompt Extension Preset Word Worktree Skill Tail Any SkillPrompt Inspection Configuration Lifecycle Guidance Start OptionalArgument Attach Skills",
-  maxTerm: 45,
+  states: "$[OVQROOO#}QRO'#CaO$UQRO'#CcO$]QRO'#CdO$dQRO'#CeO$kQRO'#CfO$rQRO'#CgO$yQRO'#ChO%QQRO'#CiO%XQRO'#CjO%`QRO'#CkQOQQOOOOQP'#Cb'#CbOOQP'#Cl'#ClO%gQRO,58{O%nQRO,58}O%uQRO,59OO%|QRO,59PO&TQRO,59QO&[QRO,59RO&cQRO,59SO&jQRO,59TO&qQRO,59UO&xQRO,59VOOQP-E6j-E6j",
+  stateData: "'P~OvOS~OPQObPOcPOdWOeWOfYOgXOhSOiSOjROkTOlROmROnROoTOpTOqTOrUOsVOtRO~OP[OQ[OR[Ob[Oc[Od[Oe[Of[Og[Oh[Oi[Oj[Ok[Ol[Om[On[Oo[Op[Oq[Or[Os[Ot[O~OaTX~P!gOaVX~P!gOaWX~P!gOaXX~P!gOaYX~P!gOaZX~P!gOa[X~P!gOa]X~P!gOa^X~P!gOa_X~P!gOaTa~P!gOaVa~P!gOaWa~P!gOaXa~P!gOaYa~P!gOaZa~P!gOa[a~P!gOa]a~P!gOa^a~P!gOa_a~P!gO",
+  goto: "!waPPPPPbebbbbbbbbb{RZOy]PQRSTUVWXY^_`abcdefgQ^PQ_QQ`RQaSQbTQcUQdVQeWQfXQgYeh^_`abcdefg",
+  nodeNames: "⚠ SkillToken UnknownToken TextToken Request Prompt Any SkillPrompt Inspection Configuration Lifecycle Guidance Start OptionalArgument Attach Skills",
+  maxTerm: 38,
   context: commandContext,
   skippedNodes: [0],
-  repeatNodeCount: 2,
-  tokenData: "!l~RZX^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt~yZ}~X^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt",
+  repeatNodeCount: 1,
+  tokenData: "!l~RZX^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt~yZv~X^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt",
   tokenizers: [commandTokenizer, 0],
   topRules: {"Request":[0,4]},
   tokenPrec: 0

@@ -14,7 +14,7 @@ import type { SessionState, HostFrame, GuestFrame, AssistantMessage, SessionEntr
 import type { AppConfig, CollabHandlers, HostBinding, TopicSession } from '../shared/contracts.js';
 import { createBot } from '../src/bot.js';
 import type { readCollabState } from '../src/collab.js';
-import { createServer } from '../src/server.js';
+import { createServer, type GatewayServer } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { SessionCapacityError } from '../src/runtime.js';
 import { writeConfig } from '../src/config.js';
@@ -33,7 +33,7 @@ async function close(server: Server) {
   server.closeAllConnections();
   await promise;
 }
-export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean; readState?: typeof readCollabState } = {}) {
+export async function createSmokeApp(options: { competingStartAfterRejection?: boolean; pollingTransientFailure?: boolean | 'transport'; fileTransportFailure?: boolean; holdPromptReceipts?: boolean; botCanPinMessages?: boolean; authorizationDelayMs?: number; maxSessions?: number; ackUiResponses?: boolean; persistentStore?: boolean; disconnectDuringConnect?: boolean; skipStartupRejection?: boolean; readState?: typeof readCollabState; prepareDatabase?: (filename: string, instancePath: string) => void; initialEntries?: SessionEntry[] } = {}) {
   const messages: Record<string, unknown>[] = [];
   const createdTopics: Record<string, unknown>[] = [];
   const reactions: Record<string, unknown>[] = [];
@@ -201,7 +201,9 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   });
   const telegramUrl = await listen(telegram);
   const directory = await mkdtemp(join(tmpdir(), 'omp-telegram-fixture-'));
-  const store = new Store(options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:');
+  const databasePath = options.persistentStore ? join(directory, 'telegram.sqlite') : ':memory:';
+  options.prepareDatabase?.(databasePath, directory);
+  const store = new Store(databasePath);
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'app' }],
     instances: { [directory]: { chats: [{ botId, chatId }] } },
@@ -235,12 +237,12 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       };
     },
     async topicTitleStatus(session: TopicSession): Promise<{worktree:boolean;branch?:string}> {
-      return topicTitleStatuses.get(session.id) ?? {worktree:session.runtime.kind === 'managed' && !!session.runtime.worktreePath};
+      return topicTitleStatuses.get(session.id) ?? {worktree:false};
     },
     async worktree(session: TopicSession, _branch?: string) {
-      session.runtime = {kind:'managed',worktreePath:`/fixture/worktrees/${randomUUID()}`};
+      session.runtime = {kind:'managed',cwd:`/fixture/worktrees/${randomUUID()}`};
       topicTitleStatuses.set(session.id,{worktree:true,branch:_branch});
-      return `Moved to worktree ${session.runtime.worktreePath}`;
+      return `Moved to worktree ${session.runtime.cwd}`;
     },
     async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
       if (session.status !== 'open') throw new Error('Session closed');
@@ -328,7 +330,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
   };
   assistant.content.push({ type: 'toolCall', id: 'read-fixture', name: 'read', arguments: { path: 'src/auth.ts' }, intent: 'Inspecting the authentication boundary' });
-  const entries: SessionEntry[] = [
+  const entries: SessionEntry[] = options.initialEntries ?? [
     { type: 'message', id: 'user-fixture', parentId: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'Verify the Telegram session renderer.', timestamp: Date.now() } },
     { type: 'message', id: 'assistant-fixture', parentId: 'user-fixture', timestamp: new Date().toISOString(), message: assistant },
     { type: 'message', id: 'tool-fixture', parentId: 'assistant-fixture', timestamp: new Date().toISOString(), message: { role: 'toolResult', toolCallId: 'read-fixture', toolName: 'read', content: [{ type: 'text', text: 'export type SessionAccess = \"member\" | \"denied\";' }], timestamp: Date.now(), isError: false } },
@@ -374,17 +376,35 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     return { ...state, sessionName: sessionTitles.get(binding.sessionId) ?? state.sessionName };
   });
   const service = createBot({config,botConfig:config.bots[0]!,token:botToken,store,runtime,connect,readState,bot});
-  await service.initialize();
-  service.startBackground();
-  await service.refreshSkillCatalogs();
-  const reservation = createHttpServer();
-  const reservedUrl = await listen(reservation);
-  const port = Number(new URL(reservedUrl).port);
-  await close(reservation);
-  config.publicUrl = reservedUrl.replace('http:', 'https:');
-  writeConfig(config);
-  const server = createServer({ config, bots: [service], store, runtime, connect });
-  const url = await listen(server, port);
+  let server: GatewayServer | undefined;
+  const disposeFixture = async () => {
+    const errors: unknown[] = [];
+    for (const dispose of [
+      () => server?.closeConnections(),
+      async () => { if (server?.listening) await close(server); },
+      () => service.close(),
+      () => store.close(),
+      () => close(telegram),
+      () => rm(directory, { recursive: true, force: true }),
+    ]) {
+      try { await dispose(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Fixture cleanup failed');
+  };
+  let url: string;
+  try {
+    await service.initialize();
+    service.startBackground();
+    await service.refreshSkillCatalogs();
+    server = createServer({ config, bots: [service], store, runtime, connect });
+    url = await listen(server);
+  } catch (error) {
+    try { await disposeFixture(); } catch (cleanupError) {
+      console.error('Could not clean up failed fixture startup.', cleanupError);
+    }
+    throw error;
+  }
   async function update(message: Record<string, unknown>, from = user) {
     const created = message.forum_topic_created as
       | { name: string; icon_custom_emoji_id?: string }
@@ -503,14 +523,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     initData(sessionId: string) {
       return signedInitData(sessionId);
     },
-    async close() {
-      await server.closeConnections();
-      await close(server);
-      await service.close();
-      store.close();
-      await close(telegram);
-      await rm(directory, { recursive: true, force: true });
-    },
+    close: disposeFixture,
   };
 }
 
@@ -559,6 +572,22 @@ export async function verifyTelegramFlow() {
     assert.deepEqual(app.pins, [{ chat_id: chatId, message_id: button.message_id, disable_notification: true }], 'the Mini App entry is pinned inside its session topic');
     const topicMessages = app.messages.filter(message => message.message_thread_id === session.threadId);
     assert.equal(topicMessages[1]?.forwarded_message_id,7003);
+    const binding = await app.runtime.ensure(session);
+    const promptAnchor = {ompSessionId:binding.sessionId,entryId:'accepted-1',parentEntryId:null,kind:'collab-prompt',partIndex:0};
+    for (const messageId of [7003,Number(topicMessages[1]!.message_id)])
+      assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, messageId), promptAnchor);
+    const answer: SessionEntry = {type:'message',id:'smoke-answer',parentId:'accepted-1',timestamp:new Date().toISOString(),message:{
+      role:'assistant',content:[{type:'text',text:'Completed login review'}],model:'fixture',timestamp:Date.now(),stopReason:'stop',
+      usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},
+    }};
+    app.emit({t:'entry',entry:answer});
+    await waitUntil(
+      () => app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(app.messages.at(-1)?.message_id))?.entryId === answer.id,
+      'assistant delivery did not persist its message anchor',
+    );
+    assert.deepEqual(app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(app.messages.at(-1)!.message_id)),
+      {ompSessionId:binding.sessionId,entryId:answer.id,parentEntryId:answer.parentId,kind:'assistant',partIndex:0});
+    console.log('PASS accepted original and forwarded prompts and confirmed assistant delivery retain exact OMP message anchors.');
     assert.equal(app.createdTopics[0]?.icon_custom_emoji_id,'5312016608254762256','initial task topics start with lightning at creation');
     app.emit({t:'event',event:{type:'agent_start'}});
     await waitUntil(() => (app.topicEdits.at(-1)?.icon_custom_emoji_id ?? app.createdTopics[0]?.icon_custom_emoji_id) === '5312016608254762256', 'active turn did not get the running icon');

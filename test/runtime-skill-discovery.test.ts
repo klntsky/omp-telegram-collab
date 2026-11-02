@@ -84,7 +84,7 @@ test('stopped worktree sessions discover skills in their own cwd and cache separ
   const session = {
     id: 'worktree-skills', botId: 1, chatId: -100, threadId: 2, instancePath: app.directory,
     name: 'Worktree skills', status: 'open' as const, createdAt: Date.now(),
-    runtime: { kind: 'managed' as const, worktreePath: worktree },
+    runtime: { kind: 'managed' as const, cwd: worktree },
   };
   await app.runtime.listSkills(app.directory, session);
   assert.equal(await readFile(join(app.directory, 'cwd'), 'utf8'), worktree);
@@ -94,6 +94,18 @@ test('stopped worktree sessions discover skills in their own cwd and cache separ
   await app.runtime.listSkills(app.directory, session);
   assert.equal(await app.calls(), 2);
   await assert.rejects(app.runtime.listSkills(worktree, session), /Instance path is not configured/);
+});
+
+test('new folder skill discovery keeps configured assignment separate from execution context', async t => {
+  const app = await fixture(t);
+  const selected = join(app.directory,'selected');
+  await mkdir(selected);
+  const catalog = await app.runtime.listSkills(app.directory,undefined,undefined,selected);
+  assert.deepEqual(catalog,[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
+  assert.equal(await readFile(join(app.directory,'cwd'),'utf8'),selected);
+  await assert.rejects(app.runtime.listSkills(selected),/Instance path is not configured/);
+  await app.runtime.listSkills(app.directory);
+  assert.equal(await readFile(join(app.directory,'cwd'),'utf8'),app.directory);
 });
 
 test('discovery failures preserve multiline diagnostics and share a bounded failure cooldown', async t => {

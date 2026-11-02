@@ -4,7 +4,7 @@ import { commandTokenContext } from './telegram-command-tokens.js';
 import { isMentionableSkillName } from './skill-commands.js';
 
 export type PromptExtension =
-  | { kind: 'model-preset'; name: string }
+  | { kind: 'model-preset'; name?: string }
   | { kind: 'worktree' }
   | { kind: 'skill'; name: string };
 
@@ -82,6 +82,23 @@ export function parseTelegramCommand(
     const request = tree.topNode.firstChild!;
     if (request.name !== 'Prompt' && request.name !== 'SkillPrompt') {
       const argument = tokens.length > 1 ? text.slice(tokens[1]!.start, tokens.at(-1)!.end) : '';
+      switch (request.name) {
+        case 'Inspection':
+        case 'Configuration':
+        case 'Lifecycle':
+        case 'Guidance':
+          if (tokens.length > 1) throw new SyntaxError(`Usage: /${root.action}`);
+          break;
+        case 'Start':
+        case 'OptionalArgument':
+        case 'Skills':
+          if (tokens.length > 2 || (tokens[1] && tokens[1].kind !== 'text'))
+            throw new SyntaxError(`Usage: /${root.action} ${request.name === 'Skills' ? '[clear]' : request.name === 'Start' ? '[payload]' : root.action === 'worktree' ? '[branch]' : '[name]'}`);
+          break;
+        case 'Attach':
+          if (!tokens[1] || tokens[1].kind !== 'text') throw new SyntaxError('Usage: /attach <instanceId> [name]');
+          break;
+      }
       if (request.name === 'Skills' && argument && argument !== 'clear') throw new SyntaxError('Expected clear or no argument');
       if (root.action === 'model_preset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new SyntaxError('Invalid model preset name');
       return { kind: 'command', action: root.action!, argument };
@@ -91,29 +108,27 @@ export function parseTelegramCommand(
     let preset = false;
     let worktree = false;
     let prompt = '';
-    const addSkill = (position: number) => {
-      const name = byStart.get(position)!.skill!;
+    const addSkill = (name: string) => {
       if (!skills.has(name)) { extensions.push({ kind: 'skill', name }); skills.add(name); }
     };
-    for (let node = request.firstChild; node; node = node.nextSibling) {
-      if (node.name === 'Tail') {
-        prompt = text.slice(node.from, tokens.at(-1)!.end);
-      } else if (node.name === 'Skill') {
-        addSkill(node.from);
-      } else if (node.name === 'Extension') {
-        const extension = node.firstChild!;
-        if (extension.name === 'Skill') addSkill(extension.from);
-        else if (extension.name === 'Preset') {
-          if (preset) throw new SyntaxError('Repeated model preset extension');
-          const name = byStart.get(extension.getChild('Word')!.from)!.image;
-          if (!/^[A-Za-z][\w-]*$/.test(name)) throw new SyntaxError('Invalid model preset name');
-          preset = true;
-          extensions.push({ kind: 'model-preset', name });
-        } else {
-          if (worktree) throw new SyntaxError('Repeated worktree extension');
-          worktree = true;
-          extensions.push({ kind: 'worktree' });
-        }
+    if (root.kind === 'skill') addSkill(root.skill!);
+    for (let index = 1; index < tokens.length; index++) {
+      const token = tokens[index]!;
+      if (token.kind === 'skill') {
+        addSkill(token.skill!);
+      } else if (token.kind === 'command' && token.action === 'worktree' && !worktree) {
+        worktree = true;
+        extensions.push({ kind: 'worktree' });
+      } else if (token.kind === 'command' && token.action === 'model_preset' && !preset
+        && (!tokens[index + 1] || tokens[index + 1]!.kind === 'command' || tokens[index + 1]!.kind === 'skill'
+          || (tokens[index + 1]!.kind === 'text' && /^[A-Za-z][\w-]*$/.test(tokens[index + 1]!.image)))) {
+        preset = true;
+        extensions.push(tokens[index + 1]?.kind === 'text'
+          ? { kind: 'model-preset', name: tokens[++index]!.image }
+          : { kind: 'model-preset' });
+      } else {
+        prompt = text.slice(token.start, tokens.at(-1)!.end);
+        break;
       }
     }
     if (request.name === 'SkillPrompt' && tokens.length === 1) return root.action

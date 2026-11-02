@@ -6,9 +6,11 @@ For consumer installation, setup, configuration, deployment, and normal service 
 
 ## Contributor setup
 
-Install Node.js 22.13 or newer, pnpm, and OMP. From a checkout, install dependencies and build:
+Install nvm, pnpm, and OMP. Use the Node.js LTS version pinned in `.nvmrc`; older runtimes are unsupported. From a checkout, select the runtime, install dependencies, and build:
 
 ```sh
+nvm install
+nvm use
 pnpm install --frozen-lockfile
 pnpm build
 ```
@@ -21,7 +23,11 @@ pnpm dev --config /path/to/development/config.yaml
 
 Configure model credentials for the development account through OMP. Do not reuse production tokens or run a second service against production state.
 
+## Change the database schema
 
+Append SQL to the migration list in `src/migrations.ts`. Each list entry advances the database version by one. Keep applied entries unchanged and in order. Do not include transaction statements in migration SQL.
+
+Store startup applies pending entries in one transaction, including their version updates. A failure rolls back the entire pending upgrade and preserves the original SQLite error. There are no down migrations.
 
 ## Modify the Mini App
 
@@ -42,6 +48,8 @@ Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After ch
 `smoke` runs CLI, Telegram, gateway, and OMP runtime stages in separate subprocesses. Run a stage with `pnpm smoke:cli`, `pnpm smoke:telegram`, `pnpm smoke:gateway`, or `pnpm smoke:runtime`. Select several with `pnpm smoke telegram gateway`. The CLI stage requires a current build. The runtime stage requires an installed OMP and enough resources to start within its timeout. Its model-executing lifecycle checks also require configured model credentials. Local fixtures need no live Telegram credentials.
 
 The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
+
+Local fixtures use OS-assigned ephemeral ports and keep each listener bound until teardown. Use the returned `app.url` for loopback transport and `app.config.publicUrl` for the gateway Origin header; the configured public origin is independent of the listening port. Bot or gateway initialization failures close the resources already started and preserve the original startup diagnostic.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 

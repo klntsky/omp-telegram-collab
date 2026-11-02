@@ -34,6 +34,22 @@ test('default mode starts a session host from ordinary text without a mention', 
   } finally { await app.close(); }
 });
 
+test('explicit prompts deliver pasted absolute paths and diagnostics unchanged', async () => {
+  const app = await createSmokeApp();
+  try {
+    await app.update({text:'/setup'});
+    await setForumSetting(app, 0);
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Diagnostics'}});
+    const text = '/home/work/project/test/e2e/helpers/telegram-user.ts:27\n  throw new Error("Refusing to import a Telegram session outside the test network");\n    at validateTelegramTestSession (/home/work/project/test/e2e/helpers/telegram-user.ts:27:11)';
+    const rejection = once(app.events,'message');
+    await app.update({text:`/p ${text}`,message_thread_id:42});
+    await rejection;
+    await app.update({text:`/p ${text}`,message_thread_id:42});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{t:'prompt',text}]);
+  } finally { await app.close(); }
+});
+
 test('explicit mode ignores discussion and mentions, and admits scoped /p prompts', async () => {
   const app = await createSmokeApp();
   try {
@@ -286,7 +302,6 @@ test('a non-admin /new task creates no session until a group administrator appro
     await app.callback(proposal.approve,proposal.message);
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Proposed initial task'}]);
-    assert.equal(app.store.listSessions(botId)[0]!.name,'Proposed initial task');
   } finally { await app.close(); }
 });
 

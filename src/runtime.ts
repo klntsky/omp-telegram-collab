@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
+import { access, chmod, constants, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createConnection } from 'node:net';
@@ -348,10 +348,11 @@ export class OmpRuntime {
       const sessionFile = await realpath(state.sessionFile);
       const header = await readHeader(sessionFile);
       const cwd = await realpath(header.cwd);
+      await this.#validateCwd(cwd);
       if (header.id !== pin.sessionId || header.cwd !== cwd) throw new Error('Native OMP worktree history identity changed');
       await chmod(sessionFile, 0o600);
       await writeBinding(dir, { ...pin, cwd, sessionFile });
-      session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { worktreePath: cwd } : {}) };
+      session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { cwd } : {}) };
       if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
       return result.text;
     })();
@@ -427,13 +428,19 @@ export class OmpRuntime {
   }
 
   #sessionCwd(session: TopicSession): string {
-    return session.runtime.kind === 'managed' ? session.runtime.worktreePath ?? session.instancePath : session.instancePath;
+    return session.runtime.kind === 'managed' ? session.runtime.cwd ?? session.instancePath : session.instancePath;
   }
 
+  async #validateCwd(cwd: string): Promise<void> {
+    if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+    const directory = await opendir(cwd);
+    await directory.close();
+    await access(cwd, constants.R_OK | constants.X_OK);
+  }
   async #validatedSessionCwd(session: TopicSession): Promise<string> {
     if (await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance path identity changed');
     const cwd = this.#sessionCwd(session);
-    if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+    await this.#validateCwd(cwd);
     return cwd;
   }
   async validateSessionPaths(sessions: TopicSession[], config = this.#config): Promise<void> {
@@ -454,13 +461,13 @@ export class OmpRuntime {
         }
       } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
       if (pin) cwd = pin.cwd;
-      if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+      await this.#validateCwd(cwd);
       try {
         const header = await readHeader(pin?.sessionFile ?? history);
         if (header.cwd !== cwd || (pin && header.id !== pin.sessionId)) {
           throw new Error(`Saved history ${session.id} conflicts with working directory ${cwd}`);
         }
-        if (pin) session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { worktreePath: cwd } : {}) };
+        if (pin) session.runtime = { kind: 'managed', ...(cwd !== session.instancePath ? { cwd } : {}) };
       } catch (error) {
         if (!errno(error, 'ENOENT') || pin) throw error;
       }
@@ -787,7 +794,7 @@ export class OmpRuntime {
       throw new Error(`Invalid model preset "${name}": defaultThinkingLevel is not a thinking level`);
     return {modelRoles: roles, ...(preset.defaultThinkingLevel === undefined ? {} : {defaultThinkingLevel: preset.defaultThinkingLevel})};
   }
-  async listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
+  async listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     this.#assertActive();
     if (this.#closed) throw new Error('OMP runtime is stopping');
@@ -801,7 +808,9 @@ export class OmpRuntime {
       }
       values = JSON.parse(await this.#hostControl(session, undefined, 'list_skills'));
     } else {
-      values = await this.#cachedSkills(session ? await this.#validatedSessionCwd(session) : instancePath, signal);
+      const cwd = session ? await this.#validatedSessionCwd(session) : discoveryCwd ?? instancePath;
+      if (!session && discoveryCwd !== undefined) await this.#validateCwd(cwd);
+      values = await this.#cachedSkills(cwd, signal);
     }
     if (!Array.isArray(values) || values.some(value => !record(value) || typeof value.name !== 'string' || !value.name || typeof value.description !== 'string')) {
       throw new Error('OMP returned an invalid skill catalog');

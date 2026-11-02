@@ -16,6 +16,8 @@ import { Store } from '../src/store.js';
 
 const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-smoke-'));
 const relay = await startLocalRelay();
+const selectedFolder = join(dir, 'selected folder');
+await mkdir(selectedFolder);
 const config: AppConfig = {
   bots: [{ id: 123, token: '123:smoke-token-never-sent-to-telegram', miniAppShortName: 'app' }],
   instances: { [dir]: { chats: [{ botId: 123, chatId: -100123 }] } },
@@ -32,7 +34,7 @@ const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(
   { botId: 123, chatId: -100123, threadId: 7, instancePath: dir },
-  'Local smoke', { kind: 'managed' }, {text:'Preserved pending instruction'},
+  'Local smoke', { kind: 'managed', cwd: selectedFolder }, {text:'Preserved pending instruction'},
 );
 initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();
@@ -44,6 +46,11 @@ try {
   assert.ok(first.sessionId);
   assert.equal(same.sessionId, first.sessionId);
   assert.equal(same.instanceId, first.instanceId);
+  const assertProcessCwd = async (id: string, expected: string) => {
+    const lifecycle = JSON.parse(await readFile(join(dir, 'sessions', id, 'lifecycle.json'), 'utf8')) as { pid: number };
+    assert.equal(execFileSync('pwd', { cwd: `/proc/${lifecycle.pid}/cwd`, encoding: 'utf8', timeout: 5000 }).trim(), expected);
+  };
+  await assertProcessCwd(session.id, selectedFolder);
   const release = runtime.retain(session.id);
   await assert.rejects(runtime.ensure({ ...session, id: 'capacity-boundary-session' }), SessionCapacityError);
   release();
@@ -80,6 +87,7 @@ try {
     onFrame(frame) {
       frames.push(frame.t);
       if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Telegram title → actual OMP');
+      if (frame.t === 'welcome') assert.equal(frame.header.cwd, selectedFolder);
       if (frame.t === 'state' && frame.state.sessionName === 'Live Telegram rename') titleState.resolve();
     },
     onClose() {},
@@ -94,7 +102,7 @@ try {
   }
   guest.close();
   console.log('PASS actual OMP denies a forged write capability despite a valid encryption key; the genuine capability still receives the snapshot and live title updates.');
-  const attached = await runtime.attach(first.instanceId, dir);
+  const attached = await runtime.attach(first.instanceId, selectedFolder);
   assert.equal(attached.sessionId, first.sessionId);
   runtime.markPrompt(session.id);
   await runtime.close();
@@ -108,6 +116,7 @@ try {
   const resumed = await runtime.ensure(session);
   assert.equal(resumed.sessionId,first.sessionId,'idle retirement preserves the exact OMP conversation');
   assert.notEqual(resumed.instanceId,first.instanceId,'a retired conversation resumes in a fresh process');
+  await assertProcessCwd(session.id, selectedFolder);
   const resumedGuest = await connectCollab(resumed, 'Resume verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.id, first.sessionId);
@@ -124,7 +133,7 @@ try {
   await mkdir(secondPath);
   config.instances[secondPath] = { chats: [{ botId: session.botId, chatId: session.chatId - 1 }] };
   runtime.setSessionLimit(2);
-  const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instancePath: secondPath };
+  const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instancePath: secondPath, runtime: { kind: 'managed' as const } };
   const secondBinding = await runtime.ensure(secondSession);
   assert.notEqual(secondBinding.sessionId, resumed.sessionId);
   const secondGuest = await connectCollab(secondBinding, 'Instance path verifier', {
@@ -135,7 +144,7 @@ try {
   });
   secondGuest.close();
   await assert.rejects(runtime.attach(secondBinding.instanceId, dir), /instance path/);
-  await assert.rejects(runtime.ensure({ ...session, instancePath: secondPath }), /incompatible/);
+  await assert.rejects(runtime.ensure({ ...session, instancePath: secondPath, runtime: { kind: 'managed', cwd: secondPath } }), /incompatible/);
   assert.equal(await runtime.isRunning(session), true, 'a path mismatch must leave the original host alive');
   assert.equal(await runtime.isRunning(secondSession), true);
   runtime.markPrompt(session.id);
@@ -158,6 +167,7 @@ try {
     const recovered = await runtime.ensure(preserved);
     assert.equal(recovered.sessionId, resumed.sessionId);
     assert.equal(recovered.instanceId, resumed.instanceId, 'a current store/config reopen must recover the protected live host');
+    await assertProcessCwd(preserved.id, selectedFolder);
     assert.equal(reopenedStore.hasPendingInitialTask(session.id), true, 'recovery must not submit or claim the pending instruction');
     assert.deepEqual(await readFile(historyPath), historyBeforeReopen);
     runtime.observeFrame(session.id, { t: 'event', event: { type: 'agent_end' } });
@@ -174,16 +184,16 @@ try {
   execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '-m', 'Smoke root']);
   await writeFile(join(worktreeRepository, 'tracked'), 'dirty tracked\n');
   await writeFile(join(worktreeRepository, 'untracked'), 'dirty untracked\n');
-  reopenedConfig.instances[worktreeRepository] = { chats: [{ botId: session.botId, chatId: session.chatId - 2 }] };
+  reopenedConfig.instances[dir]!.chats.push({ botId: session.botId, chatId: session.chatId - 2 });
   runtime = new OmpRuntime(reopenedConfig);
   const worktreeSession = {
-    ...session, id: 'worktree-smoke-session', instancePath: worktreeRepository, chatId: session.chatId - 2,
-    runtime: { kind: 'managed' as const, worktreePath: undefined as string | undefined },
+    ...session, id: 'worktree-smoke-session', instancePath: dir, chatId: session.chatId - 2,
+    runtime: { kind: 'managed' as const, cwd: worktreeRepository },
   };
   try {
     const binding = await runtime.ensure(worktreeSession);
     await runtime.worktree(worktreeSession, `telegram-smoke-${Date.now()}`);
-    const worktreePath = worktreeSession.runtime.worktreePath!;
+    const worktreePath = worktreeSession.runtime.cwd!;
     assert.ok(worktreePath);
     assert.equal(await readFile(join(worktreePath, 'tracked'), 'utf8'), 'dirty tracked\n');
     assert.equal(await readFile(join(worktreePath, 'untracked'), 'utf8'), 'dirty untracked\n');
@@ -203,6 +213,7 @@ try {
     runtime = new OmpRuntime(reopenedConfig);
     await runtime.validateSessionPaths([worktreeSession]);
     const resumed = await runtime.ensure(worktreeSession);
+    await assertProcessCwd(worktreeSession.id, worktreePath);
     assert.equal(resumed.sessionId, binding.sessionId);
     await runtime.kill(worktreeSession);
     execFileSync('git', ['-C', worktreeRepository, 'worktree', 'remove', '--force', worktreePath]);
