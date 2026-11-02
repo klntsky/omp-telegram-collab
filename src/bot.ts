@@ -65,7 +65,7 @@ export interface RuntimeLike {
   retain(sessionId: string): () => void;
   close(): Promise<void>;
 }
-export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean }
+export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean; topicActivityEmojis?: { running: string; finished: string } }
 type TopicActivity = 'unknown' | 'running' | 'finished';
 type KnownTopicActivity = Exclude<TopicActivity, 'unknown'>;
 interface TopicMetadata {
@@ -1980,11 +1980,13 @@ export class BotService {
       try {
         const stickers = await this.bot.api.getForumTopicIconStickers(controller.signal);
         const find = (emoji: string) => {
-          const id = stickers.find(sticker => sticker.emoji?.replace(/\uFE0F/g, '') === emoji)?.custom_emoji_id;
+          const normalized = emoji.replace(/\uFE0F/g, '');
+          const id = stickers.find(sticker => sticker.emoji?.replace(/\uFE0F/g, '') === normalized)?.custom_emoji_id;
           if (!id) throw new Error(`Telegram topic icon unavailable: ${emoji}`);
           return id;
         };
-        return { running: find('⚡'), finished: find('🏁') };
+        const emojis = this.options.topicActivityEmojis ?? { running: '⚡', finished: '🏁' };
+        return { running: find(emojis.running), finished: find(emojis.finished) };
       } finally {
         clearTimeout(timeout);
         this.background.signal.removeEventListener('abort', abort);

@@ -515,7 +515,7 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO snapshot_baselines VALUES (?)').run(id);
   }
   createSetupRequest(input: Omit<SetupRequest, 'code' | 'expiresAt'>): SetupRequest {
-    const request: SetupRequest = { ...input, code: randomBytes(9).toString('base64url'), expiresAt: Date.now() + 600000 };
+    const request: SetupRequest = { ...input, code: `r_${randomBytes(9).toString('base64url')}`, expiresAt: Date.now() + 600000 };
     this.db.prepare('DELETE FROM setup_requests WHERE expires_at<=?').run(Date.now());
     this.db.prepare('INSERT INTO setup_requests (code,bot_id,chat_id,user_id,username,title,expires_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(bot_id,chat_id,user_id) DO UPDATE SET code=excluded.code,username=excluded.username,title=excluded.title,expires_at=excluded.expires_at').run(request.code, request.botId, request.chatId, request.userId, request.username ?? null, request.title, request.expiresAt);
     return request;
