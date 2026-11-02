@@ -73,6 +73,8 @@ pnpm telegram:test:login
 
 Enter the registered test-network phone number with its country code, the actual verification code delivered to the account, and its two-step verification password if requested. Code and password input are hidden. The command verifies the test network and appends `TELEGRAM_TEST_SESSION` to `.env` without printing it. It preserves existing configuration and sets `.env` permissions to `0600`. Rerunning the command appends a refreshed session; the latest entry is used.
 
+Login supports Telegram moving the connection to the account's home datacenter. No datacenter configuration is required.
+
 The saved session grants access to the test account. Never log it, commit it, send it in chat, or publish it as an artifact. Revoke the authorization in the account's device settings if it leaks.
 
 Run live tests after login:

@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { createTelegramTestClient, readTelegramApplicationCredentials, validateTelegramTestSession } from '../test/e2e/helpers/telegram-user.js';
+import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from '../test/e2e/helpers/telegram-user.js';
 import { appendTelegramTestSession } from '../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
 
@@ -44,8 +44,7 @@ try {
     abortSignal: signal,
   });
   if (user.isBot) throw new Error('Telegram test provisioning requires a user account');
-  const session = await client.exportSession();
-  validateTelegramTestSession(session);
+  const session = await exportTelegramTestSession(client, signal);
   signal.throwIfAborted();
   const filename = resolve('.env');
   await appendTelegramTestSession(filename, session);

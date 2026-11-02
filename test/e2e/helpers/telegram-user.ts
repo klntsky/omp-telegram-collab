@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { MemoryStorage, TelegramClient, tl, type User } from '@mtcute/node';
-import { readStringSession } from '@mtcute/node/utils.js';
+import { readStringSession, writeStringSession } from '@mtcute/node/utils.js';
 import { combineTelegramErrors } from './errors.js';
 
 export interface TelegramApplicationCredentials {
@@ -27,6 +27,24 @@ export function validateTelegramTestSession(session: string): void {
     throw new Error('Refusing to import a Telegram session outside the test network');
   }
   if (data.self?.isBot) throw new Error('Telegram test provisioning requires a user session, not a bot session');
+}
+
+export async function exportTelegramTestSession(client: TelegramClient, signal: AbortSignal): Promise<string> {
+  const config = await client.call({ _: 'help.getConfig' }, { timeout: 30000, abortSignal: signal });
+  if (!config.testMode) throw new Error('Refusing to export a Telegram session outside the test network');
+  const data = readStringSession(await client.exportSession());
+  for (const dc of [data.primaryDcs.main, data.primaryDcs.media]) {
+    if (!config.dcOptions.some(option => option.id === dc.id && option.ipAddress === dc.ipAddress && option.port === dc.port)) {
+      throw new Error('Exported Telegram session contains a datacenter outside the verified test-network configuration');
+    }
+  }
+  return writeStringSession({
+    ...data,
+    primaryDcs: {
+      main: { ...data.primaryDcs.main, testMode: true },
+      media: { ...data.primaryDcs.media, testMode: true },
+    },
+  });
 }
 
 export function readTelegramTestCredentials(env: NodeJS.ProcessEnv = process.env): TelegramTestCredentials {
