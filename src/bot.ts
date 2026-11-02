@@ -1105,8 +1105,19 @@ export class BotService {
     });
   }
   private async reportError(ctx: Context, error: unknown): Promise<void> {
-    console.error('Telegram operation failed.', error);
     const intent = this.inputIntents.get(ctx);
+    const context = {
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+      botId: this.id,
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      threadId: ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id,
+      messageId: ctx.message?.message_id ?? ctx.callbackQuery?.message?.message_id,
+      inputKind: intent?.kind,
+      action: intent?.kind === 'command' ? intent.action : undefined,
+    };
+    console.error('Telegram operation failed.', error, context);
     if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
       const session = this.options.store.getTopic({botId:this.id,destination:contextDestination(ctx)});
       if (session && this.sessionAssigned(session)) this.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
@@ -1123,7 +1134,9 @@ export class BotService {
     const details = error instanceof Error ? error.message : String(error);
     await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
-    }).catch(() => undefined);
+    }).catch(deliveryError => {
+      console.error('Could not deliver Telegram operation failure.', deliveryError, context);
+    });
   }
   private collectAlbum(ctx: Context): boolean {
     const message = ctx.message;
