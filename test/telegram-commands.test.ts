@@ -30,16 +30,17 @@ test('unknown roots and wrong bot roots are ignored after full tokenization', ()
   assert.deepEqual(parse('/p@eXAMPLEbOT hello'), { kind: 'prompt', action: 'p', text: 'hello', extensions: [] });
 });
 
-test('prefix boundaries and repeated singleton extensions reject', () => {
-  for (const text of [
-    '/new /unknown text', '/p /stop text', '/p /p text', '/p /model_preset',
-    '/p /model_preset /worktree text', '/p /model_preset a /model_preset b text',
-    '/new /worktree /worktree text', '/p /worktree@OtherBot text',
-  ]) {
-    const result = parse(text);
-    assert.equal(result.kind, 'invalid', text);
-    if (result.kind === 'invalid') assert.ok(result.error instanceof Error);
-  }
+test('bare presets compose interactively and repeated extensions start literal text', () => {
+  assert.deepEqual(parse('/p /model_preset'), {kind:'prompt',action:'p',text:'',extensions:[{kind:'model-preset'}]});
+  assert.deepEqual(parse('/p /model_preset /worktree text'), {
+    kind:'prompt',action:'p',text:'text',extensions:[{kind:'model-preset'},{kind:'worktree'}],
+  });
+  assert.deepEqual(parse('/p /model_preset a /model_preset b text'), {
+    kind:'prompt',action:'p',text:'/model_preset b text',extensions:[{kind:'model-preset',name:'a'}],
+  });
+  assert.deepEqual(parse('/new /worktree /worktree text'), {
+    kind:'prompt',action:'new',text:'/worktree text',extensions:[{kind:'worktree'}],
+  });
   assert.deepEqual(parse('/p /worktree branch /stop'), {
     kind: 'prompt', action: 'p', text: 'branch /stop', extensions: [{ kind: 'worktree' }],
   });
@@ -69,7 +70,7 @@ test('standalone start accepts deep-link payloads without becoming composable', 
   assert.deepEqual(parse('/start@ExampleBot setup'), {kind:'command',action:'start',argument:'setup'});
   assert.deepEqual(parse('/start token_with-dashes'), {kind:'command',action:'start',argument:'token_with-dashes'});
   assert.equal(parse('/start one two').kind,'invalid');
-  assert.equal(parse('/p /start setup task').kind,'invalid');
+  assert.deepEqual(parse('/p /start setup task'), {kind:'prompt',action:'p',text:'/start setup task',extensions:[]});
 });
 
 test('tokenization consumes every non-whitespace span with strictly advancing offsets', () => {
@@ -90,16 +91,16 @@ test('generator rejects unresolved grammar conflicts rather than choosing altern
   assert.throws(() => buildParser('@top Request { Left | Right } Left { "x" } Right { "x" }'));
 });
 
-test('all non-extension slash commands reject before the prompt boundary', () => {
-  for (const action of ['new', 'p', 'skills', 'settings', 'setup', 'list_admins', 'attach', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli']) {
-    assert.equal(parse(`/new /${action} text`).kind, 'invalid', action);
+test('non-extension slash tokens start literal prompts without executing commands', () => {
+  for (const action of ['new', 'p', 'skills', 'settings', 'setup', 'list_admins', 'attach', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli', 'unknown', 'worktree@OtherBot']) {
+    assert.deepEqual(parse(`/new /${action} text`), {kind:'prompt',action:'new',text:`/${action} text`,extensions:[]});
   }
 });
 
-test('malformed preset names reject in both grammar contexts', () => {
+test('malformed preset names are literal in prompts and validated in standalone commands', () => {
   for (const name of ['123', 'name.dot', 'bad!', '-name', '😀']) {
     assert.equal(parse(`/model_preset ${name}`).kind, 'invalid');
-    assert.equal(parse(`/new /model_preset ${name} prompt`).kind, 'invalid');
+    assert.deepEqual(parse(`/new /model_preset ${name} prompt`), {kind:'prompt',action:'new',text:`/model_preset ${name} prompt`,extensions:[]});
   }
   assert.deepEqual(parse('/model_preset Good_name-2'), { kind: 'command', action: 'model_preset', argument: 'Good_name-2' });
 });
@@ -109,8 +110,8 @@ test('long prefixes terminate and deduplicate without changing literal tails', (
   assert.deepEqual(parse(`/p ${prefix}literal /stop`), {
     kind: 'prompt', action: 'p', text: 'literal /stop', extensions: [{ kind: 'skill', name: 'Exact' }],
   });
-  assert.equal(parse(`/p ${prefix}/unknown`).kind, 'invalid');
-  assert.equal(parse(`/p ${prefix}/worktree /worktree`).kind, 'invalid');
+  assert.deepEqual(parse(`/p ${prefix}/unknown`), {kind:'prompt',action:'p',text:'/unknown',extensions:[{kind:'skill',name:'Exact'}]});
+  assert.deepEqual(parse(`/p ${prefix}/worktree /worktree`), {kind:'prompt',action:'p',text:'/worktree',extensions:[{kind:'skill',name:'Exact'},{kind:'worktree'}]});
 });
 
 test('source-offset parser and tokenizer agree on whitespace boundaries', () => {
@@ -121,4 +122,27 @@ test('source-offset parser and tokenizer agree on whitespace boundaries', () => 
       extensions:[{kind:'model-preset',name:'Fast'}],
     });
   }
+});
+
+test('pasted absolute paths and multiline diagnostics are literal prompt data', () => {
+  const text = '/home/work/project/test/e2e/helpers/telegram-user.ts:27\n  throw new Error("Refusing to import a Telegram session outside the test network");\nError: Refusing to import a Telegram session outside the test network\n    at validateTelegramTestSession (/home/work/project/test/e2e/helpers/telegram-user.ts:27:11)';
+  for (const root of ['/p', '/new', '/skill_review']) {
+    assert.deepEqual(parse(`${root} ${text}`), {
+      kind:'prompt',action:root === '/new' ? 'new' : 'p',text,
+      extensions:root === '/skill_review' ? [{kind:'skill',name:'Review.Exact'}] : [],
+    });
+  }
+  assert.deepEqual(parse(`/p /worktree /model_preset Fast ${text}`), {
+    kind:'prompt',action:'p',text,extensions:[{kind:'worktree'},{kind:'model-preset',name:'Fast'}],
+  });
+});
+
+test('interactive presets retain following skill selection and literal slash task boundaries', () => {
+  assert.deepEqual(parse('/new /model_preset /skill_review /home/work/error.ts:27\n/stop'), {
+    kind:'prompt',action:'new',text:'/home/work/error.ts:27\n/stop',
+    extensions:[{kind:'model-preset'},{kind:'skill',name:'Review.Exact'}],
+  });
+  assert.deepEqual(parse('/p /model_preset /stop'), {
+    kind:'prompt',action:'p',text:'/stop',extensions:[{kind:'model-preset'}],
+  });
 });
