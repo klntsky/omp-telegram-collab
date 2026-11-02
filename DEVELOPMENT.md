@@ -39,7 +39,7 @@ The editable Collab Web client lives in `web/src`. `web/upstream.json` records i
 pnpm verify
 ```
 
-`verify` requires typechecking, the isolated suite, a production build, all integration stages, and live Telegram end-to-end tests to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
+`verify` requires live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and all integration stages to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
 
 `check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five; mocked collaborators only establish local behavior, not compatibility with the external service they imitate. `test:integration` builds production artifacts and runs `smoke`.
 
@@ -91,7 +91,7 @@ Run live tests after login:
 timeout 480s pnpm test:e2e
 ```
 
-Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from the isolated `test` suite and runs as the final stage of `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. Install OMP before running the suite; set `OMP_EXECUTABLE` to select a different executable.
+Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from the isolated `test` suite and runs as the first stage of `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. Install OMP before running the suite; set `OMP_EXECUTABLE` to select a different executable.
 
 Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environment. Otherwise, the fixture creates a uniquely named bot through that environment's BotFather. Created bots remain in the test account for reuse; the helpers do not issue BotFather's irreversible bot-deletion command. Retrieve a reusable token through BotFather in the test environment. Never log tokens or commit them.
 
