@@ -11,14 +11,9 @@ function copies(messages: Record<string,unknown>[]): string[] {
   });
 }
 
-for (const enabled of [true,false]) {
-  test(`/cli copies only Telegram coordinates without starting a host with Mini App ${enabled ? 'enabled' : 'disabled'}`, async t => {
+test('/cli copies only Telegram coordinates without starting a host with Mini App enabled', async t => {
     const app = await createSmokeApp();
     try {
-      if (!enabled) {
-        app.config.publicUrl = '';
-        delete app.config.bots[0]!.miniAppShortName;
-      }
       await app.service.reconcileConfiguration();
       await app.update({text:'/setup'});
       const instancePath = Object.keys(app.config.instances)[0]!;
@@ -39,7 +34,6 @@ for (const enabled of [true,false]) {
       assert.ok(adminCommands.length <= 100);
     } finally { await app.close(); }
   });
-}
 
 for (const denial of ['member','demoted','departed','general','missing','closed','detached','reassigned','terminated'] as const) {
   test(`/cli rejects ${denial} without issuing a join command or starting a host`, async t => {

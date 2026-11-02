@@ -8,7 +8,7 @@ import { BotService } from '../../../src/bot.js';
 import { emptyConfig, writeConfig } from '../../../src/config.js';
 import { OmpRuntime } from '../../../src/runtime.js';
 import { Store } from '../../../src/store.js';
-import type { FakeLlmStep } from './fake-llm-provider.js';
+import type { FakeLlmScenario } from './fake-llm-provider.js';
 import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
 
@@ -31,7 +31,7 @@ async function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
 
 export async function setupCollaborationTest(
   t: Pick<TestContext, 'after' | 'signal' | 'diagnostic' | 'mock'>,
-  options: { steps: readonly FakeLlmStep[] },
+  options: { scenarios: readonly FakeLlmScenario[] },
 ) {
   const telegramCleanup: Cleanup[] = [];
   const ompCleanup: Cleanup[] = [];

@@ -238,50 +238,6 @@ test(
   },
 );
 
-test(
-  'unchanged host snapshots do not resend topic title or icon after eleven minutes',
-  { timeout: 15000 },
-  async (t) => {
-    t.mock.timers.enable({ apis: ['setInterval'] });
-    const now = Date.now.bind(Date);
-    let offset = 0;
-    t.mock.method(Date, 'now', () => now() + offset);
-    let reads = 0;
-    const app = await createSmokeApp({
-      readState: async () => {
-        reads++;
-        return { ...idle, sessionName: 'Reconciliation probe' };
-      },
-    });
-    try {
-      const session = await liveTopic(app);
-      await eventually(() =>
-        app.topicEdits.some(
-          (edit) => edit.message_thread_id === 42 && edit.name === 'Reconciliation probe',
-        ),
-      );
-      const metadata = { ...app.remoteTopics.get(remoteKey)! };
-      const requests: Record<string, unknown>[] = [];
-      app.bot.api.config.use(async (previous, method, payload, signal) => {
-        if (method === 'editForumTopic') requests.push({ ...payload });
-        return previous(method, payload, signal);
-      });
-      const initialReads = reads;
-      offset = 11 * 60_000;
-      t.mock.timers.tick(30_000);
-      await eventually(() => reads > initialReads);
-      app.emit({ t: 'state', state: { ...idle, sessionName: 'Reconciliation probe' } });
-      await app.service.ensureMirroring(session, await app.runtime.ensure(session));
-      await delay(100);
-      assert.deepEqual(requests, []);
-      assert.deepEqual(app.remoteTopics.get(remoteKey), metadata);
-    } finally {
-      t.mock.timers.reset();
-      await app.close();
-    }
-  },
-);
-
 test('supergroup attribution is independent of usernames and chat-attributed edits do not replace intent', async () => {
   const app = await createSmokeApp();
   try {

@@ -5,10 +5,10 @@ import { join, resolve } from 'node:path';
 import type { TestContext } from 'node:test';
 import { formatWithOptions } from 'node:util';
 import { startLocalRelay } from '../../../scripts/local-relay.js';
-import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmStep } from './fake-llm-provider.js';
+import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from './fake-llm-provider.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
-  steps: readonly FakeLlmStep[];
+  scenarios: readonly FakeLlmScenario[];
 }) {
   const root = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-'));
   const logDirectory = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-logs-'));
@@ -86,7 +86,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   for (const directory of [workspace, dataDir, agent, ...Object.values(xdg).map(directory => join(directory, 'omp'))]) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
   }
-  provider = await startFakeLlmProvider({ steps: options.steps, log });
+  provider = await startFakeLlmProvider({ scenarios: options.scenarios, log });
   relay = await startLocalRelay();
   const selectedModel = 'e2e/e2e-model';
   await writeFile(join(agent, 'models.yml'), JSON.stringify({ providers: { e2e: {

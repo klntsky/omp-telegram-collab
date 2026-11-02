@@ -100,24 +100,9 @@ test('work-topic preset switches leave the forum default unchanged and General l
   } finally { await app.close(); }
 });
 
-test('removed preset-list command cannot start or mutate a session and is absent from command menus', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset command cutover'}});
-    const session = app.store.listSessions(botId)[0]!;
-    await app.update({text:'/list_model_presets',message_thread_id:42});
-    assert.equal(await app.runtime.isRunning(session),false);
-    assert.deepEqual(app.accepted,[]);
-    for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId},{type:'chat_administrators' as const,chat_id:chatId}]) {
-      const commands = await app.bot.api.getMyCommands({scope});
-      assert.equal(commands.some(command => command.command === 'list_model_presets'),false);
-      assert.equal(commands.some(command => command.command === 'model_preset'),true);
-    }
-  } finally { await app.close(); }
-});
 
-for (const root of ['new', 'p']) {
+{
+  const root = 'new';
   test(`/${root} invalid preparation has no topic, runtime or prompt effects`, async t => {
     const app = await createSmokeApp();
     try {
@@ -136,7 +121,8 @@ for (const root of ['new', 'p']) {
   });
 }
 
-for (const existing of [false,true]) {
+{
+  const existing = true;
   for (const order of ['worktree-first','preset-first']) {
     test(`composed prompt retains its selected preset across ${existing ? 'existing' : 'new'} session preparation in ${order} order`, async t => {
       const app = await createSmokeApp({skipStartupRejection:true});

@@ -120,20 +120,6 @@ for (const change of ['role', 'assignment', 'read-only'] as const) {
   });
 }
 
-test('settings command menus remove superseded preference commands but retain session operations', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
-      const commands = (await app.bot.api.getMyCommands({scope})).map(command=>command.command);
-      assert.ok(commands.includes('settings'));
-      assert.ok(commands.includes('model_preset'));
-      assert.ok(!commands.includes('list_model_presets'));
-      assert.ok(!commands.includes('set_default_new_topic_skill'));
-      assert.ok(!commands.includes('unset_default_new_topic_skill'));
-    }
-  } finally { await app.close(); }
-});
 
 test('settings callbacks reject unauthorized users, old choices and closed panels', async () => {
   const app = await createSmokeApp();

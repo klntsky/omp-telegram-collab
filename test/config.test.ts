@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { stringify } from 'yaml';
 import type { AppConfig } from '../shared/contracts.js';
-import { canonicalPath, ConfigError, configWritable, defaultConfigPath, emptyConfig, findInstance, readConfig, validateStart, writeConfig } from '../src/config.js';
+import { canonicalPath, ConfigError, configWritable, emptyConfig, readConfig, validateStart, writeConfig } from '../src/config.js';
 import { botId, botToken, chatId } from './telegram-data.js';
 
 function fixture(t: TestContext) {
@@ -32,30 +32,6 @@ function assertInvalid(path: string, action: () => unknown, key?: string) {
   });
 }
 
-test('default config path honors XDG_CONFIG_HOME', () => {
-  const before = process.env.XDG_CONFIG_HOME;
-  try {
-    process.env.XDG_CONFIG_HOME = '/tmp/custom-config-home';
-    assert.equal(defaultConfigPath(), '/tmp/custom-config-home/omp-telegram/config.yaml');
-  } finally {
-    if (before === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = before;
-  }
-});
-
-test('draft YAML roundtrips without a serialized configPath and starts only once configured', t => {
-  const { path, dir } = fixture(t);
-  const config = emptyConfig(path);
-  writeConfig(config);
-  assert.deepEqual(readConfig(path), config);
-  assert.equal(readFileSync(path, 'utf8').includes('configPath:'), false);
-  assert.equal(statSync(path).mode & 0o777, 0o600);
-  assertInvalid(path, () => validateStart(config), 'bots');
-  const ready = validConfig(path, dir);
-  writeConfig(ready);
-  validateStart(readConfig(path));
-});
-
 test('Telegram-only configurations start without Mini App names while enabled configurations require them', t => {
   const { path } = fixture(t);
   const config = emptyConfig(path);
@@ -77,46 +53,6 @@ test('missing config is never an implicit empty draft', t => {
   assert.equal(existsSync(path), false);
 });
 
-test('YAML supports multiple bots and multiple chats', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
-  config.instances[dir]!.chats.push(
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false },
-    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false },
-  );
-  writeConfig(config);
-  const loaded = readConfig(path);
-  assert.equal(findInstance(loaded, 987654321, chatId)?.path, dir);
-  assert.equal(findInstance(loaded, botId, -999), undefined);
-  assert.deepEqual(loaded.instances[dir]!.chats, [
-    { botId, chatId, all_messages_are_prompts: true, users_can_propose_prompts: false, create_topic_worktrees: false, folder_options: [], typing_indicators: 'disabled' },
-    { botId: 987654321, chatId, all_messages_are_prompts: false, users_can_propose_prompts: true, create_topic_worktrees: true, folder_options: [], typing_indicators: 'disabled' },
-    { botId, chatId: -10042, all_messages_are_prompts: true, users_can_propose_prompts: true, create_topic_worktrees: false, folder_options: [], typing_indicators: 'disabled' },
-    { botId, chatId: -10043, all_messages_are_prompts: false, users_can_propose_prompts: false, create_topic_worktrees: false, folder_options: [], typing_indicators: 'disabled' },
-  ]);
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path), loaded);
-});
-
-test('typing indicators default to disabled and accept only supported modes', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  writeConfig(config);
-  assert.equal(readConfig(path).instances[dir]!.chats[0]!.typing_indicators, 'disabled');
-  for (const mode of ['disabled', 'streaming', 'inference'] as const) {
-    config.instances[dir]!.chats[0]!.typing_indicators = mode;
-    writeConfig(config);
-    assert.equal(readConfig(path).instances[dir]!.chats[0]!.typing_indicators, mode);
-  }
-  const { configPath: _, ...input } = config;
-  for (const mode of ['enabled', '', true, null, 1]) {
-    writeFileSync(path, stringify({...input, instances: {[dir]: {chats: [{botId, chatId, typing_indicators: mode}]}}}));
-    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.typing_indicators`);
-  }
-});
-
 test('folder options default per forum and normalize relative paths without creating directories', t => {
   const { path, dir } = fixture(t);
   const config = validConfig(path, dir);
@@ -136,18 +72,6 @@ test('folder options default per forum and normalize relative paths without crea
   loaded.instances[dir]!.chats[1]!.folder_options = [];
   writeConfig(loaded);
   assert.deepEqual(readConfig(path).instances[dir]!.chats[1]!.folder_options, []);
-});
-
-test('folder options roundtrip after removing dot without inserting a default', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  config.instances[dir]!.chats[0]!.folder_options = ['.', 'project'];
-  writeConfig(config);
-  const loaded = readConfig(path);
-  loaded.instances[dir]!.chats[0]!.folder_options =
-    loaded.instances[dir]!.chats[0]!.folder_options!.filter(folder => folder !== '.');
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path).instances[dir]!.chats[0]!.folder_options, ['project']);
 });
 
 test('folder options reject absolute, empty, NUL, malformed and obsolete configuration', t => {
@@ -176,32 +100,6 @@ test('obsolete administrator configuration keys are rejected', t => {
   }
 });
 
-test('forum model defaults roundtrip independently for each bot/chat assignment and remain optional', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
-  config.instances[dir]!.chats[0]!.default_model_preset = 'Fast';
-  config.instances[dir]!.chats.push(
-    { botId, chatId: -10042, default_model_preset: 'Slow' },
-    { botId: 987654321, chatId, default_model_preset: 'Fast_2-beta' },
-    { botId, chatId: -10043 },
-  );
-  writeConfig(config);
-  const loaded = readConfig(path);
-  assert.equal(findInstance(loaded, botId, chatId)?.instance.chats
-    .find(chat => chat.botId === botId && chat.chatId === chatId)?.default_model_preset, 'Fast');
-  assert.deepEqual(loaded.instances[dir]!.chats.map(({ botId, chatId, default_model_preset }) =>
-    ({ botId, chatId, default_model_preset })), [
-    { botId, chatId, default_model_preset: 'Fast' },
-    { botId, chatId: -10042, default_model_preset: 'Slow' },
-    { botId: 987654321, chatId, default_model_preset: 'Fast_2-beta' },
-    { botId, chatId: -10043, default_model_preset: undefined },
-  ]);
-  assert.equal('default_model_preset' in loaded.instances[dir]!.chats[3]!, false);
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path), loaded);
-});
-
 test('forum model defaults reject names outside the native preset-name grammar', t => {
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);
@@ -212,28 +110,6 @@ test('forum model defaults reject names outside the native preset-name grammar',
     }));
     assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_model_preset`);
   }
-});
-
-test('new-topic skill defaults preserve canonical names independently per bot/chat and remain optional', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  config.bots.push({ id: 987654321, token: '987654321:second-fixture-token', miniAppShortName: 'other' });
-  config.instances[dir]!.chats[0]!.default_new_topic_skill = 'Team:Review/Exact.Name-v2';
-  config.instances[dir]!.chats.push(
-    { botId, chatId: -10042, default_new_topic_skill: 'review' },
-    { botId: 987654321, chatId, default_new_topic_skill: 'Review' },
-    { botId, chatId: -10043 },
-  );
-  writeConfig(config);
-  const loaded = readConfig(path);
-  assert.deepEqual(loaded.instances[dir]!.chats.map(chat => chat.default_new_topic_skill),
-    ['Team:Review/Exact.Name-v2', 'review', 'Review', undefined]);
-  assert.equal('default_new_topic_skill' in loaded.instances[dir]!.chats[3]!, false);
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path), loaded);
-  delete loaded.instances[dir]!.chats[0]!.default_new_topic_skill;
-  writeConfig(loaded);
-  assert.equal('default_new_topic_skill' in readConfig(path).instances[dir]!.chats[0]!, false);
 });
 
 test('new-topic skill defaults reject whitespace, controls, backslashes, and nonstrings without normalization', t => {

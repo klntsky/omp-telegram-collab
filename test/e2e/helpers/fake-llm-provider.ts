@@ -1,29 +1,42 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
+import { z } from 'zod';
 
 export type FakeLlmStep =
   | { type: 'text'; text: string }
   | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> };
 
+export interface FakeLlmScenario {
+  name: string;
+  prompt: string;
+  steps: readonly FakeLlmStep[];
+}
+
+const completionMessages = z.array(z.object({
+  role: z.string(),
+  content: z.unknown(),
+  tool_call_id: z.string().optional(),
+}));
+
 export interface FakeLlmProvider {
   baseUrl: string;
   apiKey: string;
-  requests: Array<Record<string, unknown>>;
+  requests: ReadonlyMap<string, readonly Record<string, unknown>[]>;
   assertComplete(): void;
   close(): Promise<void>;
 }
 
 export async function startFakeLlmProvider(options: {
-  steps: readonly FakeLlmStep[];
+  scenarios: readonly FakeLlmScenario[];
   log(event: string, data: unknown): void;
 }): Promise<FakeLlmProvider> {
   const apiKey = 'fake-e2e-api-key';
-  const steps = [...options.steps];
-  const requests: Array<Record<string, unknown>> = [];
+  const scenarios = new Map(options.scenarios.map(scenario => [scenario.name, {
+    ...scenario, requests: [] as Record<string, unknown>[], nextStep: 0, completed: 0,
+  }]));
+  if (scenarios.size !== options.scenarios.length) throw new Error('Fake LLM scenario names must be unique');
   const errors: unknown[] = [];
   const sockets = new Set<Socket>();
-  let nextStep = 0;
-  let completed = 0;
   let closing: Promise<void> | undefined;
 
   function recordError(error: unknown): void {
@@ -52,7 +65,6 @@ export async function startFakeLlmProvider(options: {
       throw new Error('Fake LLM protocol error: request body must be a JSON object');
     }
     const payload = body as Record<string, unknown>;
-    requests.push(payload);
     if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
       throw new Error(`Fake LLM protocol error: unexpected ${request.method} ${request.url}`);
     }
@@ -62,10 +74,23 @@ export async function startFakeLlmProvider(options: {
     if (payload.stream !== true) {
       throw new Error('Fake LLM protocol error: stream must be true');
     }
-    const step = steps[nextStep];
-    if (!step) throw new Error(`Fake LLM protocol error: unplanned completion request ${nextStep + 1}`);
-    const index = nextStep++;
-    const id = `chatcmpl-fake-${index + 1}`;
+    const messages = completionMessages.parse(payload.messages);
+    const userMessage = messages.findLast(message => message.role === 'user');
+    const content = JSON.stringify(userMessage?.content);
+    const matches = [...scenarios.values()].filter(scenario =>
+      content?.includes(JSON.stringify(scenario.prompt).slice(1, -1)));
+    if (matches.length !== 1) throw new Error(`Fake LLM expected one scenario for the latest user prompt, matched ${matches.length}: ${content}`);
+    const scenario = matches[0]!;
+    const step = scenario.steps[scenario.nextStep];
+    if (!step) throw new Error(`Fake LLM scenario "${scenario.name}" received an extra completion request`);
+    const previous = scenario.steps[scenario.nextStep - 1];
+    const last = messages.at(-1);
+    if (previous?.type === 'tool' && (last?.role !== 'tool' || last.tool_call_id !== previous.id)) {
+      throw new Error(`Fake LLM scenario "${scenario.name}" expected the result of tool call "${previous.id}", received ${JSON.stringify(last)}`);
+    }
+    scenario.requests.push(payload);
+    const index = scenario.nextStep++;
+    const id = `chatcmpl-${scenario.name}-${index + 1}`;
     const created = Math.floor(Date.now() / 1000);
     if (typeof payload.model !== 'string' || !payload.model) throw new Error('Fake LLM protocol error: model must be a non-empty string');
     const model = payload.model;
@@ -76,7 +101,7 @@ export async function startFakeLlmProvider(options: {
     });
     function emit(data: unknown): void {
       const frame = `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`;
-      options.log('fake-llm-sse', { index, frame });
+      options.log('fake-llm-sse', { scenario: scenario.name, index, frame });
       response.write(frame);
     }
     function chunk(delta: Record<string, unknown>, finishReason: string | null = null): void {
@@ -102,8 +127,8 @@ export async function startFakeLlmProvider(options: {
     });
     response.end(() => finished.resolve());
     await finished.promise;
-    completed++;
-    options.log('fake-llm-response-complete', { index, id, type: step.type });
+    scenario.completed++;
+    options.log('fake-llm-response-complete', { scenario: scenario.name, index, id, type: step.type });
   }
 
   const server = createServer((request, response) => {
@@ -140,13 +165,15 @@ export async function startFakeLlmProvider(options: {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     apiKey,
-    requests,
+    requests: new Map([...scenarios].map(([name, scenario]) => [name, scenario.requests])),
     assertComplete() {
       const failures = [...errors];
-      if (completed !== steps.length || nextStep !== steps.length) {
-        failures.push(new Error(`Fake LLM script incomplete: ${completed}/${steps.length} responses completed, ${nextStep}/${steps.length} steps consumed`));
+      for (const scenario of scenarios.values()) {
+        if (scenario.completed !== scenario.steps.length || scenario.nextStep !== scenario.steps.length) {
+          failures.push(new Error(`Fake LLM scenario "${scenario.name}" incomplete: ${scenario.completed}/${scenario.steps.length} responses completed, ${scenario.nextStep}/${scenario.steps.length} steps consumed`));
+        }
       }
-      if (failures.length) throw new AggregateError(failures, 'Fake LLM protocol/script failed');
+      if (failures.length) throw new AggregateError(failures, failures.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
     },
     close() {
       if (!closing) {

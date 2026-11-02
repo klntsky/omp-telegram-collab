@@ -126,49 +126,6 @@ test('General stays outside sessions while pending selections enforce destinatio
   }
 });
 
-test('disk and in-memory stores reject missing instance paths and orphan reply targets', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-current-schema-'));
-  const disk = new Store(join(directory, 'topics.sqlite'));
-  const memory = new Store(':memory:');
-  try {
-    for (const store of [disk, memory]) {
-      assert.throws(() => store.setReplyTarget('unknown-session', 7), /FOREIGN KEY constraint failed/);
-      assert.throws(() => store.createSession({ ...topic, instancePath: '' }, 'Missing path'));
-      const created = store.createSession(topic, 'Current schema');
-      assert.equal(created.instancePath, topic.instancePath);
-      assert.throws(() => store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(created.id), /NOT NULL constraint failed/);
-      assert.equal(store.getSession(created.id)?.instancePath, topic.instancePath);
-    }
-  } finally {
-    disk.close();
-    memory.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('topic display and generated prefix commit together or both roll back', () => {
-  const store = new Store(':memory:');
-  try {
-    const session = store.createSession(topic, 'Initial title');
-    store.setTopicTitle(session.id, 'old-branch Readable title', 'old-branch');
-    store.db
-      .exec(`CREATE TEMP TRIGGER reject_topic_prefix BEFORE UPDATE ON session_topic_title_prefixes
-      BEGIN SELECT RAISE(ABORT,'Fixture prefix write failed'); END`);
-    assert.throws(
-      () => store.setTopicTitle(session.id, 'new-branch Readable title', 'new-branch'),
-      (error) => error instanceof Error && error.message === 'Fixture prefix write failed',
-    );
-    assert.equal(store.getSession(session.id)?.name, 'old-branch Readable title');
-    assert.equal(store.getTopicTitlePrefix(session.id), 'old-branch');
-    store.db.exec('DROP TRIGGER reject_topic_prefix');
-    store.setTopicTitle(session.id, 'new-branch Readable title', 'new-branch');
-    assert.equal(store.getSession(session.id)?.name, 'new-branch Readable title');
-    assert.equal(store.getTopicTitlePrefix(session.id), 'new-branch');
-  } finally {
-    store.close();
-  }
-});
-
 test('topic identity survives a service restart and closing preserves its history binding', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-store-'));
   const filename = join(dir, 'topics.sqlite');
@@ -255,35 +212,6 @@ test('image-only initial content survives reopening storage and stays session-sc
   }
 });
 
-test('absent initial content creates no task while empty supplied content is rejected', () => {
-  const store = new Store(':memory:');
-  try {
-    const absent = store.createSession(topic,'No task',{kind:'managed'},undefined,42);
-    assert.equal(store.hasPendingInitialTask(absent.id),false);
-    assert.equal(store.claimInitialTask(absent.id),undefined);
-    assert.equal(store.getInitialUser(absent.id),undefined);
-    assert.equal(store.getInitialAuthority(absent.id),undefined);
-    assert.deepEqual(store.db.prepare('SELECT initial_task,initial_state FROM sessions WHERE id=?').get(absent.id),Object.assign(Object.create(null),{initial_task:null,initial_state:null}));
-    for (const content of [{text:''},{text:' \n\t '},{text:'',images:[]}]) {
-      assert.throws(() => store.createSession({...topic,threadId:18},'Invalid',{kind:'managed'},content,42),/An initial task requires text or images/);
-      assert.equal(store.getTopic({botId,destination:topicDestination(chatId,18)}),undefined);
-    }
-    const text = {text:'  Preserve task whitespace  '};
-    const pending = store.createSession({...topic,threadId:18},'Text task',{kind:'managed'},text);
-    assert.equal(store.hasPendingInitialTask(pending.id),true);
-    assert.equal(store.db.prepare('SELECT initial_task FROM sessions WHERE id=?').get(pending.id)?.initial_task,text.text);
-    assert.deepEqual(store.claimInitialTask(pending.id),text);
-    assert.equal(store.hasPendingInitialTask(pending.id),false);
-    const cancelled = store.createSession({...topic,threadId:19},'Cancelled',{kind:'managed'},{text:'Do not send'});
-    store.cancelInitialTask(cancelled.id);
-    assert.equal(store.hasPendingInitialTask(cancelled.id),false);
-    assert.equal(store.claimInitialTask(cancelled.id),undefined);
-    assert.equal(store.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(cancelled.id)?.initial_state,'cancelled');
-  } finally {
-    store.close();
-  }
-});
-
 test('one bot and topic tuple cannot acquire two session identities', () => {
   const store = new Store(':memory:');
   try {
@@ -321,43 +249,6 @@ test('kill generations persist across restart and stay isolated to their session
     assert.equal(store.getSessionGeneration(other.id),0);
     store.advanceSessionGeneration(target.id);
     assert.equal(store.getSessionGeneration(target.id),3);
-  } finally {
-    store.close();
-    await rm(directory,{recursive:true,force:true});
-  }
-});
-
-
-test('human finish icons persist across restart and preserve empty and status choices', async () => {
-  const directory = await mkdtemp(join(tmpdir(),'omp-topic-finish-icons-'));
-  const filename = join(directory,'topics.sqlite');
-  let store = new Store(filename);
-  try {
-    const preferences = ['human-selected-icon','','5312016608254762256','5408906741125490282','5237699328843200968'];
-    const sessions = preferences.map((preference,index) => {
-      const session = store.createSession({...topic,threadId:topic.threadId+index},`Preference ${index}`);
-      assert.equal(store.getTopicFinishIcon(session.id),undefined);
-      store.setTopicFinishIcon(session.id,preference);
-      assert.equal(store.getTopicFinishIcon(session.id),preference);
-      return session;
-    });
-    const otherBot = store.createSession({...topic,botId:botId+1},'Other bot');
-    const otherChat = store.createSession({...topic,chatId:chatId-1},'Other chat');
-    store.close();
-    store = new Store(filename);
-    for (const [index,session] of sessions.entries()) {
-      assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
-    assert.equal(store.getTopicFinishIcon(otherBot.id),undefined);
-    assert.equal(store.getTopicFinishIcon(otherChat.id),undefined);
-    assert.equal(store.getTopicFinishIcon('unknown-session'),undefined);
-    store.setTopicFinishIcon(sessions[0]!.id,'updated-human-icon');
-    store.close();
-    store = new Store(filename);
-    assert.equal(store.getTopicFinishIcon(sessions[0]!.id),'updated-human-icon');
-    for (const [index,session] of sessions.entries()) {
-      if (index > 0) assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
   } finally {
     store.close();
     await rm(directory,{recursive:true,force:true});

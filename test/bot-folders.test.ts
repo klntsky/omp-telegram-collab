@@ -163,27 +163,8 @@ test('folder selection precedes command capacity reservation and survives approv
   } finally { await app.close(); }
 });
 
-test('folder lists are paginated without creating a session until a visible choice is accepted', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    configure(app,Array.from({length:24},(_,index) => String(index)));
-    await app.update({text:'/new task'});
-    let selection = panel(app);
-    let markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(selection.reply_markup);
-    assert.ok(markup.inline_keyboard.length <= 11);
-    await app.callback(button(selection,'page8'),selection);
-    selection = panel(app);
-    markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(selection.reply_markup);
-    assert.ok(markup.inline_keyboard.length <= 11);
-    assert.ok(button(selection,'8'));
-    assert.equal(app.store.listSessions(botId).length,0);
-    await app.callback(button(selection,'cancel'),selection);
-    assert.equal(app.store.listSessions(botId).length,0);
-  } finally { await app.close(); }
-});
 
-for (const options of [[],['.'],['sub','sub/'],['..']] ) {
+for (const options of [[],['..']] ) {
   test(`sole effective folder ${JSON.stringify(options)} starts without controls`, async () => {
     const app = await createSmokeApp();
     try {

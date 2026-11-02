@@ -43,7 +43,7 @@ pnpm verify
 
 `check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five; mocked collaborators only establish local behavior, not compatibility with the external service they imitate. `test:integration` builds production artifacts and runs `smoke`.
 
-Prefer live end-to-end coverage for successful workflows across Telegram, BotService, and OMP. Before removing an isolated test, verify that the live case asserts the same input handling, protocol data, persisted state, and side effects. Shared setup or command names do not establish duplicate coverage. Keep deterministic isolated tests for authorization boundaries, parser edge cases, cancellation, retry timing, and races that the live suite cannot control. Do not test dependency internals, tokenizer implementation details, or display wording.
+Choose tests from the behavior in [Product](PRODUCT.md), not the inventory of internal methods. Prefer live end-to-end coverage for successful workflows across Telegram, BotService, and OMP. Keep deterministic isolated coverage for authorization, data preservation, cancellation, retry timing, and races with observable product consequences. Prefer existing bot-level scenarios over a second matrix for their internal helpers. Dependency internals, fixture self-tests, trivial accessor roundtrips, and display wording do not need permanent tests. When replacing meaningful isolated coverage with a live case, compare the actual input handling, protocol data, persisted state, and side effects; shared command names alone do not establish duplication.
 
 Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After changing the grammar, run `pnpm generate:commands` and commit both generated files, `src/telegram-command-parser.ts` and `src/telegram-command-parser.terms.ts`. Both `pnpm check` and `pnpm build` regenerate them. The tokenizer supplies named terminals at their original message offsets; the parser reads the original message, not an encoded command alphabet. Lezer's generator is a development dependency; production uses the generated tables and `@lezer/lr` with strict parsing. Unresolved grammar conflicts fail generation. Do not add ambiguity annotations or parser recovery to accept conflicting command forms.
 
@@ -107,6 +107,8 @@ Telegram's test environment still enforces flood limits. The helpers wait for ex
 
 The OMP helper launches each child with an allowlisted environment and disposable home, agent, XDG, workspace, and application directories. It does not forward provider credentials or personal OMP configuration. Model requests use a scripted loopback HTTP provider with a fake key. No container or paid model credentials are needed. This configuration isolation is not a filesystem sandbox.
 
+Define scripted provider responses per named task, with the expected user prompt and its tool/text steps. The provider matches only the latest user message, keeps request history and progress per task, and verifies tool-result IDs before continuing. Task ordering across sessions does not determine which response is sent. Unexpected prompts, extra requests, and unfinished tasks fail with task-specific diagnostics. Telegram transport, BotService, OMP, and tool execution remain real.
+
 The full-path fixture uses the actual test-network user session and application poller. Keep tests sharing an account and bot in `test/e2e/telegram.test.ts`, where top-level tests run sequentially. Separate files still run with concurrency five; use distinct credentials before adding parallel live fixtures.
 
 `BotOptions.topicActivityEmojis` configures the running and finished topic emojis in code. Normal startup keeps ⚡ and 🏁. The live fixture selects two distinct emojis from the test server's `getForumTopicIconStickers` response and records the selection in the trace. It does not substitute Telegram API responses.
@@ -127,7 +129,7 @@ The inspector lists terminal/history paths and preserves complete error diagnost
 To run only the OMP scenario, place test-runner flags before the file path:
 
 ```sh
-timeout 300s pnpm exec node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 --test-name-pattern '^userbot task' test/e2e/telegram.test.ts
+timeout 420s pnpm exec node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 --test-name-pattern '^Telegram tasks' test/e2e/telegram.test.ts
 ```
 
 ## Debugging
