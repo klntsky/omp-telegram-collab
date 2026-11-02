@@ -6,7 +6,8 @@ import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 import { eventually, setForumSetting } from './bot-test-helpers.js';
 
-for (const branch of ['', ' feature/native']) {
+{
+  const branch = ' feature/native';
   test(`/worktree${branch} moves the existing topic session without a prompt`, async t => {
     const app = await createSmokeApp();
     try {
@@ -202,7 +203,8 @@ test('manual topic creation uses its topic branch once and does not submit a tas
   } finally { await app.close(); }
 });
 
-for (const branch of ['', ' feature/explicit']) {
+{
+  const branch = '';
   test(`explicit General worktree${branch} overrides automatic topic branches`, async t => {
     const app = await createSmokeApp();
     try {

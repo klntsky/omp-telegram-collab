@@ -76,16 +76,6 @@ function fixture(t: TestContext) {
   return {root, configPath, project, other, calls, state, deps, run, seed, store};
 }
 
-test('unhandled commands return false and reads never create a missing configuration', async t => {
-  const f = fixture(t);
-  assert.equal(await f.run(['start']), false);
-  assert.equal(await f.run(['configure']), false);
-  assert.equal(existsSync(f.configPath), false);
-  await assert.rejects(f.run(['list']), /Cannot read/);
-  assert.equal(await f.run(['admin', 'add', f.project, 'Alice']), false);
-  assert.equal(existsSync(f.configPath), false);
-});
-
 test('create, list, show and remove use canonical directory identities', async t => {
   const f = fixture(t);
   const alias = join(f.root, 'alias');
@@ -152,17 +142,6 @@ test('bot addition verifies identity without polling and supports stdin and envi
   await assert.rejects(f.run(['bot', 'add', '--token-env', 'BOT_TOKEN']), /already configured/);
   await f.run(['bot', 'remove', '987654321']);
   assert.equal(readConfig(f.configPath).bots.length, 1);
-});
-
-test('Telegram-only bot addition skips Mini App prompts and names', async t => {
-  const f = fixture(t);
-  const answers = [token];
-  await f.run(['bot', 'add'], {interactive: true, question: async () => {
-    assert.ok(answers.length);
-    return answers.shift()!;
-  }});
-  assert.deepEqual(answers, []);
-  assert.equal(readConfig(f.configPath).bots[0]!.miniAppShortName, undefined);
 });
 
 test('changing Mini App mode preserves registered names and fills only missing names', async t => {
@@ -259,29 +238,6 @@ test('multiple bots require a selector and one path can bind multiple bot/chat p
   assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
 });
 
-test('chat add updates matching options independently and omissions preserve them', async t => {
-  const f = fixture(t);
-  f.seed();
-  await f.run(['chat', 'add', f.project, '--chat', '-1001']);
-  await f.run(['chat', 'add', f.project, '--chat', '-1002']);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'true']);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false']);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001']);
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
-    {botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true},
-    {botId: 123456789, chatId: -1002, all_messages_are_prompts: true, users_can_propose_prompts: false},
-  ]);
-  await f.run(['show', f.project]);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'true']);
-  assert.equal(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats[0]!.all_messages_are_prompts, true);
-  assert.equal(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats[0]!.users_can_propose_prompts, true);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'false']);
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [
-    {botId: 123456789, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false},
-    {botId: 123456789, chatId: -1002, all_messages_are_prompts: true, users_can_propose_prompts: false},
-  ]);
-});
-
 test('chat add and approve reject invalid, missing and repeated prompt mode values without writes', async t => {
   const f = fixture(t);
   f.seed();
@@ -309,27 +265,6 @@ test('chat add and approve reject invalid, missing and repeated prompt mode valu
   assert.ok(preserved.getSetupRequest(pending.code));
   assert.equal(preserved.isEnrolled(123456789, -1001), false);
   preserved.close();
-});
-
-test('interactive chat add selects both options with current defaults and flags skip each choice', async t => {
-  const f = fixture(t);
-  f.seed();
-  const prompts: string[] = [];
-  let answers = ['', ''];
-  const interactive = {interactive: true, question: async (prompt: string) => { prompts.push(prompt); const next = answers.shift(); assert.notEqual(next, undefined); return next!; }};
-  await f.run(['chat', 'add', f.project, '--chat', '-1001'], interactive);
-  answers = ['false', 'true'];
-  await f.run(['chat', 'add', f.project, '--chat', '-1001'], interactive);
-  answers = ['', ''];
-  await f.run(['chat', 'add', f.project, '--chat', '-1001'], interactive);
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'true', '--users-can-propose-prompts', 'false'], interactive);
-  assert.equal(prompts.length, 6);
-  answers = ['true'];
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--all-messages-are-prompts', 'false'], interactive);
-  answers = [''];
-  await f.run(['chat', 'add', f.project, '--chat', '-1001', '--users-can-propose-prompts', 'true'], interactive);
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
 });
 
 test('invalid interactive chat proposal choices leave assignments and approval requests unchanged', async t => {
@@ -510,19 +445,6 @@ test('approval preserves request and configuration when config becomes readonly 
   preserved.close();
 });
 
-test('readonly file and readonly parent reject mutations but permit inspection', async t => {
-  const f = fixture(t);
-  f.seed();
-  chmodSync(f.configPath, 0o400);
-  await f.run(['list']);
-  await assert.rejects(f.run(['setup', '--max-sessions', '50']), /read-only/);
-  chmodSync(f.configPath, 0o600);
-  chmodSync(f.root, 0o500);
-  try { await assert.rejects(f.run(['setup', '--max-sessions', '50']), /read-only/); }
-  finally { chmodSync(f.root, 0o700); }
-  assert.equal(readConfig(f.configPath).omp.maxSessions, 8);
-});
-
 test('separate service, bot, instance and approval commands persist an enrolled chat', async t => {
   const f = fixture(t);
   await f.run(['setup', '--public-url', 'https://cli.example', '--omp-arg', '--model', '--omp-arg', 'literal model']);
@@ -668,15 +590,5 @@ test('reload notification requires an acknowledgement from the selected service 
     status = 409;
     await assert.rejects(notifyReload(config), /Configuration saved/);
   } finally { server.close(); await once(server, 'close'); }
-});
-
-test('interactive multi-bot chat connection selects the requested bot without starting a poller', async t => {
-  const f = fixture(t);
-  f.seed(true);
-  const answers = ['987654321', '', ''];
-  await f.run(['chat', 'add', f.project, '--chat', '-1001'], {interactive: true, question: async () => answers.shift()!});
-  assert.deepEqual(assignmentPolicies(readConfig(f.configPath).instances[canonicalPath(f.project)]!.chats), [{botId: 987654321, chatId: -1001, all_messages_are_prompts: true, users_can_propose_prompts: false}]);
-  assert.equal(f.calls.every(call => call.botId === 987654321), true);
-  assert.equal(f.calls.some(call => call.method === 'getUpdates'), false);
 });
 

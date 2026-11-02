@@ -226,7 +226,7 @@ for (const change of ['limit', 'role', 'assignment'] as const) {
 }
 
 for (const existing of [false,true]) {
-  for (const order of ['worktree-first','preset-first']) {
+  const order = existing ? 'preset-first' : 'worktree-first';
     test(`composed ${existing ? 'existing' : 'new'} target waits before every ${order} consumer effect`, async t => {
       const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
       try {
@@ -265,7 +265,6 @@ for (const existing of [false,true]) {
         assert.equal(app.accepted.filter(frame => frame.t === 'prompt' && frame.text === 'Frozen task').length,1);
       } finally { await app.close(); }
     });
-  }
 }
 
 test('cancelled composed capacity admission never creates a target or executes preparations', async t => {

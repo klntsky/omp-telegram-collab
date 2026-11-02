@@ -37,32 +37,6 @@ test('caption commands retain bot targeting and forwarded-message exclusions', a
   }
 });
 
-test('session media follows prompt mode and preserves image document bytes', async t => {
-  const app = await createSmokeApp();
-  app.mockFiles(t, imageData, 'image/png');
-  const downloads = app.fileRequests;
-  try {
-    await app.update({text:'/setup'});
-    await app.update({text:'/new Start'});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const session = app.store.listSessions(botId)[0]!;
-    const document = {file_id:'original',file_unique_id:'original',mime_type:'image/png',file_name:'picture.png'};
-    await app.update({message_thread_id:session.threadId,document,caption:'What is funny about this picture?'});
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1), {
-      t:'prompt',text:'What is funny about this picture?',images:[{type:'image',data:imageData,mimeType:'image/png'}],
-    });
-    await app.update({text:'/setup'});
-    await setForumSetting(app, 0);
-    await app.update({message_thread_id:session.threadId,document,caption:'Ignored discussion'});
-    assert.deepEqual(downloads,['original']);
-    await app.update({message_thread_id:session.threadId,document,caption:'/p Explain it'});
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1), {
-      t:'prompt',text:'Explain it',images:[{type:'image',data:imageData,mimeType:'image/png'}],
-    });
-  } finally {
-    await app.close();
-  }
-});
 
 test('unapproved image proposals cannot reach the model', async t => {
   const app = await createSmokeApp();

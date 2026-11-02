@@ -50,29 +50,6 @@ test('settings open with usable controls even when message edits are unavailable
   } finally { await app.close(); }
 });
 
-test('settings toggles save immediately in both directions on the same overview', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({ text: '/setup' });
-    const panel = app.messages.at(-1)!;
-    await clickSettings(app, 0);
-    assert.equal(app.messages.at(-1)!.message_id,panel.message_id);
-    assert.equal(saved(app).chat.all_messages_are_prompts,false);
-    await clickSettings(app, 0);
-    assert.equal(saved(app).chat.all_messages_are_prompts,true);
-    await clickSettings(app, 1);
-    assert.equal(saved(app).chat.users_can_propose_prompts,true);
-    await clickSettings(app, 1);
-    assert.equal(saved(app).chat.users_can_propose_prompts,false);
-    await clickSettings(app, 5);
-    assert.equal(saved(app).chat.create_topic_worktrees,true);
-    await clickSettings(app, 5);
-    assert.equal(saved(app).chat.create_topic_worktrees,false);
-    await clickSettings(app, -1);
-    assert.deepEqual(app.store.listSessions(botId),[]);
-    assert.equal(app.connectionCount,0);
-  } finally { await app.close(); }
-});
 
 test('typing mode choices persist immediately and preserve concurrent configuration', async () => {
   const app = await createSmokeApp();

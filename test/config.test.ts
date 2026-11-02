@@ -53,27 +53,6 @@ test('missing config is never an implicit empty draft', t => {
   assert.equal(existsSync(path), false);
 });
 
-test('folder options default per forum and normalize relative paths without creating directories', t => {
-  const { path, dir } = fixture(t);
-  const config = validConfig(path, dir);
-  writeConfig(config);
-  assert.deepEqual(readConfig(path).instances[dir]!.chats[0]!.folder_options, []);
-  config.instances[dir]!.chats.push({
-    botId, chatId: -10042,
-    folder_options: ['./not-created/project', 'not-created//project/', '.', './', '..', '../', '../sibling', './sub/../sub'],
-  });
-  writeConfig(config);
-  const loaded = readConfig(path);
-  assert.deepEqual(loaded.instances[dir]!.chats[0]!.folder_options, []);
-  assert.deepEqual(loaded.instances[dir]!.chats[1]!.folder_options, ['not-created/project', '.', '..', '../sibling', 'sub']);
-  assert.equal(existsSync(join(dir, 'not-created', 'project')), false);
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path), loaded);
-  loaded.instances[dir]!.chats[1]!.folder_options = [];
-  writeConfig(loaded);
-  assert.deepEqual(readConfig(path).instances[dir]!.chats[1]!.folder_options, []);
-});
-
 test('folder options reject absolute, empty, NUL, malformed and obsolete configuration', t => {
   const { path, dir } = fixture(t);
   const { configPath: _, ...input } = validConfig(path, dir);

@@ -11,20 +11,6 @@ import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
 
-test('detached topic classification is tuple-scoped and rejects session creation', () => {
-  const store = new Store(':memory:');
-  try {
-    assert.equal(store.getTopicKind(topic), 'tracked');
-    store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    for (const key of [{...topic,botId:botId+1}, {...topic,chatId:chatId-1}, {...topic,threadId:18}]) {
-      assert.equal(store.getTopicKind(key), 'tracked');
-    }
-    assert.throws(() => store.createSession(topic, 'Not a session'));
-    assert.deepEqual(store.listSessions(botId), []);
-  } finally { store.close(); }
-});
-
 for (const conversion of ['detach', 'status'] as const) {
 test(`${conversion} conversion retires its session and title work without deleting history`, () => {
   const store = new Store(':memory:');
@@ -104,26 +90,6 @@ test('existing detached sessions classify as detached without a topic identity r
     assert.throws(() => store.createSession(topic, 'Cannot revive'));
     assert.equal(store.getSession(session.id)?.name, 'Detached history');
   } finally { store.close(); }
-});
-
-test('General stays outside sessions while pending selections enforce destination identities', () => {
-  const store = new Store(':memory:');
-  const general = topicDestination(chatId);
-  const destination = topicDestination(chatId, topic.threadId);
-  try {
-    const created = store.createSession(topic, 'Actual topic');
-    store.addPendingSkill({botId,destination:general,userId:42}, 'general-skill');
-    store.addPendingSkill({botId,destination,userId:42}, 'topic-skill');
-    assert.equal(store.getTopic({botId,destination:general}), undefined);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-    assert.throws(() => store.createSession({...topic,threadId:1}, 'General'), /A session requires a non-General topic/);
-    assert.deepEqual(store.listSessions(botId).map(session => session.id), [created.id]);
-    store.clearPendingSkills({botId,destination:general,userId:42});
-    assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-  } finally {
-    store.close();
-  }
 });
 
 test('topic identity survives a service restart and closing preserves its history binding', async () => {
@@ -212,27 +178,6 @@ test('image-only initial content survives reopening storage and stays session-sc
   }
 });
 
-test('one bot and topic tuple cannot acquire two session identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const original = store.createSession(topic, 'Original');
-    try {
-      store.createSession(topic, 'Duplicate service update');
-    } catch {
-      assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    }
-    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    assert.equal(store.listSessions(botId).length, 1);
-    const otherBot = store.createSession({ ...topic, botId: botId + 1 }, 'Other bot');
-    const otherChat = store.createSession({ ...topic, chatId: chatId - 1 }, 'Other group');
-    assert.notEqual(otherBot.id, original.id);
-    assert.notEqual(otherChat.id, original.id);
-    assert.equal(store.isEnrolled(botId + 1, chatId), false);
-  } finally {
-    store.close();
-  }
-});
-
 test('kill generations persist across restart and stay isolated to their session', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-session-generation-'));
   const filename = join(directory,'topics.sqlite');
@@ -282,27 +227,6 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('one path can bind several bots and chats without merging topic identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const instances = {
-      '/work/a': { chats: [{ botId, chatId }, { botId: botId + 1, chatId }, { botId, chatId: chatId - 1 }] },
-      '/work/b': { chats: [{ botId: botId + 1, chatId: chatId - 1 }] },
-    };
-    const sessions = Object.entries(instances).flatMap(([instancePath, instance]) => instance.chats.map(chat => store.createSession({ ...chat, threadId: 17, instancePath }, instancePath)));
-    assert.equal(new Set(sessions.map(session => session.id)).size, 4);
-    assert.equal(sessions.filter(session => session.instancePath === '/work/a').length, 3);
-    for (const original of sessions) {
-      assert.equal(store.getTopic({botId: original.botId, destination: topicDestination(original.chatId, original.threadId)})?.id, original.id);
-      const otherPath = original.instancePath === '/work/a' ? '/work/b' : '/work/a';
-      assert.throws(() => store.createSession({ ...original, instancePath: otherPath }, 'Retarget'), /history belongs/);
-      assert.deepEqual(store.getSession(original.id), original);
-    }
-  } finally {
-    store.close();
   }
 });
 

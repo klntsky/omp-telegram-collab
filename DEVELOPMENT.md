@@ -103,9 +103,13 @@ Import `setupTelegramTest` from `test/e2e/helpers/telegram-fixture.ts` in live t
 
 Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
 
+Forum provisioning retries only the test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, with at most three creation attempts. Before retrying, it searches the authenticated account's dialogs for the newly created owned forum with the same title and reuses it if found. Retry waits respect cancellation. Other failures, including ambiguous transport errors, propagate without replaying creation; exhausted attempts preserve the original RPC error.
+
 ### Isolated OMP and debug artifacts
 
 The OMP helper launches each child with an allowlisted environment and disposable home, agent, XDG, workspace, and application directories. It does not forward provider credentials or personal OMP configuration. Model requests use a scripted loopback HTTP provider with a fake key. No container or paid model credentials are needed. This configuration isolation is not a filesystem sandbox.
+
+The disposable agent directory contains suite-owned skill files, and the scripted model declares image input support. Skill discovery uses that isolated OMP configuration. Uploaded image documents pass through Telegram's real file service before reaching the provider. File downloads use the bot client's selected production or test environment.
 
 Define scripted provider responses per named task, with the expected user prompt and its tool/text steps. The provider matches only the latest user message, keeps request history and progress per task, and verifies tool-result IDs before continuing. Task ordering across sessions does not determine which response is sent. Unexpected prompts, extra requests, and unfinished tasks fail with task-specific diagnostics. Telegram transport, BotService, OMP, and tool execution remain real.
 

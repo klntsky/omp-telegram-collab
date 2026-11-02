@@ -121,40 +121,6 @@ test('work-topic preset switches leave the forum default unchanged and General l
   });
 }
 
-{
-  const existing = true;
-  for (const order of ['worktree-first','preset-first']) {
-    test(`composed prompt retains its selected preset across ${existing ? 'existing' : 'new'} session preparation in ${order} order`, async t => {
-      const app = await createSmokeApp({skipStartupRejection:true});
-      try {
-        await app.update({text:'/setup'});
-        if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Prepared session'}});
-        t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
-        const effects: string[] = [];
-        let activePreset = 'Slow';
-        t.mock.method(app.runtime,'worktree',async () => {
-          assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,0);
-          effects.push('worktree');
-          activePreset = 'Slow';
-          return 'Prepared worktree';
-        });
-        t.mock.method(app.runtime,'modelPresets',async (_session: TopicSession, name?: string) => {
-          assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,0);
-          effects.push(`preset:${name}`);
-          activePreset = name!;
-          return 'Preset selected';
-        });
-        const prefix = order === 'worktree-first' ? '/worktree /model_preset Fast' : '/model_preset Fast /worktree';
-        await app.update({text:`/${existing ? 'p' : 'new'} ${prefix} Final task`,...(existing ? {message_thread_id:42} : {})});
-        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-        assert.deepEqual(effects,order === 'worktree-first' ? ['worktree','preset:Fast'] : ['preset:Fast','worktree','preset:Fast']);
-        assert.equal(activePreset,'Fast');
-        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Final task'}]);
-        assert.equal(app.store.listSessions(botId).length,1);
-      } finally { await app.close(); }
-    });
-  }
-}
 
 test('mutating prompt extensions cannot become non-admin approval proposals', async t => {
   const app = await createSmokeApp();

@@ -86,6 +86,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   for (const directory of [workspace, dataDir, agent, ...Object.values(xdg).map(directory => join(directory, 'omp'))]) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
   }
+  const skillDirectory = join(agent, 'skills', 'e2e-review');
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: e2e-review\ndescription: Review the E2E task\n---\nPreserve the e2e-skill-loaded marker when reviewing this task.\n');
   provider = await startFakeLlmProvider({ scenarios: options.scenarios, log });
   relay = await startLocalRelay();
   const selectedModel = 'e2e/e2e-model';
@@ -93,7 +96,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     baseUrl: provider.baseUrl,
     api: 'openai-completions',
     apiKey: provider.apiKey,
-    models: [{ id: 'e2e-model', name: 'E2E Model', reasoning: false, input: ['text'], supportsTools: true,
+    models: [{ id: 'e2e-model', name: 'E2E Model', reasoning: false, input: ['text', 'image'], supportsTools: true,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1024 }],
   } } }), { mode: 0o600 });
   await writeFile(join(agent, 'config.yml'), JSON.stringify({
@@ -116,7 +119,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const forwarded = lifecycleKeys.map(key => `"${key}=\${${key}-}"`);
   await writeFile(executable, `#!/bin/sh\nexec /usr/bin/env -i ${assignments.join(' ')} ${forwarded.join(' ')} /bin/bash -c 'exec -a \"$0\" \"$@\"' ${quote(executable)} ${quote(actualOmp.includes('/') ? resolve(actualOmp) : actualOmp)} \"$@\"\n`, { mode: 0o700 });
   const args = [
-    '--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title', '--no-lsp', '--no-pty',
+    '--no-extensions', '--no-rules', '--no-context-files', '--no-title', '--no-lsp', '--no-pty',
     '--model', selectedModel, '--smol', selectedModel, '--slow', selectedModel,
     '--thinking', 'off', '--tools', 'write', '--approval-mode', 'yolo',
     '--system-prompt', 'Complete the requested task with the provided write tool.',

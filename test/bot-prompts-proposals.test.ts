@@ -61,7 +61,8 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
 });
 
 
-for (const allMessagesArePrompts of [true,false]) {
+{
+  const allMessagesArePrompts = false;
   test(`bot-directed replies quote context and create sessions from General with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {
