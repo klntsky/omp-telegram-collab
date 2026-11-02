@@ -2747,7 +2747,8 @@ export class BotService {
       if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
       const file = await this.bot.api.getFile(fileId);
       if (!file.file_path) throw new Error('Telegram image file path is unavailable');
-      const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+      const environment = this.bot.api.options?.environment === 'test' ? 'test/' : '';
+      const response = await fetch(`https://api.telegram.org/file/bot${this.token}/${environment}${file.file_path}`);
       if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
       return {type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType};
     }));
