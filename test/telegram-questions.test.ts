@@ -71,6 +71,7 @@ for (const allMessagesArePrompts of [true,false]) {
     app.emit({ t: 'ui-request', request: { kind: 'editor', reqId: 82, title: 'Enter your deployment target', prefill: 'Suggested: staging' } });
     await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
     const editor = app.messages.at(-1)!;
+    assert.equal(editor.message_id, choice.message_id);
     assert.equal(editor.message_thread_id, session.threadId);
     assert.equal(z.object({force_reply:z.boolean()}).parse(editor.reply_markup).force_reply, true);
     const text = 'This is an answer, not a new session\n  Keep <literal> **text** 😀  ';
@@ -170,7 +171,7 @@ test('cancel dismisses a pending custom response without submitting a prompt', a
 });
 
 
-test('Telegram rate limits retain the answer receipt and following custom-answer prompt', async () => {
+test('Telegram rate limits retain the reused custom-answer controls', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -181,11 +182,12 @@ test('Telegram rate limits retain the answer receipt and following custom-answer
     const control = app.messages.at(-1)!;
     const {inline_keyboard} = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(control.reply_markup);
     app.rateLimitNext('editMessageText');
-    app.rateLimitNext('sendMessage');
     await app.callback(inline_keyboard[0]![1]!.callback_data,control);
     app.emit({t:'ui-request',request:{kind:'editor',reqId:122,title:'Custom deployment target'}});
     await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
-    assert.deepEqual(control.reply_markup,{inline_keyboard:[]});
+    assert.equal(app.messages.at(-1)!.message_id,control.message_id);
+    const cancel = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(control.reply_markup);
+    assert.notEqual(cancel.inline_keyboard[0]![0]!.callback_data,inline_keyboard[0]![0]!.callback_data);
     const editor = app.messages.at(-1)!;
     const text = 'Private staging\n  Preserve this target  ';
     await app.update({message_thread_id:session.threadId,text,reply_to_message:{message_id:editor.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
