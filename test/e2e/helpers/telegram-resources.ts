@@ -6,6 +6,7 @@ import { Chat, Conversation, tl, type Message } from '@mtcute/node';
 import { installTelegramRetry } from '../../../src/telegram-retry.js';
 import type { TelegramTestUser } from './telegram-user.js';
 import { combineTelegramErrors } from './errors.js';
+import { bounded } from './async.js';
 
 export interface TelegramTestBot {
   id: number;
@@ -110,9 +111,12 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
     } catch (error) {
       if (!tl.RpcError.is(error, 'CHAT_OCCUPY_LOC_FAILED') || error.code !== 500) throw error;
       try {
-        for await (const dialog of user.client.iterDialogs({ archived: 'keep' })) {
+        const dialogs = user.client.iterDialogs({ archived: 'keep' });
+        for (;;) {
+          const next = await bounded(dialogs.next(), user.signal);
+          if (next.done) break;
           user.signal.throwIfAborted();
-          const peer = dialog.peer;
+          const peer = next.value.peer;
           if (peer instanceof Chat && peer.title === title && peer.raw._ === 'channel' &&
             peer.raw.creator && peer.raw.forum && peer.raw.date >= startedAt) {
             if (chat) throw new Error(`Telegram returned multiple newly created forums named ${title}`);

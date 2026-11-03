@@ -103,7 +103,7 @@ Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` fo
 
 Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
 
-Forum provisioning retries only the test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, with at most three creation attempts. Before retrying, it searches the authenticated account's dialogs for the newly created owned forum with the same title and reuses it if found. Retry waits respect cancellation. Other failures, including ambiguous transport errors, propagate without replaying creation; exhausted attempts preserve the original RPC error.
+Forum provisioning retries only the test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, with at most three creation attempts. Before retrying, it searches the authenticated account's dialogs for the newly created owned forum with the same title and reuses it if found. Retry waits and pending recovery-inspection waits respect cancellation, allowing teardown to destroy the owned client and its outstanding RPC. Other failures, including ambiguous transport errors, propagate without replaying creation; exhausted attempts preserve the original RPC error.
 
 ### Isolated OMP and debug artifacts
 
