@@ -53,35 +53,28 @@ test('select answers preserve protocol values and cannot be submitted twice', as
   }
 });
 
-test('chat handoff routes question replies as prompts without reopening completed answers', async () => {
-  for (const allMessagesArePrompts of [true,false]) {
-    const app = await createSmokeApp({skipStartupRejection:true});
-    try {
-      await app.update({text:'/setup'});
-      if (!allMessagesArePrompts) await setForumSetting(app,0);
-      await app.update({text:'/new Start'});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      const session = app.store.listSessions(botId)[0]!;
-      const before = app.messages.length;
-      app.emit({t:'ui-request',request:{kind:'select',reqId:85,title:'Choose handling',options:['Keep cleanup','Chat about this']}});
-      await eventually(() => app.messages.slice(before).some(message => JSON.stringify(message.reply_markup)?.includes('ask:')));
-      const questionMessages = app.messages.slice(before);
-      const control = questionMessages.at(-1)!;
-      const {inline_keyboard} = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(control.reply_markup);
-      await app.callback(inline_keyboard[0]![1]!.callback_data,control);
-      assert.deepEqual(app.accepted.at(-1),{t:'ui-response',reqId:85,value:'Chat about this'});
-      for (const [index,question] of questionMessages.entries()) {
-        const text = `Explain tradeoff ${index}\nKeep the operation reversible.`;
-        const count = app.accepted.length;
-        await app.update({message_id:8250+index,message_thread_id:session.threadId,text,reply_to_message:{message_id:question.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
-        assert.deepEqual(app.accepted.slice(count),[{t:'prompt',text}]);
-      }
-      const count = app.accepted.length;
-      app.store.advanceSessionGeneration(session.id);
-      await app.update({message_thread_id:session.threadId,text:'Do not resume an old handoff',reply_to_message:{message_id:control.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
-      assert.deepEqual(app.accepted.slice(count),[]);
-    } finally { await app.close(); }
-  }
+test('question handoff stops accepting replies after its session generation changes', async () => {
+  const app = await createSmokeApp({skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await setForumSetting(app,0);
+    await app.update({text:'/new Start'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
+    const session = app.store.listSessions(botId)[0]!;
+    const before = app.messages.length;
+    app.emit({t:'ui-request',request:{kind:'select',reqId:85,title:'Choose handling',options:['Keep cleanup','Chat about this']}});
+    await eventually(() => app.messages.slice(before).some(message => JSON.stringify(message.reply_markup)?.includes('ask:')));
+    const control = app.messages.at(-1)!;
+    const {inline_keyboard} = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(control.reply_markup);
+    await app.callback(inline_keyboard[0]![1]!.callback_data,control);
+    const text = 'Discuss the tradeoff';
+    await app.update({message_thread_id:session.threadId,text,reply_to_message:{message_id:control.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+    assert.deepEqual(app.accepted.at(-1),{t:'prompt',text});
+    const count = app.accepted.length;
+    app.store.advanceSessionGeneration(session.id);
+    await app.update({message_thread_id:session.threadId,text:'Do not resume an old handoff',reply_to_message:{message_id:control.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}}});
+    assert.deepEqual(app.accepted.slice(count),[]);
+  } finally { await app.close(); }
 });
 
 test('question answers reject copied buttons, removed members, ended requests and disconnected listeners', async () => {
@@ -113,22 +106,6 @@ test('question answers reject copied buttons, removed members, ended requests an
     assert.equal(app.accepted.filter(frame => frame.t === 'ui-response').length, count);
   } finally { await app.close(); }
 });
-
-test('cancel dismisses a pending custom response without submitting a prompt', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({ text: '/setup' });
-    await app.update({ text: '/new Start' });
-    app.emit({ t: 'ui-request', request: { kind: 'editor', reqId: 101, title: 'Enter custom response' } });
-    await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
-    const cancel = app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes('ask:'))!;
-    const { inline_keyboard } = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(cancel.reply_markup);
-    const before = app.accepted.length;
-    await app.callback(inline_keyboard[0]![0]!.callback_data, cancel);
-    assert.deepEqual(app.accepted.slice(before), [{ t: 'ui-response', reqId: 101, value: undefined }]);
-  } finally { await app.close(); }
-});
-
 
 test('Telegram rate limits retain the answer receipt and following custom-answer prompt', async () => {
   const app = await createSmokeApp();

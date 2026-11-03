@@ -27,9 +27,9 @@ const replyMarkup = z.object({
   inline_keyboard: z.array(z.array(z.object({ callback_data: z.string().optional() }))),
 });
 const panelCall = z.object({
-  method: z.literal('sendMessage'),
+  method: z.enum(['sendMessage', 'editMessageText']),
   payload: z.object({ message_thread_id: z.number().optional(), reply_markup: replyMarkup }),
-  result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) }),
+  result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number(), message_thread_id: z.number().optional() }) }),
 });
 
 export async function enrollForum(app: TelegramWorkflow): Promise<void> {
@@ -57,7 +57,7 @@ export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['k
     }
     return false;
   });
-  assert.equal(panel!.payload.message_thread_id ?? 1, threadId ?? 1);
+  assert.equal(panel!.result.result.message_thread_id ?? panel!.payload.message_thread_id ?? 1, threadId ?? 1);
   return {
     kind,
     messageId: panel!.result.result.message_id,

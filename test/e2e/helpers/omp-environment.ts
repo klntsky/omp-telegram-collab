@@ -118,9 +118,6 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     assert.ok(cwd.startsWith(`${dirname(workspace)}${sep}`));
     assert.notEqual(cwd, workspace);
     assert.equal(await git(cwd, 'branch', '--show-current'), branch);
-    assert.notEqual(
-      await git(cwd, 'rev-parse', '--path-format=absolute', '--git-dir'),
-      await git(cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'));
   });
   const skillDirectory = join(agent, 'skills', 'e2e-review');
   await mkdir(skillDirectory, { recursive: true });

@@ -29,29 +29,6 @@ function button(message: Record<string,unknown>, suffix: string) {
   return callbacks(message).find(data => data.endsWith(`:${suffix}`))!;
 }
 
-test('missing folder requires explicit confirmation and cancellation never creates it', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const path = join(Object.keys(app.config.instances)[0]!,'chosen','nested');
-    configure(app,['chosen/nested']);
-    await app.update({text:'/new task'});
-    let message = panel(app);
-    assert.equal(existsSync(path),false);
-    assert.equal(app.store.listSessions(botId).length,0);
-    await app.callback(button(message,'cancel'),message);
-    assert.equal(existsSync(path),false);
-    await app.update({text:'/new task'});
-    message = panel(app);
-    const create = button(message,'create');
-    await app.callback(create,message);
-    await app.callback(create,message);
-    assert.equal(existsSync(path),true);
-    assert.equal(app.store.listSessions(botId).length,1);
-    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(path)});
-  } finally { await app.close(); }
-});
-
 for (const invalidation of ['role','settings','assignment','expired','actor'] as const) {
   test(`folder selection rejects ${invalidation} without session mutation`, async t => {
     const app = await createSmokeApp();

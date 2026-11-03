@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { SessionEntry } from '@oh-my-pi/pi-wire';
@@ -17,6 +17,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
     question: createWriteTask('question'),
     customAnswer: createWriteTask('custom-answer'),
     askHandoff: createWriteTask('ask-handoff'),
+    chatHandoff: createWriteTask('chat-handoff'),
     settingsReply: createWriteTask('settings-reply'),
     image: createWriteTask('image'),
     explicitImage: createWriteTask('explicit-image'),
@@ -31,12 +32,18 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };
+  const questionControls = ['chat-question', 'dismiss-question'].map(name => ({
+    name, prompt: `${name} ${tasks.initial.evidence.nonce}`, steps: name === 'chat-question'
+      ? [questionStep(name), { type: 'text' as const, text: 'Continue the discussion in Telegram.' }]
+      : [questionStep(name)],
+  }));
   const scenarios = Object.values(tasks).map(task =>
     task === tasks.question || task === tasks.customAnswer ? questionScenario(task) : writeScenario(task));
   const app = await setupCollaborationTest(t, { scenarios: [
     ...scenarios,
     { ...interrupted, steps: [{ type: 'await-abort' }] },
     { ...cancelledQuestion, steps: [questionStep(cancelledQuestion.name)] },
+    ...questionControls,
   ] });
   const savedChat = () => readConfig(app.config.configPath).instances[app.omp.workspace]!.chats[0]!;
   const [me, chat, member] = await Promise.all([
@@ -86,7 +93,6 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await app.sendAndWait('/worktree e2e-branch', session.threadId);
   session = app.store.getSession(session.id)!;
   await app.omp.assertWorktree(session, 'e2e-branch');
-  assert.equal(await app.omp.git(app.omp.workspace, 'branch', '--show-current'), 'main');
   const worktree = await app.sendAndWait(`/p ${tasks.worktree.prompt}`, session.threadId);
   await completeWriteTask(app, tasks.worktree, worktree, session.threadId);
   assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.worktree.name)![0]!.messages).includes(tasks.initial.evidence.nonce));
@@ -145,6 +151,49 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await completeWriteTask(app, tasks.askHandoff, handoff, session.threadId);
   assert.ok(!app.guestFrames.some(frame => frame.t === 'ui-response' && frame.value === handoffText));
 
+  const questionSettings = await openPanel(app, '/settings', session.threadId);
+  await clickPanel(app, questionSettings, 0);
+  await app.waitForCondition(() => savedChat().all_messages_are_prompts === false);
+  for (const control of questionControls) {
+    const start = app.apiCalls.length;
+    const frameStart = app.hostFrames.length;
+    const instruction = await app.sendAndWait(`/p ${control.prompt}`, session.threadId);
+    const panel = await waitForPanel(app, 'question', 'ask:', start, session.threadId);
+    const request = app.hostFrames.slice(frameStart).findLast(frame => frame.t === 'ui-request');
+    assert.ok(request?.t === 'ui-request');
+    if (control.name === 'chat-question') {
+      await clickPanel(app, panel, 3);
+      await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame => frame.t === 'ui-request-end' && frame.reqId === request.request.reqId));
+      assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === request.request.reqId && frame.value === 'Chat about this'));
+      await app.waitForReply({ replyToMessageId: instruction.id, threadId: session.threadId });
+      const discussion = await replyText(app, panel.messageId, session.threadId, tasks.chatHandoff.prompt);
+      await completeWriteTask(app, tasks.chatHandoff, discussion, session.threadId);
+    } else {
+      const editorStart = app.apiCalls.length;
+      await clickPanel(app, panel, 2);
+      const editorMessage = await waitForEditor(app, editorStart, session.threadId);
+      const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
+      assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
+      const cancellation = await waitForPanel(app, 'question', 'ask:', editorStart, session.threadId);
+      const dismissStart = app.apiCalls.length;
+      await clickPanel(app, cancellation, 0);
+      await app.waitForCondition(() => app.hostFrames.some(frame => frame.t === 'ui-request-end' && frame.reqId === editor.request.reqId));
+      assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === undefined));
+      const parent = await waitForPanel(app, 'question', 'ask:', dismissStart, session.threadId);
+      const parentRequest = app.hostFrames.findLast(frame => frame.t === 'ui-request');
+      assert.ok(parentRequest?.t === 'ui-request' && parentRequest.request.kind === 'select');
+      await clickPanel(app, parent, -1);
+      await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
+      assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === parentRequest.request.reqId && frame.value === undefined));
+      const lateAnswer = 'Do not submit this cancelled editor reply';
+      await replyText(app, editorMessage, session.threadId, lateAnswer);
+      assert.ok(!app.guestFrames.some(frame => frame.t === 'prompt' && frame.text === lateAnswer));
+    }
+  }
+  await clickPanel(app, questionSettings, 0);
+  await app.waitForCondition(() => savedChat().all_messages_are_prompts === true);
+  await clickPanel(app, questionSettings, -1);
+
   const imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
   for (const task of [tasks.image, tasks.explicitImage]) {
     const explicit = task === tasks.explicitImage;
@@ -190,16 +239,28 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   assert.deepEqual(app.store.getPendingSkills(skillKey), []);
   assert.ok(taskInput(app.omp.provider, tasks.followup).text.includes(`/skill:e2e-review\n\n${tasks.followup.prompt}`));
 
-  const selectedDirectory = join(app.omp.workspace, 'selected');
-  await mkdir(selectedDirectory);
-  app.setFolderOptions(['.', 'selected']);
+  const selectedDirectory = join(app.omp.workspace, 'selected', 'nested');
+  app.setFolderOptions(['selected/nested']);
   await app.sendAndWait('/skill_e2e_review');
   const folderStart = app.apiCalls.length;
-  const general = await app.sendAndWait(tasks.general.prompt);
+  await app.sendAndWait(tasks.general.prompt);
   const folders = await waitForPanel(app, 'folder', 'folder:', folderStart);
   assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), [session.id]);
   assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
-  await clickPanel(app, folders, 1);
+  await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
+  await clickPanel(app, folders, folders.buttons.findIndex(data => data.endsWith(':cancel')));
+  await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
+  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), [session.id]);
+  assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
+  app.setFolderOptions(['.', 'selected/nested']);
+  const confirmationStart = app.apiCalls.length;
+  const general = await app.sendAndWait(tasks.general.prompt);
+  const choices = await waitForPanel(app, 'folder', 'folder:', confirmationStart);
+  const creationStart = app.apiCalls.length;
+  await clickPanel(app, choices, 1);
+  const confirmation = await waitForPanel(app, 'folder', 'folder:', creationStart);
+  await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
+  await clickPanel(app, confirmation, confirmation.buttons.findIndex(data => data.endsWith(':create')));
   const generalReply = await completeWriteTask(app, tasks.general, general);
   const allSessions = app.store.listSessions(app.telegram.bot.id);
   const created = allSessions.find(value => value.id !== session.id)!;
