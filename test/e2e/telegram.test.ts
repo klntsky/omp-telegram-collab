@@ -6,7 +6,7 @@ import type { SessionEntry } from '@oh-my-pi/pi-wire';
 import { z } from 'zod';
 import { readConfig, writeConfig } from '../../src/config.js';
 import { setupCollaborationTest } from './helpers/collaboration-fixture.js';
-import { changeTopicClosed, clickPanel, enrollForum, openPanel, reactionAttempts, replyText, sendImageDocument, setTopicClosed, waitForEditor, waitForPanel, waitForReactionAttempt } from './helpers/telegram-actions.js';
+import { changeTopicClosed, clickPanel, deliveredMessageLinks, enrollForum, openPanel, reactionAttempts, replyText, sendImageDocument, setTopicClosed, waitForEditor, waitForPanel, waitForReactionAttempt } from './helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, questionScenario, questionStep, readSessionHistory, taskInput, writeScenario } from './helpers/model-tasks.js';
 
 test('Telegram workflows share one fixture across protocol, media, lifecycle, and restart checks', { timeout: 480000 }, async t => {
@@ -29,6 +29,9 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
     separate: createWriteTask('separate'),
     restarted: createWriteTask('restarted'),
     restored: createWriteTask('restored'),
+    forkTip: createWriteTask('fork-tip'),
+    forkAnswer: createWriteTask('fork-answer'),
+    forkPrompt: createWriteTask('fork-prompt'),
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };
@@ -104,6 +107,60 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   const worktreeRestarted = await app.sendAndWait(`/p ${tasks.worktreeRestarted.prompt}`, session.threadId);
   await completeWriteTask(app, tasks.worktreeRestarted, worktreeRestarted, session.threadId);
   assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.worktreeRestarted.name)![0]!.messages).includes(tasks.worktree.evidence.nonce));
+
+  const sourceBinding = JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8'));
+  const sourceBeforeForks = app.store.getSession(session.id)!;
+  const sourceHost = await app.runtime.resolveExisting(session);
+  assert.ok(sourceHost);
+  const forkSettings = await openPanel(app, '/settings');
+  for (const [task, replyId, automaticWorktree] of [
+    [tasks.forkTip, undefined, false],
+    [tasks.forkAnswer, reply.id, true],
+    [tasks.forkPrompt, worktreeRestarted.id, false],
+  ] as const) {
+    if ((savedChat().create_topic_worktrees === true) !== automaticWorktree) {
+      await clickPanel(app, forkSettings, 5);
+      await app.waitForCondition(() => savedChat().create_topic_worktrees === automaticWorktree);
+    }
+    const previousSessions = new Set(app.store.listSessions(app.telegram.bot.id).map(value => value.id));
+    const sourceHistory = await readSessionHistory(app.omp.dataDir, session.id);
+    const forkCallStart = app.apiCalls.length;
+    const command = replyId === undefined
+      ? await app.sendAndWait('/fork', session.threadId)
+      : await replyText(app, replyId, session.threadId, '/fork');
+    const fork = app.store.listSessions(app.telegram.bot.id).find(value => !previousSessions.has(value.id));
+    assert.ok(fork?.runtime.kind === 'managed');
+    assert.notEqual(fork.threadId, session.threadId);
+    assert.deepEqual(app.store.getSession(session.id), sourceBeforeForks);
+    assert.equal(await readSessionHistory(app.omp.dataDir, session.id), sourceHistory);
+    assert.deepEqual(JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8')), sourceBinding);
+    assert.deepEqual(await app.runtime.resolveExisting(session), sourceHost);
+    const forkCalls = app.apiCalls.slice(forkCallStart);
+    const internalChat = String(session.chatId).replace(/^-100/, '');
+    assert.ok(deliveredMessageLinks(forkCalls, session.threadId).some(link =>
+      link.hostname === 't.me' && link.pathname === `/c/${internalChat}/${fork.threadId}`));
+    assert.ok(deliveredMessageLinks(forkCalls, fork.threadId).some(link =>
+      link.hostname === 't.me' && link.pathname === `/c/${internalChat}/${replyId ?? command.id}` &&
+      link.searchParams.get('thread') === String(session.threadId)));
+    const forkHistory = (await readSessionHistory(app.omp.dataDir, fork.id)).trim().split('\n').map(line => JSON.parse(line));
+    const forkHeader = forkHistory.find(entry => entry.type === 'session');
+    assert.ok(forkHeader);
+    assert.notEqual(forkHeader.id, sourceBinding.sessionId);
+    assert.ok(forkHistory.some(entry => entry.type === 'custom_message' && entry.customType === 'collab-prompt'));
+    assert.equal(forkHistory.some(entry => entry.type === 'message' && entry.message.role === 'toolResult' &&
+      entry.message.toolCallId === tasks.worktreeRestarted.toolCallId), task === tasks.forkTip);
+    if (automaticWorktree) await app.omp.assertWorktree(fork);
+    else assert.deepEqual(fork.runtime, session.runtime);
+    const instruction = await app.sendAndWait(`/p ${task.prompt}`, fork.threadId);
+    await completeWriteTask(app, task, instruction, fork.threadId);
+    const modelHistory = JSON.stringify(app.omp.provider.requests.get(task.name)![0]!.messages);
+    assert.ok(modelHistory.includes(tasks.initial.evidence.nonce));
+    assert.equal(modelHistory.includes(tasks.worktreeRestarted.toolCallId), task === tasks.forkTip);
+    assert.equal(await readSessionHistory(app.omp.dataDir, session.id), sourceHistory);
+    await setTopicClosed(app, fork, true);
+  }
+  await clickPanel(app, forkSettings, -1);
+  const sessionsAfterForks = app.store.listSessions(app.telegram.bot.id).map(value => value.id);
 
   const interruptedFrames = app.hostFrames.length;
   await app.sendAndWait(`/p ${interrupted.prompt}`, session.threadId);
@@ -235,7 +292,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   const followup = await app.sendAndWait(tasks.followup.prompt, session.threadId);
   const followupReply = await completeWriteTask(app, tasks.followup, followup, session.threadId);
   assert.equal(followupReply.replyToMessage?.id, followup.id);
-  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(value => value.id), [session.id]);
+  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(value => value.id), sessionsAfterForks);
   assert.deepEqual(app.store.getPendingSkills(skillKey), []);
   assert.ok(taskInput(app.omp.provider, tasks.followup).text.includes(`/skill:e2e-review\n\n${tasks.followup.prompt}`));
 
@@ -245,12 +302,12 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   const folderStart = app.apiCalls.length;
   await app.sendAndWait(tasks.general.prompt);
   const folders = await waitForPanel(app, 'folder', 'folder:', folderStart);
-  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), [session.id]);
+  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), sessionsAfterForks);
   assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
   await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
   await clickPanel(app, folders, folders.buttons.findIndex(data => data.endsWith(':cancel')));
   await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
-  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), [session.id]);
+  assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), sessionsAfterForks);
   assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
   app.setFolderOptions(['.', 'selected/nested']);
   const confirmationStart = app.apiCalls.length;
@@ -263,8 +320,8 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await clickPanel(app, confirmation, confirmation.buttons.findIndex(data => data.endsWith(':create')));
   const generalReply = await completeWriteTask(app, tasks.general, general);
   const allSessions = app.store.listSessions(app.telegram.bot.id);
-  const created = allSessions.find(value => value.id !== session.id)!;
-  assert.equal(allSessions.length, 2);
+  const created = allSessions.find(value => !sessionsAfterForks.includes(value.id))!;
+  assert.deepEqual(allSessions.map(value => value.id).filter(id => id !== created.id), sessionsAfterForks);
   assert.deepEqual(created.runtime, { kind: 'managed', cwd: selectedDirectory });
   assert.equal(created.instancePath, app.omp.workspace);
   await assert.rejects(readFile(join(app.omp.workspace, tasks.general.path), 'utf8'), { code: 'ENOENT' });
@@ -294,6 +351,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await completeWriteTask(app, tasks.reopened, reopened, session.threadId);
   assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.reopened.name)![0]!.messages).includes(tasks.resumed.evidence.nonce));
   await setTopicClosed(app, created, true);
+
 
   await app.omp.git(app.omp.workspace, 'add', '--all');
   await app.omp.git(app.omp.workspace, 'commit', '-m', 'Preserve selected-folder task evidence');

@@ -32,6 +32,32 @@ const panelCall = z.object({
   result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number(), message_thread_id: z.number().optional() }) }),
 });
 
+export function deliveredMessageLinks(
+  calls: TelegramWorkflow['apiCalls'],
+  threadId: number,
+): URL[] {
+  const message = z.object({
+    ok: z.literal(true),
+    result: z.object({
+      message_thread_id: z.number(),
+      text: z.string(),
+      entities: z.array(z.object({
+        type: z.string(), offset: z.number(), length: z.number(), url: z.string().optional(),
+      })).optional(),
+    }),
+  });
+  return calls.flatMap(call => {
+    const parsed = message.safeParse(call.result);
+    if (!parsed.success || parsed.data.result.message_thread_id !== threadId) return [];
+    const result = parsed.data.result;
+    return (result.entities ?? []).flatMap(entity => {
+      if (entity.type === 'text_link' && entity.url) return [new URL(entity.url)];
+      if (entity.type === 'url') return [new URL(result.text.slice(entity.offset, entity.offset + entity.length))];
+      return [];
+    });
+  });
+}
+
 export async function enrollForum(app: TelegramWorkflow): Promise<void> {
   await app.omp.step('telegram.enroll', async () => {
     await app.sendAndWait('/setup');

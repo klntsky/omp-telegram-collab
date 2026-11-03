@@ -221,6 +221,16 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
   const connectionSessions = new Map<CollabHandlers,string>();
   const runtime = {
+    async existingBinding(session: TopicSession) {
+      return managedSessions.has(session.id) ? {sessionId:session.id} : undefined;
+    },
+    async fork(source: TopicSession, destination: TopicSession, _target?: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'}, beforeMutation?: () => Promise<void>) {
+      await beforeMutation?.();
+      if (source.runtime.kind !== 'managed' || destination.runtime.kind !== 'managed')
+        throw new Error('Fork requires managed sessions');
+      destination.runtime = {...source.runtime};
+      managedSessions.add(destination.id);
+    },
     async reserveSession(sessionId: string = randomUUID(), beforeMutation?: () => Promise<void>) {
       if (runtimeClosed) throw new Error('OMP runtime is stopping');
       await beforeMutation?.();

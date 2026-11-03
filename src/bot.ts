@@ -41,6 +41,8 @@ import { TopicWriter } from './topic-writer.js';
 class AuthorizationDeniedError extends Error {}
 
 export interface RuntimeLike {
+  fork(source: TopicSession, destination: TopicSession, target?: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'}, beforeMutation?: () => Promise<void>): Promise<void>;
+  existingBinding(session: TopicSession): Promise<{sessionId:string} | undefined>;
   worktree(session: TopicSession, branch?: string): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
@@ -242,6 +244,7 @@ const cliHelp = '/cli — copy a local terminal session join command (group admi
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 const groupCommands = [
   { command: 'new', description: 'Start a new session' },
+  { command: 'fork', description: 'Fork this session at its tip or a replied message (group admin)' },
   { command: 'worktree', description: '🌳 Move session to an OMP worktree; new topic in General' },
   { command: 'p', description: 'New session in General; prompt in explicit-command topics' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
@@ -1841,7 +1844,8 @@ export class BotService {
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
   private commandHelp(): string {
-    return this.options.config.publicUrl ? help : help.split('\n').filter(line => !line.startsWith('/session ')).join('\n');
+    const commands = `${help}\n/fork — fork this session at its tip, or reply to select a persisted message (group admin)`;
+    return this.options.config.publicUrl ? commands : commands.split('\n').filter(line => !line.startsWith('/session ')).join('\n');
   }
   private syncCommandMenus(): Promise<void> {
     const operation = this.menuTail.then(() => this.publishCommandMenus());
@@ -2442,6 +2446,85 @@ export class BotService {
     this.options.store.setSessionEntry(session.id,message.message_id,JSON.stringify(this.sessionMarkup(session)));
     this.requireSessionAssignment(session);
     await this.bot.api.pinChatMessage(session.chatId, message.message_id, { disable_notification: true });
+  }
+  private async forkSession(ctx: Context, source: TopicSession): Promise<void> {
+    const generation = this.options.store.getSessionGeneration(source.id);
+    const epoch = this.admissionEpoch;
+    const check = async () => {
+      await this.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.currentAdmin(ctx))) throw new Error('Forking requires a group administrator.');
+      if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch)
+        throw new Error('The service changed before the fork completed');
+      this.requireSessionAssignment(source);
+      if (source.runtime.kind !== 'managed' || this.options.store.getSession(source.id)?.status !== 'open' ||
+          this.options.store.getSessionGeneration(source.id) !== generation)
+        throw new Error('The source session changed before the fork completed');
+    };
+    await check();
+    let target: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'} | undefined;
+    const replied = ctx.message?.reply_to_message;
+    const reply = replied && !replied.forum_topic_created && replied.message_id !== source.threadId
+      ? replied : undefined;
+    if (reply) {
+      const binding = await this.options.runtime.existingBinding(source);
+      target = binding && this.options.store.getMessageAnchor(source.id, binding.sessionId, source.chatId, reply.message_id);
+      if (!target || reply.message_thread_id !== source.threadId)
+        throw new Error('Reply to a persisted message in the current session to select a fork point.');
+    }
+    const releaseSource = this.options.runtime.retain(source.id);
+    let reservation: {bind(id:string):void;release():void} | undefined;
+    let topic: {message_thread_id:number} | undefined;
+    let destination: TopicSession | undefined;
+    try {
+      reservation = await this.options.runtime.reserveSession(undefined, check);
+      await check();
+      topic = await this.bot.api.createForumTopic(source.chatId, source.name.slice(0, 128) || 'OMP session');
+      await check();
+      destination = this.options.store.createSession(
+        {botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id,instancePath:source.instancePath},
+        source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id,
+      );
+      reservation.bind(destination.id);
+      this.options.store.beginInitialTaskPreparation(destination.id);
+      const destinationGeneration = this.options.store.getSessionGeneration(destination.id);
+      const beforeMutation = async () => {
+        await check();
+        this.requireSessionAssignment(destination!);
+        if (this.options.store.getSession(destination!.id)?.status !== 'open' ||
+            this.options.store.getSessionGeneration(destination!.id) !== destinationGeneration)
+          throw new Error('The destination session changed before the fork completed');
+      };
+      releaseSource();
+      await this.options.runtime.fork(source, destination, target, beforeMutation);
+      await beforeMutation();
+      this.options.store.setSessionRuntime(destination.id, destination.runtime);
+      const defaultSkill = this.defaultNewTopicSkill(source.chatId);
+      if (defaultSkill) this.options.store.setNewTopicSkill(destination.id, defaultSkill);
+      if (this.createsTopicWorktrees(source.chatId)) {
+        await this.createTopicWorktree(destination);
+        await beforeMutation();
+      }
+      await sendTo(this.bot.api, topicDestination(destination.chatId, destination.threadId),
+        `Forked from: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${reply?.message_id ?? ctx.message!.message_id}?thread=${source.threadId}`,
+        {link_preview_options:{is_disabled:true}});
+      await this.announce(destination);
+      await beforeMutation();
+      await this.listen(destination, undefined, beforeMutation);
+      await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`);
+    } catch (error) {
+      if (topic) {
+        this.options.store.detachTopic({botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id});
+        if (destination) this.dropListener(destination.id);
+        await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`).catch(deliveryError => {
+          console.error('Could not deliver the created topic link after fork preparation failed.', deliveryError);
+        });
+      }
+      throw error;
+    } finally {
+      if (destination) this.options.store.finishInitialTaskPreparation(destination.id);
+      releaseSource();
+      reservation?.release();
+    }
   }
   private async newSession(
     ctx: Context,
@@ -3537,6 +3620,13 @@ export class BotService {
           contextDestination(ctx),
           'This topic is conversation-only. Use /new to create a separate session topic.',
         );
+        return;
+      }
+      if (action === 'fork') {
+        if (arg) throw new Error('Usage: /fork');
+        if (!session || destination.kind !== 'topic' || session.runtime.kind !== 'managed' || session.status !== 'open')
+          throw new Error('Use /fork inside an open managed session topic.');
+        await this.forkSession(ctx, session);
         return;
       }
       if (action === 'worktree') {
