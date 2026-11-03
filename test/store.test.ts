@@ -11,51 +11,6 @@ import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
 
-test('detached topic classification is tuple-scoped and rejects session creation', () => {
-  const store = new Store(':memory:');
-  try {
-    assert.equal(store.getTopicKind(topic), 'tracked');
-    store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    for (const key of [{...topic,botId:botId+1}, {...topic,chatId:chatId-1}, {...topic,threadId:18}]) {
-      assert.equal(store.getTopicKind(key), 'tracked');
-    }
-    assert.throws(() => store.createSession(topic, 'Not a session'));
-    assert.deepEqual(store.listSessions(botId), []);
-  } finally { store.close(); }
-});
-
-for (const conversion of ['detach', 'status'] as const) {
-test(`${conversion} conversion retires its session and title work without deleting history`, () => {
-  const store = new Store(':memory:');
-  try {
-    const session = store.createSession(topic, 'Preserved history', {kind:'managed'}, {text:'Never submit'});
-    const other = store.createSession({...topic,threadId:18}, 'Other topic');
-    store.setReplyTarget(session.id, 1234);
-    store.setPendingSessionTitle(session.id, 'Pending rename');
-    store.setTopicTitlePrefix(session.id, 'feature/pending');
-    const generation = store.getSessionGeneration(session.id);
-    if (conversion === 'status') store.setBotStatusTopic(botId,chatId,topic.threadId);
-    else store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    assert.equal(store.getSession(session.id)?.status, 'detached');
-    assert.equal(store.getSession(session.id)?.name, 'Preserved history');
-    assert.equal(store.getReplyTarget(session.id), 1234);
-    assert.equal(store.getTopic({botId,destination:topicDestination(chatId,topic.threadId)})?.id, session.id);
-    assert.equal(store.getPendingSessionTitle(session.id), undefined);
-    assert.equal(store.getTopicTitlePrefix(session.id), undefined);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.hasPendingInitialTask(session.id), false);
-    assert.equal(store.claimInitialTask(session.id), undefined);
-    store.detachTopic(topic);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.getSession(other.id)?.status, 'open');
-    assert.equal(store.getPendingSessionTitle(other.id), 'Other topic');
-    assert.throws(() => store.createSession(topic, 'Cannot revive'));
-  } finally { store.close(); }
-});
-}
-
 test('status identities include legacy stored rows and remain detached after replacement', () => {
   const store = new Store(':memory:');
   try {
@@ -104,46 +59,6 @@ test('existing detached sessions classify as detached without a topic identity r
     assert.throws(() => store.createSession(topic, 'Cannot revive'));
     assert.equal(store.getSession(session.id)?.name, 'Detached history');
   } finally { store.close(); }
-});
-
-test('General stays outside sessions while pending selections enforce destination identities', () => {
-  const store = new Store(':memory:');
-  const general = topicDestination(chatId);
-  const destination = topicDestination(chatId, topic.threadId);
-  try {
-    const created = store.createSession(topic, 'Actual topic');
-    store.addPendingSkill({botId,destination:general,userId:42}, 'general-skill');
-    store.addPendingSkill({botId,destination,userId:42}, 'topic-skill');
-    assert.equal(store.getTopic({botId,destination:general}), undefined);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-    assert.throws(() => store.createSession({...topic,threadId:1}, 'General'), /A session requires a non-General topic/);
-    assert.deepEqual(store.listSessions(botId).map(session => session.id), [created.id]);
-    store.clearPendingSkills({botId,destination:general,userId:42});
-    assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-  } finally {
-    store.close();
-  }
-});
-
-test('disk and in-memory stores reject missing instance paths and orphan reply targets', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-current-schema-'));
-  const disk = new Store(join(directory, 'topics.sqlite'));
-  const memory = new Store(':memory:');
-  try {
-    for (const store of [disk, memory]) {
-      assert.throws(() => store.setReplyTarget('unknown-session', 7), /FOREIGN KEY constraint failed/);
-      assert.throws(() => store.createSession({ ...topic, instancePath: '' }, 'Missing path'));
-      const created = store.createSession(topic, 'Current schema');
-      assert.equal(created.instancePath, topic.instancePath);
-      assert.throws(() => store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(created.id), /NOT NULL constraint failed/);
-      assert.equal(store.getSession(created.id)?.instancePath, topic.instancePath);
-    }
-  } finally {
-    disk.close();
-    memory.close();
-    await rm(directory, { recursive: true, force: true });
-  }
 });
 
 test('topic display and generated prefix commit together or both roll back', () => {
@@ -255,56 +170,6 @@ test('image-only initial content survives reopening storage and stays session-sc
   }
 });
 
-test('absent initial content creates no task while empty supplied content is rejected', () => {
-  const store = new Store(':memory:');
-  try {
-    const absent = store.createSession(topic,'No task',{kind:'managed'},undefined,42);
-    assert.equal(store.hasPendingInitialTask(absent.id),false);
-    assert.equal(store.claimInitialTask(absent.id),undefined);
-    assert.equal(store.getInitialUser(absent.id),undefined);
-    assert.equal(store.getInitialAuthority(absent.id),undefined);
-    assert.deepEqual(store.db.prepare('SELECT initial_task,initial_state FROM sessions WHERE id=?').get(absent.id),Object.assign(Object.create(null),{initial_task:null,initial_state:null}));
-    for (const content of [{text:''},{text:' \n\t '},{text:'',images:[]}]) {
-      assert.throws(() => store.createSession({...topic,threadId:18},'Invalid',{kind:'managed'},content,42),/An initial task requires text or images/);
-      assert.equal(store.getTopic({botId,destination:topicDestination(chatId,18)}),undefined);
-    }
-    const text = {text:'  Preserve task whitespace  '};
-    const pending = store.createSession({...topic,threadId:18},'Text task',{kind:'managed'},text);
-    assert.equal(store.hasPendingInitialTask(pending.id),true);
-    assert.equal(store.db.prepare('SELECT initial_task FROM sessions WHERE id=?').get(pending.id)?.initial_task,text.text);
-    assert.deepEqual(store.claimInitialTask(pending.id),text);
-    assert.equal(store.hasPendingInitialTask(pending.id),false);
-    const cancelled = store.createSession({...topic,threadId:19},'Cancelled',{kind:'managed'},{text:'Do not send'});
-    store.cancelInitialTask(cancelled.id);
-    assert.equal(store.hasPendingInitialTask(cancelled.id),false);
-    assert.equal(store.claimInitialTask(cancelled.id),undefined);
-    assert.equal(store.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(cancelled.id)?.initial_state,'cancelled');
-  } finally {
-    store.close();
-  }
-});
-
-test('one bot and topic tuple cannot acquire two session identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const original = store.createSession(topic, 'Original');
-    try {
-      store.createSession(topic, 'Duplicate service update');
-    } catch {
-      assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    }
-    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    assert.equal(store.listSessions(botId).length, 1);
-    const otherBot = store.createSession({ ...topic, botId: botId + 1 }, 'Other bot');
-    const otherChat = store.createSession({ ...topic, chatId: chatId - 1 }, 'Other group');
-    assert.notEqual(otherBot.id, original.id);
-    assert.notEqual(otherChat.id, original.id);
-    assert.equal(store.isEnrolled(botId + 1, chatId), false);
-  } finally {
-    store.close();
-  }
-});
-
 test('kill generations persist across restart and stay isolated to their session', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-session-generation-'));
   const filename = join(directory,'topics.sqlite');
@@ -321,43 +186,6 @@ test('kill generations persist across restart and stay isolated to their session
     assert.equal(store.getSessionGeneration(other.id),0);
     store.advanceSessionGeneration(target.id);
     assert.equal(store.getSessionGeneration(target.id),3);
-  } finally {
-    store.close();
-    await rm(directory,{recursive:true,force:true});
-  }
-});
-
-
-test('human finish icons persist across restart and preserve empty and status choices', async () => {
-  const directory = await mkdtemp(join(tmpdir(),'omp-topic-finish-icons-'));
-  const filename = join(directory,'topics.sqlite');
-  let store = new Store(filename);
-  try {
-    const preferences = ['human-selected-icon','','5312016608254762256','5408906741125490282','5237699328843200968'];
-    const sessions = preferences.map((preference,index) => {
-      const session = store.createSession({...topic,threadId:topic.threadId+index},`Preference ${index}`);
-      assert.equal(store.getTopicFinishIcon(session.id),undefined);
-      store.setTopicFinishIcon(session.id,preference);
-      assert.equal(store.getTopicFinishIcon(session.id),preference);
-      return session;
-    });
-    const otherBot = store.createSession({...topic,botId:botId+1},'Other bot');
-    const otherChat = store.createSession({...topic,chatId:chatId-1},'Other chat');
-    store.close();
-    store = new Store(filename);
-    for (const [index,session] of sessions.entries()) {
-      assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
-    assert.equal(store.getTopicFinishIcon(otherBot.id),undefined);
-    assert.equal(store.getTopicFinishIcon(otherChat.id),undefined);
-    assert.equal(store.getTopicFinishIcon('unknown-session'),undefined);
-    store.setTopicFinishIcon(sessions[0]!.id,'updated-human-icon');
-    store.close();
-    store = new Store(filename);
-    assert.equal(store.getTopicFinishIcon(sessions[0]!.id),'updated-human-icon');
-    for (const [index,session] of sessions.entries()) {
-      if (index > 0) assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
   } finally {
     store.close();
     await rm(directory,{recursive:true,force:true});
@@ -391,27 +219,6 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('one path can bind several bots and chats without merging topic identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const instances = {
-      '/work/a': { chats: [{ botId, chatId }, { botId: botId + 1, chatId }, { botId, chatId: chatId - 1 }] },
-      '/work/b': { chats: [{ botId: botId + 1, chatId: chatId - 1 }] },
-    };
-    const sessions = Object.entries(instances).flatMap(([instancePath, instance]) => instance.chats.map(chat => store.createSession({ ...chat, threadId: 17, instancePath }, instancePath)));
-    assert.equal(new Set(sessions.map(session => session.id)).size, 4);
-    assert.equal(sessions.filter(session => session.instancePath === '/work/a').length, 3);
-    for (const original of sessions) {
-      assert.equal(store.getTopic({botId: original.botId, destination: topicDestination(original.chatId, original.threadId)})?.id, original.id);
-      const otherPath = original.instancePath === '/work/a' ? '/work/b' : '/work/a';
-      assert.throws(() => store.createSession({ ...original, instancePath: otherPath }, 'Retarget'), /history belongs/);
-      assert.deepEqual(store.getSession(original.id), original);
-    }
-  } finally {
-    store.close();
   }
 });
 

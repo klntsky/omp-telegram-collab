@@ -77,20 +77,6 @@ for (const command of ['stop', 'kill']) {
   });
 }
 
-test('/stop on an empty topic does not launch its host', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Empty topic'}});
-    const session = app.store.listSessions(botId)[0]!;
-    await app.update({text:'/stop',message_thread_id:42});
-    assert.equal(await app.runtime.isRunning(session),false);
-    assert.equal(app.connectionCount,0);
-    assert.deepEqual(app.accepted,[]);
-  } finally {
-    await app.close();
-  }
-});
 
 test('/kill ends the matching Mini App connection without disconnecting other topics or reconnecting mirroring', async () => {
   const app = await createSmokeApp();

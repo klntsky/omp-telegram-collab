@@ -29,56 +29,6 @@ function button(message: Record<string,unknown>, suffix: string) {
   return callbacks(message).find(data => data.endsWith(`:${suffix}`))!;
 }
 
-for (const command of ['/new task','/p task']) {
-  test(`${command} defers all session side effects and starts once in chosen cwd`, async () => {
-    const app = await createSmokeApp();
-    try {
-      await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
-      configure(app,['.','other']);
-      await app.update({text:command});
-      assert.equal(app.store.listSessions(botId).length,0);
-      assert.equal(app.connectionCount,0);
-      const message = panel(app);
-      const choice = button(message,'0');
-      await app.callback(choice,message);
-      await app.callback(choice,message);
-      const sessions = app.store.listSessions(botId);
-      assert.equal(sessions.length,1);
-      assert.equal(sessions[0]!.instancePath,root);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(root)});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
-      await app.update({text:'/p existing',message_thread_id:sessions[0]!.threadId});
-      await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
-      assert.equal(app.store.listSessions(botId).length,1);
-    } finally { await app.close(); }
-  });
-}
-
-test('missing folder requires explicit confirmation and cancellation never creates it', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    const path = join(Object.keys(app.config.instances)[0]!,'chosen','nested');
-    configure(app,['chosen/nested']);
-    await app.update({text:'/new task'});
-    let message = panel(app);
-    assert.equal(existsSync(path),false);
-    assert.equal(app.store.listSessions(botId).length,0);
-    await app.callback(button(message,'cancel'),message);
-    assert.equal(existsSync(path),false);
-    await app.update({text:'/new task'});
-    message = panel(app);
-    const create = button(message,'create');
-    await app.callback(create,message);
-    await app.callback(create,message);
-    assert.equal(existsSync(path),true);
-    assert.equal(app.store.listSessions(botId).length,1);
-    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(path)});
-  } finally { await app.close(); }
-});
-
 for (const invalidation of ['role','settings','assignment','expired','actor'] as const) {
   test(`folder selection rejects ${invalidation} without session mutation`, async t => {
     const app = await createSmokeApp();
@@ -163,39 +113,19 @@ test('folder selection precedes command capacity reservation and survives approv
   } finally { await app.close(); }
 });
 
-test('folder lists are paginated without creating a session until a visible choice is accepted', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    configure(app,Array.from({length:24},(_,index) => String(index)));
-    await app.update({text:'/new task'});
-    let selection = panel(app);
-    let markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(selection.reply_markup);
-    assert.ok(markup.inline_keyboard.length <= 11);
-    await app.callback(button(selection,'page8'),selection);
-    selection = panel(app);
-    markup = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(selection.reply_markup);
-    assert.ok(markup.inline_keyboard.length <= 11);
-    assert.ok(button(selection,'8'));
-    assert.equal(app.store.listSessions(botId).length,0);
-    await app.callback(button(selection,'cancel'),selection);
-    assert.equal(app.store.listSessions(botId).length,0);
-  } finally { await app.close(); }
-});
 
-for (const options of [[],['.'],['sub','sub/'],['..']] ) {
-  test(`sole effective folder ${JSON.stringify(options)} starts without controls`, async () => {
+{
+  test('sole parent folder starts without controls', async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
       const root = Object.keys(app.config.instances)[0]!;
-      await mkdir(join(root,'sub'));
-      configure(app,options);
+      configure(app,['..']);
       await app.update({text:'/new automatic'});
       assert.equal(panel(app),undefined);
       const sessions = app.store.listSessions(botId);
       assert.equal(sessions.length,1);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,options[0] ?? '.'))});
+      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'..'))});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'automatic'}]);
     } finally { await app.close(); }

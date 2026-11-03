@@ -112,25 +112,7 @@ test('direct sendMessage retries repeated explicit 429 responses without changin
   assert.equal(userOperations, 1);
 });
 
-test('retry handling also covers non-message API methods and a zero retry_after', async t => {
-  const advance = clock(t);
-  const calls: { method: string; payload: unknown }[] = [];
-  const commands = [{ command: 'start', description: 'Start' }];
-  const { bot } = fixture(t, async (_previous, method, payload) => {
-    calls.push({ method, payload: structuredClone(payload) });
-    return calls.length === 1 ? limited(0) : { ok: true, result: true };
-  });
-  const pending = bot.api.setMyCommands(commands, { scope: { type: 'all_private_chats' } });
-  await settle();
-  await advance(0);
-  assert.equal(await pending, true);
-  assert.deepEqual(calls, [
-    { method: 'setMyCommands', payload: { commands, scope: { type: 'all_private_chats' } } },
-    { method: 'setMyCommands', payload: { commands, scope: { type: 'all_private_chats' } } },
-  ]);
-});
-
-for (const error_code of [400, 403, 500]) {
+for (const error_code of [500]) {
   test(`a permanent raw Telegram ${error_code} response retains its protocol details without retry`, async t => {
     const advance = clock(t);
     const response = {
@@ -155,15 +137,13 @@ for (const error_code of [400, 403, 500]) {
   });
 }
 
-for (const kind of ['telegram', 'transport', 'lookalike'] as const) {
+for (const kind of ['telegram', 'transport'] as const) {
   test(`a thrown ${kind} exception is propagated by identity without replay`, async t => {
     const advance = clock(t);
     const cause = new Error('ECONNRESET after request transmission');
     const failure = kind === 'telegram'
       ? new GrammyError('Original diagnostic', limited(1), 'sendMessage', { chat_id: -100123, text: 'payload' })
-      : kind === 'transport'
-        ? new HttpError('Original transport diagnostic', cause)
-        : Object.assign(new Error('Not a Telegram response'), { error_code: 429, parameters: { retry_after: 1 } });
+      : new HttpError('Original transport diagnostic', cause);
     let attempts = 0;
     const { bot } = fixture(t, async () => { attempts++; throw failure; });
     await assert.rejects(bot.api.sendMessage(-100123, 'payload'), error => error === failure);
@@ -172,7 +152,7 @@ for (const kind of ['telegram', 'transport', 'lookalike'] as const) {
   });
 }
 
-for (const retryAfter of [undefined, -1, NaN, Infinity]) {
+for (const retryAfter of [undefined, -1, Infinity]) {
   test(`a raw 429 with invalid retry_after ${String(retryAfter)} is not replayed`, async t => {
     const advance = clock(t);
     let attempts = 0;

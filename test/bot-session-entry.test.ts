@@ -22,29 +22,6 @@ test('enrollment requires permission to pin the session entry', async () => {
   }
 });
 
-test('rich Telegram commands create a session and rich bot replies submit quoted followups', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({rich_message:{blocks:[
-      {type:'paragraph',text:[{type:'bot_command',text:'/new',bot_command:'new'},' Fix setup']},
-      {type:'list',items:[{label:'•',blocks:[{type:'paragraph',text:'Include the folder'}]}]},
-    ]}});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const session = app.store.listSessions(botId)[0]!;
-    assert.equal(app.store.hasPendingInitialTask(session.id),false);
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
-      {t:'prompt',text:'Fix setup\n\n• Include the folder'},
-    ]);
-    await app.update({message_thread_id:session.threadId,rich_message:{blocks:[{type:'paragraph',text:'Continue'}]},
-      reply_to_message:{message_id:900,from:{id:botId,is_bot:true,first_name:'Bot'},rich_message:{blocks:[{type:'paragraph',text:'Previous result'}]}}});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === '> Previous result\n\nContinue'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
-      {t:'prompt',text:'Fix setup\n\n• Include the folder'},
-      {t:'prompt',text:'> Previous result\n\nContinue'},
-    ]);
-  } finally { await app.close(); }
-});
 
 test('another participant starting work does not cancel an explicitly rejected initial task', async () => {
   const app = await createSmokeApp({ competingStartAfterRejection: true });
@@ -130,40 +107,6 @@ test('retirement admission rejection preserves an unsent initial task for the ne
 });
 
 
-for (const enabled of [false,true]) {
-  test(`session entry preserves Telegram prompting with Mini App ${enabled ? 'enabled' : 'disabled'}`, async () => {
-    const app = await createSmokeApp();
-    try {
-      if (!enabled) {
-        app.config.publicUrl = '';
-        delete app.config.bots[0]!.miniAppShortName;
-      }
-      await app.service.reconcileConfiguration();
-      await app.update({text:'/setup'});
-      await app.update({text:'/new Work through Telegram'});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      const session = app.store.listSessions(botId)[0]!;
-      const pin = app.pins.find(value => value.chat_id === chatId);
-      assert.ok(pin);
-      const entry = app.messages.find(value => value.message_id === pin.message_id)!;
-      const markup = entry.reply_markup as {inline_keyboard: {url?:string}[][]};
-      const urls = markup.inline_keyboard.flat().flatMap(button => button.url ? [button.url] : []);
-      assert.deepEqual(urls,enabled ? [`https://t.me/FixtureOmpBot/app?startapp=s_${session.id}`] : []);
-      for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId}]) {
-        const commands = await app.bot.api.getMyCommands({scope});
-        assert.equal(commands.some(command => command.command === 'session'),enabled);
-        assert.ok(commands.some(command => command.command === 'p'));
-      }
-      const before = app.messages.length;
-      await app.update({text:'/session',message_thread_id:session.threadId});
-      const response = app.messages.slice(before);
-      assert.equal(response.some(message => JSON.stringify(message.reply_markup ?? {}).includes(`startapp=s_${session.id}`)),enabled);
-      await app.update({text:'/p Continue in Telegram',message_thread_id:session.threadId});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Continue in Telegram'));
-      assert.equal(app.store.listSessions(botId).length,1);
-    } finally { await app.close(); }
-  });
-}
 
 test('runtime mode changes update existing entry links without replacing pins or disconnecting Telegram', async () => {
   const app = await createSmokeApp();

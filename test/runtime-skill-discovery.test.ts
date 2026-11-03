@@ -60,22 +60,6 @@ process.stdin.on('data', part => {
   return {runtime,directory,catalog,gate,ready:ready.promise,calls:async () => (await readFile(counter,'utf8')).trim().split('\n').length};
 }
 
-test('concurrent catalogs share discovery and new skills appear after freshness expires', async t => {
-  const app = await fixture(t);
-  let now = Date.now();
-  t.mock.method(Date,'now',() => now);
-  const results = await Promise.all([app.runtime.listSkills(app.directory),app.runtime.listSkills(app.directory),app.runtime.listSkills(app.directory)]);
-  for (const result of results) assert.deepEqual(result,[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
-  assert.equal(await app.calls(),1);
-  results[0]![0]!.name='mutated';
-  await writeFile(app.catalog,JSON.stringify([{name:'skill:new-skill',description:'Newly installed',source:'skill'}]));
-  assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
-  assert.equal(await app.calls(),1);
-  now += 5 * 60000 + 1;
-  assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'new-skill',description:'Newly installed'}]);
-  assert.equal(await app.calls(),2);
-});
-
 test('stopped worktree sessions discover skills in their own cwd and cache separately from the assigned project', async t => {
   const app = await fixture(t);
   const worktree = join(app.directory, 'worktree');

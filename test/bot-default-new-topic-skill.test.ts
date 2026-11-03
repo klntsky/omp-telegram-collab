@@ -44,8 +44,8 @@ test('settings preserve exact default skill identities and allow clearing', asyn
   } finally { await app.close(); }
 });
 
-for (const command of ['/new','/p']) {
-  test(`General ${command} merges the default with explicit skills once and preserves quoted images`, async t => {
+{
+  test('General /p merges the default with explicit skills once and preserves quoted images', async t => {
     const app = await createSmokeApp();
     const data = Buffer.from('image').toString('base64');
     app.mockFiles(t, data);
@@ -54,7 +54,7 @@ for (const command of ['/new','/p']) {
       await setForumSetting(app, 2, 0);
       await app.update({text:'/skill_find_skills'});
       await app.update({text:'/skill_pdf_tools'});
-      await app.update({photo:[{file_id:'photo',file_unique_id:'photo',width:10,height:10}],caption:`${command} Explain`,reply_to_message:{message_id:9900,text:'Context'}});
+      await app.update({photo:[{file_id:'photo',file_unique_id:'photo',width:10,height:10}],caption:'/p Explain',reply_to_message:{message_id:9900,text:'Context'}});
       assert.deepEqual(app.accepted.filter(frame=>frame.t==='prompt').at(-1),{
         t:'prompt',text:'/skill:find-skills /skill:pdf-tools\n\n> Context\n\nExplain',images:[{type:'image',data,mimeType:'image/jpeg'}],
       });

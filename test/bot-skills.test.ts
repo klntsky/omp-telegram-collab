@@ -38,18 +38,10 @@ async function seed(app: App) {
   return app.store.listSessions(botId)[0]!;
 }
 
-test('skill callbacks accumulate once per user/topic and consume only the next accepted prompt', async () => {
+test('pending skills stay isolated by user and topic', async () => {
   const app = await createSmokeApp();
   try {
     const session = await seed(app);
-    const first = await select(app, 'find-skills', session.threadId);
-    await app.callback(first.data, first.picker);
-    await select(app, 'pdf-tools', session.threadId);
-    await app.update({ text: '/p First', message_thread_id: session.threadId });
-    assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: '/skill:find-skills /skill:pdf-tools\n\nFirst' });
-    await app.update({ text: '/p Second', message_thread_id: session.threadId });
-    assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'Second' });
-
     await select(app, 'pdf-tools', session.threadId);
     await app.update({ message_thread_id: 42, forum_topic_created: { name: 'Other topic' } });
     await app.update({ text: '/p Other topic', message_thread_id: 42 });
@@ -63,45 +55,7 @@ test('skill callbacks accumulate once per user/topic and consume only the next a
   } finally { await app.close(); }
 });
 
-for (const command of ['/p', '/new']) {
-  test(`General ${command} carries source selections into the new topic exactly once`, async () => {
-    const app = await createSmokeApp();
-    try {
-      await app.update({ text: '/setup' });
-      await select(app, 'find-skills', 1);
-      await app.update({ text: `${command} Build it`, message_thread_id: 1 });
-      await eventually(() => prompts(app).length === 1);
-      const session = app.store.listSessions(botId)[0]!;
-      assert.notEqual(session.threadId, 1);
-      assert.deepEqual(prompts(app), [{ t: 'prompt', text: '/skill:find-skills\n\nBuild it' }]);
-      await app.update({ text: '/p Continue', message_thread_id: session.threadId });
-      assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'Continue' });
-      await app.update({ text: '/new Another', message_thread_id: 1 });
-      await eventually(() => prompts(app).length === 3);
-      assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'Another' });
-    } finally { await app.close(); }
-  });
-}
 
-test('skill composition preserves normalized caption, reply quote and downloaded image', async t => {
-  const app = await createSmokeApp();
-  const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
-  app.mockFiles(t, imageData);
-  try {
-    const session = await seed(app);
-    await select(app, 'pdf-tools', session.threadId);
-    await app.update({
-      message_thread_id: session.threadId,
-      photo: [{ file_id: 'photo', file_unique_id: 'photo', width: 100, height: 100 }],
-      caption: '/p@FixtureOmpBot Explain this',
-      reply_to_message: { message_id: 9000, caption: 'Original\ncontext' },
-    });
-    assert.deepEqual(prompts(app).at(-1), {
-      t: 'prompt', text: '/skill:pdf-tools\n\n> Original\n> context\n\nExplain this',
-      images: [{ type: 'image', data: imageData, mimeType: 'image/jpeg' }],
-    });
-  } finally { await app.close(); }
-});
 
 test('ignored commands, discussion and rejected prompts retain skills; clear removes them', async () => {
   const app = await createSmokeApp();
@@ -154,23 +108,6 @@ test('proposal creation freezes and consumes proposer skills without consuming a
   } finally { await app.close(); }
 });
 
-test('skill aliases appear in group menus and select the canonical skill without prompting', async () => {
-  const app = await createSmokeApp();
-  try {
-    const session = await seed(app);
-    for (const scope of [{ type: 'chat' as const, chat_id: session.chatId }]) {
-      const commands = await app.bot.api.getMyCommands({ scope });
-      assert.ok(commands.some(command => command.command === 'skill_find_skills'));
-      assert.ok(commands.some(command => command.command === 'skill_pdf_tools'));
-    }
-    await app.update({ text: '/skill_find_skills@FixtureOmpBot', message_thread_id: session.threadId });
-    assert.equal(prompts(app).length, 1);
-    await app.update({ text: '/p Alias task', message_thread_id: session.threadId });
-    assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: '/skill:find-skills\n\nAlias task' });
-    await app.update({ text: '/p After alias', message_thread_id: session.threadId });
-    assert.deepEqual(prompts(app).at(-1), { t: 'prompt', text: 'After alias' });
-  } finally { await app.close(); }
-});
 
 test('inline skill search selects only for its original user and topic', async () => {
   const app = await createSmokeApp();

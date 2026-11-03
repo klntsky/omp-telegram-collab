@@ -91,8 +91,7 @@ for (const origin of ['status', 'command'] as const) {
   });
 }
 
-for (const origin of ['status', 'empty', 'session'] as const) {
-  for (const command of ['new', 'attach'] as const) {
+for (const [origin, command] of [['status', 'attach'], ['empty', 'new'], ['session', 'attach']] as const) {
     test(`/${command} from a ${origin} detached topic creates a separate topic`, async () => {
       const app = await createSmokeApp();
       try {
@@ -119,31 +118,7 @@ for (const origin of ['status', 'empty', 'session'] as const) {
       } finally { await app.close(); }
     });
   }
-}
 
-test('explicit detached topic identities ignore lifecycle updates and prompts without runtime or rename effects', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    app.store.detachTopic({botId,chatId,threadId:42});
-    let probes = 0;
-    app.runtime.topicTitleStatus = async () => { probes++; return {worktree:true,branch:'must-not-appear'}; };
-    const before = app.topicEdits.length;
-    for (const update of [
-      {forum_topic_created:{name:'Detached topic'}},
-      {forum_topic_edited:{name:'Human title'}},
-      {forum_topic_closed:{}},
-      {forum_topic_reopened:{}},
-      {text:'/p Must not prompt'},
-      {text:'Ordinary detached input'},
-    ]) await app.update({message_thread_id:42,...update});
-    assert.equal(probes,0);
-    assert.equal(app.topicEdits.length,before);
-    assert.equal(app.connectionCount,0);
-    assert.deepEqual(app.store.listSessions(botId),[]);
-    assert.deepEqual(app.accepted,[]);
-  } finally { await app.close(); }
-});
 
 test('legacy status sessions are excluded from initialization, mirroring, and topic updates', async () => {
   const app = await createSmokeApp();

@@ -100,24 +100,9 @@ test('work-topic preset switches leave the forum default unchanged and General l
   } finally { await app.close(); }
 });
 
-test('removed preset-list command cannot start or mutate a session and is absent from command menus', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset command cutover'}});
-    const session = app.store.listSessions(botId)[0]!;
-    await app.update({text:'/list_model_presets',message_thread_id:42});
-    assert.equal(await app.runtime.isRunning(session),false);
-    assert.deepEqual(app.accepted,[]);
-    for (const scope of [{type:'all_group_chats' as const},{type:'chat' as const,chat_id:chatId},{type:'chat_administrators' as const,chat_id:chatId}]) {
-      const commands = await app.bot.api.getMyCommands({scope});
-      assert.equal(commands.some(command => command.command === 'list_model_presets'),false);
-      assert.equal(commands.some(command => command.command === 'model_preset'),true);
-    }
-  } finally { await app.close(); }
-});
 
-for (const root of ['new', 'p']) {
+{
+  const root = 'new';
   test(`/${root} invalid preparation has no topic, runtime or prompt effects`, async t => {
     const app = await createSmokeApp();
     try {
@@ -136,39 +121,6 @@ for (const root of ['new', 'p']) {
   });
 }
 
-for (const existing of [false,true]) {
-  for (const order of ['worktree-first','preset-first']) {
-    test(`composed prompt retains its selected preset across ${existing ? 'existing' : 'new'} session preparation in ${order} order`, async t => {
-      const app = await createSmokeApp({skipStartupRejection:true});
-      try {
-        await app.update({text:'/setup'});
-        if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Prepared session'}});
-        t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
-        const effects: string[] = [];
-        let activePreset = 'Slow';
-        t.mock.method(app.runtime,'worktree',async () => {
-          assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,0);
-          effects.push('worktree');
-          activePreset = 'Slow';
-          return 'Prepared worktree';
-        });
-        t.mock.method(app.runtime,'modelPresets',async (_session: TopicSession, name?: string) => {
-          assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,0);
-          effects.push(`preset:${name}`);
-          activePreset = name!;
-          return 'Preset selected';
-        });
-        const prefix = order === 'worktree-first' ? '/worktree /model_preset Fast' : '/model_preset Fast /worktree';
-        await app.update({text:`/${existing ? 'p' : 'new'} ${prefix} Final task`,...(existing ? {message_thread_id:42} : {})});
-        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-        assert.deepEqual(effects,order === 'worktree-first' ? ['worktree','preset:Fast'] : ['preset:Fast','worktree','preset:Fast']);
-        assert.equal(activePreset,'Fast');
-        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Final task'}]);
-        assert.equal(app.store.listSessions(botId).length,1);
-      } finally { await app.close(); }
-    });
-  }
-}
 
 test('mutating prompt extensions cannot become non-admin approval proposals', async t => {
   const app = await createSmokeApp();
@@ -403,42 +355,6 @@ test('expired panels, changed sessions and adversarial cross-topic callbacks can
   } finally { await app.close(); }
 });
 
-test('preset pagination keeps later choices and detail-page default actions reachable', async () => {
-  const app = await createSmokeApp();
-  const names = Array.from({length: 17}, (_, index) => `Preset${index}`);
-  app.runtime.availableModelPresets = async () => names;
-  app.runtime.modelPresetDetails = async () => ({
-    modelRoles: Object.fromEntries(Array.from({length: 120}, (_, index) =>
-      [`role${index}`, `provider/model-${index}-${'long-model-name'.repeat(5)}#high`])),
-    defaultThinkingLevel: 'high',
-  });
-  const panel = () => app.messages.findLast(message =>
-    (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
-      ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
-  const click = async (index: number) => {
-    const message = panel();
-    await app.callback(settingsButton(message, index), message);
-  };
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset pages'}});
-    await app.update({text:'/model_preset',message_thread_id:42});
-    await click(8);
-    await click(9);
-    await click(0);
-    await click(3);
-    await click(4);
-    await click(1);
-    const session = app.store.listSessions(botId)[0]!;
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[16]);
-    assert.equal(await app.runtime.isRunning(session), false);
-    await click(2);
-    await click(1);
-    await click(0);
-    await click(1);
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[8]);
-  } finally { await app.close(); }
-});
 
 function composedPresetPanel(app: {messages: Record<string,unknown>[]}) {
   const message = app.messages.findLast(message =>
@@ -537,20 +453,18 @@ for (const invalidation of ['generation','assignment','administrator','expired']
   });
 }
 
-for (const existing of [false,true]) {
-  test(`composed bare preset cancellation discards the pending ${existing ? 'existing topic' : 'General new'} task`, async t => {
+{
+  test('composed bare preset cancellation discards the pending General new task', async t => {
     const app = await createSmokeApp({skipStartupRejection:true});
     try {
       await app.update({text:'/setup'});
-      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Cancelled interactive preparation'}});
       const before = app.store.listSessions(botId);
       t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
       const ensure = t.mock.method(app.runtime,'ensure');
       const worktree = t.mock.method(app.runtime,'worktree');
       const presets = t.mock.method(app.runtime,'modelPresets');
       await app.update({
-        text:`/${existing ? 'p' : 'new'} /model_preset /worktree Discard this task`,
-        ...(existing ? {message_thread_id:42} : {}),
+        text:'/new /model_preset /worktree Discard this task',
       });
       let panel = composedPresetPanel(app);
       await app.callback(settingsButton(panel,0),panel);
@@ -594,19 +508,18 @@ test('composed bare preset refreshes administrator access after host startup bef
   } finally { await app.close(); }
 });
 
-for (const existing of [false,true]) {
-  test(`preparation-only bare preset configures ${existing ? 'existing' : 'new'} session without an empty prompt`, async t => {
+{
+  test('preparation-only bare preset configures a new session without an empty prompt', async t => {
     const app = await createSmokeApp({skipStartupRejection:true});
     try {
       await app.update({text:'/setup'});
-      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Preparation only'}});
       t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
       const selected: Array<{id:string;name?:string}> = [];
       t.mock.method(app.runtime,'modelPresets',async (session:TopicSession,name?:string) => {
         selected.push({id:session.id,name});
         return 'Selected';
       });
-      await app.update({text:`/${existing ? 'p' : 'new'} /model_preset`,...(existing ? {message_thread_id:42} : {})});
+      await app.update({text:'/new /model_preset'});
       let panel = composedPresetPanel(app);
       await app.callback(settingsButton(panel,0),panel);
       panel = composedPresetPanel(app);

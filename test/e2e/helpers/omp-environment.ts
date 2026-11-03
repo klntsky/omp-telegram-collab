@@ -1,14 +1,19 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { TestContext } from 'node:test';
-import { formatWithOptions } from 'node:util';
+import { formatWithOptions, promisify } from 'node:util';
+import { z } from 'zod';
 import { startLocalRelay } from '../../../scripts/local-relay.js';
-import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmStep } from './fake-llm-provider.js';
+import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from './fake-llm-provider.js';
+import { readSessionHistory } from './model-tasks.js';
+import type { TopicSession } from '../../../shared/contracts.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
-  steps: readonly FakeLlmStep[];
+  scenarios: readonly FakeLlmScenario[];
 }) {
   const root = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-'));
   const logDirectory = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-logs-'));
@@ -65,12 +70,17 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
       }
       for (const session of sessions) {
         const directory = join(sessionsDir, session);
-        for (const filename of await readdir(directory)) {
-          if (filename === 'history.jsonl' || /^terminal\.log(?:\.1)?$/.test(filename)) {
-            const destination = join(logDirectory, 'sessions', session);
+        const filenames = await readdir(directory);
+        const destination = join(logDirectory, 'sessions', session);
+        for (const filename of filenames) {
+          if (/^terminal\.log(?:\.1)?$/.test(filename)) {
             await mkdir(destination, { recursive: true, mode: 0o700 });
             await cp(join(directory, filename), join(destination, filename));
           }
+        }
+        if (filenames.includes('binding.json')) {
+          await mkdir(destination, { recursive: true, mode: 0o700 });
+          await writeFile(join(destination, 'history.jsonl'), await readSessionHistory(dataDir, session));
         }
       }
     } catch (error) { log('artifact-copy-error', error); errors.push(error); }
@@ -86,14 +96,40 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   for (const directory of [workspace, dataDir, agent, ...Object.values(xdg).map(directory => join(directory, 'omp'))]) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
   }
-  provider = await startFakeLlmProvider({ steps: options.steps, log });
+  const execute = promisify(execFile);
+  const git = (cwd: string, ...args: string[]) => step('git', async () => {
+    log('git.command', { cwd, args });
+    const { stdout, stderr } = await execute('git', args, {
+      cwd, timeout: 10000, env: { PATH: process.env.PATH, HOME: home, XDG_CONFIG_HOME: xdg.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: '1' },
+    });
+    log('git.result', { cwd, args, stdout, stderr });
+    return stdout.trim();
+  });
+  await git(workspace, 'init', '--initial-branch=main');
+  await git(workspace, 'config', 'user.name', 'E2E Fixture');
+  await git(workspace, 'config', 'user.email', 'fixture@example.test');
+  await git(workspace, 'config', 'commit.gpgsign', 'false');
+  await git(workspace, 'config', 'init.defaultBranch', 'main');
+  await git(workspace, 'commit', '--allow-empty', '-m', 'Initialize E2E workspace');
+  const assertWorktree = (session: TopicSession, branch = `t.me/c/${String(session.chatId).slice(4)}/${session.threadId}`) => step('omp.worktree', async () => {
+    assert.ok(session.runtime.kind === 'managed' && session.runtime.cwd);
+    const cwd = session.runtime.cwd;
+    assert.equal(session.instancePath, workspace);
+    assert.ok(cwd.startsWith(`${dirname(workspace)}${sep}`));
+    assert.notEqual(cwd, workspace);
+    assert.equal(await git(cwd, 'branch', '--show-current'), branch);
+  });
+  const skillDirectory = join(agent, 'skills', 'e2e-review');
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: e2e-review\ndescription: Review the E2E task\n---\nPreserve the e2e-skill-loaded marker when reviewing this task.\n');
+  provider = await startFakeLlmProvider({ scenarios: options.scenarios, log });
   relay = await startLocalRelay();
   const selectedModel = 'e2e/e2e-model';
   await writeFile(join(agent, 'models.yml'), JSON.stringify({ providers: { e2e: {
     baseUrl: provider.baseUrl,
     api: 'openai-completions',
     apiKey: provider.apiKey,
-    models: [{ id: 'e2e-model', name: 'E2E Model', reasoning: false, input: ['text'], supportsTools: true,
+    models: [{ id: 'e2e-model', name: 'E2E Model', reasoning: false, input: ['text', 'image'], supportsTools: true,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1024 }],
   } } }), { mode: 0o600 });
   await writeFile(join(agent, 'config.yml'), JSON.stringify({
@@ -114,13 +150,32 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const assignments = Object.entries(env).map(([key, value]) => quote(`${key}=${value}`));
   const lifecycleKeys = ['OMP_TELEGRAM_SESSION_DIR', 'OMP_TELEGRAM_DEFAULT_PRESET', 'OMP_TELEGRAM_SUPERVISOR_PID'];
   const forwarded = lifecycleKeys.map(key => `"${key}=\${${key}-}"`);
-  await writeFile(executable, `#!/bin/sh\nexec /usr/bin/env -i ${assignments.join(' ')} ${forwarded.join(' ')} /bin/bash -c 'exec -a \"$0\" \"$@\"' ${quote(executable)} ${quote(actualOmp.includes('/') ? resolve(actualOmp) : actualOmp)} \"$@\"\n`, { mode: 0o700 });
+  const launch = `command=$1
+shift
+args=("$@")
+headless=false
+for value in "\${args[@]}"; do
+  if [[ "$value" == "--mode" ]]; then headless=true; fi
+done
+if [[ "$headless" == false ]]; then
+  for index in "\${!args[@]}"; do
+    if [[ "\${args[index]}" == "--tools" ]]; then args[index+1]=write,ask; fi
+  done
+fi
+exec -a "$0" "$command" "\${args[@]}"`;
+  await writeFile(executable, `#!/bin/sh\nexec /usr/bin/env -i ${assignments.join(' ')} ${forwarded.join(' ')} /bin/bash -c ${quote(launch)} ${quote(executable)} ${quote(actualOmp.includes('/') ? resolve(actualOmp) : actualOmp)} \"$@\"\n`, { mode: 0o700 });
+  const listHosts = () => step('omp.hosts', async () => {
+    const { stdout } = await execute(executable, ['collab', 'list', '--json'], { cwd: workspace, timeout: 10000 });
+    return z.object({ hosts: z.array(z.object({
+      sessionId: z.string(), cwd: z.string(), pid: z.number(),
+    })) }).parse(JSON.parse(stdout)).hosts;
+  });
   const args = [
-    '--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title', '--no-lsp', '--no-pty',
+    '--no-extensions', '--no-rules', '--no-context-files', '--no-title', '--no-lsp', '--no-pty',
     '--model', selectedModel, '--smol', selectedModel, '--slow', selectedModel,
     '--thinking', 'off', '--tools', 'write', '--approval-mode', 'yolo',
-    '--system-prompt', 'Complete the requested task with the provided write tool.',
+    '--system-prompt', 'Complete the requested task with the available tools.',
   ];
   log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl, relayUrl: relay.url });
-  return { workspace, dataDir, executable, args, relayUrl: relay.url, provider, log, step, formatDiagnostic, logDirectory, registerSecret };
+  return { workspace, dataDir, executable, args, relayUrl: relay.url, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
 }

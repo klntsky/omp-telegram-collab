@@ -1,37 +1,28 @@
 import type { TestContext } from 'node:test';
 import { join } from 'node:path';
 import { Bot } from 'grammy';
+import type { Update } from 'grammy/types';
 import type { Message } from '@mtcute/node';
-import type { HostFrame } from '@oh-my-pi/pi-wire';
+import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
 import { connectCollab } from '../../../src/collab.js';
 import { BotService } from '../../../src/bot.js';
-import { emptyConfig, writeConfig } from '../../../src/config.js';
+import { emptyConfig, readConfig, writeConfig } from '../../../src/config.js';
 import { OmpRuntime } from '../../../src/runtime.js';
 import { Store } from '../../../src/store.js';
-import type { FakeLlmStep } from './fake-llm-provider.js';
+import type { FakeLlmScenario } from './fake-llm-provider.js';
 import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
+import { bounded } from './async.js';
 
 const operationTimeoutMs = 120_000;
 const cleanupTimeoutMs = 30_000;
 
 type Cleanup = () => unknown | Promise<unknown>;
 
-async function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  const cancelled = Promise.withResolvers<never>();
-  const abort = () => cancelled.reject(signal.reason);
-  signal.addEventListener('abort', abort, { once: true });
-  try {
-    return await Promise.race([operation, cancelled.promise]);
-  } finally {
-    signal.removeEventListener('abort', abort);
-  }
-}
 
 export async function setupCollaborationTest(
   t: Pick<TestContext, 'after' | 'signal' | 'diagnostic' | 'mock'>,
-  options: { steps: readonly FakeLlmStep[] },
+  options: { scenarios: readonly FakeLlmScenario[] },
 ) {
   const telegramCleanup: Cleanup[] = [];
   const ompCleanup: Cleanup[] = [];
@@ -90,6 +81,7 @@ export async function setupCollaborationTest(
     after: ((run: Cleanup) => { ompCleanup.push(run); }) as TestContext['after'],
   }, options);
   log = omp.log;
+  void omp.provider.failure.catch(fail);
   for (const method of ['log', 'error'] as const) {
     const original = console[method].bind(console);
     const mocked = t.mock.method(console, method, (...args: unknown[]) => {
@@ -117,31 +109,46 @@ export async function setupCollaborationTest(
     startupTimeoutMs: 60_000,
   };
   writeConfig(config);
-  store = new Store(':memory:');
+  const databasePath = join(omp.dataDir, 'telegram.sqlite');
+  store = new Store(databasePath);
   runtime = new OmpRuntime(config);
-  const bot = new Bot(telegram.bot.token, { client: { environment: 'test' } });
   const hostFrames: HostFrame[] = [];
+  const guestFrames: GuestFrame[] = [];
+  const updates: Update[] = [];
+  const handledMessages = new Set<number>();
   const apiCalls: { method: string; payload: unknown; result: unknown }[] = [];
   let changed = Promise.withResolvers<void>();
-  bot.api.config.use(async (previous, method, payload, signal) => {
-    omp.log('telegram.api.request', { method, payload });
-    try {
-      const result = await previous(method, payload, signal);
-      apiCalls.push({ method, payload, result });
-      const notification = changed;
-      changed = Promise.withResolvers<void>();
-      notification.resolve();
-      omp.log('telegram.api.result', { method, result });
-      return result;
-    } catch (error) {
-      omp.log('telegram.api.error', { method, error });
-      throw error;
-    }
-  });
-  bot.use(async (ctx, next) => {
-    omp.log('telegram.update', ctx.update);
-    await next();
-  });
+  function instrumentedBot() {
+    const value = new Bot(telegram.bot.token, { client: { environment: 'test' } });
+    value.api.config.use(async (previous, method, payload, signal) => {
+      omp.log('telegram.api.request', { method, payload });
+      try {
+        const result = await previous(method, payload, signal);
+        apiCalls.push({ method, payload, result });
+        const notification = changed;
+        changed = Promise.withResolvers<void>();
+        notification.resolve();
+        omp.log('telegram.api.result', { method, result });
+        return result;
+      } catch (error) {
+        omp.log('telegram.api.error', { method, error });
+        throw error;
+      }
+    });
+    value.use(async (ctx, next) => {
+      updates.push(ctx.update);
+      omp.log('telegram.update', ctx.update);
+      await next();
+      if (ctx.chat?.id === telegram.forum.chatId && ctx.message) {
+        handledMessages.add(ctx.message.message_id);
+        const notification = changed;
+        changed = Promise.withResolvers<void>();
+        notification.resolve();
+      }
+    });
+    return value;
+  }
+  let bot = instrumentedBot();
   const connect: typeof connectCollab = async (binding, name, handlers, signal) => {
     try {
       const connection = await connectCollab(binding, name, {
@@ -160,6 +167,7 @@ export async function setupCollaborationTest(
       }, signal);
       return {
         send(frame) {
+          guestFrames.push(frame);
           omp.log('collab.guest.frame', frame);
           try { connection.send(frame); } catch (error) {
             omp.log('collab.send.error', { error });
@@ -196,20 +204,24 @@ export async function setupCollaborationTest(
     telegram.user.client.onNewMessage.remove(receive);
     telegram.user.client.onError.remove(fail);
   };
-  const ready = Promise.withResolvers<void>();
-  polling = service.start(() => {
-    try {
-      service!.startBackground();
-      ready.resolve();
-    } catch (error) {
-      fail(error);
-      throw error;
-    }
-  });
-  void polling.then(() => {
-    if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
-  }, error => { if (!closing) fail(error); });
-  await omp.step('application.start', () => operation(ready.promise));
+  async function startService(): Promise<void> {
+    const ready = Promise.withResolvers<void>();
+    const activeService = service!;
+    polling = activeService.start(() => {
+      try {
+        activeService.startBackground();
+        ready.resolve();
+      } catch (error) {
+        fail(error);
+        throw error;
+      }
+    });
+    void polling.then(() => {
+      if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
+    }, error => { if (!closing) fail(error); });
+    await operation(ready.promise);
+  }
+  await omp.step('application.start', startService);
   async function waitForCondition(predicate: () => boolean): Promise<void> {
     const signal = AbortSignal.any([t.signal, failed.signal, AbortSignal.timeout(operationTimeoutMs)]);
     for (;;) {
@@ -229,19 +241,56 @@ export async function setupCollaborationTest(
     return found!;
   }
 
+  function send(text: string, threadId?: number): Promise<Message> {
+    t.signal.throwIfAborted();
+    failed.signal.throwIfAborted();
+    return omp.step('telegram.user.send', async () => {
+      omp.log('telegram.user.send.request', { text, threadId });
+      const sent = await operation(telegram.user.client.sendText(
+        telegram.forum.chat, text, threadId === undefined ? undefined : { threadId },
+      ));
+      omp.log('telegram.user.send.result', sent.raw);
+      return sent;
+    });
+  }
+
   return {
-    telegram, omp, config, store, runtime, service, bot, hostFrames, apiCalls,
-    send(text: string, threadId?: number): Promise<Message> {
-      t.signal.throwIfAborted();
-      failed.signal.throwIfAborted();
-      return omp.step('telegram.user.send', async () => {
-        omp.log('telegram.user.send.request', { text, threadId });
-        const sent = await operation(telegram.user.client.sendText(
-          telegram.forum.chat, text, threadId === undefined ? undefined : { threadId },
-        ));
-        omp.log('telegram.user.send.result', sent.raw);
-        return sent;
+    telegram, omp, config, hostFrames, guestFrames, apiCalls, updates,
+    get runtime() { return runtime!; },
+    get store() { return store!; },
+    get service() { return service!; },
+    get bot() { return bot; },
+    restart(): Promise<void> {
+      return omp.step('application.restart', async () => {
+        closing = true;
+        await service!.close();
+        await polling;
+        await runtime!.close();
+        store!.close();
+        Object.assign(config, readConfig(config.configPath));
+        store = new Store(databasePath);
+        runtime = new OmpRuntime(config);
+        bot = instrumentedBot();
+        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime: runtime!, bot, connect, topicActivityEmojis });
+        closing = false;
+        await startService();
       });
+    },
+    setFolderOptions(options: string[]): void {
+      const updated = readConfig(config.configPath);
+      const chat = updated.instances[omp.workspace]!.chats[0]!;
+      chat.folder_options = options;
+      writeConfig(updated);
+      Object.assign(config.instances[omp.workspace]!.chats[0]!, chat);
+    },
+    send,
+    async sendAndWait(text: string, threadId?: number): Promise<Message> {
+      const sent = await send(text, threadId);
+      await waitForCondition(() => handledMessages.has(sent.id));
+      return sent;
+    },
+    waitForMessageHandled(messageId: number): Promise<void> {
+      return waitForCondition(() => handledMessages.has(messageId));
     },
     waitForCondition,
     waitForMessage,

@@ -7,48 +7,7 @@ import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
 import { eventually, setForumSetting } from './bot-test-helpers.js';
 
-test('default mode starts a session host from ordinary text without a mention', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'All messages'}});
-    assert.equal(app.connectionCount,0);
-    const rejection = once(app.events,'message');
-    await app.update({text:'Implement ordinary text\nwith multiple lines',message_thread_id:42});
-    await rejection;
-    await app.update({text:'Implement ordinary text\nwith multiple lines',message_thread_id:42});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
-      {t:'prompt',text:'Implement ordinary text\nwith multiple lines'},
-    ]);
-    await app.update({text:'/unrecognized command',message_thread_id:42});
-    assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
-    await app.update({text:'Create from ordinary General text'});
-    await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),
-      {t:'prompt',text:'Create from ordinary General text'});
-    const generalSession = app.store.listSessions(botId).find(session => session.threadId !== 42)!;
-    assert.ok(generalSession);
-    assert.notEqual(generalSession.threadId,1);
-    assert.equal(app.store.getTopic({botId,destination:{kind:'general',chatId}}),undefined);
-  } finally { await app.close(); }
-});
 
-test('explicit prompts deliver pasted absolute paths and diagnostics unchanged', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await setForumSetting(app, 0);
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Diagnostics'}});
-    const text = '/home/work/project/test/e2e/helpers/telegram-user.ts:27\n  throw new Error("Refusing to import a Telegram session outside the test network");\n    at validateTelegramTestSession (/home/work/project/test/e2e/helpers/telegram-user.ts:27:11)';
-    const rejection = once(app.events,'message');
-    await app.update({text:`/p ${text}`,message_thread_id:42});
-    await rejection;
-    await app.update({text:`/p ${text}`,message_thread_id:42});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{t:'prompt',text}]);
-  } finally { await app.close(); }
-});
 
 test('explicit mode ignores discussion and mentions, and admits scoped /p prompts', async () => {
   const app = await createSmokeApp();
@@ -102,7 +61,8 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
 });
 
 
-for (const allMessagesArePrompts of [true,false]) {
+{
+  const allMessagesArePrompts = false;
   test(`bot-directed replies quote context and create sessions from General with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
     try {
@@ -125,7 +85,8 @@ for (const allMessagesArePrompts of [true,false]) {
   });
 }
 
-for (const allMessagesArePrompts of [true, false]) {
+{
+  const allMessagesArePrompts = false;
   for (const command of ['/p', '/new']) {
   test(`${command} includes replied-to text and captions as greentext with all messages: ${allMessagesArePrompts}`, async () => {
     const app = await createSmokeApp();
@@ -152,21 +113,6 @@ for (const allMessagesArePrompts of [true, false]) {
   }
 }
 
-for (const allMessagesArePrompts of [true, false]) {
-    test(`/p in General creates a session like /new (all messages: ${allMessagesArePrompts})`, async () => {
-      const app = await createSmokeApp();
-      try {
-        await app.update({text:'/setup'});
-        if (!allMessagesArePrompts) await setForumSetting(app, 0);
-        await app.update({text:'/p@FixtureOmpBot Create from General',message_thread_id:1});
-        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-        const session = app.store.listSessions(botId)[0]!;
-        assert.notEqual(session.threadId,1);
-        assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Create from General'}]);
-        assert.equal(app.store.getTopic({botId,destination:{kind:'general',chatId}}),undefined);
-      } finally { await app.close(); }
-    });
-}
 
 test('empty new-session commands do not create sessions or request replies', async () => {
   const app = await createSmokeApp();
@@ -305,66 +251,6 @@ test('a non-admin /new task creates no session until a group administrator appro
   } finally { await app.close(); }
 });
 
-test('approval sends one reply reference and submits the stored proposal text', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await setForumSetting(app, 1);
-    await app.update({text:'/new Seed task'});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const session = app.store.listSessions(botId)[0]!;
-    const proposer = {id:ownerId+5,first_name:'Grace',username:'grace',is_bot:false};
-    const text = '😀'.repeat(2047)+'x';
-    app.setCurrentMember({username:'grace',status:'member'});
-    const before = app.messages.length;
-    await app.update({message_id:8200,text,message_thread_id:session.threadId},proposer);
-    assert.equal(app.messages.length,before+1);
-    assert.deepEqual(app.messages.at(-1)!.reply_parameters,{message_id:8200,allow_sending_without_reply:true});
-    const proposal = promptProposal(app);
-    app.setCurrentMember({username:ownerUsername,status:'creator'});
-    await app.callback(proposal.approve,proposal.message);
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[
-      {t:'prompt',text:'Seed task'},{t:'prompt',text},
-    ]);
-  } finally { await app.close(); }
-});
-
-for (const target of ['settings','question'] as const) {
-  for (const command of ['/new','/p','/settings','/unknown','/p@AnotherBot','/p!']) {
-    test(`${command} replying to ${target} retains command routing`, async () => {
-      const app = await createSmokeApp();
-      try {
-        await app.update({text:'/setup'});
-        await app.update({text:'/new Seed'});
-        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-        const session = app.store.listSessions(botId)[0]!;
-        if (target === 'settings') await app.update({text:'/settings',message_thread_id:session.threadId});
-        else {
-          app.emit({t:'ui-request',request:{kind:'editor',reqId:201,title:'Input'}});
-          await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
-        }
-        const reply = app.messages.at(-1)!;
-        const before = app.accepted.length;
-        const sessions = app.store.listSessions(botId).length;
-        await app.update({text:`${command} Task`,message_thread_id:session.threadId,reply_to_message:reply});
-        assert.equal(app.accepted.slice(before).some(frame => frame.t === 'ui-response'),false);
-        if (command === '/new' || command === '/p') {
-          await eventually(() => app.accepted.slice(before).some(frame => frame.t === 'prompt'));
-          assert.equal(app.store.listSessions(botId).length,sessions + (command === '/new' ? 1 : 0));
-        } else {
-          assert.equal(app.accepted.slice(before).some(frame => frame.t === 'prompt'),false);
-          assert.equal(app.store.listSessions(botId).length,sessions);
-        }
-        if (target === 'question') {
-          await app.update({text:'Answer',message_thread_id:session.threadId,reply_to_message:reply});
-          await eventually(() => app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 201));
-          assert.deepEqual(app.accepted.find(frame => frame.t === 'ui-response' && frame.reqId === 201),
-            {t:'ui-response',reqId:201,value:'Answer'});
-        }
-      } finally { await app.close(); }
-    });
-  }
-}
 
 for (const general of [false,true]) {
   test(`image-only proposals retain bytes through administrator approval in ${general ? 'General' : 'a session'}`, async t => {

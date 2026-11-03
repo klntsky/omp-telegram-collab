@@ -1,10 +1,12 @@
 import { randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import TelegramAbortController from 'abort-controller';
 import { Bot, type Api } from 'grammy';
-import { Chat, Conversation, type Message, type tl } from '@mtcute/node';
+import { Chat, Conversation, tl, type Message } from '@mtcute/node';
 import { installTelegramRetry } from '../../../src/telegram-retry.js';
 import type { TelegramTestUser } from './telegram-user.js';
 import { combineTelegramErrors } from './errors.js';
+import { bounded } from './async.js';
 
 export interface TelegramTestBot {
   id: number;
@@ -91,15 +93,45 @@ export async function createTelegramTestBot(user: TelegramTestUser, options: {
 export async function createTelegramTestForum(user: TelegramTestUser, bot: TelegramTestBot, options: {
   title?: string;
 } = {}): Promise<TelegramTestForum> {
-  const updates = await user.call({
-    _: 'channels.createChannel', title: options.title ?? uniqueTelegramTestName(),
-    about: 'Disposable OMP Telegram end-to-end test forum', megagroup: true, forum: true,
-  });
-  if (updates._ !== 'updates' && updates._ !== 'updatesCombined') throw new Error(`Unexpected forum creation response: ${updates._}`);
-  user.client.handleClientUpdate(updates);
-  const raw = updates.chats.find((chat): chat is tl.RawChannel => chat._ === 'channel' && Boolean(chat.forum));
-  if (!raw) throw new Error('Telegram did not return the created forum channel');
-  const chat = new Chat(raw);
+  const title = options.title ?? uniqueTelegramTestName();
+  const startedAt = Math.floor(Date.now() / 1000);
+  let chat: Chat | undefined;
+  for (let attempt = 0; !chat; attempt++) {
+    user.signal.throwIfAborted();
+    try {
+      const updates = await user.call({
+        _: 'channels.createChannel', title,
+        about: 'Disposable OMP Telegram end-to-end test forum', megagroup: true, forum: true,
+      });
+      if (updates._ !== 'updates' && updates._ !== 'updatesCombined') throw new Error(`Unexpected forum creation response: ${updates._}`);
+      user.client.handleClientUpdate(updates);
+      const raw = updates.chats.find((value): value is tl.RawChannel => value._ === 'channel' && Boolean(value.forum));
+      if (!raw) throw new Error('Telegram did not return the created forum channel');
+      chat = new Chat(raw);
+    } catch (error) {
+      if (!tl.RpcError.is(error, 'CHAT_OCCUPY_LOC_FAILED') || error.code !== 500) throw error;
+      try {
+        const dialogs = user.client.iterDialogs({ archived: 'keep' });
+        for (;;) {
+          const next = await bounded(dialogs.next(), user.signal);
+          if (next.done) break;
+          user.signal.throwIfAborted();
+          const peer = next.value.peer;
+          if (peer instanceof Chat && peer.title === title && peer.raw._ === 'channel' &&
+            peer.raw.creator && peer.raw.forum && peer.raw.date >= startedAt) {
+            if (chat) throw new Error(`Telegram returned multiple newly created forums named ${title}`);
+            chat = peer;
+          }
+        }
+      } catch (inspectionError) {
+        throw combineTelegramErrors(error, inspectionError);
+      }
+      if (!chat) {
+        if (attempt >= 2) throw error;
+        await delay((attempt + 1) * 1000, undefined, { signal: user.signal });
+      }
+    }
+  }
   const channel = await user.client.resolveChannel(chat);
   let closing: Promise<void> | undefined;
   const forum: TelegramTestForum = {

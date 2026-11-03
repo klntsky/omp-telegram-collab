@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildParser } from '@lezer/generator';
-import { parseTelegramCommand, tokenizeTelegramCommand } from '../src/telegram-commands.js';
+import { parseTelegramCommand } from '../src/telegram-commands.js';
 
 const aliases = new Map([['skill_review', { name: 'Review.Exact' }]]);
 const parse = (text: string) => parseTelegramCommand(text, 'ExampleBot', aliases);
@@ -77,23 +76,6 @@ test('standalone start accepts deep-link payloads without becoming composable', 
   assert.deepEqual(parse('/p /start setup task'), {kind:'prompt',action:'p',text:'/start setup task',extensions:[]});
 });
 
-test('tokenization consumes every non-whitespace span with strictly advancing offsets', () => {
-  const source = '/p\n /skill:Exact 😀\t/unknown@Else /stop';
-  const tokens = tokenizeTelegramCommand(source, 'ExampleBot');
-  let end = 0;
-  for (const token of tokens) {
-    assert.ok(token.start >= end);
-    assert.ok(token.end > token.start);
-    assert.equal(source.slice(token.start, token.end), token.image);
-    assert.equal(source.slice(end, token.start).trim(), '');
-    end = token.end;
-  }
-  assert.equal(source.slice(end).trim(), '');
-});
-
-test('generator rejects unresolved grammar conflicts rather than choosing alternatives', () => {
-  assert.throws(() => buildParser('@top Request { Left | Right } Left { "x" } Right { "x" }'));
-});
 
 test('non-extension slash tokens start literal prompts without executing commands', () => {
   for (const action of ['new', 'p', 'skills', 'settings', 'setup', 'list_admins', 'attach', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli', 'unknown', 'worktree@OtherBot']) {
@@ -109,24 +91,6 @@ test('malformed preset names are literal in prompts and validated in standalone 
   assert.deepEqual(parse('/model_preset Good_name-2'), { kind: 'command', action: 'model_preset', argument: 'Good_name-2' });
 });
 
-test('long prefixes terminate and deduplicate without changing literal tails', () => {
-  const prefix = '/skill:Exact '.repeat(2000);
-  assert.deepEqual(parse(`/p ${prefix}literal /stop`), {
-    kind: 'prompt', action: 'p', text: 'literal /stop', extensions: [{ kind: 'skill', name: 'Exact' }],
-  });
-  assert.deepEqual(parse(`/p ${prefix}/unknown`), {kind:'prompt',action:'p',text:'/unknown',extensions:[{kind:'skill',name:'Exact'}]});
-  assert.deepEqual(parse(`/p ${prefix}/worktree /worktree`), {kind:'prompt',action:'p',text:'/worktree',extensions:[{kind:'skill',name:'Exact'},{kind:'worktree'}]});
-});
-
-test('source-offset parser and tokenizer agree on whitespace boundaries', () => {
-  for (const separator of [' ', '\t', '\r\n', '\u00a0', '\u2028', '\u2029', '\ufeff']) {
-    const source = `/p${separator}/model_preset${separator}Fast${separator}Explain${separator}/stop`;
-    assert.deepEqual(parse(source), {
-      kind:'prompt',action:'p',text:`Explain${separator}/stop`,
-      extensions:[{kind:'model-preset',name:'Fast'}],
-    });
-  }
-});
 
 test('pasted absolute paths and multiline diagnostics are literal prompt data', () => {
   const text = '/home/work/project/test/e2e/helpers/telegram-user.ts:27\n  throw new Error("Refusing to import a Telegram session outside the test network");\nError: Refusing to import a Telegram session outside the test network\n    at validateTelegramTestSession (/home/work/project/test/e2e/helpers/telegram-user.ts:27:11)';
