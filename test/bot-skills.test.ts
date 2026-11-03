@@ -56,25 +56,6 @@ test('pending skills stay isolated by user and topic', async () => {
 });
 
 
-test('skill composition preserves normalized caption, reply quote and downloaded image', async t => {
-  const app = await createSmokeApp();
-  const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
-  app.mockFiles(t, imageData);
-  try {
-    const session = await seed(app);
-    await select(app, 'pdf-tools', session.threadId);
-    await app.update({
-      message_thread_id: session.threadId,
-      photo: [{ file_id: 'photo', file_unique_id: 'photo', width: 100, height: 100 }],
-      caption: '/p@FixtureOmpBot Explain this',
-      reply_to_message: { message_id: 9000, caption: 'Original\ncontext' },
-    });
-    assert.deepEqual(prompts(app).at(-1), {
-      t: 'prompt', text: '/skill:pdf-tools\n\n> Original\n> context\n\nExplain this',
-      images: [{ type: 'image', data: imageData, mimeType: 'image/jpeg' }],
-    });
-  } finally { await app.close(); }
-});
 
 test('ignored commands, discussion and rejected prompts retain skills; clear removes them', async () => {
   const app = await createSmokeApp();

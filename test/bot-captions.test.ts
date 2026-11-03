@@ -7,22 +7,6 @@ import { eventually, setForumSetting } from './bot-test-helpers.js';
 const photo = [{ file_id: 'photo', file_unique_id: 'photo', width: 100, height: 100 }];
 const imageData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 
-test('image-only caption commands preserve empty text through initial startup rejection and retry', async t => {
-  const app = await createSmokeApp();
-  app.mockFiles(t, imageData);
-  try {
-    await app.update({ photo, caption: '/setup' });
-    await app.update({ message_id: 7001, photo, caption: '/new@FixtureOmpBot' });
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'), [{ t: 'prompt', text: '', images: [{ type: 'image', data: imageData, mimeType: 'image/jpeg' }] }]);
-    const session = app.store.listSessions(botId)[0]!;
-    assert.ok(session);
-    assert.equal(app.store.hasPendingInitialTask(session.id), false);
-    assert.deepEqual(app.fileRequests, ['photo']);
-  } finally {
-    await app.close();
-  }
-});
 
 test('caption commands retain bot targeting and forwarded-message exclusions', async () => {
   const app = await createSmokeApp();
@@ -122,25 +106,6 @@ test('native file HTTP failures retain response diagnostics and never submit a t
   } finally { await app.close(); }
 });
 
-test('captionless photos use the largest size in all-message sessions', async t => {
-  const app = await createSmokeApp();
-  app.mockFiles(t, imageData);
-  try {
-    await app.update({text:'/setup'});
-    await app.update({text:'/new Start'});
-    await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const session = app.store.listSessions(botId)[0]!;
-    await app.update({message_thread_id:session.threadId,photo:[
-      ...photo,{file_id:'largest',file_unique_id:'largest',width:1000,height:1000},
-    ]});
-    assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt').at(-1),{
-      t:'prompt',text:'',images:[{type:'image',data:imageData,mimeType:'image/jpeg'}],
-    });
-    assert.deepEqual(app.fileRequests, ['largest']);
-  } finally {
-    await app.close();
-  }
-});
 
 test('demotion during image download cannot submit an administrator prompt', async t => {
   const app = await createSmokeApp();

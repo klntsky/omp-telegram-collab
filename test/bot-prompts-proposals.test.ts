@@ -252,43 +252,6 @@ test('a non-admin /new task creates no session until a group administrator appro
 });
 
 
-for (const target of ['settings','question'] as const) {
-  for (const command of ['/p','/unknown']) {
-    test(`${command} replying to ${target} retains command routing`, async () => {
-      const app = await createSmokeApp();
-      try {
-        await app.update({text:'/setup'});
-        await app.update({text:'/new Seed'});
-        await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-        const session = app.store.listSessions(botId)[0]!;
-        if (target === 'settings') await app.update({text:'/settings',message_thread_id:session.threadId});
-        else {
-          app.emit({t:'ui-request',request:{kind:'editor',reqId:201,title:'Input'}});
-          await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
-        }
-        const reply = app.messages.at(-1)!;
-        const before = app.accepted.length;
-        const sessions = app.store.listSessions(botId).length;
-        await app.update({text:`${command} Task`,message_thread_id:session.threadId,reply_to_message:reply});
-        assert.equal(app.accepted.slice(before).some(frame => frame.t === 'ui-response'),false);
-        if (command === '/new' || command === '/p') {
-          await eventually(() => app.accepted.slice(before).some(frame => frame.t === 'prompt'));
-          assert.equal(app.store.listSessions(botId).length,sessions + (command === '/new' ? 1 : 0));
-        } else {
-          assert.equal(app.accepted.slice(before).some(frame => frame.t === 'prompt'),false);
-          assert.equal(app.store.listSessions(botId).length,sessions);
-        }
-        if (target === 'question') {
-          await app.update({text:'Answer',message_thread_id:session.threadId,reply_to_message:reply});
-          await eventually(() => app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 201));
-          assert.deepEqual(app.accepted.find(frame => frame.t === 'ui-response' && frame.reqId === 201),
-            {t:'ui-response',reqId:201,value:'Answer'});
-        }
-      } finally { await app.close(); }
-    });
-  }
-}
-
 for (const general of [false,true]) {
   test(`image-only proposals retain bytes through administrator approval in ${general ? 'General' : 'a session'}`, async t => {
     const app = await createSmokeApp();

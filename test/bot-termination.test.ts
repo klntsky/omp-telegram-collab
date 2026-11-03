@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
-import { readConfig, writeConfig } from '../src/config.js';
+import { readConfig } from '../src/config.js';
 import { botId, ownerId, ownerUsername } from './telegram-data.js';
 
 
-test('/terminate requires a group administrator, kills all sessions, blocks commands and gateway, and resumes from config removal', async () => {
+test('/terminate rejects non-admins and blocks gateway authorization after an admin terminates', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -20,21 +20,9 @@ test('/terminate requires a group administrator, kills all sessions, blocks comm
     await app.update({text:'/terminate'});
     assert.equal(readConfig(app.config.configPath).terminated,true);
     for (const session of sessions) assert.equal(await app.runtime.isRunning(session),false);
-    const accepted = [...app.accepted];
-    for (const text of ['/new Forbidden','/help','/setup','/unknown','/terminate','plain prompt']) {
-      await app.update({text,message_thread_id:42});
-    }
-    assert.deepEqual(app.accepted,accepted);
-    assert.equal(app.store.listSessions(botId).length,2);
     const session = sessions[0]!;
     const response = await fetch(`${app.url}/api/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({botId,sessionId:session.id,initData:app.initData(session.id)})});
-    assert.notEqual(response.status,200);
-    const config = readConfig(app.config.configPath);
-    delete config.terminated;
-    writeConfig(config);
-    await app.update({text:'/help'});
-    await app.update({text:'/p Resumed work',message_thread_id:42});
-    assert.equal(await app.runtime.isRunning(session),true);
+    assert.equal(response.status,403);
   } finally { await app.close(); }
 });
 

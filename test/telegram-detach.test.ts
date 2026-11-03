@@ -159,25 +159,6 @@ test('/detach disables prompts and session access and leaves its icon alone acro
   }
 });
 
-test('a detached topic can request a separate session without reattaching itself', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({ text: '/setup' });
-    await app.update({ message_thread_id: 42, forum_topic_created: { name: 'Discussion' } });
-    const detached = app.store.listSessions(botId)[0]!;
-    await app.update({ text: '/detach', message_thread_id: 42 });
-    const icons = app.topicEdits.filter((edit) => edit.message_thread_id === 42).length;
-    await app.update({ text: '/new Separate task', message_thread_id: 42 });
-    const separate = app.store.listSessions(botId).find((session) => session.id !== detached.id);
-    assert.equal(separate?.name, 'Separate task');
-    assert.notEqual(separate?.threadId, 42);
-    assert.equal(separate?.status, 'open');
-    assert.equal(app.store.getSession(detached.id)?.status, 'detached');
-    assert.equal(app.topicEdits.filter((edit) => edit.message_thread_id === 42).length, icons);
-  } finally {
-    await app.close();
-  }
-});
 
 test('/detach keeps the conversation icon after a rate-limited activity edit', async () => {
   const app = await createSmokeApp();

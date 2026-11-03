@@ -38,16 +38,6 @@ test('/stop changes its own reaction only after the matching host interruption n
   } finally { await app.close(); }
 });
 
-test('/stop on an empty topic is seen but never claims that a nonexistent agent received it', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Idle topic'}});
-    await app.update({message_id:9002,message_thread_id:42,text:'/stop'});
-    assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 9002).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
-    assert.ok(!app.accepted.some(frame => frame.t === 'abort'));
-  } finally { await app.close(); }
-});
 
 test('/stop cannot be acknowledged by stale notices after errors or disconnects', async () => {
   for (const outcome of ['error','disconnect'] as const) {

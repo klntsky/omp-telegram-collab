@@ -1,10 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
+import type { Duplex } from 'node:stream';
 import { z } from 'zod';
+import { bounded } from './async.js';
 
 export type FakeLlmStep =
   | { type: 'text'; text: string }
-  | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> };
+  | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> }
+  | { type: 'await-abort' };
 
 export interface FakeLlmScenario {
   name: string;
@@ -22,6 +25,9 @@ export interface FakeLlmProvider {
   baseUrl: string;
   apiKey: string;
   requests: ReadonlyMap<string, readonly Record<string, unknown>[]>;
+  failure: Promise<never>;
+  waitForRequest(name: string, signal: AbortSignal): Promise<void>;
+  waitForAbort(name: string, signal: AbortSignal): Promise<void>;
   assertComplete(): void;
   close(): Promise<void>;
 }
@@ -33,15 +39,20 @@ export async function startFakeLlmProvider(options: {
   const apiKey = 'fake-e2e-api-key';
   const scenarios = new Map(options.scenarios.map(scenario => [scenario.name, {
     ...scenario, requests: [] as Record<string, unknown>[], nextStep: 0, completed: 0,
+    started: Promise.withResolvers<void>(), aborted: Promise.withResolvers<void>(),
   }]));
   if (scenarios.size !== options.scenarios.length) throw new Error('Fake LLM scenario names must be unique');
   const errors: unknown[] = [];
   const sockets = new Set<Socket>();
+  const expectedAborts = new WeakSet<Duplex>();
   let closing: Promise<void> | undefined;
+  const failure = Promise.withResolvers<never>();
+  void failure.promise.catch(() => undefined);
 
   function recordError(error: unknown): void {
     errors.push(error);
     options.log('fake-llm-error', error);
+    failure.reject(error);
   }
 
   async function respond(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -108,6 +119,21 @@ export async function startFakeLlmProvider(options: {
       emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finishReason }] });
     }
     chunk({ role: 'assistant', content: '' });
+    if (step.type === 'await-abort') {
+      if (response.socket) expectedAborts.add(response.socket);
+      const closed = Promise.withResolvers<void>();
+      response.once('error', closed.reject);
+      response.once('close', closed.resolve);
+      response.flushHeaders();
+      scenario.started.resolve();
+      await closed.promise;
+      if (response.writableFinished) throw new Error(`Fake LLM scenario "${scenario.name}" ended without the expected client abort`);
+      scenario.completed++;
+      scenario.aborted.resolve();
+      options.log('fake-llm-request-aborted', { scenario: scenario.name, index });
+      return;
+    }
+    scenario.started.resolve();
     if (step.type === 'text') {
       chunk({ content: step.text });
     } else {
@@ -148,7 +174,11 @@ export async function startFakeLlmProvider(options: {
     socket.once('close', () => sockets.delete(socket));
   });
   server.on('clientError', (error, socket) => {
-    recordError(error);
+    if (expectedAborts.has(socket) && 'code' in error && error.code === 'ECONNRESET') {
+      options.log('fake-llm-request-abort-reset', error);
+    } else {
+      recordError(error);
+    }
     socket.destroy();
   });
   server.on('error', recordError);
@@ -166,6 +196,17 @@ export async function startFakeLlmProvider(options: {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     apiKey,
     requests: new Map([...scenarios].map(([name, scenario]) => [name, scenario.requests])),
+    failure: failure.promise,
+    waitForRequest(name, signal) {
+      const scenario = scenarios.get(name);
+      if (!scenario) throw new Error(`Unknown fake LLM scenario "${name}"`);
+      return bounded(Promise.race([scenario.started.promise, failure.promise]), signal);
+    },
+    waitForAbort(name, signal) {
+      const scenario = scenarios.get(name);
+      if (!scenario) throw new Error(`Unknown fake LLM scenario "${name}"`);
+      return bounded(Promise.race([scenario.aborted.promise, failure.promise]), signal);
+    },
     assertComplete() {
       const failures = [...errors];
       for (const scenario of scenarios.values()) {

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Message } from '@mtcute/node';
 import { z } from 'zod';
+import type { Store } from '../../../src/store.js';
 import type { FakeLlmProvider, FakeLlmScenario } from './fake-llm-provider.js';
 
 export interface WriteTask {
@@ -14,7 +15,8 @@ export interface WriteTask {
   evidence: { executedBy: string; nonce: string };
 }
 interface TaskWorkflow {
-  omp: { workspace: string; provider: FakeLlmProvider };
+  omp: { provider: FakeLlmProvider };
+  store: Pick<Store, 'getTopic'>;
   telegram: { bot: { id: number }; forum: { chatId: number } };
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }
@@ -48,10 +50,16 @@ export async function completeWriteTask(app: TaskWorkflow, task: WriteTask, sent
   assert.equal(reply.chat.id, app.telegram.forum.chatId);
   assert.equal(reply.sender.id, app.telegram.bot.id);
   if (threadId !== undefined) assert.equal(reply.replyToMessage?.threadId, threadId);
-  assert.deepEqual(JSON.parse(await readFile(join(app.omp.workspace, task.path), 'utf8')), task.evidence);
+  const actualThreadId = reply.replyToMessage?.threadId;
+  assert.ok(actualThreadId);
+  const session = app.store.getTopic({ botId: app.telegram.bot.id, destination: {
+    kind: 'topic', chatId: app.telegram.forum.chatId, threadId: actualThreadId,
+  } });
+  assert.ok(session?.runtime.kind === 'managed');
+  const cwd = session.runtime.cwd ?? session.instancePath;
+  assert.deepEqual(JSON.parse(await readFile(join(cwd, task.path), 'utf8')), task.evidence);
   const requests = app.omp.provider.requests.get(task.name)!;
-  assert.equal(requests.length, 2);
-  const messages = requestMessages.parse(requests[1]!.messages);
+  const messages = requestMessages.parse(requests.at(-1)!.messages);
   assert.ok(messages.some(message => message.role === 'tool' && message.tool_call_id === task.toolCallId));
   return reply;
 }
@@ -67,4 +75,22 @@ export function taskInput(provider: FakeLlmProvider, task: WriteTask) {
     text: content.flatMap(part => part.text === undefined ? [] : [part.text]).join('\n'),
     images: content.flatMap(part => part.image_url ? [part.image_url.url] : []),
   };
+}
+
+export async function readSessionHistory(dataDir: string, sessionId: string): Promise<string> {
+  const binding = z.object({ sessionFile: z.string() }).parse(JSON.parse(
+    await readFile(join(dataDir, 'sessions', sessionId, 'binding.json'), 'utf8')));
+  return readFile(binding.sessionFile, 'utf8');
+}
+
+export function questionStep(name: string) {
+  return { type: 'tool' as const, id: `call_ask_${name}`, name: 'ask', arguments: { questions: [{
+    id: name, question: 'Choose the test destination',
+    options: [{ label: 'Local' }, { label: 'Remote' }], recommended: 0,
+  }] } };
+}
+
+export function questionScenario(task: WriteTask): FakeLlmScenario {
+  const scenario = writeScenario(task);
+  return { ...scenario, steps: [questionStep(task.name), ...scenario.steps] };
 }

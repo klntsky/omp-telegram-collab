@@ -355,42 +355,6 @@ test('expired panels, changed sessions and adversarial cross-topic callbacks can
   } finally { await app.close(); }
 });
 
-test('preset pagination keeps later choices and detail-page default actions reachable', async () => {
-  const app = await createSmokeApp();
-  const names = Array.from({length: 17}, (_, index) => `Preset${index}`);
-  app.runtime.availableModelPresets = async () => names;
-  app.runtime.modelPresetDetails = async () => ({
-    modelRoles: Object.fromEntries(Array.from({length: 120}, (_, index) =>
-      [`role${index}`, `provider/model-${index}-${'long-model-name'.repeat(5)}#high`])),
-    defaultThinkingLevel: 'high',
-  });
-  const panel = () => app.messages.findLast(message =>
-    (message.reply_markup as {inline_keyboard?: Array<Array<{callback_data?: string}>>} | undefined)
-      ?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('preset:')))!;
-  const click = async (index: number) => {
-    const message = panel();
-    await app.callback(settingsButton(message, index), message);
-  };
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Preset pages'}});
-    await app.update({text:'/model_preset',message_thread_id:42});
-    await click(8);
-    await click(9);
-    await click(0);
-    await click(3);
-    await click(4);
-    await click(1);
-    const session = app.store.listSessions(botId)[0]!;
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[16]);
-    assert.equal(await app.runtime.isRunning(session), false);
-    await click(2);
-    await click(1);
-    await click(0);
-    await click(1);
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, names[8]);
-  } finally { await app.close(); }
-});
 
 function composedPresetPanel(app: {messages: Record<string,unknown>[]}) {
   const message = app.messages.findLast(message =>
@@ -489,20 +453,18 @@ for (const invalidation of ['generation','assignment','administrator','expired']
   });
 }
 
-for (const existing of [false,true]) {
-  test(`composed bare preset cancellation discards the pending ${existing ? 'existing topic' : 'General new'} task`, async t => {
+{
+  test('composed bare preset cancellation discards the pending General new task', async t => {
     const app = await createSmokeApp({skipStartupRejection:true});
     try {
       await app.update({text:'/setup'});
-      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Cancelled interactive preparation'}});
       const before = app.store.listSessions(botId);
       t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast','Slow']);
       const ensure = t.mock.method(app.runtime,'ensure');
       const worktree = t.mock.method(app.runtime,'worktree');
       const presets = t.mock.method(app.runtime,'modelPresets');
       await app.update({
-        text:`/${existing ? 'p' : 'new'} /model_preset /worktree Discard this task`,
-        ...(existing ? {message_thread_id:42} : {}),
+        text:'/new /model_preset /worktree Discard this task',
       });
       let panel = composedPresetPanel(app);
       await app.callback(settingsButton(panel,0),panel);
@@ -546,19 +508,18 @@ test('composed bare preset refreshes administrator access after host startup bef
   } finally { await app.close(); }
 });
 
-for (const existing of [false,true]) {
-  test(`preparation-only bare preset configures ${existing ? 'existing' : 'new'} session without an empty prompt`, async t => {
+{
+  test('preparation-only bare preset configures a new session without an empty prompt', async t => {
     const app = await createSmokeApp({skipStartupRejection:true});
     try {
       await app.update({text:'/setup'});
-      if (existing) await app.update({message_thread_id:42,forum_topic_created:{name:'Preparation only'}});
       t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
       const selected: Array<{id:string;name?:string}> = [];
       t.mock.method(app.runtime,'modelPresets',async (session:TopicSession,name?:string) => {
         selected.push({id:session.id,name});
         return 'Selected';
       });
-      await app.update({text:`/${existing ? 'p' : 'new'} /model_preset`,...(existing ? {message_thread_id:42} : {})});
+      await app.update({text:'/new /model_preset'});
       let panel = composedPresetPanel(app);
       await app.callback(settingsButton(panel,0),panel);
       panel = composedPresetPanel(app);

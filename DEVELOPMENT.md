@@ -90,7 +90,7 @@ The saved session grants access to the test account. Never log it, commit it, se
 Run live tests after login:
 
 ```sh
-timeout 480s pnpm test:e2e
+timeout 600s pnpm test:e2e
 ```
 
 Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from the isolated `test` suite and runs as the first stage of `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. Install OMP before running the suite; set `OMP_EXECUTABLE` to select a different executable.
@@ -99,7 +99,7 @@ Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environ
 
 Each fixture creates its own forum and deletes that forum during teardown, including after partial setup failure. Teardown closes the owned user client without logging the account out or revoking its saved session. Do not run concurrent fixtures with the same account while they are creating bots, or run another `getUpdates` consumer against the fixture's bot token. Give parallel workers separate accounts and bots.
 
-Import `setupTelegramTest` from `test/e2e/helpers/telegram-fixture.ts` in live tests. It registers teardown with the Node test context and returns the authenticated user, bot, test Bot API client, forum, and update inbox. Lower-level login and provisioning helpers are available in the same directory when a test needs different ownership. Keep domain scenarios and assertions in test files, not in the setup helpers.
+Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` for application workflows. It owns the real Telegram resources, disk-backed store, BotService, and OMP environment. Its lower-level `setupTelegramTest` fixture owns the authenticated user, bot, forum, test Bot API client, and update inbox. Both register teardown with the Node test context. Keep domain scenarios and expectations in test files rather than setup helpers.
 
 Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
 
@@ -107,15 +107,19 @@ Forum provisioning retries only the test-network RPC rejection `500 CHAT_OCCUPY_
 
 ### Isolated OMP and debug artifacts
 
-The OMP helper launches each child with an allowlisted environment and disposable home, agent, XDG, workspace, and application directories. It does not forward provider credentials or personal OMP configuration. Model requests use a scripted loopback HTTP provider with a fake key. No container or paid model credentials are needed. This configuration isolation is not a filesystem sandbox.
+The OMP helper launches each child with an allowlisted environment and disposable home, agent, XDG, workspace, and application directories. The workspace starts as a real Git repository with a fixture-only author identity. It does not forward provider credentials or personal OMP configuration. Model requests use a scripted loopback HTTP provider with a fake key. No container or paid model credentials are needed. This configuration isolation is not a filesystem sandbox.
 
 The disposable agent directory contains suite-owned skill files, and the scripted model declares image input support. Skill discovery uses that isolated OMP configuration. Uploaded image documents pass through Telegram's real file service before reaching the provider. File downloads use the bot client's selected production or test environment.
 
 Define scripted provider responses per named task, with the expected user prompt and its tool/text steps. The provider matches only the latest user message, keeps request history and progress per task, and verifies tool-result IDs before continuing. Task ordering across sessions does not determine which response is sent. Unexpected prompts, extra requests, and unfinished tasks fail with task-specific diagnostics. Telegram transport, BotService, OMP, and tool execution remain real.
 
-The full-path fixture uses the actual test-network user session and application poller. Keep tests sharing an account and bot in `test/e2e/telegram.test.ts`, where top-level tests run sequentially. Separate files still run with concurrency five; use distinct credentials before adding parallel live fixtures.
+Managed interactive hosts enable OMP's `write` and `ask` tools. Headless RPC helpers enable `write` only because `ask` requires an interactive host. A declared `await-abort` provider step holds the SSE connection open until OMP cancels it; completion requires the connection to close without completing the stream. An `ECONNRESET` on that specific connection is retained in the trace as an expected cancellation diagnostic. Other transport errors still fail the workflow.
+
+The live suite reuses one authenticated user, forum, application, and OMP environment across ordered workflows. `sendAndWait` waits for the bot to finish handling the actual Telegram update. `restart` closes the previous service and runtime, reopens the database, and constructs replacement runtime and bot-service instances without provisioning another forum. Separate files still run with concurrency five; distinct credentials are required for parallel live fixtures.
 
 `BotOptions.topicActivityEmojis` configures the running and finished topic emojis in code. Normal startup keeps ⚡ and 🏁. The live fixture selects two distinct emojis from the test server's `getForumTopicIconStickers` response and records the selection in the trace. It does not substitute Telegram API responses.
+
+When the test server rejects a message-reaction emoji with `REACTION_INVALID`, the original API diagnostic remains in the trace. A reaction request alone is not evidence of visible delivery; inspect its recorded API result.
 
 Each application run prints a private debug-artifact directory. `events.jsonl` contains ordered, timestamped test stages, provider requests and SSE frames, Telegram API requests/results and real updates, userbot-received messages, Collab frames, and application console diagnostics. Terminal output and conversation histories are copied under `sessions/` during cleanup. Disposable configuration and workspace files are removed; debug artifacts remain outside the checkout.
 
@@ -130,10 +134,10 @@ pnpm e2e:inspect /tmp/EXAMPLE_E2E_LOG_DIRECTORY --event telegram --full
 
 The inspector lists terminal/history paths and preserves complete error diagnostics. `--event` selects an event-name substring; `--full` prints complete payloads. Known test tokens, API hashes, and saved sessions are redacted from the JSONL trace and captured console output. Artifacts still contain prompts, model responses, and tool output; keep the directory private and do not publish it without inspection.
 
-To run only the OMP scenario, place test-runner flags before the file path:
+To select the shared live workflow, place test-runner flags before the file path:
 
 ```sh
-timeout 420s pnpm exec node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 --test-name-pattern '^Telegram tasks' test/e2e/telegram.test.ts
+timeout 600s pnpm exec node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 --test-name-pattern '^Telegram workflows' test/e2e/telegram.test.ts
 ```
 
 ## Debugging

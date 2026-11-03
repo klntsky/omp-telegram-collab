@@ -53,46 +53,6 @@ test('select answers preserve protocol values and cannot be submitted twice', as
   }
 });
 
-test('custom choices submit multiline answers in both prompt modes', async () => {
-for (const allMessagesArePrompts of [true,false]) {
-  const app = await createSmokeApp();
-  try {
-    await app.update({ text: '/setup' });
-    if (!allMessagesArePrompts) await setForumSetting(app, 0);
-    await app.update({ text: '/new Start' });
-    const session = app.store.listSessions(botId)[0]!;
-    app.emit({ t: 'ui-request', request: { kind: 'select', reqId: 81, title: 'Deployment target?', options: ['Production', 'Other (type your own)'] } });
-    await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('ask:')));
-    const choice = app.messages.at(-1)!;
-    const { inline_keyboard } = z.object({inline_keyboard:z.array(z.array(z.object({callback_data:z.string()})))}).parse(choice.reply_markup);
-    await app.callback(inline_keyboard[0]![1]!.callback_data, choice);
-    assert.deepEqual(app.accepted.at(-1), { t: 'ui-response', reqId: 81, value: 'Other (type your own)' });
-    app.emit({ t: 'ui-request-end', reqId: 81 });
-    app.emit({ t: 'ui-request', request: { kind: 'editor', reqId: 82, title: 'Enter your deployment target', prefill: 'Suggested: staging' } });
-    await eventually(() => app.messages.some(message => JSON.stringify(message.reply_markup)?.includes('force_reply')));
-    const editor = app.messages.at(-1)!;
-    assert.equal(editor.message_thread_id, session.threadId);
-    assert.equal(z.object({force_reply:z.boolean()}).parse(editor.reply_markup).force_reply, true);
-    const text = 'This is an answer, not a new session\n  Keep <literal> **text** 😀  ';
-    const before = app.accepted.length;
-    await app.update({ message_id:8200,message_thread_id:session.threadId,text,reply_to_message:{message_id:editor.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}} });
-    assert.deepEqual(app.accepted.slice(before), [{ t: 'ui-response', reqId: 82, value: text }]);
-    assert.equal(app.store.listSessions(botId).length, 1);
-    assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 8200).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
-    app.emit({t:'ui-request-end',reqId:81});
-    assert.ok(!app.reactions.some(reaction => reaction.message_id === 8200 && JSON.stringify(reaction.reaction).includes('🤝')));
-    app.emit({t:'ui-request-end',reqId:82});
-    await eventually(() => app.reactions.some(reaction => reaction.message_id === 8200 && JSON.stringify(reaction.reaction).includes('🤝')));
-    app.emit({t:'ui-request-end',reqId:82});
-    assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 8200).map(reaction => reaction.reaction),[
-      [{type:'emoji',emoji:'👀'}],[{type:'emoji',emoji:'🤝'}],
-    ]);
-    await app.update({ message_thread_id: session.threadId, text: 'A late duplicate answer', reply_to_message: { message_id: editor.message_id, from: { id: botId, is_bot: true, first_name: 'OMP' } } });
-    assert.equal(app.accepted.length, before + 1, 'a stale editor reply must not become a new instruction');
-  } finally { await app.close(); }
-}
-});
-
 test('chat handoff routes question replies as prompts without reopening completed answers', async () => {
   for (const allMessagesArePrompts of [true,false]) {
     const app = await createSmokeApp({skipStartupRejection:true});

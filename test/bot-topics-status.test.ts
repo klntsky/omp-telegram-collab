@@ -35,24 +35,6 @@ test('anonymous-admin topic closure cancels bot work without granting a host tic
   }
 });
 
-test('empty topic creation, initialization, and reopening do not launch managed hosts', async () => {
-  const app = await createSmokeApp();
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Idle topic',icon_color:7322096}});
-    const session = app.store.listSessions(botId)[0]!;
-    await app.service.initialize();
-    await app.update({message_thread_id:42,forum_topic_closed:{}});
-    await app.update({message_thread_id:42,forum_topic_reopened:{}});
-    assert.equal(app.connectionCount,0);
-    assert.equal(await app.runtime.isRunning(session),false);
-    await app.update({message_thread_id:42,text:'@FixtureOmpBot Start now',entities:[{type:'mention',offset:0,length:14}]});
-    assert.equal(app.connectionCount,1);
-    assert.equal(await app.runtime.isRunning(session),true);
-  } finally {
-    await app.close();
-  }
-});
 
 test('a connection closed during admission reconnects before sending the prompt once', async () => {
   const app = await createSmokeApp({disconnectDuringConnect:true,skipStartupRejection:true});

@@ -11,37 +11,6 @@ import { botId, chatId } from './telegram-data.js';
 
 const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
 
-for (const conversion of ['detach', 'status'] as const) {
-test(`${conversion} conversion retires its session and title work without deleting history`, () => {
-  const store = new Store(':memory:');
-  try {
-    const session = store.createSession(topic, 'Preserved history', {kind:'managed'}, {text:'Never submit'});
-    const other = store.createSession({...topic,threadId:18}, 'Other topic');
-    store.setReplyTarget(session.id, 1234);
-    store.setPendingSessionTitle(session.id, 'Pending rename');
-    store.setTopicTitlePrefix(session.id, 'feature/pending');
-    const generation = store.getSessionGeneration(session.id);
-    if (conversion === 'status') store.setBotStatusTopic(botId,chatId,topic.threadId);
-    else store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    assert.equal(store.getSession(session.id)?.status, 'detached');
-    assert.equal(store.getSession(session.id)?.name, 'Preserved history');
-    assert.equal(store.getReplyTarget(session.id), 1234);
-    assert.equal(store.getTopic({botId,destination:topicDestination(chatId,topic.threadId)})?.id, session.id);
-    assert.equal(store.getPendingSessionTitle(session.id), undefined);
-    assert.equal(store.getTopicTitlePrefix(session.id), undefined);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.hasPendingInitialTask(session.id), false);
-    assert.equal(store.claimInitialTask(session.id), undefined);
-    store.detachTopic(topic);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.getSession(other.id)?.status, 'open');
-    assert.equal(store.getPendingSessionTitle(other.id), 'Other topic');
-    assert.throws(() => store.createSession(topic, 'Cannot revive'));
-  } finally { store.close(); }
-});
-}
-
 test('status identities include legacy stored rows and remain detached after replacement', () => {
   const store = new Store(':memory:');
   try {

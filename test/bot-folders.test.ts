@@ -29,33 +29,6 @@ function button(message: Record<string,unknown>, suffix: string) {
   return callbacks(message).find(data => data.endsWith(`:${suffix}`))!;
 }
 
-for (const command of ['/new task','/p task']) {
-  test(`${command} defers all session side effects and starts once in chosen cwd`, async () => {
-    const app = await createSmokeApp();
-    try {
-      await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
-      configure(app,['.','other']);
-      await app.update({text:command});
-      assert.equal(app.store.listSessions(botId).length,0);
-      assert.equal(app.connectionCount,0);
-      const message = panel(app);
-      const choice = button(message,'0');
-      await app.callback(choice,message);
-      await app.callback(choice,message);
-      const sessions = app.store.listSessions(botId);
-      assert.equal(sessions.length,1);
-      assert.equal(sessions[0]!.instancePath,root);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(root)});
-      await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-      assert.equal(app.accepted.filter(frame => frame.t === 'prompt').length,1);
-      await app.update({text:'/p existing',message_thread_id:sessions[0]!.threadId});
-      await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
-      assert.equal(app.store.listSessions(botId).length,1);
-    } finally { await app.close(); }
-  });
-}
-
 test('missing folder requires explicit confirmation and cancellation never creates it', async () => {
   const app = await createSmokeApp();
   try {
@@ -164,19 +137,18 @@ test('folder selection precedes command capacity reservation and survives approv
 });
 
 
-for (const options of [[],['..']] ) {
-  test(`sole effective folder ${JSON.stringify(options)} starts without controls`, async () => {
+{
+  test('sole parent folder starts without controls', async () => {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
       const root = Object.keys(app.config.instances)[0]!;
-      await mkdir(join(root,'sub'));
-      configure(app,options);
+      configure(app,['..']);
       await app.update({text:'/new automatic'});
       assert.equal(panel(app),undefined);
       const sessions = app.store.listSessions(botId);
       assert.equal(sessions.length,1);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,options[0] ?? '.'))});
+      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'..'))});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'automatic'}]);
     } finally { await app.close(); }

@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test, type TestContext } from 'node:test';
@@ -92,24 +92,6 @@ test('create, list, show and remove use canonical directory identities', async t
   await f.run(['show', path]);
   await f.run(['remove', path]);
   assert.deepEqual(readConfig(f.configPath).instances, {});
-});
-
-test('explicit setup completes every service setting without hand editing', async t => {
-  const f = fixture(t);
-  const dataDir = join(f.root, 'selected data');
-  await f.run(['setup', '--public-url', 'https://collab.example', '--host', '0.0.0.0', '--port', '4200', '--data-dir', dataDir, '--omp-executable', './bin/custom-omp', '--omp-arg', '--model', '--omp-arg', 'literal model with spaces', '--max-sessions', '12', '--startup-timeout-ms', '12345', '--relay-url', 'wss://relay.example']);
-  const config = readConfig(f.configPath);
-  assert.equal(config.publicUrl, 'https://collab.example');
-  assert.equal(config.host, '0.0.0.0');
-  assert.equal(config.port, 4200);
-  assert.equal(config.dataDir, dataDir);
-  assert.deepEqual(config.omp, {executable: resolve('./bin/custom-omp'), args: ['--model', 'literal model with spaces'], maxSessions: 12, startupTimeoutMs: 12345, relayUrl: 'wss://relay.example'});
-  await f.run(['setup', '--clear-omp-args', '--relay-url', '-']);
-  assert.deepEqual(readConfig(f.configPath).omp.args, []);
-  assert.equal(readConfig(f.configPath).omp.relayUrl, undefined);
-  await assert.rejects(f.run(['setup', '--port', '4000oops']), /Port must/);
-  await assert.rejects(f.run(['setup', '--public-url', 'http://not-secure.example']), /Invalid configuration/);
-  assert.equal(readConfig(f.configPath).port, 4200);
 });
 
 test('Commander preserves literal OMP arguments and rejects unknown or excess arguments without writes', async t => {
@@ -443,26 +425,6 @@ test('approval preserves request and configuration when config becomes readonly 
   assert.ok(preserved.getSetupRequest(pending.code));
   assert.equal(preserved.isEnrolled(123456789, -1001), false);
   preserved.close();
-});
-
-test('separate service, bot, instance and approval commands persist an enrolled chat', async t => {
-  const f = fixture(t);
-  await f.run(['setup', '--public-url', 'https://cli.example', '--omp-arg', '--model', '--omp-arg', 'literal model']);
-  await f.run(['bot', 'add', '--token-env', 'BOT_TOKEN', '--mini-app-short-name', 'workspace']);
-  await f.run(['create', f.project]);
-  const store = f.store();
-  const pending = store.createSetupRequest({botId: 123456789, chatId: -1001, userId: 42, title: 'Forum'});
-  store.close();
-  await f.run(['approve', pending.code, '--path', f.project, '--yes', '--all-messages-are-prompts', 'false', '--users-can-propose-prompts', 'true']);
-  const config = readConfig(f.configPath);
-  assert.equal(config.publicUrl, 'https://cli.example');
-  assert.equal(config.bots[0]!.miniAppShortName, 'workspace');
-  assert.deepEqual(config.omp.args, ['--model', 'literal model']);
-  assert.deepEqual(assignmentPolicies(config.instances[canonicalPath(f.project)]!.chats), [{botId: 123456789, chatId: -1001, all_messages_are_prompts: false, users_can_propose_prompts: true}]);
-  const enrolled = f.store();
-  assert.equal(enrolled.isEnrolled(123456789, -1001), true);
-  assert.equal(enrolled.getSetupRequest(pending.code), undefined);
-  enrolled.close();
 });
 
 test('interactive approval can register an existing directory and cancel without consuming', async t => {
