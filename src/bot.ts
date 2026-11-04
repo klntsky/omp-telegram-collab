@@ -43,7 +43,7 @@ class AuthorizationDeniedError extends Error {}
 export interface RuntimeLike {
   fork(source: TopicSession, destination: TopicSession, target?: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'}, beforeMutation?: () => Promise<void>): Promise<void>;
   existingBinding(session: TopicSession): Promise<{sessionId:string} | undefined>;
-  worktree(session: TopicSession, branch?: string): Promise<string>;
+  worktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string>;
   topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{bind(id: string): void; release(): void}>;
@@ -1782,9 +1782,10 @@ export class BotService {
     return findInstance(this.options.config, this.id, chatId)?.instance.chats
       .find(chat => chat.botId === this.id && chat.chatId === chatId)?.create_topic_worktrees === true;
   }
-  private async createTopicWorktree(session: TopicSession): Promise<void> {
+  private async createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void> {
     this.requireSessionAssignment(session);
-    await this.options.runtime.worktree(session, `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`);
+    await this.options.runtime.worktree(session, `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, beforeMutation);
+    await beforeMutation?.();
     this.options.store.setSessionCwd(session.id, session.cwd);
   }
   private promptHelp(chatId: number): string {
@@ -2454,7 +2455,7 @@ export class BotService {
       const defaultSkill = this.defaultNewTopicSkill(source.chatId);
       if (defaultSkill) this.options.store.setNewTopicSkill(destination.id, defaultSkill);
       if (this.createsTopicWorktrees(source.chatId)) {
-        await this.createTopicWorktree(destination);
+        await this.createTopicWorktree(destination, beforeMutation);
       }
       await beforeMutation();
       this.options.store.finishInitialTaskPreparation(destination.id);

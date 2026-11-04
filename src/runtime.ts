@@ -587,21 +587,21 @@ export class OmpRuntime {
     finally { this.#skillProcesses.delete(child); }
   }
 
-  async worktree(session: TopicSession, branch?: string): Promise<string> {
+  async worktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
-    const reservation = await this.reserveSession(session.id);
-    try { return await this.#switchWorktree(session, branch); }
+    const reservation = await this.reserveSession(session.id, beforeMutation);
+    try { return await this.#switchWorktree(session, branch, beforeMutation); }
     finally { reservation.release(); }
   }
-  async #switchWorktree(session: TopicSession, branch?: string): Promise<string> {
+  async #switchWorktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     const activity = this.#hostActivity(session.id);
     if (activity.busy || activity.leases || this.#pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
-    await this.ensure(session);
+    await this.ensure(session, beforeMutation);
     const host = this.#managed.get(session.id);
     if (!host) throw new Error('Managed OMP host is not available');
     const registered = (await this.#list(Date.now() + this.#config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
@@ -610,9 +610,12 @@ export class OmpRuntime {
       throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
     }
     const operation = (async () => {
+      await beforeMutation?.();
       await this.#shutdown(session.id, host, 'worktree');
       if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      await beforeMutation?.();
       const { dir, pin } = await this.#prepare(session);
+      await beforeMutation?.();
       const result = await this.#worktreeRpc(dir, pin, branch);
       const state = result.state;
       if (state.sessionId !== pin.sessionId || typeof state.sessionFile !== 'string') {
@@ -623,7 +626,9 @@ export class OmpRuntime {
       const cwd = await realpath(header.cwd);
       await this.#validateCwd(cwd);
       if (header.id !== pin.sessionId || header.cwd !== cwd) throw new Error('Native OMP worktree history identity changed');
+      await beforeMutation?.();
       await chmod(sessionFile, 0o600);
+      await beforeMutation?.();
       await writeBinding(dir, { ...pin, cwd, sessionFile });
       session.cwd = cwd;
       if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
