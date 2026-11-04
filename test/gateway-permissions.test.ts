@@ -295,7 +295,7 @@ for (const change of ['role', 'assignment', 'generation'] as const) {
       socket.send(JSON.stringify({ t: 'abort' }));
       await entered.promise;
       if (change === 'role') app.setCurrentMember({status:'member'});
-      else if (change === 'assignment') app.config.instances[session.instancePath]!.chats = [];
+      else if (change === 'assignment') app.config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
       else app.store.advanceSessionGeneration(session.id);
       resume.resolve();
       await closed;
@@ -363,7 +363,7 @@ for (const change of ['assignment', 'generation'] as const) {
     let socket: WebSocket | undefined;
     try {
       const reader = await connect(); socket = reader.socket;
-      if (change === 'assignment') app.config.instances[session.instancePath]!.chats = [];
+      if (change === 'assignment') app.config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
       else app.store.advanceSessionGeneration(session.id);
       const closed = once(socket, 'close');
       app.emit({ t: 'error', message: 'must not cross local invalidation' });

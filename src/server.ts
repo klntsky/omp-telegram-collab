@@ -64,8 +64,8 @@ export function createServer(options: ServerOptions): GatewayServer {
     if (!bot || !session || session.botId !== identity.botId) throw new Error('Access denied');
     if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (expected && session.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
-    if (findInstance(options.config, session.botId, session.chatId)?.path !== session.instancePath ||
-        await realpath(session.instancePath) !== session.instancePath) throw new Error('Instance is unavailable');
+    if (findInstance(options.config, session.botId, session.chatId)?.instance.id !== session.instanceId ||
+        await realpath(session.cwd) !== session.cwd) throw new Error('Instance is unavailable');
     signal?.throwIfAborted();
     checkGeneration(identity);
     const canControl = access ? access.canControl : await bot.authorizeSession(session,identity.userId,signal);
@@ -74,9 +74,9 @@ export function createServer(options: ServerOptions): GatewayServer {
     if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (expected && current.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
-    if (findInstance(options.config, current.botId, current.chatId)?.path !== current.instancePath) throw new Error('Instance assignment changed');
-    if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instancePath !== session.instancePath) throw new Error('Instance assignment changed');
-    if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instancePath !== expected.instancePath)) throw new Error('Instance assignment changed');
+    if (findInstance(options.config, current.botId, current.chatId)?.instance.id !== current.instanceId) throw new Error('Instance assignment changed');
+    if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instanceId !== session.instanceId || current.cwd !== session.cwd) throw new Error('Instance assignment changed');
+    if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instanceId !== expected.instanceId || current.cwd !== expected.cwd)) throw new Error('Instance assignment changed');
     checkGeneration(identity);
     checkTermination();
     return {bot,session:current,canControl};

@@ -18,7 +18,7 @@ function fixture(t: TestContext) {
 function validConfig(path: string, directory: string) {
   const config = emptyConfig(path);
   config.bots = [{ id: botId, token: botToken, miniAppShortName: 'app' }];
-  config.instances[directory] = { chats: [{ botId, chatId }] };
+  config.instances = [{ id: 1, defaultDir: directory, chats: [{ botId, chatId }] }];
   config.publicUrl = 'https://collab.example.com';
   return config;
 }
@@ -63,7 +63,7 @@ test('folder options reject absolute, empty, NUL, malformed and obsolete configu
     { folder_options: [dir] }, { folder_options: [`${dir}/../project`] },
     { folder_options: ['bad\0path'] },
   ]) {
-    writeFileSync(path, stringify({ ...input, instances: { [dir]: { chats: [{ botId, chatId, ...fields }] } } }));
+    writeFileSync(path, stringify({ ...input, instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, ...fields }] }] }));
     assertInvalid(path, () => readConfig(path));
   }
 });
@@ -74,8 +74,8 @@ test('obsolete administrator configuration keys are rejected', t => {
   for (const admins of [[], ['alice'], [42]]) {
     writeFileSync(path, stringify({ ...input, bots: [{ ...input.bots[0], admins }] }));
     assertInvalid(path, () => readConfig(path), 'bots.0');
-    writeFileSync(path, stringify({ ...input, instances: { [dir]: { ...input.instances[dir], admins } } }));
-    assertInvalid(path, () => readConfig(path), `instances.${dir}`);
+    writeFileSync(path, stringify({ ...input, instances: [{ ...input.instances[0], admins }] }));
+    assertInvalid(path, () => readConfig(path), `instances.0`);
   }
 });
 
@@ -85,9 +85,9 @@ test('forum model defaults reject names outside the native preset-name grammar',
   for (const default_model_preset of ['', '1Fast', '../Fast', 'Fast/Slow', 'Fast Slow', 'Fast.Slow', true, 1, null, [], {}]) {
     writeFileSync(path, stringify({
       ...config,
-      instances: { [dir]: { chats: [{ botId, chatId, default_model_preset }] } },
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_model_preset }] }],
     }));
-    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_model_preset`);
+    assertInvalid(path, () => readConfig(path), `instances.0.chats.0.default_model_preset`);
   }
 });
 
@@ -99,9 +99,9 @@ test('new-topic skill defaults reject whitespace, controls, backslashes, and non
     'Team\\Review', true, 1, null, [], {}]) {
     writeFileSync(path, stringify({
       ...config,
-      instances: { [dir]: { chats: [{ botId, chatId, default_new_topic_skill }] } },
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_new_topic_skill }] }],
     }));
-    assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.default_new_topic_skill`);
+    assertInvalid(path, () => readConfig(path), `instances.0.chats.0.default_new_topic_skill`);
   }
 });
 
@@ -109,21 +109,21 @@ test('YAML defaults forum boolean options independently and rejects nonboolean v
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);
   writeFileSync(path, stringify(config));
-  assert.equal(readConfig(path).instances[dir]!.chats[0]!.all_messages_are_prompts, true);
-  assert.equal(readConfig(path).instances[dir]!.chats[0]!.users_can_propose_prompts, false);
-  assert.equal(readConfig(path).instances[dir]!.chats[0]!.create_topic_worktrees, false);
+  assert.equal(readConfig(path).instances[0]!.chats[0]!.all_messages_are_prompts, true);
+  assert.equal(readConfig(path).instances[0]!.chats[0]!.users_can_propose_prompts, false);
+  assert.equal(readConfig(path).instances[0]!.chats[0]!.create_topic_worktrees, false);
   for (const option of ['all_messages_are_prompts', 'users_can_propose_prompts', 'create_topic_worktrees']) {
     for (const mode of ['true', 'false', '', 0, 1, null, [], {}]) {
       writeFileSync(path, stringify({
         ...config,
-        instances: { [dir]: { chats: [{ botId, chatId, [option]: mode }] } },
+        instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, [option]: mode }] }],
       }));
-      assertInvalid(path, () => readConfig(path), `instances.${dir}.chats.0.${option}`);
+      assertInvalid(path, () => readConfig(path), `instances.0.chats.0.${option}`);
     }
   }
 });
 
-test('explicit creation canonicalizes directories but reads never retarget stored identity', t => {
+test('default directories must remain existing canonical directories when reading and writing', t => {
   const { path, dir } = fixture(t);
   const original = join(dir, 'original');
   const other = join(dir, 'other');
@@ -133,12 +133,16 @@ test('explicit creation canonicalizes directories but reads never retarget store
   const config = validConfig(path, original);
   writeConfig(config);
   rmSync(original, { recursive: true });
-  assert.equal(Object.keys(readConfig(path).instances)[0], original);
-  config.instances[original]!.chats[0]!.all_messages_are_prompts = false;
-  writeConfig(config);
-  assert.equal(readConfig(path).instances[original]!.chats[0]!.all_messages_are_prompts, false);
+  assertInvalid(path, () => readConfig(path), 'instances');
+  assertInvalid(path, () => writeConfig(config), 'instances');
+  assert.throws(() => readConfig(path), /ENOENT/);
   symlinkSync(other, original);
-  assert.equal(Object.keys(readConfig(path).instances)[0], original);
+  assertInvalid(path, () => readConfig(path), 'instances');
+  assertInvalid(path, () => writeConfig(config), 'instances');
+  config.instances[0]!.defaultDir = other;
+  writeConfig(config);
+  assert.equal(readConfig(path).instances[0]!.id, 1);
+  assert.equal(readConfig(path).instances[0]!.defaultDir, other);
 });
 
 test('duplicate YAML path keys and normalized-path aliases are rejected', t => {
@@ -148,8 +152,23 @@ test('duplicate YAML path keys and normalized-path aliases are rejected', t => {
   const source = stringify(value);
   writeFileSync(path, source.replace('instances:\n', `instances:\n  ${JSON.stringify(dir)}: {chats: []}\n`));
   assertInvalid(path, () => readConfig(path));
-  config.instances[`${dir}/../${dir.split('/').at(-1)}`] = { chats: [] };
+  config.instances.push({ id: 2, defaultDir: `${dir}/../${dir.split('/').at(-1)}`, chats: [] });
   assertInvalid(path, () => writeConfig(config));
+});
+
+test('instance IDs are required unique positive safe integers and duplicate directories are allowed', t => {
+  const { path, dir } = fixture(t);
+  for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, undefined, '1']) {
+    const { configPath: _, ...config } = validConfig(path, dir);
+    writeFileSync(path, stringify({...config, instances: [{id, defaultDir: dir, chats: []}]}));
+    assertInvalid(path, () => readConfig(path));
+  }
+  const config = validConfig(path, dir);
+  config.instances.push({id: 1, defaultDir: dir, chats: []});
+  assertInvalid(path, () => writeConfig(config), 'instances');
+  config.instances[1]!.id = 2;
+  writeConfig(config);
+  assert.deepEqual(readConfig(path).instances.map(instance => instance.id), [1, 2]);
 });
 
 test('new stored paths reject symlink aliases and missing directories rather than inventing identities', t => {
@@ -157,10 +176,10 @@ test('new stored paths reject symlink aliases and missing directories rather tha
   const config = validConfig(path, dir);
   const alias = join(dir, 'alias');
   symlinkSync(dir, alias);
-  config.instances[alias] = { chats: [] };
+  config.instances.push({ id: 2, defaultDir: alias, chats: [] });
   assertInvalid(path, () => writeConfig(config), 'instances');
-  delete config.instances[alias];
-  config.instances[join(dir, 'missing')] = { chats: [] };
+  config.instances.pop();
+  config.instances.push({ id: 2, defaultDir: join(dir, 'missing'), chats: [] });
   assertInvalid(path, () => writeConfig(config), 'instances');
   assert.equal(existsSync(path), false);
 });
@@ -171,9 +190,9 @@ test('duplicate bot IDs, tokens, chat assignments and missing referenced bots fa
     (config: AppConfig) => { config.bots.push({ ...config.bots[0]! }); },
     (config: AppConfig) => { config.bots.push({ ...config.bots[0]!, token: `${botId}:different-token` }); },
     (config: AppConfig) => { config.bots[0]!.id = 42; },
-    (config: AppConfig) => { config.instances[join(dir, 'missing')] = { chats: [{ botId, chatId }] }; },
-    (config: AppConfig) => { config.instances[dir]!.chats.push({ botId: 42, chatId: -42 }); },
-    (config: AppConfig) => { config.instances[dir]!.chats.push({ botId, chatId }); },
+    (config: AppConfig) => { config.instances.push({ id: 2, defaultDir: dir, chats: [{ botId, chatId }] }); },
+    (config: AppConfig) => { config.instances[0]!.chats.push({ botId: 42, chatId: -42 }); },
+    (config: AppConfig) => { config.instances[0]!.chats.push({ botId, chatId }); },
   ]) {
     const config = validConfig(path, dir);
     change(config);

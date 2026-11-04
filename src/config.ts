@@ -52,7 +52,9 @@ const configSchema = z.object({
     token: z.string().regex(tokenPattern),
     miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/).optional(),
   }).strict().refine(bot => Number(bot.token.split(':')[0]) === bot.id)),
-  instances: z.record(absolutePath, z.object({
+  instances: z.array(z.object({
+    id: positiveInteger,
+    defaultDir: absolutePath,
     chats: z.array(z.object({
       botId: positiveInteger,
       chatId: z.number().int().safe().refine(value => value !== 0),
@@ -102,7 +104,16 @@ function validate(value: unknown, configPath: string): AppConfig {
     tokens.add(bot.token);
   }
   const assignments = new Set<string>();
-  for (const instance of Object.values(config.instances)) {
+  const instanceIds = new Set<number>();
+  for (const instance of config.instances) {
+    if (instanceIds.has(instance.id)) throw failure(configPath, ['instances'], 'Every instance must have a distinct ID.');
+    instanceIds.add(instance.id);
+    try {
+      const canonical = canonicalPath(instance.defaultDir);
+      if (canonical !== instance.defaultDir) throw new Error(`Directory resolves to ${canonical}.`);
+    } catch (error) {
+      throw failure(configPath, ['instances'], `Instance ${instance.id} defaultDir must be an existing canonical directory: ${error instanceof Error ? error.message : String(error)}`);
+    }
     for (const chat of instance.chats) {
       const key = `${chat.botId}:${chat.chatId}`;
       if (!ids.has(chat.botId)) throw failure(configPath, ['instances'], 'Every chat assignment must refer to a configured bot.');
@@ -120,15 +131,15 @@ export function defaultConfigPath(): string {
 export function canonicalPath(input: string): string {
   try {
     const path = realpathSync(resolve(input));
-    if (!statSync(path).isDirectory()) throw new Error();
+    if (!statSync(path).isDirectory()) throw new Error(`Not a directory: ${path}`);
     return path;
-  } catch { throw new ConfigError(['path'], 'Choose an existing accessible directory.'); }
+  } catch (error) { throw new ConfigError(['path'], `Choose an existing accessible directory. ${error instanceof Error ? error.message : String(error)}`); }
 }
 
 export function emptyConfig(configPath: string): AppConfig {
   const path = resolve(configPath);
   return {
-    bots: [], instances: {}, publicUrl: '', host: '127.0.0.1', port: 3000,
+    bots: [], instances: [], publicUrl: '', host: '127.0.0.1', port: 3000,
     dataDir: join(dirname(path), 'data'), configPath: path,
     omp: { executable: 'omp', args: [], maxSessions: 8, startupTimeoutMs: 60000 },
   };
@@ -215,13 +226,6 @@ export function writeConfig(config: AppConfig): void {
   let fd: number | undefined;
   try {
     const initial = writableState(path);
-    const registered = initial.file ? readConfig(path).instances : {};
-    for (const directory of Object.keys(checked.instances)) {
-      if (Object.hasOwn(registered, directory)) continue;
-      try {
-        if (canonicalPath(directory) !== directory) throw new Error();
-      } catch { throw failure(path, ['instances'], 'New instance paths must be existing canonical directories.'); }
-    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const before = writableState(path);
     if (!sameFile(initial.file, before.file)) throw new Error();
@@ -263,9 +267,9 @@ export function validateStart(config: AppConfig): void {
   if (!checked.bots.length) throw failure(configPath, ['bots'], 'Configure at least one bot before starting.');
 }
 
-export function findInstance(config: AppConfig, botId: number, chatId: number): { path: string; instance: InstanceConfig } | undefined {
-  for (const [path, instance] of Object.entries(config.instances)) {
-    if (instance.chats.some(chat => chat.botId === botId && chat.chatId === chatId)) return { path, instance };
+export function findInstance(config: AppConfig, botId: number, chatId: number): { instance: InstanceConfig } | undefined {
+  for (const instance of config.instances) {
+    if (instance.chats.some(chat => chat.botId === botId && chat.chatId === chatId)) return { instance };
   }
   return undefined;
 }

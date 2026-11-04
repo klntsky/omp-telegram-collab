@@ -133,7 +133,7 @@ async function launch(config: AppConfig, onPollingFailure: () => void, initialLa
     phaseAt = performance.now();
     const sessions = store.listSessions();
     await runtime.validateSessionPaths(sessions);
-    for (const session of sessions) store.setSessionRuntime(session.id, session.runtime);
+    for (const session of sessions) store.setSessionCwd(session.id, session.cwd);
     timing('session validation', phaseAt);
     for (const botConfig of config.bots) {
       const bot = createBot({ config, botConfig, token: botConfig.token, store, runtime });
@@ -222,7 +222,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       if (JSON.stringify(next) === applied) return;
       const sessions = generation.store.listSessions();
       await generation.runtime.validateSessionPaths(sessions, next);
-      for (const session of sessions) generation.store.setSessionRuntime(session.id, session.runtime);
+      for (const session of sessions) generation.store.setSessionCwd(session.id, session.cwd);
       if (serviceSettings(next) === serviceSettings(generation.config)) {
         if (next.terminated === undefined) delete generation.config.terminated;
         Object.assign(generation.config, next);
@@ -263,7 +263,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       const matches = current.store.listSessions().filter(session => session.chatId === chatId && session.threadId === topicId &&
         current.config.bots.some(bot => bot.id === session.botId) &&
         current.store.isEnrolled(session.botId, session.chatId) &&
-        findInstance(current.config, session.botId, session.chatId)?.path === session.instancePath);
+        findInstance(current.config, session.botId, session.chatId)?.instance.id === session.instanceId);
       if (matches.length > 1) throw new Error('Topic session is ambiguous across configured bots');
       const session = matches[0];
       if (!session) throw new Error('No enrolled, assigned topic session found');
@@ -277,14 +277,14 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         const stored = current.store.getSession(session.id);
         if (!stored || stored.status !== 'open' || stored.botId !== session.botId ||
             stored.chatId !== session.chatId || stored.threadId !== session.threadId ||
-            stored.instancePath !== session.instancePath ||
+            stored.instanceId !== session.instanceId || stored.cwd !== session.cwd ||
             current.store.getSessionGeneration(session.id) !== sessionGeneration) {
           throw new Error('Topic session is not open or changed during session join');
         }
         if (!current.store.isEnrolled(session.botId, session.chatId) ||
             !current.config.bots.some(bot => bot.id === session.botId) ||
-            findInstance(current.config, session.botId, session.chatId)?.path !== session.instancePath ||
-            findInstance(persisted, session.botId, session.chatId)?.path !== session.instancePath) {
+            findInstance(current.config, session.botId, session.chatId)?.instance.id !== session.instanceId ||
+            findInstance(persisted, session.botId, session.chatId)?.instance.id !== session.instanceId) {
           throw new Error('Topic session assignment changed');
         }
       };

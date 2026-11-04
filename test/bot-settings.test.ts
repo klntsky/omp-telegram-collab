@@ -10,7 +10,7 @@ import type { AppConfig } from '../shared/contracts.js';
 
 function saved(app: { config: AppConfig }) {
   const config = readConfig(app.config.configPath);
-  const instance = Object.values(config.instances).find(value => value.chats.some(chat => chat.botId === botId && chat.chatId === chatId))!;
+  const instance = config.instances.find(value => value.chats.some(chat => chat.botId === botId && chat.chatId === chatId))!;
   return { config, instance, chat: instance.chats.find(chat => chat.botId === botId && chat.chatId === chatId)! };
 }
 
@@ -63,7 +63,7 @@ test('typing mode choices persist immediately and preserve concurrent configurat
     for (const [index, mode] of [[1, 'streaming'], [2, 'inference'], [0, 'disabled']] as const) {
       await clickSettings(app, index);
       assert.equal(saved(app).chat.typing_indicators, mode);
-      assert.equal(Object.values(app.config.instances)[0]!.chats[0]!.typing_indicators, mode);
+      assert.equal(app.config.instances[0]!.chats[0]!.typing_indicators, mode);
       assert.equal(saved(app).config.port, 23456);
     }
     assert.equal(app.connectionCount, 0);
@@ -82,13 +82,13 @@ for (const change of ['role', 'assignment', 'read-only'] as const) {
       const updated = saved(app).config;
       if (change === 'role') app.setCurrentMember({status:'member'});
       if (change === 'assignment') {
-        Object.values(updated.instances)[0]!.chats = [];
+        updated.instances[0]!.chats = [];
         writeConfig(updated);
       }
       if (change === 'read-only') await chmod(app.config.configPath, 0o400);
       await app.callback(choice, panel);
       assert.deepEqual(readConfig(app.config.configPath), updated);
-      assert.notEqual(Object.values(app.config.instances)[0]!.chats[0]!.typing_indicators, 'inference');
+      assert.notEqual(app.config.instances[0]!.chats[0]!.typing_indicators, 'inference');
       assert.equal(app.connectionCount, 0);
     } finally {
       await chmod(app.config.configPath, 0o600);
@@ -131,7 +131,7 @@ for (const targetKind of ['file','directory'] as const) {
       await chmod(target,targetKind === 'file' ? 0o400 : 0o500);
       await clickSettings(app, 0);
       assert.deepEqual(saved(app).config,before);
-      assert.notEqual(Object.values(app.config.instances)[0]!.chats[0]!.all_messages_are_prompts,false);
+      assert.notEqual(app.config.instances[0]!.chats[0]!.all_messages_are_prompts,false);
     } finally {
       await chmod(target,targetKind === 'file' ? 0o600 : 0o700);
       await app.close();
@@ -148,7 +148,7 @@ for (const change of ['role','assignment'] as const) {
       const panel = app.messages.at(-1)!;
       const choice = settingsButton(panel, 0);
       const updated = saved(app).config;
-      const instance = Object.values(updated.instances)[0]!;
+      const instance = updated.instances[0]!;
       if (change === 'role') app.setCurrentMember({status:'member'});
       else instance.chats = [];
       writeConfig(updated);
@@ -271,7 +271,7 @@ for (const change of ['role','assignment','read-only'] as const) {
       const updated = saved(app).config;
       if (change === 'role') app.setCurrentMember({status:'member'});
       if (change === 'assignment') {
-        Object.values(updated.instances)[0]!.chats = [];
+        updated.instances[0]!.chats = [];
         writeConfig(updated);
       }
       if (change === 'read-only') await chmod(app.config.configPath,0o400);
@@ -328,7 +328,7 @@ for (const change of ['role','assignment','unrelated'] as const) {
       const panel = app.messages.at(-1)!;
       const choice = settingsButton(panel, 0);
       const updated = saved(app).config;
-      const instance = Object.values(updated.instances)[0]!;
+      const instance = updated.instances[0]!;
       if (change === 'assignment') instance.chats = [];
       else if (change === 'unrelated') updated.port = 23456;
       let changed = false;

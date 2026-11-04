@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import { Store, type MessageAnchor } from '../src/store.js';
 
-const topic = {botId:1,chatId:-100,threadId:42,instancePath:'/fixture'};
+const topic = {botId:1,chatId:-100,threadId:42,instanceId:1,cwd:'/fixture'};
 const sender = 'Telegram @fixture_bot';
 const target = (ompSessionId: string, entryId: string, parentEntryId: string | null = null) => ({ompSessionId,entryId,parentEntryId});
 

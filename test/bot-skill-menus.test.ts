@@ -11,13 +11,13 @@ import { join } from 'node:path';
 test('a slow instance does not delay another menu, and close cancels refresh without late publication', {timeout:10000}, async t => {
   const app = await createSmokeApp();
   await app.service.close();
-  const firstPath = Object.keys(app.config.instances)[0]!;
+  const firstPath = app.config.instances[0]!.defaultDir;
   const secondPath = join(firstPath,'second');
   await mkdir(secondPath);
   const secondChat = chatId - 1;
-  app.config.instances[secondPath] = {chats:[{botId,chatId:secondChat}]};
+  app.config.instances.push({id: 2, defaultDir: secondPath, chats: [{botId,chatId:secondChat}]});
   const slow = Promise.withResolvers<Array<{name:string;description:string}>>();
-  t.mock.method(app.runtime,'listSkills',async (path: string) => path === firstPath ? slow.promise : [{name:'fast-skill',description:'Independent catalog'}]);
+  t.mock.method(app.runtime,'listSkills',async (id: number) => id === 1 ? slow.promise : [{name:'fast-skill',description:'Independent catalog'}]);
   const bot = new Bot(botToken,{client:{apiRoot:app.telegramUrl}});
   const service = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,bot});
   const published = Promise.withResolvers<void>();
@@ -30,11 +30,11 @@ test('a slow instance does not delay another menu, and close cancels refresh wit
     await service.initialize();
     service.startBackground();
     await published.promise;
-    const before = app.store.getSkillCatalog(firstPath);
+    const before = app.store.getSkillCatalog(1);
     await service.close();
     slow.resolve([{name:'late-skill',description:'Must not publish'}]);
     await service.refreshSkillCatalogs();
-    assert.deepEqual(app.store.getSkillCatalog(firstPath),before);
+    assert.deepEqual(app.store.getSkillCatalog(1),before);
     const commands = await bot.api.getMyCommands({scope:{type:'chat',chat_id:secondChat}});
     assert.ok(commands.some(command=>command.command==='skill_fast_skill'));
   } finally { slow.resolve([]); await service.close(); await app.close(); }
@@ -48,14 +48,14 @@ test('assignment cleanup and acknowledgement do not wait for catalog discovery',
   try {
     await app.update({text:'/setup'});
     await app.update({message_thread_id:42,forum_topic_created:{name:'Removed assignment'}});
-    const instancePath = Object.keys(app.config.instances)[0]!;
+    const instancePath = app.config.instances[0]!.id;
     const session = app.store.listSessions(botId)[0]!;
     const detached: string[] = [];
     app.service.onSessionInvalidated(id => detached.push(id));
     const before = app.store.getSkillCatalog(instancePath);
     const refresh = app.service.refreshSkillCatalogs();
     await entered.promise;
-    app.config.instances[instancePath]!.chats = [];
+    app.config.instances[0]!.chats = [];
     await app.service.reconcileConfiguration();
     assert.deepEqual(detached,[session.id]);
     assert.deepEqual(await app.bot.api.getMyCommands({scope:{type:'chat',chat_id:chatId}}),[]);
@@ -68,7 +68,7 @@ test('assignment cleanup and acknowledgement do not wait for catalog discovery',
 test('restart serves cached shortcuts and reaches polling while discovery is blocked', async t => {
   const app = await createSmokeApp();
   await app.service.close();
-  const instancePath = Object.keys(app.config.instances)[0]!;
+  const instancePath = app.config.instances[0]!.id;
   app.store.enrollGroup(botId, chatId);
   app.store.setSkillCatalog(instancePath, [{name:'cached-skill',description:'Last successful discovery'}]);
   const discovery = Promise.withResolvers<Array<{name:string;description:string}>>();

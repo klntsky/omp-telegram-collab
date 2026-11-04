@@ -164,14 +164,14 @@ if (process.argv[2] !== 'collab') {
   server.once('error', listening.reject);
   server.listen(socketPath, listening.resolve);
   await listening.promise;
-  const config: AppConfig = { bots: [], instances: { [directory]: { chats: [] } },
+  const config: AppConfig = { bots: [], instances: [{id: 1, defaultDir: directory, chats: []}],
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir,
     omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 10000 } };
   writeConfig(config);
   const runtime = new OmpRuntime(config);
   const session: TopicSession = { id: 'topic', botId: 1, chatId: -100, threadId: 2,
-    instancePath: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
+    instanceId: 1, cwd: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
   return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
     async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
     async removeHost() { state.host = undefined; await persistRegistry(); },
@@ -326,7 +326,7 @@ for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', '
       diagnostic = /Managed OMP lifecycle identity changed/;
     } else if (invalid === 'stale-history') {
       await writeFile(join(app.sessionDir, 'history.jsonl'), JSON.stringify({
-        type: 'session', version: 3, id: 'another-history', cwd: app.session.instancePath,
+        type: 'session', version: 3, id: 'another-history', cwd: app.session.cwd,
       }) + '\n');
       diagnostic = /Managed OMP history identity changed/;
     } else {

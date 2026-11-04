@@ -208,10 +208,10 @@ for (const change of ['limit', 'role', 'assignment'] as const) {
     try {
       const request = capacityRequest(app);
       const updated = readConfig(app.config.configPath);
-      const path = Object.keys(updated.instances)[0]!;
+      const path = updated.instances[0]!.defaultDir;
       if (change === 'limit') updated.omp.maxSessions = 3;
       else if (change === 'role') app.setCurrentMember({status:'member'});
-      else updated.instances[path]!.chats = [];
+      else updated.instances[0]!.chats = [];
       writeConfig(updated);
       await app.callback(request.approve, request.message);
       assert.equal(app.runtime.getSessionLimit(), 1);

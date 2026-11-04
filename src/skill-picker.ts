@@ -9,7 +9,8 @@ import { isMentionableSkillName } from './skill-commands.js';
 export interface SkillCatalogEntry { name: string; description: string }
 interface Picker {
   key: PendingSkillKey;
-  instancePath: string;
+  instanceId: number;
+  cwd: string;
   skills: SkillCatalogEntry[];
   expires: number;
 }
@@ -18,8 +19,9 @@ interface Options {
   botId: () => number;
   username: () => string;
   authorize: (chatId: number, userId: number) => Promise<void>;
-  instancePath: (chatId: number) => string;
-  listSkills: (instancePath: string, session?: TopicSession) => Promise<SkillCatalogEntry[]>;
+  instanceId: (chatId: number) => number;
+  cwd: (chatId: number) => string;
+  listSkills: (instanceId: number, session?: TopicSession) => Promise<SkillCatalogEntry[]>;
 }
 export class SkillPicker {
   private readonly pickers = new Map<string, Picker>();
@@ -38,15 +40,17 @@ export class SkillPicker {
       await replyTo(ctx, contextDestination(ctx), 'Pending skills cleared.');
       return;
     }
-    const instancePath = this.options.instancePath(key.destination.chatId);
-    const catalog = await this.options.listSkills(instancePath, session);
+    const instanceId = this.options.instanceId(key.destination.chatId);
+    const cwd = session?.cwd ?? this.options.cwd(key.destination.chatId);
+    const catalog = await this.options.listSkills(instanceId, session);
     const skills = catalog.filter(skill => isMentionableSkillName(skill.name));
     const unsupported = catalog.length - skills.length;
-    if (this.options.instancePath(key.destination.chatId) !== instancePath) throw new Error('The group instance assignment changed');
+    if (this.options.instanceId(key.destination.chatId) !== instanceId) throw new Error('The group instance assignment changed');
+    if ((session?.cwd ?? this.options.cwd(key.destination.chatId)) !== cwd) throw new Error('The skill discovery directory changed');
     this.prune();
     if (this.pickers.size >= 1024) throw new Error('Too many active skill pickers. Try again after a picker expires.');
     const token = randomBytes(12).toString('hex');
-    this.pickers.set(token, { key, instancePath, skills, expires: Date.now() + 600000 });
+    this.pickers.set(token, { key, instanceId, cwd, skills, expires: Date.now() + 600000 });
     const pending = this.options.store.getPendingSkills(key);
     await replyTo(ctx, contextDestination(ctx), `${pending.length ? `Your next message will mention ${pending.map(name => `/skill:${name}`).join(', ')}.` : 'No skills selected.'}\nChoose skills for your next prompt. In General, send /p or /new followed by your task.${unsupported ? `\n${unsupported} skill name(s) cannot be represented as /skill:name because they contain whitespace or control/path characters.` : ''}`, {
       reply_markup: { inline_keyboard: [
@@ -59,14 +63,15 @@ export class SkillPicker {
   async choose(ctx: Context, name: string, session?: TopicSession): Promise<void> {
     const key = this.key(ctx);
     await this.options.authorize(key.destination.chatId, key.userId);
-    const instancePath = this.options.instancePath(key.destination.chatId);
-    const skills = (await this.options.listSkills(instancePath, session)).filter(skill => isMentionableSkillName(skill.name));
+    const instanceId = this.options.instanceId(key.destination.chatId);
+    const cwd = session?.cwd ?? this.options.cwd(key.destination.chatId);
+    const skills = (await this.options.listSkills(instanceId, session)).filter(skill => isMentionableSkillName(skill.name));
     const index = skills.findIndex(skill => skill.name === name);
     if (index === -1) throw new Error(`Skill is no longer available: /skill:${name}`);
     this.prune();
     if (this.pickers.size >= 1024) throw new Error('Too many active skill pickers. Try again after a picker expires.');
     const token = randomBytes(12).toString('hex');
-    this.pickers.set(token, { key, instancePath, skills, expires: Date.now() + 600000 });
+    this.pickers.set(token, { key, instanceId, cwd, skills, expires: Date.now() + 600000 });
     await this.select(ctx, token, index, session);
   }
   async inline(ctx: Context): Promise<void> {
@@ -79,7 +84,9 @@ export class SkillPicker {
       return;
     }
     await this.options.authorize(picker.key.destination.chatId, ctx.from.id);
-    if (this.options.instancePath(picker.key.destination.chatId) !== picker.instancePath) throw new Error('The group instance assignment changed');
+    if (this.options.instanceId(picker.key.destination.chatId) !== picker.instanceId) throw new Error('The group instance assignment changed');
+    const session = this.options.store.getTopic({botId:picker.key.botId,destination:picker.key.destination});
+    if ((session?.cwd ?? this.options.cwd(picker.key.destination.chatId)) !== picker.cwd) throw new Error('The skill discovery directory changed');
     const query = (match![2] ?? '').trim().toLowerCase();
     await ctx.answerInlineQuery(picker.skills.flatMap((skill, index) => {
       if (!`${skill.name} ${skill.description}`.toLowerCase().includes(query)) return [];
@@ -121,15 +128,17 @@ export class SkillPicker {
       return;
     }
     await this.options.authorize(key.destination.chatId, key.userId);
-    if (this.options.instancePath(key.destination.chatId) !== picker.instancePath) throw new Error('The group instance assignment changed');
+    if (this.options.instanceId(key.destination.chatId) !== picker.instanceId) throw new Error('The group instance assignment changed');
+    if ((session?.cwd ?? this.options.cwd(key.destination.chatId)) !== picker.cwd) throw new Error('The skill discovery directory changed');
     if (session && session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'Reopen this topic before selecting skills.'); return; }
     if (index === undefined) this.options.store.clearPendingSkills(key);
     else {
       const skill = picker.skills[index];
       if (!skill) throw new Error('Unknown skill selection');
-      const available = await this.options.listSkills(picker.instancePath, session);
+      const available = await this.options.listSkills(picker.instanceId, session);
       if (!available.some(entry => entry.name === skill.name)) throw new Error(`Skill is no longer available: /skill:${skill.name}`);
-      if (this.options.instancePath(key.destination.chatId) !== picker.instancePath) throw new Error('The group instance assignment changed');
+      if (this.options.instanceId(key.destination.chatId) !== picker.instanceId) throw new Error('The group instance assignment changed');
+      if ((session?.cwd ?? this.options.cwd(key.destination.chatId)) !== picker.cwd) throw new Error('The skill discovery directory changed');
       this.options.store.addPendingSkill(key, skill.name);
     }
     const skills = this.options.store.getPendingSkills(key);

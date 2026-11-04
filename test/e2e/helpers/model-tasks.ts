@@ -56,7 +56,7 @@ export async function completeWriteTask(app: TaskWorkflow, task: WriteTask, sent
     kind: 'topic', chatId: app.telegram.forum.chatId, threadId: actualThreadId,
   } });
   assert.ok(session?.runtime.kind === 'managed');
-  const cwd = session.runtime.cwd ?? session.instancePath;
+  const cwd = session.cwd;
   assert.deepEqual(JSON.parse(await readFile(join(cwd, task.path), 'utf8')), task.evidence);
   const requests = app.omp.provider.requests.get(task.name)!;
   const messages = requestMessages.parse(requests.at(-1)!.messages);

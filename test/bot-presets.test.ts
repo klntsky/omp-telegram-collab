@@ -47,7 +47,7 @@ for (const command of ['/model_preset Fast','/model_preset']) {
       await app.update({text:'/detach',message_thread_id:42});
       assert.equal(app.store.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.status,'detached');
       await app.update({text:command,message_thread_id:42});
-      assert.equal(app.config.instances[Object.keys(app.config.instances)[0]!]!.chats[0]!.default_model_preset,undefined);
+      assert.equal(app.config.instances[0]!.chats[0]!.default_model_preset,undefined);
       assert.equal(await app.runtime.isRunning(app.store.listSessions(botId)[0]!),false);
       assert.equal(app.connectionCount,0);
       assert.equal(presets.mock.callCount(),0);
@@ -86,16 +86,16 @@ test('work-topic preset switches leave the forum default unchanged and General l
     await app.update({message_thread_id:42,forum_topic_created:{name:'Session-only preset'}});
     await app.update({text:'/model_preset Fast',message_thread_id:42});
     const session = app.store.listSessions(botId)[0]!;
-    const path = session.instancePath;
+    const path = session.cwd;
     assert.equal(await app.runtime.isRunning(session),true);
-    assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.default_model_preset,'Slow');
+    assert.equal(readConfig(app.config.configPath).instances[0]!.chats[0]!.default_model_preset,'Slow');
     await app.update({text:'/model_preset',message_thread_id:42});
     await setForumSetting(app, 3, 0);
     await setForumSetting(app, 3, 1);
     await app.update({text:'/model_preset',message_thread_id:42});
     assert.equal(activePreset,'Fast');
-    assert.equal(app.config.instances[path]!.chats[0]!.default_model_preset,'Slow');
-    assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.default_model_preset,'Slow');
+    assert.equal(app.config.instances[0]!.chats[0]!.default_model_preset,'Slow');
+    assert.equal(readConfig(app.config.configPath).instances[0]!.chats[0]!.default_model_preset,'Slow');
     assert.deepEqual(app.accepted,[]);
   } finally { await app.close(); }
 });
@@ -278,7 +278,7 @@ test('preset browsing, Back, session use and forum defaults have separate effect
     assert.equal(await app.runtime.isRunning(session), false);
     await click(1);
     await click(1);
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, 'Slow');
+    assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === session.instanceId)!.chats[0]!.default_model_preset, 'Slow');
     assert.equal(await app.runtime.isRunning(session), false);
     await click(2);
     await click(0);
@@ -286,7 +286,7 @@ test('preset browsing, Back, session use and forum defaults have separate effect
     assert.equal(switches.mock.callCount(), 1);
     assert.equal(switches.mock.calls[0]!.arguments[1], 'Fast');
     assert.equal(await app.runtime.isRunning(session), true);
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, 'Slow');
+    assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === session.instanceId)!.chats[0]!.default_model_preset, 'Slow');
     assert.deepEqual(app.accepted, []);
   } finally { await app.close(); }
 });
@@ -310,7 +310,7 @@ test('preset actions refresh administration after discovery and host startup', a
       return result;
     };
     await app.callback(settingsButton(panel(), 1), panel());
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+    assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === session.instanceId)!.chats[0]!.default_model_preset, undefined);
     app.runtime.modelPresetDetails = details;
     app.setCurrentMember({username:ownerUsername,status:'creator'});
     const ensure = app.runtime.ensure.bind(app.runtime);
@@ -339,7 +339,7 @@ test('expired panels, changed sessions and adversarial cross-topic callbacks can
     await app.callback(settingsButton(panel(), 0), panel());
     const selected = structuredClone(panel());
     await app.callback(settingsButton(selected, 1), {...selected, message_thread_id:99});
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+    assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === session.instanceId)!.chats[0]!.default_model_preset, undefined);
     const now = Date.now();
     const clock = t.mock.method(Date, 'now', () => now + 31 * 60_000);
     await app.callback(settingsButton(selected, 0), selected);
@@ -351,7 +351,7 @@ test('expired panels, changed sessions and adversarial cross-topic callbacks can
     await app.callback(settingsButton(archived, 1), archived);
     assert.equal(switches.mock.callCount(), 0);
     assert.equal(await app.runtime.isRunning(session), false);
-    assert.equal(readConfig(app.config.configPath).instances[session.instancePath]!.chats[0]!.default_model_preset, undefined);
+    assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === session.instanceId)!.chats[0]!.default_model_preset, undefined);
   } finally { await app.close(); }
 });
 
@@ -411,7 +411,7 @@ for (const existing of [false,true]) {
       assert.equal(sessions.length,1);
       if (existing) assert.equal(sessions[0]!.id,before[0]!.id);
       assert.equal(app.store.hasPendingInitialTask(sessions[0]!.id),false);
-      assert.equal(readConfig(app.config.configPath).instances[sessions[0]!.instancePath]!.chats[0]!.default_model_preset,undefined);
+      assert.equal(readConfig(app.config.configPath).instances.find(instance => instance.id === sessions[0]!.instanceId)!.chats[0]!.default_model_preset,undefined);
     } finally { await app.close(); }
   });
 }
@@ -434,7 +434,7 @@ for (const invalidation of ['generation','assignment','administrator','expired']
       if (invalidation === 'generation') app.store.advanceSessionGeneration(session.id);
       if (invalidation === 'assignment') {
         const config = readConfig(app.config.configPath);
-        config.instances[session.instancePath]!.chats = [];
+        config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
         writeConfig(config);
       }
       if (invalidation === 'administrator') app.setCurrentMember({username:ownerUsername,status:'member'});

@@ -1,10 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
-import { migrateDatabase } from './migrations.js';
+import { initializeDatabase } from './migrations.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -32,7 +32,7 @@ function setupRequest(row: Row): SetupRequest {
 }
 function session(row: Row | undefined): TopicSession | undefined {
   if (!row) return undefined;
-  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instancePath: String(row.instance_path), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
+  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instanceId: Number(row.instance_id), cwd: String(row.cwd), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
 }
 function promptFingerprint(content: PromptContent): string {
   return createHash('sha256')
@@ -52,7 +52,7 @@ export class Store {
     if (filename !== ':memory:') chmodSync(filename, 0o600);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
-      migrateDatabase(this.db);
+      initializeDatabase(this.db);
     } catch (error) {
       this.db.close();
       throw error;
@@ -122,31 +122,33 @@ export class Store {
   clearPendingSkills(key: PendingSkillKey): void {
     this.db.prepare('DELETE FROM pending_skills WHERE bot_id=? AND chat_id=? AND thread_id=? AND user_id=?').run(key.botId, key.destination.chatId, storedThreadId(key.destination), key.userId);
   }
-  getSkillCatalog(instancePath: string): Array<{ name: string; description: string }> | undefined {
-    const row = this.db.prepare('SELECT skills FROM skill_catalogs WHERE instance_path=?').get(instancePath);
+  getSkillCatalog(instanceId: number): Array<{ name: string; description: string }> | undefined {
+    const row = this.db.prepare('SELECT skills FROM skill_catalogs WHERE instance_id=?').get(instanceId);
     return row ? JSON.parse(String(row.skills)) as Array<{ name: string; description: string }> : undefined;
   }
-  setSkillCatalog(instancePath: string, skills: Array<{ name: string; description: string }>): void {
-    this.db.prepare('INSERT INTO skill_catalogs VALUES (?,?) ON CONFLICT(instance_path) DO UPDATE SET skills=excluded.skills').run(instancePath, JSON.stringify(skills));
+  setSkillCatalog(instanceId: number, skills: Array<{ name: string; description: string }>): void {
+    this.db.prepare('INSERT INTO skill_catalogs VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET skills=excluded.skills').run(instanceId, JSON.stringify(skills));
   }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
-  setSessionRuntime(id: string, runtime: TopicSession['runtime']): void {
-    this.db.prepare('UPDATE sessions SET runtime=? WHERE id=?').run(JSON.stringify(runtime), id);
+  setSessionCwd(id: string, cwd: string): void {
+    if (!isAbsolute(cwd)) throw new Error('A session requires an absolute working directory');
+    this.db.prepare('UPDATE sessions SET cwd=? WHERE id=?').run(cwd,id);
   }
   getTopic(key: { botId: number; destination: TopicDestination }): TopicSession | undefined {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId): TopicSession {
-    if (!key.instancePath) throw new Error('A session requires its configured instance path');
+  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId): TopicSession {
+    if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new Error('A session requires a positive safe integer instance ID');
+    if (!isAbsolute(key.cwd)) throw new Error('A session requires an absolute working directory');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length) throw new Error('An initial task requires text or images');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.getTopicKind(key) === 'detached') throw new Error('A detached topic cannot have a session');
-      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instancePath);
+      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_id,cwd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instanceId, key.cwd);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
-      if (created.instancePath !== key.instancePath) throw new Error('This topic history belongs to a different instance path');
+      if (created.instanceId !== key.instanceId) throw new Error('This topic history belongs to a different instance ID');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
       if (Number(result.changes) && initialTask?.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(initialTask.images));
       if (Number(result.changes) && initialTask !== undefined && initialUserId !== undefined) {
@@ -338,16 +340,6 @@ export class Store {
   beginPromptReceiptSnapshot(sessionId: string, ompSessionId: string): number {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const upgrade = this.db.prepare('SELECT omp_session_id FROM provenance_upgrades WHERE session_id=?').get(sessionId);
-      if (upgrade?.omp_session_id === null) {
-        this.db.prepare('UPDATE provenance_upgrades SET omp_session_id=? WHERE session_id=?').run(ompSessionId, sessionId);
-        this.db.prepare(`INSERT INTO prompt_submissions (id,session_id,omp_session_id,sender,message_id,text,fingerprint,state)
-          SELECT id,session_id,?,sender,message_id,text,fingerprint,state FROM pending_upgrade_prompt_submissions WHERE session_id=?`).run(ompSessionId, sessionId);
-        this.db.prepare(`INSERT INTO prompt_receipts (session_id,omp_session_id,entry_id,message_id)
-          SELECT session_id,?,entry_id,message_id FROM pending_upgrade_prompt_receipts WHERE session_id=?`).run(ompSessionId, sessionId);
-        this.db.prepare('DELETE FROM pending_upgrade_prompt_submissions WHERE session_id=?').run(sessionId);
-        this.db.prepare('DELETE FROM pending_upgrade_prompt_receipts WHERE session_id=?').run(sessionId);
-      }
       this.db.prepare("UPDATE prompt_submissions SET state='uncertain' WHERE session_id=? AND omp_session_id=? AND state='pending'")
         .run(sessionId, ompSessionId);
       const row = this.db.prepare('SELECT MAX(id) AS boundary FROM prompt_submissions WHERE session_id=? AND omp_session_id=?')
@@ -489,24 +481,6 @@ export class Store {
   rememberReply(id: string, ompSessionId: string, entryId: string): boolean {
     const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, ompSessionId, entryId);
     return Number(result.changes) === 1;
-  }
-  rememberSnapshotReply(sessionId: string, ompSessionId: string, entryId: string, message: {text: string; timestamp: number}): boolean {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const fresh = this.rememberReply(sessionId, ompSessionId, entryId);
-      let historical = false;
-      if (fresh && this.db.prepare(`SELECT 1 FROM pending_upgrade_replies r JOIN provenance_upgrades u ON u.session_id=r.session_id
-        WHERE r.session_id=? AND u.omp_session_id=? LIMIT 1`).get(sessionId, ompSessionId)) {
-        const fingerprint = createHash('sha256').update(JSON.stringify([message.timestamp, message.text])).digest('hex');
-        historical = Boolean(this.db.prepare(`SELECT 1 FROM pending_upgrade_replies r JOIN provenance_upgrades u ON u.session_id=r.session_id
-          WHERE r.session_id=? AND u.omp_session_id=? AND r.fingerprint=?`).get(sessionId, ompSessionId, fingerprint));
-      }
-      this.db.exec('COMMIT');
-      return fresh && !historical;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
   }
   hasSnapshot(id: string): boolean {
     return Boolean(this.db.prepare('SELECT 1 FROM snapshot_baselines WHERE session_id=?').get(id));

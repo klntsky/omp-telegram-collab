@@ -23,7 +23,7 @@ async function seed(app: DefaultSkillApp) {
   return app.store.listSessions(botId)[0]!;
 }
 function savedDefault(app: DefaultSkillApp) {
-  return Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.default_new_topic_skill;
+  return readConfig(app.config.configPath).instances[0]!.chats[0]!.default_new_topic_skill;
 }
 const participant = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
 

@@ -19,7 +19,8 @@ test('General creates an empty topic then passes native branch arguments without
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       assert.equal(app.store.getSession(session.id)?.threadId,session.threadId);
       calls.push({id:session.id,branch});
-      session.runtime = {kind:'managed',cwd:'/fixture/general-worktree'};
+      session.runtime = { kind: 'managed' };
+      session.cwd = '/fixture/general-worktree';
       return 'Moved to worktree /fixture/general-worktree';
     });
     await app.update({text:'/worktree feature/native',reply_to_message:{message_id:8000,text:'Ignore this quote'}});
@@ -48,7 +49,8 @@ test('General worktree waits for group administrator approval', async t => {
     t.mock.method(app.runtime,'worktree',async (session: TopicSession, branch?: string) => {
       calls++;
       assert.equal(branch,'feature/proposed');
-      session.runtime = {kind:'managed',cwd:'/fixture/approved'};
+      session.runtime = { kind: 'managed' };
+      session.cwd = '/fixture/approved';
       return 'Moved to worktree /fixture/approved';
     });
     const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};

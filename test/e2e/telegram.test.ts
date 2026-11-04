@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { SessionEntry } from '@oh-my-pi/pi-wire';
@@ -29,6 +29,10 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
     separate: createWriteTask('separate'),
     restarted: createWriteTask('restarted'),
     restored: createWriteTask('restored'),
+    identityOld: createWriteTask('identity-old'),
+    identityNew: createWriteTask('identity-new'),
+    identityOldRestarted: createWriteTask('identity-old-restarted'),
+    identityNewRestarted: createWriteTask('identity-new-restarted'),
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };
@@ -45,7 +49,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
     { ...cancelledQuestion, steps: [questionStep(cancelledQuestion.name)] },
     ...questionControls,
   ] });
-  const savedChat = () => readConfig(app.config.configPath).instances[app.omp.workspace]!.chats[0]!;
+  const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
   const [me, chat, member] = await Promise.all([
     app.telegram.api.getMe(), app.telegram.api.getChat(app.telegram.forum.chatId),
     app.telegram.api.getChatMember(app.telegram.forum.chatId, app.telegram.bot.id),
@@ -76,7 +80,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   assert.equal(sessions.length, 1);
   let session = sessions[0]!;
   assert.equal(session.chatId, app.telegram.forum.chatId);
-  assert.equal(session.instancePath, app.omp.workspace);
+  assert.equal(session.cwd, app.omp.workspace);
   assert.equal(session.runtime.kind, 'managed');
   assert.equal(session.status, 'open');
   assert.equal(app.store.hasPendingInitialTask(session.id), false);
@@ -217,7 +221,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await clickPanel(app, promptSettings, 0);
   await app.waitForCondition(() => savedChat().all_messages_are_prompts === true);
 
-  await app.waitForCondition(() => app.store.getSkillCatalog(app.omp.workspace)?.some(skill => skill.name === 'e2e-review') ?? false);
+  await app.waitForCondition(() => app.store.getSkillCatalog(session.instanceId)?.some(skill => skill.name === 'e2e-review') ?? false);
   await app.sendAndWait('/unrecognized command', session.threadId);
   const skillKey = { botId: app.telegram.bot.id, destination: { kind: 'topic' as const, chatId: session.chatId, threadId: session.threadId }, userId: app.telegram.user.account.id };
   const skillPicker = await openPanel(app, '/skills', session.threadId);
@@ -265,8 +269,9 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   const allSessions = app.store.listSessions(app.telegram.bot.id);
   const created = allSessions.find(value => value.id !== session.id)!;
   assert.equal(allSessions.length, 2);
-  assert.deepEqual(created.runtime, { kind: 'managed', cwd: selectedDirectory });
-  assert.equal(created.instancePath, app.omp.workspace);
+  assert.deepEqual(created.runtime, { kind: 'managed' });
+  assert.equal(created.instanceId, 1);
+  assert.equal(created.cwd, selectedDirectory);
   await assert.rejects(readFile(join(app.omp.workspace, tasks.general.path), 'utf8'), { code: 'ENOENT' });
   app.setFolderOptions([]);
   assert.notEqual(created.threadId, session.threadId);
@@ -396,6 +401,40 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   assert.deepEqual(app.store.getPendingSkills(persistedSkillKey), []);
   assert.ok(taskInput(app.omp.provider, tasks.restarted).text.includes(`/skill:e2e-review\n\n${tasks.restarted.prompt}`));
   assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.restarted.name)![0]!.messages).includes(tasks.separate.evidence.nonce));
+
+  const oldCwd = separateSession.cwd;
+  const identityDirectory = join(app.omp.workspace, 'identity-default');
+  await mkdir(identityDirectory, {recursive:true});
+  const identityConfig = readConfig(app.config.configPath);
+  const logicalInstance = identityConfig.instances.find(instance => instance.id === separateSession.instanceId)!;
+  logicalInstance.defaultDir = identityDirectory;
+  identityConfig.instances = [{id: 2, defaultDir: identityDirectory, chats: []}, logicalInstance];
+  writeConfig(identityConfig);
+  const identityHistory = await readSessionHistory(app.omp.dataDir, separateSession.id);
+  const oldFollowup = await app.sendAndWait(`/p ${tasks.identityOld.prompt}`, separateSession.threadId);
+  await completeWriteTask(app, tasks.identityOld, oldFollowup, separateSession.threadId);
+  assert.equal(app.store.getSession(separateSession.id)?.cwd, oldCwd);
+  assert.ok((await readSessionHistory(app.omp.dataDir, separateSession.id)).startsWith(identityHistory));
+  assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityOld.name)![0]!.messages).includes(tasks.separate.evidence.nonce));
+  const identityNew = await app.sendAndWait(`/new ${tasks.identityNew.prompt}`);
+  const identityReply = await completeWriteTask(app, tasks.identityNew, identityNew);
+  const identitySession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === identityReply.replyToMessage?.threadId)!;
+  assert.equal(identitySession.instanceId, separateSession.instanceId);
+  assert.equal(identitySession.cwd, identityDirectory);
+  assert.equal(await readFile(join(identityDirectory,tasks.identityNew.path),'utf8'), JSON.stringify(tasks.identityNew.evidence));
+  await assert.rejects(stat(join(oldCwd,tasks.identityNew.path)), {code:'ENOENT'});
+  const newIdentityHistory = await readSessionHistory(app.omp.dataDir, identitySession.id);
+  await app.restart();
+  assert.equal(app.store.getSession(separateSession.id)?.cwd, oldCwd);
+  assert.equal(app.store.getSession(identitySession.id)?.cwd, identityDirectory);
+  assert.equal(app.store.getSession(identitySession.id)?.instanceId, separateSession.instanceId);
+  const oldRestarted = await app.sendAndWait(`/p ${tasks.identityOldRestarted.prompt}`, separateSession.threadId);
+  await completeWriteTask(app,tasks.identityOldRestarted,oldRestarted,separateSession.threadId);
+  const newRestarted = await app.sendAndWait(`/p ${tasks.identityNewRestarted.prompt}`,identitySession.threadId);
+  await completeWriteTask(app,tasks.identityNewRestarted,newRestarted,identitySession.threadId);
+  assert.ok((await readSessionHistory(app.omp.dataDir,identitySession.id)).startsWith(newIdentityHistory));
+  assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityOldRestarted.name)![0]!.messages).includes(tasks.identityOld.evidence.nonce));
+  assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityNewRestarted.name)![0]!.messages).includes(tasks.identityNew.evidence.nonce));
 
   await app.sendAndWait('/terminate');
   assert.equal(readConfig(app.config.configPath).terminated, true);

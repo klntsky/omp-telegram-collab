@@ -28,10 +28,10 @@ childProcess.execFile = new Proxy(originalExec, {
 syncBuiltinESMExports();
 const directory = await mkdtemp(join(tmpdir(), 'omp-startup-diagnosis-'));
 const config = { ...readConfig(process.argv[2] ?? defaultConfigPath()), dataDir: directory };
-const instancePath = Object.keys(config.instances)[0];
-if (!instancePath) throw new Error('Configure an instance before diagnosing startup');
+const instance = config.instances[0];
+if (!instance) throw new Error('Configure an instance before diagnosing startup');
 const runtime = new OmpRuntime(config);
-const session: TopicSession = { id: 'startup-diagnosis', instancePath, botId: 0, chatId: 0, threadId: 0, name: 'Startup diagnosis', status: 'open', runtime: { kind: 'managed' }, createdAt: Date.now() };
+const session: TopicSession = { id: 'startup-diagnosis', instanceId: instance.id, cwd: instance.defaultDir, botId: 0, chatId: 0, threadId: 0, name: 'Startup diagnosis', status: 'open', runtime: { kind: 'managed' }, createdAt: Date.now() };
 const start = Date.now();
 try {
   const binding = await runtime.ensure(session);

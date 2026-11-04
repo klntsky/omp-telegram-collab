@@ -98,9 +98,7 @@ export async function setupCollaborationTest(
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
   config.bots = [{ id: telegram.bot.id, token: telegram.bot.token }];
-  config.instances = {
-    [omp.workspace]: { chats: [{ botId: telegram.bot.id, chatId: telegram.forum.chatId }] },
-  };
+  config.instances = [{id: 1, defaultDir: omp.workspace, chats: [{ botId: telegram.bot.id, chatId: telegram.forum.chatId }]}];
   config.omp = {
     executable: omp.executable,
     args: omp.args,
@@ -278,10 +276,10 @@ export async function setupCollaborationTest(
     },
     setFolderOptions(options: string[]): void {
       const updated = readConfig(config.configPath);
-      const chat = updated.instances[omp.workspace]!.chats[0]!;
+      const chat = updated.instances.find(instance => instance.id === 1)!.chats[0]!;
       chat.folder_options = options;
       writeConfig(updated);
-      Object.assign(config.instances[omp.workspace]!.chats[0]!, chat);
+      Object.assign(config.instances.find(instance => instance.id === 1)!.chats[0]!, chat);
     },
     send,
     async sendAndWait(text: string, threadId?: number): Promise<Message> {

@@ -23,7 +23,7 @@ test('pending skill order and clearing persist across store restarts independent
     try {
       assert.deepEqual(second.getPendingSkills(key), ['zebra', 'alpha']);
       assert.equal(second.getTopic(key), undefined);
-      const session = second.createSession({ botId:key.botId, chatId:key.destination.chatId, threadId:17, instancePath:'/work/project' }, 'Session');
+      const session = second.createSession({ botId:key.botId, chatId:key.destination.chatId, threadId:17, instanceId: 1, cwd:'/work/project' }, 'Session');
       second.updateSession(session.id, { status: 'closed' });
       assert.deepEqual(second.getPendingSkills(key), ['zebra', 'alpha']);
       second.clearPendingSkills(key);

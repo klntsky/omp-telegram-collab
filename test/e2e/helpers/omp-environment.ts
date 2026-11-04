@@ -112,9 +112,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   await git(workspace, 'config', 'init.defaultBranch', 'main');
   await git(workspace, 'commit', '--allow-empty', '-m', 'Initialize E2E workspace');
   const assertWorktree = (session: TopicSession, branch = `t.me/c/${String(session.chatId).slice(4)}/${session.threadId}`) => step('omp.worktree', async () => {
-    assert.ok(session.runtime.kind === 'managed' && session.runtime.cwd);
-    const cwd = session.runtime.cwd;
-    assert.equal(session.instancePath, workspace);
+    assert.ok(session.runtime.kind === 'managed' && session.cwd);
+    const cwd = session.cwd;
+    assert.equal(session.instanceId, 1);
     assert.ok(cwd.startsWith(`${dirname(workspace)}${sep}`));
     assert.notEqual(cwd, workspace);
     assert.equal(await git(cwd, 'branch', '--show-current'), branch);
