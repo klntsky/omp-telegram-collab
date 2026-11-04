@@ -228,7 +228,7 @@ test('transcript timeout, viewer disposal, and send failure cannot redirect late
   assert.deepEqual(second.frames.at(-1), {t: 'transcript', reqId: 1, text: 'current', newSize: 2});
 });
 
-test('new feed epoch rejects old cursors and cold welcome invents no live partial', t => {
+test('new feed epoch resets old cursors and cold welcome invents no live partial', t => {
   const old = fixture(t, Array.from({length: 101}, (_, i) => entry(String(i))));
   const cursor = viewer(old).older;
   assert.ok(cursor);
@@ -240,13 +240,14 @@ test('new feed epoch rejects old cursors and cold welcome invents no live partia
   const reader = viewer(fresh);
   assert.notEqual(fresh.epoch, old.epoch);
   assert.deepEqual(reader.frames.map(frame => frame.t), ['welcome', 'history-state', 'snapshot-chunk']);
-  assert.throws(() => reader.page(cursor), /Session history changed/);
+  reader.subscription.send({t: 'history-page', reqId: 1, cursor});
+  assert.deepEqual(reader.frames.at(-1), {t: 'history-reset', page: {entries: [entry('replacement')], older: null}});
   assert.throws(() => reader.page({epoch: fresh.epoch, before: 2}), /Invalid history cursor/);
 });
 
 test('disk index is private and disposal releases files and viewers with original diagnostics', t => {
   const feed = fixture(t, [entry('sensitive')]);
-  const {directory} = feed as unknown as {directory: string};
+  const {index: {directory}} = feed as unknown as {index: {directory: string}};
   assert.equal(statSync(directory).mode & 0o777, 0o700);
   assert.equal(statSync(join(directory, 'history.sqlite')).mode & 0o777, 0o600);
   const reader = viewer(feed);
@@ -259,7 +260,7 @@ test('disk index is private and disposal releases files and viewers with origina
 test('index ingest failures dispose only the feed and preserve the storage error', t => {
   const feed = fixture(t);
   const reader = viewer(feed);
-  const {db, directory} = feed as unknown as {db: DatabaseSync; directory: string};
+  const {index: {db, directory}} = feed as unknown as {index: {db: DatabaseSync; directory: string}};
   db.exec('DROP TABLE entries');
   assert.doesNotThrow(() => feed.accept({t: 'entry', entry: entry('cannot-index')}));
   assert.equal(reader.reasons.length, 1);
@@ -267,4 +268,58 @@ test('index ingest failures dispose only the feed and preserve the storage error
   assert.equal(existsSync(directory), false);
   assert.doesNotThrow(() => feed.accept({t: 'state', state}));
   assert.throws(() => viewer(feed), /no such table: entries/);
+});
+
+test('history replacement changes same-ID content and removals without replaying stale entries or resetting live state', t => {
+  const original = Array.from({length: 150}, (_, i) => entry(String(i)));
+  const feed = fixture(t, original);
+  const reader = viewer(feed);
+  assert.ok(reader.older);
+  const previousEpoch = feed.epoch;
+  feed.accept({t: 'state', state: {...state, isStreaming: true}});
+  feed.accept({t: 'event', event: {type: 'message_update', message: message('still streaming')}});
+  feed.accept({t: 'event', event: {type: 'tool_execution_start', toolCallId: 'active', toolName: 'read', args: {}}});
+  const receive = feed.beginHistoryRefresh();
+  assert.equal(feed.historyFresh, false);
+  assert.throws(() => viewer(feed), /history is refreshing/);
+  feed.accept({t: 'entry', entry: entry('removed-before-snapshot')});
+  const replacement = original.filter(row => row.id !== '148').map(row => row.id === '149' ? entry('149', 'rewritten') : row);
+  receive({...welcome(replacement.length), state: {...state, isStreaming: true}});
+  receive({t: 'snapshot-chunk', entries: replacement, final: true});
+  const appended = entry('150', 'after the snapshot cut');
+  feed.accept({t: 'entry', entry: appended});
+  feed.finishHistoryRefresh();
+  const expected = [...replacement, appended].slice(-100);
+  assert.equal(feed.historyFresh, true);
+  assert.notEqual(feed.epoch, previousEpoch);
+  assert.deepEqual(reader.frames.at(-1), {t: 'history-reset', page: {entries: expected, older: {epoch: feed.epoch, before: 50}}});
+  reader.subscription.send({t: 'history-page', reqId: 5, cursor: reader.older});
+  assert.equal(reader.frames.at(-1)?.t, 'history-reset');
+  const joined = viewer(feed);
+  assert.deepEqual(joined.entries, expected);
+  assert.ok(joined.frames.some(frame => frame.t === 'event' && frame.event.type === 'message_update' &&
+    frame.event.message.role === 'assistant' && frame.event.message.content[0]?.type === 'text' &&
+    frame.event.message.content[0].text === 'still streaming'));
+  assert.ok(joined.frames.some(frame => frame.t === 'event' && frame.event.type === 'tool_execution_start' && frame.event.toolCallId === 'active'));
+});
+
+test('failed replacement preserves the diagnostic and cannot serve unverified pages before recovery', t => {
+  const feed = fixture(t, Array.from({length: 101}, (_, i) => entry(String(i))));
+  const reader = viewer(feed);
+  assert.ok(reader.older);
+  const receive = feed.beginHistoryRefresh();
+  receive(welcome(2));
+  receive({t: 'snapshot-chunk', entries: [entry('partial')], final: false});
+  const diagnostic = new Error('Original replacement failure\nDisk diagnostic');
+  feed.discardHistoryRefresh(diagnostic);
+  assert.deepEqual(reader.frames.at(-1), {t: 'history-error', message: diagnostic.message});
+  reader.subscription.send({t: 'history-page', reqId: 2, cursor: reader.older});
+  assert.deepEqual(reader.frames.at(-1), {t: 'history-invalidated'});
+  assert.throws(() => viewer(feed), /history is refreshing/);
+  const recovered = feed.beginHistoryRefresh();
+  recovered(welcome(1));
+  recovered({t: 'snapshot-chunk', entries: [entry('verified')], final: true});
+  feed.finishHistoryRefresh();
+  assert.deepEqual(reader.frames.at(-1), {t: 'history-reset', page: {entries: [entry('verified')], older: null}});
+  assert.deepEqual(viewer(feed).entries, [entry('verified')]);
 });

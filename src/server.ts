@@ -229,22 +229,23 @@ export function createServer(options: ServerOptions): GatewayServer {
       } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
+    async function failAction(error: unknown): Promise<void> {
+      if (error instanceof ServiceTerminatedError) fail(4003,error.message);
+      else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
+      else if (error instanceof SessionCapacityError) {
+        fail(4009,error.message);
+        const session = options.store.getSession(identity.sessionId);
+        if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(() => undefined);
+      } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
+    }
     function enqueue(action: () => Promise<void>): void {
       if (closed) return;
-      tail = tail.then(async () => { if (!closed) await action(); }).catch(async error => {
-        if (error instanceof ServiceTerminatedError) fail(4003,error.message);
-        else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
-        else if (error instanceof SessionCapacityError) {
-          fail(4009,error.message);
-          const session = options.store.getSession(identity.sessionId);
-          if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(() => undefined);
-        } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
-      });
+      tail = tail.then(async () => { if (!closed) await action(); }).catch(failAction);
     }
     function flushOutgoing(): void {
       if (closed || outgoingScheduled || !outgoing.length) return;
       outgoingScheduled = true;
-      enqueue(async () => {
+      void (async () => {
         // Frames arriving during this local check belong to the next batch.
         const batch = outgoing;
         outgoing = [];
@@ -262,7 +263,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           outgoingScheduled = false;
           flushOutgoing();
         }
-      });
+      })().catch(failAction);
     }
     ws.on('error',() => fail(1011,'Connection failed'));
     ws.on('close',() => { closed=true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close(); });
@@ -277,7 +278,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         await authorize(identity,connectedSession,readAccess);
         if (!upstream) throw new Error('Session not connected');
         checkTermination();
-        upstream.send(frame);
+        await upstream.send(frame);
       });
     });
     enqueue(async () => {
@@ -295,7 +296,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed) return;
       checkTermination();
       await authorize(identity,session,readAccess);
-      const connection = bot.subscribeSessionFeed(session,{
+      const connection = await bot.subscribeSessionFeed(session,{
         onFrame: frame => {
           try { checkTermination(); }
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }

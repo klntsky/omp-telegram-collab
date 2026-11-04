@@ -92,7 +92,7 @@ test('idle restart repairs an applied icon whose acknowledgement was lost and re
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:reopened,runtime:app.runtime,
       bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),connect:async (binding,_name,handlers) => {
         welcome(binding,handlers);
-        return {send(){ throw new Error('Icon recovery must not submit a frame'); },close(){}};
+        return {send(){ throw new Error('Icon recovery must not submit a frame'); },async refreshSnapshot(){ assert.fail('Icon recovery must not refresh history'); },close(){}};
       }});
     await restarted.initialize();
     restarted.startBackground();
@@ -149,7 +149,7 @@ test('maintenance restores a missing mirror without host admission or prompt rep
         attempts++;
         if (!available) throw new Error('Relay temporarily unavailable');
         welcome(binding,handlers);
-        return {send(){ throw new Error('Observation recovery must not submit work'); },close(){}};
+        return {send(){ throw new Error('Observation recovery must not submit work'); },async refreshSnapshot(){ assert.fail('Observation recovery must not refresh history'); },close(){}};
       }});
     await restarted.initialize();
     restarted.startBackground();
@@ -295,7 +295,7 @@ test('restart discards a contaminated generated finish preference', {timeout:150
     restarted = createBot({config:app.config,botConfig:app.config.bots[0]!,token:botToken,store:app.store,runtime:app.runtime,
       bot:new Bot(botToken,{client:{apiRoot:app.telegramUrl}}),connect:async (binding,_name,handlers) => {
         welcome(binding,handlers);
-        return {send(){ throw new Error('Recovery must not send work'); },close(){}};
+        return {send(){ throw new Error('Recovery must not send work'); },async refreshSnapshot(){ assert.fail('Recovery must not refresh history'); },close(){}};
       }});
     await restarted.initialize();
     restarted.startBackground();

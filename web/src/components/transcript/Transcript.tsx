@@ -249,7 +249,14 @@ const EARLIER_TRIGGER_PX = 200;
 export function Transcript(props: TranscriptProps): ReactNode {
 	const { entries, stream, streamDone, activeTools, working, compact, host, phase, history, onLoadEarlier } = props;
 
-	const [pinnedStart, setPinnedStart] = useState<SessionEntry | "beginning" | null>(null);
+	const [pin, setPin] = useState<{ revision: number | undefined; start: SessionEntry | "beginning" | null }>({
+		revision: history?.revision,
+		start: null,
+	});
+	const pinnedStart = pin.revision === history?.revision ? pin.start : null;
+	const setPinnedStart = (start: SessionEntry | "beginning" | null): void => {
+		setPin({ revision: history?.revision, start });
+	};
 	const [awayFromTail, setAwayFromTail] = useState(false);
 	const tailStart = Math.max(0, entries.length - WINDOW);
 	const pinnedIndex = useMemo(
@@ -280,6 +287,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
 	const lastScrollTopRef = useRef(0);
 	const earlierScrollArmedRef = useRef(true);
+	const historyRevisionRef = useRef(history?.revision);
 
 	const captureAnchor = (): void => {
 		const el = rootRef.current;
@@ -316,6 +324,16 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		lastScrollTopRef.current = el.scrollTop;
 	}, [phase]);
 
+	useLayoutEffect(() => {
+		const replaced = historyRevisionRef.current !== history?.revision;
+		historyRevisionRef.current = history?.revision;
+		if (replaced || (history && history.freshness !== "ready")) {
+			prependRef.current = null;
+			earlierScrollArmedRef.current = false;
+		}
+		if (replaced && rootRef.current) lastScrollTopRef.current = rootRef.current.scrollTop;
+	}, [history?.revision, history?.freshness]);
+
 	// Keep the reader's content in place when earlier rows mount above it.
 	useLayoutEffect(() => {
 		const el = rootRef.current;
@@ -325,10 +343,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (!before.anchor.isConnected) return;
 		el.scrollTop += before.anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
 		lastScrollTopRef.current = el.scrollTop;
-	}, [start, entries, history?.loading, history?.error]);
+	}, [start, entries, history?.loading, history?.error, history?.freshness, history?.revision]);
 
 	const showEarlier = (): void => {
-		if (!rootRef.current || history?.loading) return;
+		if (!rootRef.current || history?.loading || history?.freshness === "refreshing") return;
 		if (start === 0 && (!history?.older || !onLoadEarlier || phase !== "live")) return;
 		captureAnchor();
 		lockRef.current = false;
@@ -386,7 +404,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
 			onScroll={() => {
 				const el = rootRef.current;
-				if (el === null) return;
+				if (el === null || el.scrollTop === lastScrollTopRef.current) return;
 				const movingUp = el.scrollTop < lastScrollTopRef.current;
 				lastScrollTopRef.current = el.scrollTop;
 				updateTranscriptTailLock(el, lockRef);
@@ -399,22 +417,38 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				}
 				if (history?.loading && !lockRef.current) captureAnchor();
 				if (el.scrollTop > EARLIER_TRIGGER_PX) earlierScrollArmedRef.current = true;
-				if (movingUp && el.scrollTop <= EARLIER_TRIGGER_PX && earlierScrollArmedRef.current) showEarlier();
+				if (
+					movingUp && el.scrollTop <= EARLIER_TRIGGER_PX && earlierScrollArmedRef.current &&
+					history?.freshness !== "unverified"
+				) showEarlier();
 			}}
 		>
 			{settled && entries.length === 0 && stream === null && !working && (
 				<div className="tr-empty">no activity yet</div>
 			)}
-			{(start > 0 || history?.older || history?.loading || history?.error) && (
-				<div className="tr-history">
+			{(start > 0 || history?.older || history?.loading || history?.error || history?.freshness === "refreshing") && (
+				<div className="tr-history" aria-busy={history?.loading || history?.freshness === "refreshing"}>
 					<button
 						type="button"
 						className="tr-earlier"
-						disabled={history?.loading || (start === 0 && phase !== "live")}
+						disabled={
+							history?.loading || history?.freshness === "refreshing" ||
+							(start === 0 && (phase !== "live" || !history?.older))
+						}
 						onClick={showEarlier}
 					>
 						{history?.loading ? "loading earlier…" : history?.error ? "retry earlier history" : "show earlier"}
 					</button>
+					{history?.freshness === "refreshing" && (
+						<div className="tr-history-status" role="status">Refreshing session history…</div>
+					)}
+					{history?.freshness === "unverified" && (
+						<div className="tr-history-status" role="status">
+							{history.older
+								? "History is unverified. Retry earlier history to check again."
+								: "History is unverified. Waiting for the session source to recover."}
+						</div>
+					)}
 					{history?.error && <div className="tr-history-error" role="alert">{history.error}</div>}
 				</div>
 			)}

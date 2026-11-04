@@ -27,8 +27,7 @@ const userContent = z.union([z.string(), z.array(z.object({
   type: z.string(), text: z.string().optional(), image_url: z.object({ url: z.string() }).optional(),
 }))]);
 
-export function createWriteTask(name: string, suffix = ''): WriteTask {
-  const path = `e2e-${name}.json`;
+export function createWriteTask(name: string, suffix = '', path = `e2e-${name}.json`): WriteTask {
   const evidence = { executedBy: 'real-omp-write-tool', nonce: randomUUID() };
   return {
     name, path, evidence, toolCallId: `call_e2e_${name}`,
@@ -42,6 +41,17 @@ export function writeScenario(task: WriteTask): FakeLlmScenario {
       i: 'Writing E2E evidence', path: task.path, content: JSON.stringify(task.evidence),
     } },
     { type: 'text', text: 'The requested file has been written.' },
+  ] };
+}
+
+export function writeReadScenario(task: WriteTask): FakeLlmScenario {
+  const scenario = writeScenario(task);
+  return { ...scenario, steps: [
+    scenario.steps[0]!,
+    { type: 'tool', id: `call_read_${task.name}`, name: 'read', arguments: {
+      i: 'Reading E2E evidence', path: task.path,
+    } },
+    ...scenario.steps.slice(1),
   ] };
 }
 

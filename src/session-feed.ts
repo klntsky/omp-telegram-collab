@@ -18,21 +18,114 @@ export interface SessionFeedHandlers {
   onClose(reason: string): void;
 }
 export interface SessionFeedSubscription {
-  send(frame: BrowserFrame): void;
+  send(frame: BrowserFrame): void | Promise<void>;
   close(): void;
 }
 interface Viewer { handlers: SessionFeedHandlers; requests: Set<number> }
 
-export class SessionFeed {
+class HistoryIndex {
   readonly epoch = randomBytes(18).toString('base64url');
-  private directory: string | undefined;
-  private db!: DatabaseSync;
-  private insert!: StatementSync;
-  private insertPending!: StatementSync;
+  readonly directory: string;
+  readonly db: DatabaseSync;
+  private readonly insert: StatementSync;
+  private readonly insertPending: StatementSync;
+  nextOrdinal = 0;
+  ready = false;
+  private closed = false;
+
+  constructor() {
+    this.directory = mkdtempSync(join(tmpdir(), 'omp-session-feed-'));
+    try {
+      this.db = new DatabaseSync(join(this.directory, 'history.sqlite'));
+      chmodSync(join(this.directory, 'history.sqlite'), 0o600);
+      this.db.exec(`PRAGMA journal_mode=DELETE; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA temp_store=FILE;
+        CREATE TABLE entries (ordinal INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL, payload TEXT NOT NULL);
+        CREATE TABLE pending (arrival INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL, payload TEXT NOT NULL);`);
+      this.insert = this.db.prepare('INSERT OR IGNORE INTO entries VALUES (?,?,?,?)');
+      this.insertPending = this.db.prepare('INSERT OR IGNORE INTO pending (id,bytes,payload) VALUES (?,?,?)');
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+  }
+
+  private append(entry: SessionEntry): boolean {
+    const payload = JSON.stringify(entry);
+    const result = this.insert.run(this.nextOrdinal, entry.id, Buffer.byteLength(payload), payload);
+    if (!result.changes) return false;
+    this.nextOrdinal++;
+    return true;
+  }
+
+  add(entry: SessionEntry): boolean {
+    if (this.ready) return this.append(entry);
+    const payload = JSON.stringify(entry);
+    this.insertPending.run(entry.id, Buffer.byteLength(payload), payload);
+    return true;
+  }
+
+  snapshot(entries: SessionEntry[], final: boolean): void {
+    this.db.exec('BEGIN');
+    try {
+      for (const entry of entries) this.append(entry);
+      if (final) {
+        const appended = this.db.prepare(`INSERT INTO entries (ordinal,id,bytes,payload)
+          SELECT ? + row_number() OVER (ORDER BY arrival) - 1,id,bytes,payload FROM pending
+          WHERE NOT EXISTS (SELECT 1 FROM entries WHERE entries.id=pending.id) ORDER BY arrival`).run(this.nextOrdinal);
+        this.nextOrdinal += Number(appended.changes);
+        this.db.exec('DELETE FROM pending');
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); }
+      catch (rollbackError) { console.warn('Could not roll back session history index', rollbackError); }
+      throw error;
+    }
+    if (final) this.ready = true;
+  }
+
+  page(before = this.nextOrdinal): HistoryPage {
+    const rows = this.db.prepare('SELECT ordinal,bytes FROM entries WHERE ordinal < ? ORDER BY ordinal DESC LIMIT ?')
+      .all(before, PAGE_ENTRIES);
+    const entries: SessionEntry[] = [];
+    let bytes = 512;
+    let first = before;
+    const payload = this.db.prepare('SELECT payload FROM entries WHERE ordinal=?');
+    for (const row of rows) {
+      const size = Number(row.bytes) + (entries.length ? 1 : 0);
+      if (entries.length && bytes + size > PAGE_BYTES) break;
+      entries.push(JSON.parse(String(payload.get(row.ordinal!)!.payload)) as SessionEntry);
+      bytes += size;
+      first = Number(row.ordinal);
+    }
+    entries.reverse();
+    return {entries, older: first > 0 ? {epoch: this.epoch, before: first} : null};
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try { this.db?.close(); }
+    catch (error) { console.warn('Could not close session history index', error); }
+    try { rmSync(this.directory, {recursive: true, force: true}); }
+    catch (error) { console.warn('Could not remove session history index', error); }
+  }
+}
+
+export class SessionFeed {
+  private index!: HistoryIndex;
+  private refresh: {index: HistoryIndex; welcome?: Welcome; error?: unknown} | undefined;
+  private dirty = false;
+
+  get epoch(): string { return this.index.epoch; }
+  get historyFresh(): boolean { return this.ready && !this.dirty && this.ended === undefined; }
+
+  confirmInitialHistory(): void {
+    if (this.ready && this.ended === undefined) this.dirty = false;
+  }
   private readonly viewers = new Set<Viewer>();
   private readonly requests = new Map<number, {viewer: Viewer; reqId: number; timer: NodeJS.Timeout}>();
   private nextRequest = 1;
-  private nextOrdinal = 0;
   private ready = false;
   private ended: string | undefined;
   private welcome: Welcome | undefined;
@@ -47,18 +140,8 @@ export class SessionFeed {
   private unlisted = new Set<string>();
 
   constructor(private readonly sendUpstream: (frame: Extract<BrowserFrame, {t: 'fetch-transcript'}>) => void) {
-    try {
-      this.directory = mkdtempSync(join(tmpdir(), 'omp-session-feed-'));
-      this.db = new DatabaseSync(join(this.directory, 'history.sqlite'));
-      chmodSync(join(this.directory, 'history.sqlite'), 0o600);
-      this.db.exec(`PRAGMA journal_mode=DELETE; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA temp_store=FILE;
-        CREATE TABLE entries (ordinal INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL, payload TEXT NOT NULL);
-        CREATE TABLE pending (arrival INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL, payload TEXT NOT NULL);`);
-      this.insert = this.db.prepare('INSERT OR IGNORE INTO entries VALUES (?,?,?,?)');
-      this.insertPending = this.db.prepare('INSERT OR IGNORE INTO pending (id,bytes,payload) VALUES (?,?,?)');
-    } catch (error) {
-      this.close(error instanceof Error ? error.message : String(error));
-    }
+    try { this.index = new HistoryIndex(); }
+    catch (error) { this.close(error instanceof Error ? error.message : String(error)); }
   }
 
   accept(frame: HostFrame): void {
@@ -77,34 +160,19 @@ export class SessionFeed {
         return;
       }
       if (frame.t === 'snapshot-chunk') {
-        this.db.exec('BEGIN');
-        try {
-          for (const entry of frame.entries) this.append(entry);
-          if (frame.final) {
-            const appended = this.db.prepare(`INSERT INTO entries (ordinal,id,bytes,payload)
-              SELECT ? + row_number() OVER (ORDER BY arrival) - 1,id,bytes,payload FROM pending
-              WHERE NOT EXISTS (SELECT 1 FROM entries WHERE entries.id=pending.id) ORDER BY arrival`).run(this.nextOrdinal);
-            this.nextOrdinal += Number(appended.changes);
-            this.db.exec('DELETE FROM pending');
-          }
-          this.db.exec('COMMIT');
-        } catch (error) {
-          try { this.db.exec('ROLLBACK'); }
-          catch (rollbackError) { console.warn('Could not roll back session history index', rollbackError); }
-          throw error;
-        }
+        this.index.snapshot(frame.entries, frame.final);
         if (frame.final) this.ready = true;
         return;
       }
       if (frame.t === 'entry') {
-        if (this.ready) {
-          if (!this.append(frame.entry)) {
-            this.retain(frame);
-            return;
-          }
-        } else {
-          const payload = JSON.stringify(frame.entry);
-          this.insertPending.run(frame.entry.id, Buffer.byteLength(payload), payload);
+        const refresh = this.refresh;
+        if (refresh?.welcome && refresh.error === undefined) {
+          try { refresh.index.add(frame.entry); }
+          catch (error) { refresh.error = error; }
+        }
+        if (!this.index.add(frame.entry)) {
+          this.retain(frame);
+          return;
         }
       }
       this.retain(frame);
@@ -114,41 +182,71 @@ export class SessionFeed {
     }
   }
 
-  private append(entry: SessionEntry): boolean {
-    const payload = JSON.stringify(entry);
-    const result = this.insert.run(this.nextOrdinal, entry.id, Buffer.byteLength(payload), payload);
-    if (!result.changes) return false;
-    this.nextOrdinal++;
-    return true;
-  }
-
-  private page(before: number): HistoryPage {
-    try {
-      const rows = this.db.prepare('SELECT ordinal,bytes FROM entries WHERE ordinal < ? ORDER BY ordinal DESC LIMIT ?')
-        .all(before, PAGE_ENTRIES);
-      const entries: SessionEntry[] = [];
-      let bytes = 512;
-      let first = before;
-      const payload = this.db.prepare('SELECT payload FROM entries WHERE ordinal=?');
-      for (const row of rows) {
-        const size = Number(row.bytes) + (entries.length ? 1 : 0);
-        if (entries.length && bytes + size > PAGE_BYTES) break;
-        entries.push(JSON.parse(String(payload.get(row.ordinal!)!.payload)) as SessionEntry);
-        bytes += size;
-        first = Number(row.ordinal);
-      }
-      entries.reverse();
-      return {entries, older: first > 0 ? {epoch: this.epoch, before: first} : null};
-    } catch (error) {
+  private page(before = this.index.nextOrdinal): HistoryPage {
+    try { return this.index.page(before); }
+    catch (error) {
       this.close(error instanceof Error ? error.message : String(error));
       throw error;
     }
   }
 
+  invalidateHistory(): void {
+    if (this.ended !== undefined || this.dirty) return;
+    this.dirty = true;
+    for (const viewer of this.viewers) viewer.handlers.onFrame({t: 'history-invalidated'});
+  }
+
+  reportHistoryError(error: unknown): void {
+    this.invalidateHistory();
+    const message = error instanceof Error ? error.message : String(error);
+    for (const viewer of this.viewers) viewer.handlers.onFrame({t: 'history-error', message});
+  }
+
+  beginHistoryRefresh(): (frame: Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>) => void {
+    if (this.ended !== undefined) throw new Error(this.ended);
+    if (this.refresh) throw new Error('Session history refresh is already in progress');
+    this.invalidateHistory();
+    const refresh = {index: new HistoryIndex()} as NonNullable<SessionFeed['refresh']>;
+    this.refresh = refresh;
+    return frame => {
+      if (this.refresh !== refresh || this.ended !== undefined) return;
+      if (refresh.error !== undefined) throw refresh.error;
+      if (frame.t === 'welcome') {
+        refresh.welcome = frame;
+        this.accept({t: 'state', state: frame.state});
+        this.accept({t: 'agents', agents: frame.agents});
+      } else {
+        refresh.index.snapshot(frame.entries, frame.final);
+      }
+    };
+  }
+
+  finishHistoryRefresh(): void {
+    const refresh = this.refresh;
+    if (!refresh?.welcome || !refresh.index.ready) throw new Error('Collab refresh snapshot is not ready');
+    if (refresh.error !== undefined) throw refresh.error;
+    const page = refresh.index.page();
+    const previous = this.index;
+    this.index = refresh.index;
+    this.welcome = refresh.welcome;
+    this.refresh = undefined;
+    this.dirty = false;
+    this.ready = true;
+    previous.close();
+    for (const viewer of this.viewers) viewer.handlers.onFrame({t: 'history-reset', page});
+  }
+
+  discardHistoryRefresh(error?: unknown): void {
+    this.refresh?.index.close();
+    this.refresh = undefined;
+    if (error !== undefined) this.reportHistoryError(error);
+  }
+
   subscribe(handlers: SessionFeedHandlers): SessionFeedSubscription {
     if (this.ended !== undefined) throw new Error(this.ended);
     if (!this.ready || !this.welcome) throw new Error('Collab snapshot is not ready');
-    const page = this.page(this.nextOrdinal);
+    if (this.dirty) throw new Error('Session history is refreshing');
+    const page = this.page();
     const retained = [this.state, this.agents, this.working, this.stream,
       ...Array.from(this.tools.values()).flatMap(tool => [tool.start, tool.update]), ...this.bus.values()]
       .filter((value): value is Retained => value !== undefined).sort((a,b) => a.order-b.order);
@@ -167,6 +265,11 @@ export class SessionFeed {
       send: frame => {
         if (!this.viewers.has(viewer)) throw new Error(this.ended ?? 'Session not connected');
         if (frame.t === 'history-page') {
+          if (this.dirty) { handlers.onFrame({t: 'history-invalidated'}); return; }
+          if (frame.cursor.epoch !== this.epoch) {
+            handlers.onFrame({t: 'history-reset', page: this.page()});
+            return;
+          }
           this.validateCursor(frame.cursor);
           handlers.onFrame({t: 'history-page', reqId: frame.reqId, cursor: frame.cursor, page: this.page(frame.cursor.before)});
           return;
@@ -188,8 +291,7 @@ export class SessionFeed {
   }
 
   private validateCursor(cursor: HistoryCursor): void {
-    if (cursor.epoch !== this.epoch) throw new Error('Session history changed; reconnect to load it again');
-    if (!Number.isSafeInteger(cursor.before) || cursor.before < 0 || cursor.before > this.nextOrdinal)
+    if (!Number.isSafeInteger(cursor.before) || cursor.before < 0 || cursor.before > this.index.nextOrdinal)
       throw new Error('Invalid history cursor');
   }
 
@@ -207,10 +309,8 @@ export class SessionFeed {
     for (const reqId of this.requests.keys()) this.cancelRequest(reqId);
     const viewers = [...this.viewers];
     this.viewers.clear();
-    try { this.db?.close(); }
-    catch (error) { console.warn('Could not close session history index', error); }
-    try { if (this.directory) rmSync(this.directory, {recursive: true, force: true}); }
-    catch (error) { console.warn('Could not remove session history index', error); }
+    this.discardHistoryRefresh();
+    this.index?.close();
     for (const viewer of viewers) {
       try { viewer.handlers.onClose(reason); }
       catch (error) { console.warn('Could not close session feed viewer', error); }

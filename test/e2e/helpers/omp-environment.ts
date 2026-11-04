@@ -15,6 +15,9 @@ import { resolveTelegramTestEnvFile } from './telegram-env.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
   scenarios: readonly FakeLlmScenario[];
+  telegramSecrets?: boolean;
+  tools?: readonly string[];
+  compaction?: { enabled: boolean; supersedeReads: boolean; dropUseless: boolean; experimentalContextManagement: boolean };
 }) {
   const root = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-'));
   const logDirectory = await mkdtemp(join(tmpdir(), 'omp-telegram-e2e-logs-'));
@@ -23,8 +26,10 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   t.diagnostic(`E2E debug artifacts: ${logDirectory}`);
   const secrets = new Set<string>();
   const registerSecret = (value: string) => { if (value) secrets.add(value); };
-  const sharedEnv = parseEnv(await readFile(await resolveTelegramTestEnvFile(), 'utf8'));
-  for (const env of [process.env, sharedEnv]) {
+  const secretEnvironments = options.telegramSecrets === false ? [] : [
+    process.env, parseEnv(await readFile(await resolveTelegramTestEnvFile(), 'utf8')),
+  ];
+  for (const env of secretEnvironments) {
     for (const key of ['TELEGRAM_TEST_BOT_TOKENS', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSIONS']) {
       if (env[key]) registerSecret(env[key]!);
     }
@@ -38,7 +43,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
       for (const token of tokens) registerSecret(token);
     }
   }
-  if (process.env.TELEGRAM_TEST_SESSIONS) {
+  if (options.telegramSecrets !== false && process.env.TELEGRAM_TEST_SESSIONS) {
     let sessions: unknown;
     try {
       sessions = JSON.parse(process.env.TELEGRAM_TEST_SESSIONS);
@@ -160,6 +165,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   await writeFile(join(agent, 'config.yml'), JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
+    ...(options.compaction ? { compaction: options.compaction } : {}),
   }), { mode: 0o600 });
   const env: Record<string, string> = {
     HOME: home,
@@ -184,7 +190,7 @@ for value in "\${args[@]}"; do
 done
 if [[ "$headless" == false ]]; then
   for index in "\${!args[@]}"; do
-    if [[ "\${args[index]}" == "--tools" ]]; then args[index+1]=write,ask; fi
+    if [[ "\${args[index]}" == "--tools" ]]; then args[index+1]=${(options.tools ?? ['write','ask']).join(',')}; fi
   done
 fi
 exec -a "$0" "$command" "\${args[@]}"`;

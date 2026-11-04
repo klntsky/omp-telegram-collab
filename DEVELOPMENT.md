@@ -39,7 +39,7 @@ The editable Collab Web client lives in `web/src`. `web/upstream.json` records i
 pnpm verify
 ```
 
-`verify` requires live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and all integration stages to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
+`verify` requires native end-to-end tests, live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and all integration stages to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
 
 `check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five; mocked collaborators only establish local behavior, not compatibility with the external service they imitate. `test:integration` builds production artifacts and runs `smoke`.
 
@@ -52,6 +52,14 @@ Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After ch
 The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
 
 Local fixtures use OS-assigned ephemeral ports and keep each listener bound until teardown. Use the returned `app.url` for loopback transport and `app.config.publicUrl` for the gateway Origin header; the configured public origin is independent of the listening port. Bot or gateway initialization failures close the resources already started and preserve the original startup diagnostic.
+
+Run native end-to-end checks without Telegram credentials:
+
+```sh
+timeout 540s pnpm test:native
+```
+
+`test:native` uses the installed stock OMP executable, real tools and history files, and a local forwarding relay. Only LLM responses are scripted. Set `OMP_EXECUTABLE` to select the executable. Native test environments keep their process configuration and generated files separate from normal sessions.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 

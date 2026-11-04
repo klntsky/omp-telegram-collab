@@ -66,7 +66,14 @@ export interface GuestSnapshot {
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
 	loading: { received: number; total: number } | null;
-	history: { older: HistoryCursor | null; loading: boolean; error: string | null };
+	history: {
+		older: HistoryCursor | null;
+		loading: boolean;
+		error: string | null;
+		freshness: "ready" | "refreshing" | "unverified";
+		/** Changes only when a history reset replaces the visible row set. */
+		revision: number;
+	};
 }
 
 const MAX_NOTICES = 50;
@@ -126,6 +133,8 @@ export class GuestClient {
 	#snapshotProgressTimer: ReturnType<typeof setTimeout> | null = null;
 	#older: HistoryCursor | null = null;
 	#historyError: string | null = null;
+	#historyFreshness: GuestSnapshot["history"]["freshness"] = "ready";
+	#historyRevision = 0;
 	#pendingHistory: PendingHistory | null = null;
 
 	#phase: ConnectionPhase = "connecting";
@@ -223,16 +232,19 @@ export class GuestClient {
 	}
 
 	loadEarlier(): void {
-		if (this.#phase !== "live" || this.#pendingSnapshot || this.#pendingHistory || !this.#older) return;
+		if (
+			this.#phase !== "live" || this.#pendingSnapshot || this.#pendingHistory ||
+			this.#historyFreshness === "refreshing" || !this.#older
+		) return;
 		const reqId = ++this.#reqSeq;
 		const cursor = { ...this.#older };
 		const timer = setTimeout(() => {
 			this.#pendingHistory = null;
-			this.#historyError = "Timed out waiting for earlier history.";
+			this.#historyError ??= "Timed out waiting for earlier history.";
 			this.#commit();
 		}, TRANSCRIPT_TIMEOUT_MS);
 		this.#pendingHistory = { reqId, cursor, timer };
-		this.#historyError = null;
+		if (this.#historyFreshness === "ready") this.#historyError = null;
 		this.#commit();
 		this.#socket.send({ t: "history-page", reqId, cursor });
 	}
@@ -259,6 +271,7 @@ export class GuestClient {
 		this.#clearPendingReads();
 		this.#older = null;
 		this.#historyError = null;
+		this.#historyFreshness = "ready";
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
@@ -285,6 +298,7 @@ export class GuestClient {
 		this.#pendingSnapshot = null;
 		this.#older = null;
 		this.#historyError = null;
+		this.#historyFreshness = "ready";
 		this.#clearPendingReads();
 		this.#commit();
 		this.#socket.close();
@@ -351,6 +365,7 @@ export class GuestClient {
 				this.#clearPendingReads();
 				this.#older = null;
 				this.#historyError = null;
+				this.#historyFreshness = "ready";
 				// A fresh welcome (first join or reconnect) restarts the snapshot.
 				// Entries already on screen stay until the new snapshot replaces
 				// them once complete, so a resync never blanks the transcript.
@@ -387,7 +402,7 @@ export class GuestClient {
 				// only advance `loading`: publishing entries per chunk re-renders
 				// the transcript per chunk, and a 50 MB session is ~100 chunks.
 				const pending = this.#pendingSnapshot;
-				if (pending === null) return;
+				if (pending === null || this.#historyFreshness !== "ready") return;
 				pending.entries.push(...frame.entries);
 				// Complete on `final` or once every promised entry arrived, so a
 				// lost final chunk doesn't strand a fully received transcript.
@@ -404,8 +419,37 @@ export class GuestClient {
 				break;
 			}
 			case "history-state":
-				if (!this.#welcomed || this.#phase === "ended") return;
+				if (!this.#welcomed || this.#phase === "ended" || this.#historyFreshness !== "ready") return;
 				this.#older = frame.older;
+				break;
+			case "history-invalidated":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#clearSnapshotProgressTimer();
+				this.#historyFreshness = "refreshing";
+				break;
+			case "history-reset":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#pendingSnapshot = null;
+				this.#clearSnapshotProgressTimer();
+				this.#entries = [...frame.page.entries];
+				this.#publishedEntries = [...this.#entries];
+				this.#older = frame.page.older;
+				this.#historyFreshness = "ready";
+				this.#historyError = null;
+				this.#historyRevision++;
+				this.#phase = "live";
+				break;
+			case "history-error":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#clearSnapshotProgressTimer();
+				this.#historyFreshness = "unverified";
+				this.#historyError = frame.message;
 				break;
 			case "history-page": {
 				const pending = this.#pendingHistory;
@@ -422,6 +466,8 @@ export class GuestClient {
 				)) return;
 				clearTimeout(pending.timer);
 				this.#pendingHistory = null;
+				// A page cannot certify rows retained across a failed source refresh.
+				if (this.#historyFreshness !== "ready") break;
 				this.#historyError = null;
 				this.#entries = [...frame.page.entries, ...this.#entries];
 				this.#publishedEntries = [...this.#entries];
@@ -506,7 +552,7 @@ export class GuestClient {
 				if (this.#pendingHistory) {
 					clearTimeout(this.#pendingHistory.timer);
 					this.#pendingHistory = null;
-					this.#historyError = frame.message;
+					if (this.#historyFreshness === "ready" || this.#historyError === null) this.#historyError = frame.message;
 				}
 				this.#pushNotice("error", frame.message);
 				break;
@@ -674,7 +720,13 @@ export class GuestClient {
 			activeTools: this.#activeTools,
 			working: this.#working,
 			notices: this.#notices,
-			history: { older: this.#older, loading: this.#pendingHistory !== null, error: this.#historyError },
+			history: {
+				older: this.#older,
+				loading: this.#pendingHistory !== null,
+				error: this.#historyError,
+				freshness: this.#historyFreshness,
+				revision: this.#historyRevision,
+			},
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,

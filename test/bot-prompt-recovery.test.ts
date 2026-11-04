@@ -141,6 +141,9 @@ for (const recovery of [
                 send() {
                   assert.fail('Recovery must not submit work');
                 },
+                async refreshSnapshot() {
+                  assert.fail('Prompt recovery must not refresh history');
+                },
                 close() {},
               };
             },

@@ -17,7 +17,10 @@ export type BrowserFrame =
 export type BrowserHostFrame =
   | HostFrame
   | {t: 'history-state'; older: HistoryCursor | null}
-  | {t: 'history-page'; reqId: number; cursor: HistoryCursor; page: HistoryPage};
+  | {t: 'history-page'; reqId: number; cursor: HistoryCursor; page: HistoryPage}
+  | {t: 'history-invalidated'}
+  | {t: 'history-reset'; page: HistoryPage}
+  | {t: 'history-error'; message: string};
 
 export interface PromptContent {
   text: string;
@@ -81,6 +84,7 @@ export interface HostBinding {
 
 export interface CollabConnection {
   send(frame: GuestFrame): void;
+  refreshSnapshot(onFrame: (frame: Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>) => void): Promise<void>;
   close(): void;
 }
 

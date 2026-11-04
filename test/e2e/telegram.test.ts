@@ -114,7 +114,7 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   const completedEntry = app.hostFrames.findLast(frame =>
     frame.t === 'entry' && frame.entry.type === 'message' && frame.entry.message.role === 'assistant');
   assert.ok(completedEntry?.t === 'entry');
-  const reader = app.service.subscribeSessionFeed(session, {
+  const reader = await app.service.subscribeSessionFeed(session, {
     onFrame: frame => readerFrames.push(frame),
     onClose: reason => app.omp.log('miniapp.reader.close', { reason }),
   });

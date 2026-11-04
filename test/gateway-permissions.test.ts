@@ -111,11 +111,77 @@ test('warm viewers share mirroring while paging and private transcript reads sta
     const freshHistory = fresh.frames.find(frame => frame.t === 'history-state');
     assert.ok(freshHistory?.t === 'history-state' && freshHistory.older);
     assert.notEqual(freshHistory.older.epoch, initial.older.epoch);
-    const staleClosed = once(fresh.socket, 'close');
     fresh.socket.send(JSON.stringify({t: 'history-page', reqId: 1, cursor: initial.older}));
-    const [, staleReason] = await staleClosed;
-    assert.equal(staleReason.toString(), 'Session history changed; reconnect to load it again');
+    await waitFor(() => fresh.frames.some(frame => frame.t === 'history-reset'));
+    const reset = fresh.frames.find(frame => frame.t === 'history-reset');
+    assert.ok(reset?.t === 'history-reset');
+    assert.deepEqual(reset.page.entries, fresh.frames.find(frame => frame.t === 'snapshot-chunk')?.entries);
+    assert.equal(fresh.socket.readyState, WebSocket.OPEN);
   } finally {
+    sockets.forEach(socket => socket.terminate());
+    await app.close();
+  }
+});
+
+test('watched rewrites share an ordered refresh and a racing rewrite cannot publish stale pages', {timeout: 15000}, async () => {
+  const {app, session, connect} = await fixture();
+  const sockets: WebSocket[] = [];
+  const gates: {release(): void}[] = [];
+  const waitFor = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+      assert.ok(Date.now() < deadline, 'watched history transition missing');
+      await delay(10);
+    }
+  };
+  try {
+    const original = Array.from({length: 245}, (_, i) => ({
+      type: 'custom_message' as const, id: `history-${i}`, parentId: null,
+      timestamp: '2026-01-01T00:00:00Z', customType: 'fixture', content: String(i), display: true,
+    }));
+    for (const entry of original) app.appendEntry(entry);
+    const first = await connect(); sockets.push(first.socket);
+    const second = await connect(); sockets.push(second.socket);
+    const previous = first.frames.find(frame => frame.t === 'history-state');
+    assert.ok(previous?.t === 'history-state' && previous.older);
+    const connections = app.connectionCount;
+    const gate = app.pauseHistoryRefresh(); gates.push(gate);
+    const intermediate = original.filter(entry => entry.id !== 'history-243')
+      .map(entry => entry.id === 'history-244' ? {...entry, content: 'intermediate'} : entry);
+    app.rewriteHistory(intermediate);
+    await gate.started;
+    assert.equal(app.historyRefreshCount, 1);
+    const joining = connect();
+    const replacement = intermediate.filter(entry => entry.id !== 'history-242')
+      .map(entry => entry.id === 'history-244' ? {...entry, content: 'latest persisted content'} : entry);
+    app.rewriteHistory(replacement);
+    app.emit({t: 'state', state: {cwd: session.cwd, isStreaming: true, queuedMessageCount: 0, participants: []}});
+    gate.release();
+    const joined = await joining; sockets.push(joined.socket);
+    await waitFor(() => first.frames.some(frame => frame.t === 'history-reset') && second.frames.some(frame => frame.t === 'history-reset'));
+    for (const viewer of [first, second]) {
+      const reset = viewer.frames.findLast(frame => frame.t === 'history-reset');
+      assert.ok(reset?.t === 'history-reset' && reset.page.older);
+      assert.deepEqual(reset.page.entries, replacement.slice(-100));
+      assert.notEqual(reset.page.older.epoch, previous.older.epoch);
+      assert.equal(viewer.socket.readyState, WebSocket.OPEN);
+    }
+    assert.deepEqual(joined.frames.find(frame => frame.t === 'snapshot-chunk')?.entries, replacement.slice(-100));
+    assert.equal(app.historyRefreshCount, 2);
+    assert.equal(app.connectionCount, connections);
+    first.socket.send(JSON.stringify({t: 'history-page', reqId: 9, cursor: previous.older}));
+    await waitFor(() => first.frames.filter(frame => frame.t === 'history-reset').length === 2);
+    assert.equal(first.socket.readyState, WebSocket.OPEN);
+    const appended = {...original[0]!, id: 'history-245', content: 'new live output'};
+    app.appendEntry(appended);
+    app.emit({t: 'entry', entry: appended});
+    await waitFor(() => second.frames.some(frame => frame.t === 'entry' && frame.entry.id === appended.id));
+    const warm = await connect(); sockets.push(warm.socket);
+    assert.deepEqual(warm.frames.find(frame => frame.t === 'snapshot-chunk')?.entries, [...replacement, appended].slice(-100));
+    assert.equal(app.historyRefreshCount, 2);
+    assert.equal(app.connectionCount, connections);
+  } finally {
+    for (const gate of gates) gate.release();
     sockets.forEach(socket => socket.terminate());
     await app.close();
   }

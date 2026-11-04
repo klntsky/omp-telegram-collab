@@ -348,10 +348,14 @@ The current supergroup owner and administrators can attach a control-shared OMP 
 ### 4.1. Session history and live tracking
 
 - Opening the Mini App downloads a recent page, not the complete session history. Earlier entries load when the reader scrolls near the top or selects Show earlier.
-- Active mirrored sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Viewers share the bot's existing connection rather than opening another OMP connection. New viewers receive the latest observed session title.
+- Active mirrored managed sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Managed viewers share the bot's existing connection rather than opening another OMP connection. New viewers receive the latest observed session title.
 - Historical pages preserve entry order and the reader's visible position while live output continues, including when images finish loading above the viewport. Reading earlier messages disables automatic tail following. Returning to the bottom or selecting Jump to latest resumes it, including while an earlier-page request is pending.
 - History-read timeouts retain the current transcript and offer retry. Reconnecting replaces loaded history with a fresh recent page and discards requests and cursors from the previous connection.
-- The bot's native OMP handshake is unchanged. A new bot connection receives OMP's initial snapshot before serving history. Live replay includes only state observed by that listener; it does not invent partial messages or running tools that predate the connection.
+- The native OMP protocol is unchanged. A new bot connection receives OMP's initial snapshot before serving history. A history refresh also receives a complete native snapshot, but browser delivery remains paginated. Live replay includes only state observed by that listener; it does not invent partial messages or running tools that predate the connection.
+- Managed history observes persisted native rewrites, including automatic pruning of older tool results. Directory observation and periodic metadata checks keep the cache warm; joins and historical-page reads also check the current source. Ordinary appends do not force another snapshot.
+- A refresh marks retained history as updating, cancels pending older-page reads, and replaces the rows with a fresh recent page. Streaming, tools, subagents, and the reader's tail-following choice survive. Old page replies cannot restore replaced content. A deeply scrolled reader can return to the recent page after replacement.
+- Source failures show the original diagnostic and leave older history unverified without stopping Telegram mirroring. Freshness checks cover persisted native history, not mutations that remain only in native memory or arbitrary external edits that imitate appends.
+- Attached terminal hosts do not expose a verified history path. Each attached viewer receives a fresh snapshot and paginated index on joining through its own native connection. Already-open attached viewers do not receive managed-session rewrite tracking; reconnecting obtains a fresh snapshot.
 
 ### 4.2. Transcript presentation
 

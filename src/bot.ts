@@ -38,6 +38,7 @@ import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage
 import type { PromptExtension } from './telegram-commands.js';
 import { TopicWriter } from './topic-writer.js';
 import { SessionFeed, type SessionFeedHandlers, type SessionFeedSubscription } from './session-feed.js';
+import { SessionHistory } from './session-history.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -48,6 +49,7 @@ export interface RuntimeLike {
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{bind(id: string): void; release(): void}>;
   /** Resolves an existing host without preparing one; undefined means confirmed absence. */
   resolveExisting(session: TopicSession): Promise<HostBinding | undefined>;
+  historySource(session: TopicSession): Promise<{sessionId: string; path: string} | undefined>;
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
   attach(hostId: string, cwd: string): Promise<HostBinding>;
@@ -116,6 +118,8 @@ interface Listener {
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   feed: SessionFeed;
+  history?: SessionHistory;
+  readers: Set<{feed: SessionFeed; connection?: CollabConnection; controller: AbortController}>;
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
@@ -1527,15 +1531,71 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.listen(session,binding,beforeMutation);
   }
-  subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): SessionFeedSubscription {
-    this.requireSessionAssignment(session);
-    if (this.options.store.getSession(session.id)?.status !== 'open')
-      throw new Error('This topic is closed. Reopen it before connecting.');
+  async subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
     const listener = this.listeners.get(session.id);
-    if (!listener?.connection || listener.generation !== this.options.store.getSessionGeneration(session.id))
-      throw new Error('Session closed');
-    return listener.feed.subscribe(handlers);
+    if (!listener?.connection) throw new Error('Session closed');
+    this.requireFeedListener(session, listener);
+    if (session.runtime.kind === 'attached') return this.subscribeAttachedFeed(session, listener, handlers);
+    await listener.history!.ensureFresh();
+    this.requireFeedListener(session, listener);
+    const subscription = listener.feed.subscribe(handlers);
+    return {
+      send: async frame => {
+        this.requireFeedListener(session, listener);
+        if (frame.t === 'history-page') {
+          try { await listener.history!.ensureFresh(); }
+          catch {
+            this.requireFeedListener(session, listener);
+            return;
+          }
+          this.requireFeedListener(session, listener);
+        }
+        subscription.send(frame);
+      },
+      close: () => subscription.close(),
+    };
   }
+
+  private requireFeedListener(session: TopicSession, listener: Listener): void {
+    this.requireSessionAssignment(session);
+    if (this.options.store.getSession(session.id)?.status !== 'open' ||
+        this.listeners.get(session.id) !== listener ||
+        listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+  }
+
+  private async subscribeAttachedFeed(session: TopicSession, listener: Listener, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
+    const binding = await this.options.runtime.resolveExisting(session);
+    this.requireFeedListener(session, listener);
+    if (!binding) throw new Error('Session closed');
+    const reader: {feed: SessionFeed; connection?: CollabConnection; controller: AbortController} = {
+      controller: new AbortController(),
+      feed: new SessionFeed(frame => {
+        if (!reader.connection) throw new Error('Session not connected');
+        reader.connection.send(frame);
+      }),
+    };
+    listener.readers.add(reader);
+    const close = () => {
+      listener.readers.delete(reader);
+      reader.controller.abort(new Error('Session reader closed'));
+      reader.feed.close();
+      reader.connection?.close();
+    };
+    try {
+      const connection = await (this.options.connect ?? connectCollab)(binding, 'Mini App history reader', {
+        onFrame: frame => reader.feed.accept(frame),
+        onClose: reason => reader.feed.close(reason),
+      }, AbortSignal.any([this.background.signal, reader.controller.signal]));
+      reader.connection = connection;
+      this.requireFeedListener(session, listener);
+      const subscription = reader.feed.subscribe(handlers);
+      return {send: frame => subscription.send(frame), close};
+    } catch (error) {
+      close();
+      throw error;
+    }
+  }
+
   async start(onReady?: () => void): Promise<void> {
     await this.initialize();
     if (this.stopped) return;
@@ -1621,10 +1681,17 @@ export class BotService {
       clearInterval(item.typingTimer);
       item.feed.close();
       item.connection?.close();
+      for (const reader of item.readers) {
+        reader.controller.abort(new Error('Session reader closed'));
+        reader.feed.close();
+        reader.connection?.close();
+      }
+      item.readers.clear();
     }
     this.listeners.clear();
     await this.updateTail;
     await Promise.all(listeners.map((listener) => listener.tail));
+    await Promise.all(listeners.map(listener => listener.history?.close()));
     await Promise.all(this.backgroundTasks);
     await this.menuTail;
     await Promise.all(metadataCompletions);
@@ -3897,6 +3964,15 @@ export class BotService {
       if (question.listener === listener) this.endQuestion(token);
     }
     listener?.feed.close(reason);
+    if (listener) {
+      for (const reader of listener.readers) {
+        reader.controller.abort(new Error(reason));
+        reader.feed.close(reason);
+        reader.connection?.close();
+      }
+      listener.readers.clear();
+      if (listener.history) void listener.history.close().catch(error => console.error('Could not close session history', error));
+    }
     listener?.connection?.close();
   }
   private listen(
@@ -3923,6 +3999,7 @@ export class BotService {
         listener.connection.send(frame);
       }),
       tail: Promise.resolve(),
+      readers: new Set(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
       receiptBoundary: 0,
@@ -3956,6 +4033,19 @@ export class BotService {
         await this.applySessionTitle(session);
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
+        if (session.runtime.kind === 'managed') {
+          listener.history = new SessionHistory(listener.feed, {
+            sessionId: binding.sessionId,
+            source: () => this.options.runtime.historySource(session),
+            assertActive: () => this.requireFeedListener(session, listener),
+            onError: error => {
+              this.sessionObservation(session.id).failure = {operation: 'Session history refresh', at: Date.now(), error};
+              console.error('Could not refresh session history', error);
+            },
+          });
+          await listener.history.prepare();
+          if (!active()) throw closed;
+        }
         return (this.options.connect ?? connectCollab)(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
@@ -3973,15 +4063,18 @@ export class BotService {
               if (connected) this.scheduleReconnect(session);
             },
           },
+          this.background.signal,
         );
       })
-      .then((connection) => {
+      .then(async (connection) => {
         if (!active()) {
           connection.close();
           throw closed;
         }
         this.sessionObservation(session.id).mirrored = true;
         listener.connection = connection;
+        await listener.history?.start(connection);
+        if (!active()) { connection.close(); throw closed; }
         return connection;
       })
       .catch(async (error) => {
@@ -4243,7 +4336,8 @@ export class BotService {
     await ctx.answerCallbackQuery();
   }
   private relayQuestion(session: TopicSession, listener: Listener, request: CollabUiRequest): void {
-    if ([...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
+    if (listener.pendingAnswers.has(request.reqId) ||
+        [...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
     const token = randomBytes(12).toString('base64url');
     const question: PendingQuestion = {session, listener, request, messageIds:[],buttonIds:[]};
     this.questions.set(token, question);

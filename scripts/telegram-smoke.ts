@@ -5,6 +5,7 @@ import { once, EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Bot, type Context } from 'grammy';
@@ -220,6 +221,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const titleChanges: {sessionId:string;title:string}[] = [];
   const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
   const connectionSessions = new Map<CollabHandlers,string>();
+  const historyFiles = new Map<string, string>();
+  let historyRefreshCount = 0;
+  let historyRefreshGate: {started: PromiseWithResolvers<void>; released: PromiseWithResolvers<void>} | undefined;
+  const historyText = (sessionId: string) => `${JSON.stringify({type:'session',version:3,id:sessionId,cwd:directory,timestamp:new Date(0).toISOString()})}\n${entries.map(entry => JSON.stringify(entry)).join('\n')}\n`;
   const runtime = {
     async reserveSession(sessionId: string = randomUUID(), beforeMutation?: () => Promise<void>) {
       if (runtimeClosed) throw new Error('OMP runtime is stopping');
@@ -273,6 +278,16 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       if (host.binding.sessionId !== session.runtime.sessionId) throw new Error('Attached OMP session identity changed');
       if (host.cwd !== session.cwd) throw new Error('Attached host does not belong to this instance path');
       return host.binding;
+    },
+    async historySource(session: TopicSession) {
+      if (session.runtime.kind === 'attached') return undefined;
+      let path = historyFiles.get(session.id);
+      if (!path) {
+        path = join(directory, `history-${session.id}.jsonl`);
+        writeFileSync(path, historyText(session.id), {mode: 0o600});
+        historyFiles.set(session.id, path);
+      }
+      return {sessionId: session.id, path};
     },
     async isRunning(session: TopicSession) {
       return session.runtime.kind === 'managed' ? managedSessions.has(session.id)
@@ -366,6 +381,16 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         }
         if (frame.t === 'ui-response' && options.ackUiResponses) handlers.onFrame({t:'ui-request-end',reqId:frame.reqId});
         events.emit('accepted');
+      },
+      async refreshSnapshot(onFrame: (frame: Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>) => void) {
+        historyRefreshCount++;
+        const snapshot = [...entries];
+        const gate = historyRefreshGate;
+        historyRefreshGate = undefined;
+        if (gate) { gate.started.resolve(); await gate.released.promise; }
+        const currentState = {...state,sessionName:sessionTitles.get(binding.sessionId) ?? state.sessionName};
+        onFrame({t:'welcome',proto:3,header:{type:'session',id:binding.sessionId,title:currentState.sessionName,cwd:state.cwd,timestamp:new Date().toISOString()},state:currentState,agents:[],entryCount:snapshot.length});
+        onFrame({t:'snapshot-chunk',entries:snapshot,final:true});
       },
       close() { connections.delete(handlers); },
     };
@@ -520,7 +545,22 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     },
     appendEntry(entry: SessionEntry) {
       entries.push(entry);
+      for (const path of historyFiles.values()) appendFileSync(path, `${JSON.stringify(entry)}\n`);
     },
+    rewriteHistory(replacement: SessionEntry[]) {
+      entries.splice(0, entries.length, ...replacement);
+      for (const [sessionId, path] of historyFiles) {
+        writeFileSync(`${path}.replacement`, historyText(sessionId), {mode: 0o600});
+        renameSync(`${path}.replacement`, path);
+      }
+    },
+    pauseHistoryRefresh() {
+      if (historyRefreshGate) throw new Error('History refresh is already paused');
+      const gate = {started: Promise.withResolvers<void>(), released: Promise.withResolvers<void>()};
+      historyRefreshGate = gate;
+      return {started: gate.started.promise, release: () => gate.released.resolve()};
+    },
+    get historyRefreshCount() { return historyRefreshCount; },
     initData(sessionId: string) {
       return signedInitData(sessionId);
     },

@@ -260,9 +260,9 @@ test('a lazy topic keeps Telegram delivery and upstream mirroring after its disp
     const binding = await app.runtime.ensure(session);
     await app.service.ensureMirroring(session,binding);
     const reasons: string[] = [];
-    app.service.subscribeSessionFeed(session, {onFrame() {}, onClose: reason => reasons.push(reason)});
-    const internal = app.service as unknown as {listeners: Map<string, {feed: {db: DatabaseSync}}>};
-    internal.listeners.get(session.id)!.feed.db.exec('DROP TABLE entries');
+    await app.service.subscribeSessionFeed(session, {onFrame() {}, onClose: reason => reasons.push(reason)});
+    const internal = app.service as unknown as {listeners: Map<string, {feed: {index: {db: DatabaseSync}}}>};
+    internal.listeners.get(session.id)!.feed.index.db.exec('DROP TABLE entries');
     app.emit({t:'entry',entry:{type:'message',id:'mirrored-mini-app-answer',parentId:null,timestamp:new Date().toISOString(),message:{
       role:'assistant',content:[{type:'text',text:'Mirrored Mini App answer'}],model:'fixture',timestamp:Date.now(),
       stopReason:'stop',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},

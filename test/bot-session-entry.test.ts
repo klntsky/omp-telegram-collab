@@ -73,6 +73,7 @@ test('a replacement bot starts a persisted image-only task and preserves it thro
             ? {t:'error',message:'prompting is unavailable until the host finishes starting up'}
             : {t:'entry',entry:{type:'custom_message',customType:'collab-prompt',content:[{type:'text',text:frame.text},...frame.images!],details:{from:name},display:true,id:'image-admitted',parentId:null,timestamp:new Date().toISOString()}}));
         },
+        async refreshSnapshot() { assert.fail('Prompt admission must not refresh history'); },
         close() {},
       }),
     });

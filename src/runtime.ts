@@ -13,6 +13,7 @@ import { findInstance, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { withCancellation } from './cancellation.js';
 import { formatUsage } from './usage.js';
+import { readHistoryHeader } from './history-watch.js';
 
 export class SessionCapacityError extends Error {
   constructor(readonly limit: number) {
@@ -176,15 +177,7 @@ async function readHeader(file: string): Promise<{ id: string; cwd: string }> {
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Managed history must be a regular file');
   const handle = await open(file, 'r');
   try {
-    const buffer = Buffer.alloc(64 * 1024);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
-    const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
-    let header = JSON.parse(lines[0] || '{}') as Record<string, unknown>;
-    if (header.type === 'title' && header.v === 1) header = JSON.parse(lines[1] || '{}') as Record<string, unknown>;
-    if (header.type !== 'session' || header.version !== 3 || typeof header.id !== 'string' || !header.id || typeof header.cwd !== 'string') {
-      throw new Error('Unsupported managed OMP session history format');
-    }
-    return { id: header.id, cwd: header.cwd };
+    return await readHistoryHeader(handle);
   } finally {
     await handle.close();
   }
@@ -648,6 +641,18 @@ export class OmpRuntime {
       throw new Error('Managed OMP history identity changed');
     }
     return pin;
+  }
+
+  async historySource(session: TopicSession): Promise<{ sessionId: string; path: string } | undefined> {
+    this.#assertActive();
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    if (session.runtime.kind === 'attached') return undefined;
+    const pin = await this.#readManagedBinding(session);
+    this.#assertActive();
+    if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    return pin && { sessionId: pin.sessionId, path: pin.sessionFile };
   }
 
   async resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
