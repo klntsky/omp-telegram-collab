@@ -95,7 +95,7 @@ test('initial preparation initialization recovers stale gate with source and aut
       const store = new Store(filename);
       try {
         store.enrollGroup(botId,chatId);
-        const session = store.createSession({botId,chatId,threadId:42,instancePath},'Interrupted preparation',{kind:'managed'},{text:'Resume prepared task'},ownerId,ownerId);
+        const session = store.createSession({botId,chatId,threadId:42, instanceId: 1, cwd: instancePath}, 'Interrupted preparation',{kind:'managed'},{text:'Resume prepared task'},ownerId,ownerId);
         sessionId = session.id;
         store.setInitialMessage(session.id,8200);
         store.recordPromptMessageAlias(session.id,8200,8201);

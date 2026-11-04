@@ -51,14 +51,14 @@ export interface RuntimeLike {
   resolveExisting(session: TopicSession): Promise<HostBinding | undefined>;
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
-  attach(instanceId: string, instancePath: string): Promise<HostBinding>;
+  attach(hostId: string, cwd: string): Promise<HostBinding>;
   stop(session: TopicSession): Promise<boolean>;
   kill(session: TopicSession): Promise<void>;
   modelPresets(session: TopicSession, name?: string): Promise<string>;
-  availableModelPresets(instancePath: string): Promise<string[]>;
-  modelPresetDetails(instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
-  providerUsage(instancePath: string): Promise<{ heading: string; table: string }[]>;
-  listSkills(instancePath: string, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<{name: string; description: string}[]>;
+  availableModelPresets(instanceId: number, discoveryCwd?: string): Promise<string[]>;
+  modelPresetDetails(instanceId: number, name: string, discoveryCwd?: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
+  providerUsage(instanceId: number): Promise<{ heading: string; table: string }[]>;
+  listSkills(instanceId: number, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<{name: string; description: string}[]>;
   getSessionLimit(): number;
   setSessionLimit(limit: number): void;
   increaseSessionLimit(expectedLimit: number): boolean;
@@ -158,13 +158,14 @@ interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
-  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instancePath: string; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
+  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
 }
 interface PromptProposal {
   source: Context;
   content: PromptContent;
-  instancePath: string;
+  instanceId: number;
   sessionId?: string;
+  folderFingerprint?: string;
   worktree?: boolean;
   generation?: number;
   allMessagesArePrompts: boolean;
@@ -203,7 +204,7 @@ interface SettingsPanel {
   chatId: number;
   destination: TopicDestination;
   messageId: number;
-  instancePath: string;
+  instanceId: number;
   revision: number;
   offset: number;
   choices: SettingsAction[];
@@ -218,7 +219,7 @@ interface PresetPanel {
   chatId: number;
   destination: TopicDestination;
   messageId: number;
-  instancePath: string;
+  instanceId: number;
   sessionId: string;
   generation: number;
   revision: number;
@@ -308,14 +309,14 @@ export class BotService {
   private readonly background = new AbortController();
   private catalogRefresh = new AbortController();
   private readonly backgroundTasks = new Set<Promise<void>>();
-  private readonly catalogTasks = new Map<string, Promise<void>>();
-  private readonly presetCatalogs = new Map<string, string[]>();
+  private readonly catalogTasks = new Map<number, Promise<void>>();
+  private readonly presetCatalogs = new Map<number, string[]>();
   private presetRefresh?: Promise<void>;
   private readonly apiAbort = new TelegramAbortController();
   private backgroundStarted = false;
   private readonly restoring = new Set<string>();
   private readonly sessionObservations = new Map<string, SessionObservation>();
-  private readonly catalogObservations = new Map<string, {refreshedAt?:number;failure?:StatusFailure;failed?:boolean}>();
+  private readonly catalogObservations = new Map<number, {refreshedAt?:number;failure?:StatusFailure;failed?:boolean}>();
   private readonly reconnecting = new Set<string>();
   private menuTail: Promise<void> = Promise.resolve();
   private initialization?: Promise<void>;
@@ -328,15 +329,15 @@ export class BotService {
   private readonly folderRequests = new Map<string, {
     state: {kind:'choose';offset:number} | {kind:'create';path:string} | {kind:'failed';path:string;create:boolean};
     source: Context; authority?: Context; messageId: number; expires: number;
-    epoch: number; instancePath: string; fingerprint: string; options: string[];
+    epoch: number; instanceId: number; defaultDir: string; fingerprint: string; options: string[];
     resume: (cwd: string, authority: Context) => Promise<void>;
     active?: () => boolean;
   }>();
   private folderSettings(chatId: number) {
     const assigned = findInstance(readConfig(this.options.config.configPath), this.id, chatId);
-    if (!assigned || assigned.path !== this.assignedPath(chatId)) throw new Error('The group instance assignment changed');
+    if (!assigned || assigned.instance.id !== this.assignedId(chatId)) throw new Error('The group instance assignment changed');
     const chat = assigned.instance.chats.find(chat => chat.botId === this.id && chat.chatId === chatId)!;
-    return {instancePath:assigned.path, options:chat.folder_options?.length ? chat.folder_options : ['.']};
+    return {instanceId:assigned.instance.id, defaultDir:assigned.instance.defaultDir, options:chat.folder_options?.length ? chat.folder_options : ['.']};
   }
   private folderKeyboard(token: string, options: string[], offset: number) {
     const rows = options.slice(offset,offset+8).map((path,index) => [{text:path === '.' ? '<Default>' : path.slice(0,100),callback_data:`folder:${token}:${offset+index}`}]);
@@ -352,7 +353,7 @@ export class BotService {
     let initial: {kind:'choose';offset:number} | {kind:'create';path:string} | {kind:'failed';path:string;create:boolean} = {kind:'choose',offset:0};
     let failure = '';
     if (settings.options.length === 1) {
-      const path = resolve(settings.instancePath,settings.options[0]!);
+      const path = resolve(settings.defaultDir,settings.options[0]!);
       let cwd: string | undefined;
       try {
         cwd = this.resolveFolder(path,false);
@@ -470,7 +471,7 @@ export class BotService {
     }
     request.authority = ctx;
     const path = state.kind === 'create' || state.kind === 'failed' ? state.path :
-      resolve(request.instancePath,request.options[Number(action)]!);
+      resolve(request.defaultDir,request.options[Number(action)]!);
     const create = state.kind === 'create' || (state.kind === 'failed' && state.create);
     let cwd: string;
     try {
@@ -523,15 +524,15 @@ export class BotService {
     this.options.store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?) ON CONFLICT(bot_id,token) DO UPDATE SET panel=excluded.panel')
       .run(this.id, panel.token, JSON.stringify({...panel, changes: [...panel.changes]}));
   }
-  private async settingsAccess(ctx: Context, panel: Pick<SettingsPanel, 'chatId' | 'instancePath'>, writable = false): Promise<AppConfig> {
+  private async settingsAccess(ctx: Context, panel: Pick<SettingsPanel, 'chatId' | 'instanceId'>, writable = false): Promise<AppConfig> {
     await this.authorize(panel.chatId, ctx.from!.id);
     if (writable && !(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) {
       throw new Error('Configuration is read-only. Ask the local operator to change its source or permissions. No settings were saved.');
     }
     const member = await this.bot.api.getChatMember(panel.chatId, ctx.from!.id);
     const persisted = readConfig(this.options.config.configPath);
-    if (this.assignedPath(panel.chatId) !== panel.instancePath ||
-        findInstance(persisted, this.id, panel.chatId)?.path !== panel.instancePath ||
+    if (this.assignedId(panel.chatId) !== panel.instanceId ||
+        findInstance(persisted, this.id, panel.chatId)?.instance.id !== panel.instanceId ||
         !isAdministrator(member)) {
       throw new Error('The configured instance assignment or administrator access changed. No settings were saved.');
     }
@@ -596,7 +597,7 @@ export class BotService {
     }
     const panel: SettingsPanel = {
       token: randomBytes(16).toString('base64url'), chatId: ctx.chat!.id,
-      destination: contextDestination(ctx), messageId: 0, instancePath: this.assignedPath(ctx.chat!.id),
+      destination: contextDestination(ctx), messageId: 0, instanceId: this.assignedId(ctx.chat!.id),
       revision: 0, offset: 0, choices: [], changes: new Map(),
     };
     const persisted = await this.settingsAccess(ctx, panel);
@@ -688,11 +689,11 @@ export class BotService {
     } else if (page === 'skills' || page === 'presets') {
       const skill = page === 'skills';
       const names = skill
-        ? (await this.options.runtime.listSkills(panel.instancePath))
+        ? (await this.options.runtime.listSkills(panel.instanceId))
             .map((entry) => entry.name)
             .filter(isMentionableSkillName)
-        : await this.options.runtime.availableModelPresets(panel.instancePath);
-      if (this.assignedPath(panel.chatId) !== panel.instancePath)
+        : await this.options.runtime.availableModelPresets(panel.instanceId);
+      if (this.assignedId(panel.chatId) !== panel.instanceId)
         throw new Error('The group instance assignment changed');
       const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
       text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
@@ -757,7 +758,7 @@ export class BotService {
     };
     let text = 'Model presets are pre-defined groups of models and their effort levels that map to various agent roles';
     if (panel.selected !== undefined) {
-      const preset = await this.options.runtime.modelPresetDetails(panel.continuation?.cwd ?? panel.instancePath, panel.selected);
+      const preset = await this.options.runtime.modelPresetDetails(panel.instanceId, panel.selected, panel.continuation?.cwd ?? this.options.store.getSession(panel.sessionId)?.cwd);
       text = `${panel.selected}\n\n${Object.entries(preset.modelRoles).map(([role, selector]) => `${role}: ${selector}`).join('\n')}${preset.defaultThinkingLevel === undefined ? '' : `\nDefault effort: ${preset.defaultThinkingLevel}`}`;
       button('Use', {kind: 'use'});
       if (!panel.continuation) button('Make default', {kind: 'default'});
@@ -769,7 +770,7 @@ export class BotService {
       if (end < text.length) button('Next', {kind: 'page', offset: end});
       text = text.slice(panel.detailOffset, end);
     } else {
-      const names = await this.options.runtime.availableModelPresets(panel.continuation?.cwd ?? panel.instancePath);
+      const names = await this.options.runtime.availableModelPresets(panel.instanceId, panel.continuation?.cwd ?? this.options.store.getSession(panel.sessionId)?.cwd);
       if (panel.listOffset >= names.length) panel.listOffset = 0;
       for (const name of names.slice(panel.listOffset, panel.listOffset + 8))
         button(name, {kind: 'select', name});
@@ -778,7 +779,7 @@ export class BotService {
     }
     if (panel.continuation) button('Cancel', {kind: 'cancel'});
     this.checkPresetPanel(panel);
-    if (this.assignedPath(panel.chatId) !== panel.instancePath) throw new Error('The group instance assignment changed');
+    if (this.assignedId(panel.chatId) !== panel.instanceId) throw new Error('The group instance assignment changed');
     const extra = {reply_markup: {inline_keyboard: rows}};
     if (panel.messageId === 0) {
       const message = await sendTo(this.bot.api, panel.destination, text, extra);
@@ -836,7 +837,7 @@ export class BotService {
     else {
       const name = panel.selected;
       if (name === undefined) return;
-      await this.options.runtime.modelPresetDetails(panel.continuation?.cwd ?? panel.instancePath, name);
+      await this.options.runtime.modelPresetDetails(panel.instanceId, name, panel.continuation?.cwd ?? this.options.store.getSession(panel.sessionId)?.cwd);
       if (panel.continuation) {
         const pending = panel.continuation;
         await this.authorize(panel.chatId, pending.source.from!.id);
@@ -857,7 +858,7 @@ export class BotService {
         const chat = findInstance(config, this.id, panel.chatId)!.instance.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
         chat.default_model_preset = name;
         writeConfig(config);
-        const live = this.options.config.instances[panel.instancePath]!.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
+        const live = this.options.config.instances.find(instance => instance.id === panel.instanceId)!.chats.find(chat => chat.botId === this.id && chat.chatId === panel.chatId)!;
         live.default_model_preset = name;
       } else {
         const session = this.presetSession(panel);
@@ -912,7 +913,7 @@ export class BotService {
         chatId: ctx.chat.id,
         destination: contextDestination(ctx),
         messageId: message.message_id,
-        instancePath: this.assignedPath(ctx.chat.id),
+        instanceId: this.assignedId(ctx.chat.id),
         revision: Number(match[2]),
         offset: 0,
         choices: [],
@@ -1001,8 +1002,8 @@ export class BotService {
       if (action.kind === 'default' && action.value !== undefined) {
         const names =
           action.field === 'default_new_topic_skill'
-            ? (await this.options.runtime.listSkills(panel.instancePath)).map((entry) => entry.name)
-            : await this.options.runtime.availableModelPresets(panel.instancePath);
+            ? (await this.options.runtime.listSkills(panel.instanceId)).map((entry) => entry.name)
+            : await this.options.runtime.availableModelPresets(panel.instanceId);
         if (!names.includes(action.value))
           throw new Error(
             `Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`,
@@ -1115,8 +1116,9 @@ export class BotService {
       botId: () => this.id,
       username: () => this.bot.botInfo!.username,
       authorize: (chatId, userId) => this.authorize(chatId, userId),
-      instancePath: (chatId) => this.assignedPath(chatId),
-      listSkills: (instancePath, session) => options.runtime.listSkills(instancePath, session),
+      instanceId: (chatId) => this.assignedId(chatId),
+      cwd: (chatId) => this.assignedCwd(chatId),
+      listSkills: (instanceId, session) => options.runtime.listSkills(instanceId, session),
     });
     this.bot.use(async (ctx) => {
       let callbackAnswered = false;
@@ -1242,7 +1244,7 @@ export class BotService {
         !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
-      () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.path === assigned.path).catch(() => undefined);
+      () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.instance.id === assigned.instance.id).catch(() => undefined);
   }
   async applyTermination(): Promise<void> {
     if (!this.options.config.terminated) { this.termination = undefined; return; }
@@ -1344,7 +1346,7 @@ export class BotService {
       if (error !== signal.reason) {
         const failure = {operation:phase,at:Date.now(),error};
         if (phase.startsWith('skills:')) {
-          const path = phase.slice('skills:'.length);
+          const path = Number(phase.slice('skills:'.length));
           const observation = this.catalogObservations.get(path) ?? {};
           observation.failure = failure;
           observation.failed = true;
@@ -1452,24 +1454,25 @@ export class BotService {
     if (this.stopped || this.options.config.terminated) return Promise.resolve();
     const signal = this.catalogRefresh.signal;
     const tasks: Promise<void>[] = [];
-    for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
+    for (const instance of this.options.config.instances) {
+      const instanceId = instance.id;
       if (!instance.chats.some(chat => chat.botId === this.id)) continue;
-      let task = this.catalogTasks.get(instancePath);
+      let task = this.catalogTasks.get(instanceId);
       if (!task) {
-        task = this.runBackground(`skills:${instancePath}`, async () => {
-          const skills = await withCancellation(this.options.runtime.listSkills(instancePath, undefined, signal), signal);
+        task = this.runBackground(`skills:${instanceId}`, async () => {
+          const skills = await withCancellation(this.options.runtime.listSkills(instanceId, undefined, signal), signal);
           signal.throwIfAborted();
-          if (!this.options.config.instances[instancePath]?.chats.some(chat => chat.botId === this.id)) return;
-          this.options.store.setSkillCatalog(instancePath, skills);
-          const observation = this.catalogObservations.get(instancePath) ?? {};
+          if (!this.options.config.instances.find(current => current.id === instanceId && current.defaultDir === instance.defaultDir)?.chats.some(chat => chat.botId === this.id)) return;
+          this.options.store.setSkillCatalog(instanceId, skills);
+          const observation = this.catalogObservations.get(instanceId) ?? {};
           observation.refreshedAt = Date.now();
           observation.failed = false;
-          this.catalogObservations.set(instancePath,observation);
+          this.catalogObservations.set(instanceId,observation);
           await this.syncCommandMenus();
         }, signal);
-        this.catalogTasks.set(instancePath, task);
+        this.catalogTasks.set(instanceId, task);
         const current = task;
-        void task.finally(() => { if (this.catalogTasks.get(instancePath) === current) this.catalogTasks.delete(instancePath); });
+        void task.finally(() => { if (this.catalogTasks.get(instanceId) === current) this.catalogTasks.delete(instanceId); });
       }
       tasks.push(task);
     }
@@ -1479,13 +1482,14 @@ export class BotService {
     if (this.stopped || this.options.config.terminated) return Promise.resolve();
     if (this.presetRefresh) return this.presetRefresh;
     const signal = this.catalogRefresh.signal;
-    const tasks = Object.entries(this.options.config.instances)
-      .filter(([, instance]) => instance.chats.some(chat => chat.botId === this.id))
-      .map(([instancePath]) => this.runBackground(`presets:${instancePath}`, async () => {
-        const names = await withCancellation(this.options.runtime.availableModelPresets(instancePath), signal);
+    const tasks = this.options.config.instances
+      .filter(instance => instance.chats.some(chat => chat.botId === this.id))
+      .map(instance => this.runBackground(`presets:${instance.id}`, async () => {
+        const instanceId = instance.id;
+        const names = await withCancellation(this.options.runtime.availableModelPresets(instanceId), signal);
         signal.throwIfAborted();
-        if (!this.options.config.instances[instancePath]?.chats.some(chat => chat.botId === this.id)) return;
-        this.presetCatalogs.set(instancePath, names);
+        if (!this.options.config.instances.find(current => current.id === instanceId && current.defaultDir === instance.defaultDir)?.chats.some(chat => chat.botId === this.id)) return;
+        this.presetCatalogs.set(instanceId, names);
         await this.syncCommandMenus();
       }, signal));
     const task = Promise.all(tasks).then(() => {});
@@ -1493,9 +1497,9 @@ export class BotService {
     void task.finally(() => { if (this.presetRefresh === task) this.presetRefresh = undefined; });
     return task;
   }
-  private presetDescription(instancePath: string): string {
+  private presetDescription(instanceId: number): string {
     let description = groupCommands.find(command => command.command === 'model_preset')!.description;
-    const names = [...(this.presetCatalogs.get(instancePath) ?? [])].sort((a, b) => a.length - b.length || a.localeCompare(b));
+    const names = [...(this.presetCatalogs.get(instanceId) ?? [])].sort((a, b) => a.length - b.length || a.localeCompare(b));
     let separator = '. Presets: ';
     for (const name of names) {
       if (description.length + separator.length + name.length > 256) break;
@@ -1504,8 +1508,8 @@ export class BotService {
     }
     return description;
   }
-  private async replyPresetUsage(ctx: Context, instancePath: string, guidance = ''): Promise<void> {
-    const names = await this.options.runtime.availableModelPresets(instancePath);
+  private async replyPresetUsage(ctx: Context, instanceId: number, guidance = ''): Promise<void> {
+    const names = await this.options.runtime.availableModelPresets(instanceId);
     await this.replyPresetText(ctx, `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\nAvailable presets:\n${names.length ? names.join('\n') : '(none configured)'}${guidance}`);
   }
   private async replyPresetText(ctx: Context, text: string): Promise<void> {
@@ -1685,7 +1689,7 @@ export class BotService {
       return;
     }
     await this.authorize(chatId,ctx.from!.id,true);
-    const path = assigned.path;
+    const path = assigned.instance.id;
     const failures: StatusFailure[] = [];
     const suspended = refreshTermination(this.options.config);
     const lines = [`Bot: ${suspended ? 'online; service terminated' : 'ready'}`];
@@ -1696,7 +1700,7 @@ export class BotService {
     }
     const stored = this.options.store.getTopic({botId:this.id,destination});
     const detached = destination.kind === 'topic' && this.options.store.getTopicKind({botId:this.id,chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
-    const session = stored?.instancePath === path ? stored : undefined;
+    const session = stored?.instanceId === path ? stored : undefined;
     if (stored && !session) lines.push('Session: unavailable (assigned to another project)');
     else if (session) {
       const observation = this.sessionObservation(session.id);
@@ -1738,7 +1742,7 @@ export class BotService {
     const text = lines.join('\n');
     for (let offset = 0; offset < text.length;) {
       await this.authorize(chatId,ctx.from!.id,true);
-      if (this.assignedPath(chatId) !== path) throw new Error('The group instance assignment changed');
+      if (this.assignedId(chatId) !== path) throw new Error('The group instance assignment changed');
       let end = Math.min(offset+3900,text.length);
       if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
       await replyTo(ctx,destination,text.slice(offset,end));
@@ -1758,7 +1762,7 @@ export class BotService {
     signal?.throwIfAborted();
     if (this.stopped) throw this.background.signal.reason;
     if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
-    const instancePath = this.assignedPath(chatId);
+    const instanceId = this.assignedId(chatId);
     if (!this.options.store.isEnrolled(this.id, chatId)) throw new Error('Group not enrolled');
     const deadline = new AbortController();
     const timeoutReason = new DOMException('Telegram authorization lookup timed out after 10 seconds', 'TimeoutError');
@@ -1780,7 +1784,7 @@ export class BotService {
       });
       cancellation.throwIfAborted();
       if (refreshTermination(this.options.config) && !statusOnly) throw new Error(terminationMessage);
-      if (this.assignedPath(chatId) !== instancePath) throw new Error('The group instance assignment changed');
+      if (this.assignedId(chatId) !== instanceId) throw new Error('The group instance assignment changed');
       if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
       if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
       if (this.stopped) throw this.background.signal.reason;
@@ -1796,22 +1800,22 @@ export class BotService {
     const [chat, member] = await Promise.all([this.bot.api.getChat(chatId), this.bot.api.getChatMember(chatId, this.id)]);
     return chat.type === 'supergroup' && chat.is_forum === true && member.status === 'administrator' && member.can_manage_topics === true && member.can_pin_messages === true;
   }
-  private assignedPath(chatId: number): string {
+  private assignedId(chatId: number): number {
     const assigned = findInstance(this.options.config, this.id, chatId);
     if (!assigned) throw new Error('This group has no configured instance assignment');
-    try {
-      if (realpathSync(assigned.path) !== assigned.path || !statSync(assigned.path).isDirectory()) throw new Error();
-    } catch {
-      throw new Error('The configured instance directory is unavailable');
-    }
-    return assigned.path;
+    return assigned.instance.id;
+  }
+  private assignedCwd(chatId: number): string {
+    const assigned = findInstance(this.options.config, this.id, chatId);
+    if (!assigned) throw new Error('This group has no configured instance assignment');
+    return assigned.instance.defaultDir;
   }
   private sessionAssigned(session: TopicSession): boolean {
     if (session.botId !== this.id || !this.options.store.isEnrolled(this.id, session.chatId)) return false;
     if (this.options.store.getTopicKind(session) === 'detached') return false;
     const stored = this.options.store.getSession(session.id);
-    if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instancePath !== session.instancePath || !session.instancePath) return false;
-    try { return this.assignedPath(session.chatId) === session.instancePath; } catch { return false; }
+    if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instanceId !== session.instanceId || !session.instanceId) return false;
+    try { return this.assignedId(session.chatId) === session.instanceId; } catch { return false; }
   }
   private requireSessionAssignment(session: TopicSession): void {
     if (this.stopped) throw this.background.signal.reason;
@@ -1833,7 +1837,7 @@ export class BotService {
   private async createTopicWorktree(session: TopicSession): Promise<void> {
     this.requireSessionAssignment(session);
     await this.options.runtime.worktree(session, `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`);
-    this.options.store.setSessionRuntime(session.id, session.runtime);
+    this.options.store.setSessionCwd(session.id, session.cwd);
   }
   private promptHelp(chatId: number): string {
     const input = this.allMessagesArePrompts(chatId)
@@ -1860,20 +1864,21 @@ export class BotService {
       this.globalCommandMenu = globalFingerprint;
     }
     const current = new Set<number>();
-    for (const [instancePath, instance] of Object.entries(this.options.config.instances)) {
+    for (const instance of this.options.config.instances) {
+      const instanceId = instance.id;
       const chats = instance.chats.filter(chat => chat.botId === this.id);
       if (!chats.length) continue;
       for (const chat of chats) current.add(chat.chatId);
-      const skills = this.options.store.getSkillCatalog(instancePath) ?? [];
+      const skills = this.options.store.getSkillCatalog(instanceId) ?? [];
       if (this.stopped) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - baseCommands.length));
-      const instanceCommands = baseCommands.map(command => command.command === 'model_preset' ? {...command, description:this.presetDescription(instancePath)} : command);
+      const instanceCommands = baseCommands.map(command => command.command === 'model_preset' ? {...command, description:this.presetDescription(instanceId)} : command);
       const commands = [...instanceCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];
-      const fingerprint = JSON.stringify([instancePath, commands]);
+      const fingerprint = JSON.stringify([instanceId, commands]);
       for (const chat of chats) {
-        if (!this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
+        if (!this.options.config.instances.find(current => current.id === instanceId)?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         current.add(chat.chatId);
         if (this.commandMenus.get(chat.chatId) === fingerprint) {
           this.skillAliases.set(chat.chatId, aliases);
@@ -1881,7 +1886,7 @@ export class BotService {
         }
         await this.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.apiAbort.signal);
         await this.bot.api.setMyCommands([...instanceCommands,cliCommand,...commands.slice(instanceCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.apiAbort.signal);
-        if (this.stopped || !this.options.config.instances[instancePath]?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
+        if (this.stopped || !this.options.config.instances.find(current => current.id === instanceId)?.chats.some(assigned => assigned.botId === this.id && assigned.chatId === chat.chatId)) continue;
         this.commandMenus.set(chat.chatId, fingerprint);
         this.skillAliases.set(chat.chatId, aliases);
       }
@@ -1900,15 +1905,15 @@ export class BotService {
   }
   private async listAdmins(ctx: Context): Promise<void> {
     const destination = contextDestination(ctx);
-    const instancePath = this.assignedPath(destination.chatId);
+    const instanceId = this.assignedId(destination.chatId);
     const roster = await this.bot.api.getChatAdministrators(destination.chatId);
     const lines = ['Group administrators:', ...roster.filter(isAdministrator).map(member =>
       `${member.status === 'creator' ? 'Owner' : 'Administrator'}: ${member.user.username ? `@${member.user.username}` : `${member.user.first_name} (User ${member.user.id})`}`)];
     let chunk = '';
     const deliver = async () => {
       await this.authorize(destination.chatId, ctx.from!.id);
-      if (this.assignedPath(destination.chatId) !== instancePath ||
-          findInstance(readConfig(this.options.config.configPath), this.id, destination.chatId)?.path !== instancePath) throw new Error('The group instance assignment changed');
+      if (this.assignedId(destination.chatId) !== instanceId ||
+          findInstance(readConfig(this.options.config.configPath), this.id, destination.chatId)?.instance.id !== instanceId) throw new Error('The group instance assignment changed');
       await replyTo(ctx, destination, chunk);
     };
     for (const line of lines) {
@@ -2432,7 +2437,7 @@ export class BotService {
         () =>
           !this.stopped &&
           this.options.store.getTopicKind(session) === 'detached' &&
-          findInstance(this.options.config, this.id, session.chatId)?.path === session.instancePath,
+          findInstance(this.options.config, this.id, session.chatId)?.instance.id === session.instanceId,
       );
     } catch (error) {
       if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')))
@@ -2482,7 +2487,7 @@ export class BotService {
       topic = await this.bot.api.createForumTopic(source.chatId, source.name.slice(0, 128) || 'OMP session');
       await check();
       destination = this.options.store.createSession(
-        {botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id,instancePath:source.instancePath},
+        {botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd},
         source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
       );
       reservation.bind(destination.id);
@@ -2497,7 +2502,7 @@ export class BotService {
       releaseSource();
       await this.options.runtime.fork(source, destination, target, beforeMutation);
       await beforeMutation();
-      this.options.store.setSessionRuntime(destination.id, destination.runtime);
+      this.options.store.setSessionCwd(destination.id, destination.cwd);
       const defaultSkill = this.defaultNewTopicSkill(source.chatId);
       if (defaultSkill) this.options.store.setNewTopicSkill(destination.id, defaultSkill);
       if (this.createsTopicWorktrees(source.chatId)) {
@@ -2531,7 +2536,7 @@ export class BotService {
   private async newSession(
     ctx: Context,
     task?: PromptContent,
-    attached?: { instanceId: string; sessionId: string; instancePath: string },
+    attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string },
     name?: string,
     accepted?: () => void,
     worktree = false,
@@ -2544,18 +2549,18 @@ export class BotService {
     await this.authorize(ctx.chat!.id, ctx.from!.id);
     const folderFingerprint = JSON.stringify(this.folderSettings(ctx.chat!.id));
     const epoch = this.admissionEpoch;
-    const instancePath = this.assignedPath(ctx.chat!.id);
-    if (attached && attached.instancePath !== instancePath)
+    const instanceId = this.assignedId(ctx.chat!.id);
+    if (attached && attached.instanceId !== instanceId)
       throw new Error('The group instance assignment changed');
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
-    if (this.assignedPath(ctx.chat!.id) !== instancePath)
+    if (this.assignedId(ctx.chat!.id) !== instanceId)
       throw new Error('The group instance assignment changed');
     if (!attached && cwd === undefined && await this.chooseFolder(ctx,authority,selected =>
       this.newSession(ctx,task,attached,name,accepted,worktree,authority,extensions,undefined,selected,proposedSkills))) return;
     if (!attached && !worktree && proposedSkills) {
       const names = [...new Set([...proposedSkills.names,...(proposedSkills.topicSkill ? [proposedSkills.topicSkill] : [])])];
       if (names.length) {
-        const available = await this.options.runtime.listSkills(instancePath, undefined, undefined, cwd);
+        const available = await this.options.runtime.listSkills(instanceId, undefined, undefined, cwd);
         const missing = names.filter(name => !available.some(skill => skill.name === name));
         if (missing.length) throw new Error(`Skills are no longer available: ${missing.join(', ')}`);
       }
@@ -2582,15 +2587,17 @@ export class BotService {
       title,
       initialIcon ? { icon_custom_emoji_id: initialIcon } : {},
     );
-    if (this.assignedPath(ctx.chat!.id) !== instancePath)
+    if (this.assignedId(ctx.chat!.id) !== instanceId)
       throw new Error('The group instance assignment changed');
+    if (epoch !== this.admissionEpoch || folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
+      throw new Error('Folder settings changed during topic creation. Send the command again.');
     const automaticWorktree = !attached && !worktree && !extensions.some(extension => extension.kind === 'worktree') && this.createsTopicWorktrees(ctx.chat!.id);
     const session = this.options.store.createSession(
-      { botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instancePath },
+      { botId: this.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instanceId, cwd: attached?.cwd ?? cwd ?? this.assignedCwd(ctx.chat!.id) },
       title,
       attached
-        ? { kind: 'attached', instanceId: attached.instanceId, sessionId: attached.sessionId }
-        : { kind: 'managed', ...(cwd ? {cwd} : {}) },
+        ? { kind: 'attached', instanceId: attached.hostId, sessionId: attached.sessionId }
+        : { kind: 'managed' },
       attached || worktree || automaticWorktree || extensions.length ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
@@ -2629,7 +2636,7 @@ export class BotService {
       }
       if (worktree) {
         const text = await this.options.runtime.worktree(session, task?.text || undefined);
-        this.options.store.setSessionRuntime(session.id, session.runtime);
+        this.options.store.setSessionCwd(session.id, session.cwd);
         task = undefined;
         await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
       }
@@ -2724,7 +2731,7 @@ export class BotService {
       else await replyTo(ctx, contextDestination(ctx), text);
       return;
     }
-    this.assignedPath(ctx.chat.id);
+    this.assignedId(ctx.chat.id);
     this.options.store.enrollGroup(this.id, ctx.chat.id);
     await this.openSettings(ctx);
   }
@@ -2791,8 +2798,8 @@ export class BotService {
         if (realpathSync(command.cwd) !== command.cwd) throw new Error('Managed working directory identity changed');
       }
       const persisted = readConfig(this.options.config.configPath);
-      if (findInstance(persisted, this.id, request.chatId)?.path !== command.instancePath ||
-          this.assignedPath(request.chatId) !== command.instancePath) return;
+      if (findInstance(persisted, this.id, request.chatId)?.instance.id !== command.instanceId ||
+          this.assignedId(request.chatId) !== command.instanceId) return;
       if (!(this.options.configWritable?.() ?? configWritable(this.options.config.configPath))) return;
       if (persisted.omp.maxSessions !== request.limit || this.options.runtime.getSessionLimit() !== request.limit) return;
       writeConfig({...persisted, omp:{...persisted.omp,maxSessions:request.limit * 2}});
@@ -2812,7 +2819,7 @@ export class BotService {
     const persisted = readConfig(this.options.config.configPath);
     const assigned = findInstance(persisted, this.id, request.chatId);
     if (!isActiveMember(member) || !assigned ||
-        assigned.path !== session.instancePath || !isAdministrator(member)) {
+        assigned.instance.id !== session.instanceId || !isAdministrator(member)) {
       await replyTo(ctx, contextDestination(ctx), 'The configured instance assignment or administrator access changed. The session limit is unchanged.');
       return;
     }
@@ -2874,7 +2881,7 @@ export class BotService {
         try {
           await this.options.runtime.worktree(session);
           checkSession();
-          this.options.store.setSessionRuntime(session.id, session.runtime);
+          this.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.dropListener(session.id);
         }
@@ -2893,7 +2900,7 @@ export class BotService {
     const epoch = this.admissionEpoch;
     const folderFingerprint = !session ? JSON.stringify(this.folderSettings(ctx.chat!.id)) : undefined;
     const generation = session ? this.options.store.getSessionGeneration(session.id) : undefined;
-    const instancePath = this.assignedPath(ctx.chat!.id);
+    const instanceId = this.assignedId(ctx.chat!.id);
     const hasTask = !!content.text.trim() || !!content.images?.length;
     const admin = await this.currentAdmin(ctx);
     if (!admin && !this.usersCanProposePrompts(ctx.chat!.id)) return;
@@ -2931,7 +2938,7 @@ export class BotService {
       const check = () => {
         if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch)
           throw new Error('The service is stopping');
-        if (this.assignedPath(ctx.chat!.id) !== instancePath)
+        if (this.assignedId(ctx.chat!.id) !== instanceId)
           throw new Error('The group instance assignment changed');
         if (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
           throw new Error('Folder settings changed before execution. Send the command again.');
@@ -2945,12 +2952,12 @@ export class BotService {
       };
       const panel: PresetPanel = {
         token: randomBytes(16).toString('base64url'), chatId: ctx.chat!.id,
-        destination: contextDestination(ctx), messageId: 0, instancePath,
+        destination: contextDestination(ctx), messageId: 0, instanceId,
         sessionId: session?.id ?? '', generation: generation ?? 0,
         revision: 0, expires: Date.now() + 30 * 60_000, choices: [], listOffset: 0, detailOffset: 0,
         continuation: {
           kind: 'prompt', active: true, source: ctx,
-          cwd: cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath,
+          cwd: cwd ?? session?.cwd ?? this.assignedCwd(ctx.chat!.id),
           check,
           resume: name => this.routePrompt(ctx, originalContent, session,
             originalExtensions.map(extension => extension.kind === 'model-preset' && extension.name === undefined
@@ -2962,7 +2969,7 @@ export class BotService {
       return;
     }
     if (extensions.some(extension => extension.kind === 'model-preset')) {
-      const names = await this.options.runtime.availableModelPresets(cwd ?? (session?.runtime.kind === 'managed' ? session.runtime.cwd : undefined) ?? instancePath);
+      const names = await this.options.runtime.availableModelPresets(instanceId, cwd ?? session?.cwd);
       for (const extension of extensions) {
         if (extension.kind === 'model-preset' && (extension.name === undefined || !names.includes(extension.name))) {
           await this.replyPresetText(ctx, `Unknown model preset: ${extension.name}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
@@ -2973,20 +2980,20 @@ export class BotService {
     const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
       if (admin || session) {
-        const available = await this.options.runtime.listSkills(instancePath, session, undefined, cwd);
+        const available = await this.options.runtime.listSkills(instanceId, session, undefined, cwd);
         const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
         if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
       }
       content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
     }
-    if (this.assignedPath(ctx.chat!.id) !== instancePath) throw new Error('The group instance assignment changed');
+    if (this.assignedId(ctx.chat!.id) !== instanceId) throw new Error('The group instance assignment changed');
     if (session && (this.options.store.getSessionGeneration(session.id) !== generation ||
         this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
     if (await this.currentAdmin(ctx)) {
       const authorizeExecution = async () => {
         await this.authorize(ctx.chat!.id,ctx.from!.id);
         if (this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('The service is stopping');
-        if (!(await this.currentAdmin(ctx)) || this.assignedPath(ctx.chat!.id) !== instancePath || this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('Prompt authority or assignment changed before execution.');
+        if (!(await this.currentAdmin(ctx)) || this.assignedId(ctx.chat!.id) !== instanceId || this.stopped || refreshTermination(this.options.config) || epoch !== this.admissionEpoch) throw new Error('Prompt authority or assignment changed before execution.');
         if (folderFingerprint && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat!.id)))
           throw new Error('Folder settings changed before execution. Send the command again.');
         if (session && (this.options.store.getSessionGeneration(session.id) !== generation || this.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed before execution.');
@@ -3015,7 +3022,7 @@ export class BotService {
           this.capacityRequests.set(token, {
             sessionId:session?.id ?? '',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
             messageId:message.message_id,limit:error.limit,expires:Date.now()+300000,
-            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instancePath,epoch,generation,skills:{names:[...pendingSkills],topicSkill},cwd,folderFingerprint},
+            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instanceId,epoch,generation,skills:{names:[...pendingSkills],topicSkill},cwd,folderFingerprint},
           });
           setTimeout(() => this.capacityRequests.delete(token),300000).unref();
           return;
@@ -3041,8 +3048,8 @@ export class BotService {
       reply_markup:{inline_keyboard:[[{text:'Approve prompt',callback_data:`prompt:approve:${token}`}]]},
     });
     this.promptProposals.set(token, {
-      source:ctx,content:structuredClone(content),instancePath,worktree,
-      ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {}),
+      source:ctx,content:structuredClone(content),instanceId,worktree,
+      ...(session ? {sessionId:session.id,generation:this.options.store.getSessionGeneration(session.id)} : {folderFingerprint}),
       skills:{key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill},
       allMessagesArePrompts:this.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
@@ -3062,7 +3069,8 @@ export class BotService {
     const session = proposal.sessionId ? this.options.store.getSession(proposal.sessionId) : undefined;
     if (proposal.expires <= Date.now() || !this.usersCanProposePrompts(ctx.chat.id) ||
         this.allMessagesArePrompts(ctx.chat.id) !== proposal.allMessagesArePrompts ||
-        findInstance(this.options.config,this.id,ctx.chat.id)?.path !== proposal.instancePath ||
+        findInstance(this.options.config,this.id,ctx.chat.id)?.instance.id !== proposal.instanceId ||
+        (!proposal.sessionId && proposal.folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat.id))) ||
         (proposal.sessionId && (!session || !this.sessionAssigned(session) || session.status !== 'open' ||
           this.options.store.getSessionGeneration(proposal.sessionId) !== proposal.generation))) {
       this.promptProposals.delete(token);
@@ -3074,6 +3082,9 @@ export class BotService {
     this.promptProposals.delete(token);
     await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
     if (!(await this.currentAdmin(ctx))) throw new Error('Administrator access changed before prompt approval.');
+    if (this.assignedId(ctx.chat.id) !== proposal.instanceId ||
+        (!proposal.sessionId && proposal.folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat.id))))
+      throw new Error('The prompt proposal assignment or folder settings changed before execution.');
     if (session) {
       if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
@@ -3231,7 +3242,7 @@ export class BotService {
       const assigned = findInstance(persisted, this.id, ctx.chat.id);
       if (
         !assigned ||
-        assigned.path !== this.assignedPath(ctx.chat.id) ||
+        assigned.instance.id !== this.assignedId(ctx.chat.id) ||
         !isAdministrator(member)
       ) {
         await replyTo(
@@ -3328,10 +3339,10 @@ export class BotService {
               botId: this.id,
               chatId: destination.chatId,
               threadId: destination.threadId,
-              instancePath: this.assignedPath(ctx.chat!.id),
+              instanceId: this.assignedId(ctx.chat!.id), cwd,
             },
             title,
-            {kind:'managed',cwd},
+            {kind:'managed'},
           );
           const defaultSkill = this.defaultNewTopicSkill(ctx.chat!.id);
           if (defaultSkill) this.options.store.setNewTopicSkill(created.id, defaultSkill);
@@ -3511,11 +3522,13 @@ export class BotService {
         return;
       }
       await this.authorize(ctx.chat.id, ctx.from.id);
-      const instancePath = this.assignedPath(ctx.chat.id);
+      const instanceId = this.assignedId(ctx.chat.id);
+      const folderFingerprint = intent.kind === 'new-task' || !session ? JSON.stringify(this.folderSettings(ctx.chat.id)) : undefined;
       const generation = session && this.options.store.getSessionGeneration(session.id);
       const images = await this.promptImages(intent.content.images);
       if (
-        this.assignedPath(ctx.chat.id) !== instancePath ||
+        this.assignedId(ctx.chat.id) !== instanceId ||
+        (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.folderSettings(ctx.chat.id))) ||
         (session && this.options.store.getSessionGeneration(session.id) !== generation)
       )
         throw new Error('The session or group assignment changed while downloading the image');
@@ -3544,7 +3557,7 @@ export class BotService {
           await replyTo(ctx, destination, 'Usage: /usage');
           return;
         }
-        const usage = await this.options.runtime.providerUsage(assigned.path);
+        const usage = await this.options.runtime.providerUsage(assigned.instance.id);
         const text = usage
           .map(
             (section) => `${section.heading ? `**${section.heading}**\n\n` : ''}${section.table}`,
@@ -3655,7 +3668,7 @@ export class BotService {
         let text: string;
         try {
           text = await this.options.runtime.worktree(session, arg || undefined);
-          this.options.store.setSessionRuntime(session.id, session.runtime);
+          this.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.dropListener(session.id);
         }
@@ -3677,12 +3690,13 @@ export class BotService {
           );
           return;
         }
-        const instancePath = this.assignedPath(ctx.chat.id);
-        const binding = await this.options.runtime.attach(match[1]!, instancePath);
+        const instanceId = this.assignedId(ctx.chat.id);
+        const cwd = this.assignedCwd(ctx.chat.id);
+        const binding = await this.options.runtime.attach(match[1]!, cwd);
         await this.newSession(
           ctx,
           undefined,
-          { instanceId: binding.instanceId, sessionId: binding.sessionId, instancePath },
+          { hostId: binding.instanceId, sessionId: binding.sessionId, instanceId, cwd },
           match[2] ?? 'Attached OMP session',
         );
         return;
@@ -3750,7 +3764,7 @@ export class BotService {
         if (destination.kind !== 'topic' || !session) {
           await this.replyPresetUsage(
             ctx,
-            assigned.path,
+            assigned.instance.id,
             '\nUse this command in a session topic. Use /settings for forum defaults.',
           );
           return;
@@ -3764,13 +3778,13 @@ export class BotService {
           return;
         }
         if (arg && !/^[A-Za-z][\w-]*$/.test(arg)) {
-          await this.replyPresetUsage(ctx, session.instancePath);
+          await this.replyPresetUsage(ctx, session.instanceId);
           return;
         }
         if (!arg) {
           const panel: PresetPanel = {
             token: randomBytes(16).toString('base64url'), chatId: ctx.chat.id,
-            destination, messageId: 0, instancePath: session.instancePath,
+            destination, messageId: 0, instanceId: session.instanceId,
             sessionId: session.id, generation: this.options.store.getSessionGeneration(session.id),
             revision: 0, expires: Date.now() + 30 * 60_000, choices: [], listOffset: 0, detailOffset: 0,
           };
@@ -3779,7 +3793,7 @@ export class BotService {
         }
         if (!session) return;
         if (arg) {
-          const names = await this.options.runtime.availableModelPresets(session.instancePath);
+          const names = await this.options.runtime.availableModelPresets(session.instanceId, session.cwd);
           if (!names.includes(arg)) {
             await this.replyPresetText(ctx, `Unknown model preset: ${arg}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
             return;
@@ -4764,9 +4778,7 @@ export class BotService {
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
           const result = assistantText(entry.message);
-          if (result) this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
-            text: result, timestamp: entry.message.timestamp,
-          });
+          if (result) this.options.store.rememberReply(session.id, ompSessionId, entry.id);
         }
       }
       if (frame.final) {
@@ -4779,11 +4791,7 @@ export class BotService {
     const entry = frame.entry;
     const text = assistantText(entry.message);
     if (!text) return;
-    const unseen = replay
-      ? this.options.store.rememberSnapshotReply(session.id, ompSessionId, entry.id, {
-          text, timestamp: entry.message.timestamp,
-        })
-      : this.options.store.rememberReply(session.id, ompSessionId, entry.id);
+    const unseen = this.options.store.rememberReply(session.id, ompSessionId, entry.id);
     if (!unseen) return;
     const replyTarget = replay
       ? listener.snapshotReplyTarget

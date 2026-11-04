@@ -67,8 +67,8 @@ test('current owner authority cannot bypass the assigned bot, chat, or project',
     assert.equal(await app.service.authorizeSession(session, ownerId), true);
     await assert.rejects(app.service.authorizeSession({ ...session, botId: botId + 1 }, ownerId));
     await assert.rejects(app.service.authorizeSession({ ...session, chatId: chatId - 1 }, ownerId));
-    await assert.rejects(app.service.authorizeSession({ ...session, instancePath: `${session.instancePath}/other` }, ownerId));
-    app.config.instances[session.instancePath]!.chats = [];
+    await assert.rejects(app.service.authorizeSession({ ...session, instanceId: session.instanceId + 1 }, ownerId));
+    app.config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
     await assert.rejects(app.service.authorizeSession(session, ownerId));
   } finally { await app.close(); }
 });
@@ -94,8 +94,8 @@ for (const status of ['creator', 'administrator'] as const) {
     t.after(() => rm(directory, { recursive: true, force: true }));
     const app = await createSmokeApp();
     try {
-      const originalPath = Object.keys(app.config.instances)[0]!;
-      app.config.instances = {};
+      const originalPath = app.config.instances[0]!.defaultDir;
+      app.config.instances = [];
       app.config.configPath = join(directory, 'config.yaml');
       writeConfig(app.config);
       app.setCurrentMember({ status: 'member', username: ownerUsername });
@@ -109,14 +109,14 @@ for (const status of ['creator', 'administrator'] as const) {
       assert.equal(app.store.isEnrolled(botId, chatId), false);
       await app.update({ text: '/new Not locally approved' });
       assert.deepEqual(app.store.listSessions(botId), []);
-      assert.deepEqual(app.config.instances, {});
-      app.config.instances = { [originalPath]: { chats: [{ botId, chatId }] } };
+      assert.deepEqual(app.config.instances, []);
+      app.config.instances = [{ id: 1, defaultDir: originalPath, chats: [{ botId, chatId }] }];
       writeConfig(app.config);
       app.store.consumeSetupRequest(request.code);
       await app.update({ text: '/setup' });
       assert.equal(app.store.isEnrolled(botId, chatId), true);
       await app.update({ text: '/attach local-instance Approved path task' });
-      assert.equal(app.store.listSessions(botId)[0]?.instancePath, originalPath);
+      assert.equal(app.store.listSessions(botId)[0]?.cwd, originalPath);
     } finally { await app.close(); }
   });
 }
@@ -124,7 +124,7 @@ for (const status of ['creator', 'administrator'] as const) {
 test('unbound setup checks bot forum permissions before creating a pending request', async () => {
   const app = await createSmokeApp({ botCanPinMessages: false });
   try {
-    app.config.instances = {};
+    app.config.instances = [];
     await app.update({ text: '/setup' });
     assert.deepEqual(app.store.listSetupRequests(), []);
     assert.equal(app.store.isEnrolled(botId, chatId), false);

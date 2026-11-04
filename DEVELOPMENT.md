@@ -25,9 +25,9 @@ Configure model credentials for the development account through OMP. Do not reus
 
 ## Change the database schema
 
-Append SQL to the migration list in `src/migrations.ts`. Each list entry advances the database version by one. Keep applied entries unchanged and in order. Do not include transaction statements in migration SQL.
+Keep one current schema in `src/migrations.ts`; collapse schema changes into that definition rather than appending compatibility migrations. Update fixtures and callers together. Older schemas are unsupported and must not be imported automatically.
 
-Store startup applies pending entries in one transaction, including their version updates. A failure rolls back the entire pending upgrade and preserves the original SQLite error. There are no down migrations.
+Store startup initializes a new database atomically and rejects unsupported schemas. Schema initialization failures preserve the original SQLite diagnostic.
 
 ## Modify the Mini App
 
@@ -66,44 +66,72 @@ Live Telegram verification requires a BotFather token and forum groups. Mini App
 
 ## Run tests against Telegram's test network
 
+Live test workers own independent Telegram user sessions and lease reusable bots from a shared token array. Each checkout may hold only one bot at a time; bot-using fixtures within that checkout are serialized, while different checkouts can use different bots concurrently. No shared server, proxy, or PM2 test process is needed. Application Bot API requests go directly to Telegram.
+
+### Set up retained sessions
+
 Register a real phone number in Telegram's [separate test environment](https://core.telegram.org/bots/features#testing-your-bot) and keep an official client logged into that account. Reserved fixed-code test accounts are [disabled](https://github.com/tdlib/td/issues/3083#issuecomment-3710841964).
 
-Obtain an application `api_id` and `api_hash` from [Telegram's application settings](https://my.telegram.org/apps). Put them in this checkout's untracked `.env`:
+Install dependencies with the current Node.js LTS selected through nvm. Native `flock` from util-linux must be available. Obtain an application `api_id` and `api_hash` from [Telegram's application settings](https://my.telegram.org/apps), and put them in the primary checkout's untracked `.env`:
 
 ```dotenv
 TELEGRAM_TEST_API_ID=YOUR_APPLICATION_ID
 TELEGRAM_TEST_API_HASH=YOUR_APPLICATION_HASH
 ```
 
-Run the source-controlled login command in an interactive terminal:
+Linked worktrees share the primary checkout's `.env`, resolved through Git's common directory. Set `TELEGRAM_TEST_ENV_FILE` to an absolute shared dotenv path when using separate clones or another credential location. Every participating checkout must use the same file and operating-system account. Credential selection reads this file directly rather than trusting stale exported session values.
+
+Run commands from a checkout containing the current development scripts, with its dependencies installed. The checkout running the command does not need its own `.env`; it resolves the shared file automatically. Run login in an interactive terminal:
 
 ```sh
 pnpm telegram:test:login
 ```
 
-Enter the registered test-network phone number with its country code, the actual verification code delivered to the account, and its two-step verification password if requested. Code and password input are hidden. The command verifies the test network and appends `TELEGRAM_TEST_SESSION` to `.env` without printing it. It preserves existing configuration and sets `.env` permissions to `0600`. Rerunning the command appends a refreshed session; the latest entry is used.
+Enter the test-network phone number, verification code, and two-step verification password if requested. Code and password input are hidden. Login verifies the test network and retains the authorization in `TELEGRAM_TEST_SESSIONS`, a JSON array in the shared `.env` with permissions `0600`. Existing sessions are retained without printing them, logging out, or revoking them.
 
-Login supports Telegram moving the connection to the account's home datacenter. No datacenter configuration is required.
+### Set up reusable bots
 
-The saved session grants access to the test account. Never log it, commit it, send it in chat, or publish it as an artifact. Revoke the authorization in the account's device settings if it leaks.
+Import an existing test-network bot token:
 
-Run live tests after login:
+`pnpm telegram:test:bots add`
+
+The command accepts a hidden terminal prompt or piped stdin. Never supply a token as a command-line argument or paste it into a chat.
+
+Explicitly create another test-network bot through BotFather:
+
+`pnpm telegram:test:bots create`
+
+Both commands validate the token against the real test Bot API and save it in `TELEGRAM_TEST_BOT_TOKENS`, a JSON array in the shared `.env`. They preserve sessions and other bots, deduplicate repeated imports, and enforce `0600` permissions even when the imported token is already saved. They print only the bot ID and dotenv path, never the token. Updating credentials for an existing bot waits for its active lease to finish.
+
+Provision one bot for each checkout that should run concurrently. With one saved token, checkouts take turns; adding tokens increases available capacity. Normal test runs only lease saved bots and never invoke provisioning, create, delete, or revoke bots.
+
+Explicit creation serializes the entire BotFather conversation across checkouts. Only BotFather's explicit “too many attempts” reply is retried after its stated delay; transport failures and ambiguous mutations are not replayed. SIGINT/SIGTERM cancels waits and closes the connection without revoking the retained session. A private `0600` recovery journal under `~/.local/state/omp-telegram-test/provisioned-bots` records the chosen username before the final creation request and the returned token before verification or saving; it is removed after successful saving. If creation fails, inspect that journal privately before retrying: the remote bot may already exist. Use `add` to recover a journaled token. Do not commit or print recovery journals.
+
+BotFather creation limits are account-wide and still apply with independent user sessions. A long creation cooldown does not prevent tests from reusing bots already saved in the array. Use Ctrl-C to cancel provisioning; do not rerun an ambiguous creation blindly.
+
+Each Node.js test worker process locks an available seed and approves one fresh QR-token authorization when its first fixture needs a user. Sequential fixtures exclusively borrow that worker's client; parallel workers and separate checkouts use independent keys. Fixture teardown ends its own request scope without disconnecting the worker's client. The worker's final teardown closes the connection and releases its authorization lease. Failed authorization setup is not replayed by later fixtures in the same worker.
+
+Fresh clients start on the seed's saved test-network datacenter, avoiding an unnecessary cross-datacenter login; server-directed migration remains supported. Saved authorizations already in use are not reused as seeds. Definitively dead sessions are removed before another seed is tried; transient network failures and rate limits retain the credentials and original diagnostic. If no usable seed remains, run interactive login again.
+
+The private state directory under `~/.local/state/omp-telegram-test` owns cross-process locks. Do not unlink live lock files. Authorization forking does not cache flood failures, retry rejected login requests, or replay ambiguous mutations. More sessions do not bypass account-level Telegram limits.
+
+### Run from any checkout
+
+Install OMP and this checkout's dependencies, then run:
 
 ```sh
 timeout 600s pnpm test:e2e
 ```
 
-Both commands load `.env` automatically. Exported shell variables take precedence over file values. `test:e2e` is separate from the isolated `test` suite and runs as the first stage of `verify`; missing credentials fail instead of skipping tests. The helper imports the saved session into in-memory storage and rejects production-network or bot sessions. It does not request a fresh login code on every run. Install OMP before running the suite; set `OMP_EXECUTABLE` to select a different executable.
+Set `OMP_EXECUTABLE` to choose another OMP executable.
 
-Set `TELEGRAM_TEST_BOT_TOKEN` to reuse a bot already created in the test environment. Otherwise, the fixture creates a uniquely named bot through that environment's BotFather. Created bots remain in the test account for reuse; the helpers do not issue BotFather's irreversible bot-deletion command. Retrieve a reusable token through BotFather in the test environment. Never log tokens or commit them.
+A checkout waits cancellably if every configured bot is busy, and proceeds when any bot becomes available. A per-bot lock protects the selected bot across checkouts; a per-checkout lock prevents that checkout from acquiring multiple bots simultaneously. Each fixture creates its own forum and keeps working directories, databases, and OMP processes separate. Teardown stops application polling before returning the bot to the pool. Failed or unsettled polling retains the lock rather than granting the bot to another fixture. Process exit releases native locks automatically; bot tokens and user sessions remain saved.
 
-Each fixture creates its own forum and deletes that forum during teardown, including after partial setup failure. Teardown closes the owned user client without logging the account out or revoking its saved session. Do not run concurrent fixtures with the same account while they are creating bots, or run another `getUpdates` consumer against the fixture's bot token. Give parallel workers separate accounts and bots.
+`test:e2e` is separate from the isolated `test` suite and runs first in `verify`. Missing credentials, provisioning failures, and timeouts fail acceptance rather than skipping tests. Inspect original Telegram diagnostics before rerunning; an ambiguous failure may already have created a remote resource. Never log or commit saved sessions or bot tokens.
 
-Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` for application workflows. It owns the real Telegram resources, disk-backed store, BotService, and OMP environment. Its lower-level `setupTelegramTest` fixture owns the authenticated user, bot, forum, test Bot API client, and update inbox. Both register teardown with the Node test context. Keep domain scenarios and expectations in test files rather than setup helpers.
+Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` for application workflows and `setupTelegramTest` for lower-level Telegram resources. Both register teardown with the Node test context. Keep scenario-specific transitions and expectations in test files rather than setup helpers.
 
-Telegram's test environment still enforces flood limits. The helpers wait for explicit flood rejections, respect cancellation, and retain original failure diagnostics. A timeout is a failure, not evidence that setup completed. If provisioning fails, inspect the original BotFather or RPC response before rerunning; an ambiguous network failure may have created a remote resource.
-
-Forum provisioning retries only the test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, with at most three creation attempts. Before retrying, it searches the authenticated account's dialogs for the newly created owned forum with the same title and reuses it if found. Retry waits and pending recovery-inspection waits respect cancellation, allowing teardown to destroy the owned client and its outstanding RPC. Other failures, including ambiguous transport errors, propagate without replaying creation; exhausted attempts preserve the original RPC error.
+Forum provisioning retries only the explicit test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, checking for an already-created matching forum before retrying. This policy belongs to the fixture; the application bot's production rate-limit handling is exercised independently.
 
 ### Isolated OMP and debug artifacts
 

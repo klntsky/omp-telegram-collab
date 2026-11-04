@@ -41,7 +41,7 @@ async function waitFor(predicate: () => Promise<boolean> | boolean, label: strin
 
 export async function verifyRuntimeKill(directory: string, executable: string, relayUrl: string): Promise<void> {
   const config: AppConfig = {
-    bots: [], instances: { [directory]: { chats: [] } }, configPath: join(directory, 'config.yaml'),
+    bots: [], instances: [{ id: 1, defaultDir: directory, chats: [] }], configPath: join(directory, 'config.yaml'),
     publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: {
       executable,
@@ -52,7 +52,7 @@ export async function verifyRuntimeKill(directory: string, executable: string, r
   writeConfig(config);
   const managed: TopicSession = {
     id: 'runtime-kill-managed', botId: 123, chatId: -100123, threadId: 41,
-    instancePath: directory,
+    instanceId: 1, cwd: directory,
     name: 'Kill smoke managed', status: 'open', runtime: { kind: 'managed' }, createdAt: Date.now(),
   };
   const attachedId = randomUUID();

@@ -17,13 +17,13 @@ for (const denial of ['member','demoted','departed','general','missing','closed'
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      const instancePath = Object.keys(app.config.instances)[0]!;
-      const session = app.store.createSession({botId,chatId,threadId:42,instancePath},'Restricted session');
+      const instancePath = app.config.instances[0]!.defaultDir;
+      const session = app.store.createSession({botId,chatId,threadId:42, instanceId: 1, cwd: instancePath}, 'Restricted session');
       if (denial === 'demoted') await app.update({text:'/cli',message_thread_id:42});
       if (denial === 'member' || denial === 'demoted') app.setCurrentMember({status:'member'});
       if (denial === 'departed') app.setMember(false);
       if (denial === 'closed' || denial === 'detached') app.store.updateSession(session.id,{status:denial});
-      if (denial === 'reassigned') app.config.instances[instancePath]!.chats = [];
+      if (denial === 'reassigned') app.config.instances[0]!.chats = [];
       if (denial === 'terminated') { app.config.terminated = true; writeConfig(app.config); }
       const ensure = t.mock.method(app.runtime,'ensure',async () => { throw new Error('Unexpected host startup'); });
       const before = app.messages.length;
@@ -40,7 +40,7 @@ test('removing a group assignment removes its administrator CLI menu', async () 
   try {
     const scope = {type:'chat_administrators' as const,chat_id:chatId};
     assert.ok((await app.bot.api.getMyCommands({scope})).some(command => command.command === 'cli'));
-    app.config.instances = {};
+    app.config.instances = [];
     await app.service.reconcileConfiguration();
     assert.deepEqual(await app.bot.api.getMyCommands({scope}),[]);
   } finally { await app.close(); }

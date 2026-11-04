@@ -1,126 +1,46 @@
-import { setTimeout as delay } from 'node:timers/promises';
-import { MemoryStorage, TelegramClient, tl, type User } from '@mtcute/node';
-import { readStringSession, writeStringSession } from '@mtcute/node/utils.js';
-import { combineTelegramErrors } from './errors.js';
+import { after } from 'node:test';
+import { tl, type TelegramClient, type User } from '@mtcute/node';
+import { TelegramTestExecution, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
+import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
 
-export interface TelegramApplicationCredentials {
-  apiId: number;
-  apiHash: string;
-}
-
-export interface TelegramTestCredentials extends TelegramApplicationCredentials {
-  session: string;
-}
-
-export function readTelegramApplicationCredentials(env: NodeJS.ProcessEnv = process.env): TelegramApplicationCredentials {
-  const apiId = Number(env.TELEGRAM_TEST_API_ID);
-  const apiHash = env.TELEGRAM_TEST_API_HASH;
-  if (!Number.isSafeInteger(apiId) || apiId <= 0 || !apiHash) {
-    throw new Error('Set TELEGRAM_TEST_API_ID and TELEGRAM_TEST_API_HASH from https://my.telegram.org/apps to run Telegram test-network tests');
-  }
-  return { apiId, apiHash };
-}
-
-export function validateTelegramTestSession(session: string): void {
-  const data = readStringSession(session);
-  if (!data.primaryDcs.main.testMode || !data.primaryDcs.media.testMode) {
-    throw new Error('Refusing to import a Telegram session outside the test network');
-  }
-  if (data.self?.isBot) throw new Error('Telegram test provisioning requires a user session, not a bot session');
-}
-
-export async function exportTelegramTestSession(client: TelegramClient, signal: AbortSignal): Promise<string> {
-  const config = await client.call({ _: 'help.getConfig' }, { timeout: 30000, abortSignal: signal });
-  if (!config.testMode) throw new Error('Refusing to export a Telegram session outside the test network');
-  const data = readStringSession(await client.exportSession());
-  for (const dc of [data.primaryDcs.main, data.primaryDcs.media]) {
-    if (!config.dcOptions.some(option => option.id === dc.id && option.ipAddress === dc.ipAddress && option.port === dc.port)) {
-      throw new Error('Exported Telegram session contains a datacenter outside the verified test-network configuration');
-    }
-  }
-  return writeStringSession({
-    ...data,
-    primaryDcs: {
-      main: { ...data.primaryDcs.main, testMode: true },
-      media: { ...data.primaryDcs.media, testMode: true },
-    },
-  });
-}
-
-export function readTelegramTestCredentials(env: NodeJS.ProcessEnv = process.env): TelegramTestCredentials {
-  const application = readTelegramApplicationCredentials(env);
-  const session = env.TELEGRAM_TEST_SESSION;
-  if (!session) throw new Error('Run pnpm telegram:test:login to save TELEGRAM_TEST_SESSION in .env before running live tests');
-  validateTelegramTestSession(session);
-  return { ...application, session };
-}
-
-export function createTelegramTestClient(credentials: TelegramApplicationCredentials): TelegramClient {
-  return new TelegramClient({
-    apiId: credentials.apiId,
-    apiHash: credentials.apiHash,
-    storage: new MemoryStorage(),
-    testMode: true,
-  });
-}
+const execution = new TelegramTestExecution();
+after(() => execution.close(), { timeout: 30000 });
 
 export class TelegramTestUser {
   readonly client: TelegramClient;
   readonly signal: AbortSignal;
   account!: User;
   readonly #controller = new AbortController();
+  readonly #session: TelegramTestSession;
   #closing?: Promise<void>;
-
-  private constructor(credentials: TelegramApplicationCredentials, signal?: AbortSignal) {
+  private constructor(session: TelegramTestSession, signal?: AbortSignal) {
+    this.#session = session;
+    this.client = session.client;
     this.signal = signal ? AbortSignal.any([signal, this.#controller.signal]) : this.#controller.signal;
-    this.client = createTelegramTestClient(credentials);
   }
-
-  static async login(credentials: TelegramTestCredentials, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TelegramTestUser> {
-    validateTelegramTestSession(credentials.session);
-    const user = new TelegramTestUser(credentials, options.signal);
-    const signal = AbortSignal.any([user.signal, AbortSignal.timeout(options.timeoutMs ?? 60000)]);
-    const closeOnAbort = () => { void user.close().catch(error => user.client.onError.emit(error)); };
-    signal.addEventListener('abort', closeOnAbort, { once: true });
-    try {
-      signal.throwIfAborted();
-      await user.client.importSession(credentials.session);
-      const config = await user.call({ _: 'help.getConfig' }, signal);
-      if (!config.testMode) throw new Error('Refusing to authorize a test account outside the Telegram test network');
-      user.account = await user.client.getMe();
-      if (user.account.isBot) throw new Error('Telegram test provisioning requires a user session, not a bot session');
-      await user.client.notifyLoggedIn(user.account.raw);
-      signal.throwIfAborted();
-      return user;
-    } catch (error) {
-      try { await user.close(); } catch (cleanupError) {
-        throw combineTelegramErrors(error, cleanupError);
-      }
-      throw error;
-    } finally {
-      signal.removeEventListener('abort', closeOnAbort);
-    }
+  static async connect(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TelegramTestUser> {
+    const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(options.timeoutMs ?? 60000)]);
+    signal.throwIfAborted();
+    const session = await execution.acquire(signal);
+    const user = new TelegramTestUser(session, options.signal);
+    const abort = () => { void user.close(); };
+    signal.addEventListener('abort', abort, { once: true });
+    try { signal.throwIfAborted(); user.account = await user.client.getMe(); signal.throwIfAborted(); return user; }
+    catch (error) { await user.close(); throw error; }
+    finally { signal.removeEventListener('abort', abort); }
   }
-
-  async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal): Promise<tl.RpcCallReturn[T['_']]> {
-    for (;;) {
-      signal.throwIfAborted();
-      try {
-        return await this.client.call(request, { abortSignal: signal, timeout: 30000, maxRetryCount: 0, floodSleepThreshold: 0 });
-      } catch (error) {
-        if (!tl.RpcError.is(error, 'FLOOD_WAIT_%d') && !tl.RpcError.is(error, 'FLOOD_TEST_PHONE_WAIT_%d')) throw error;
-        await delay(error.seconds * 1000, undefined, { signal });
-      }
-    }
+  call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal): Promise<tl.RpcCallReturn[T['_']]> {
+    signal.throwIfAborted();
+    return this.client.call(request, { abortSignal: signal, timeout: 30000, maxRetryCount: 0, floodSleepThreshold: 0 });
   }
-
+  acquireBot() {
+    return acquireTelegramTestBot(this.signal);
+  }
   close(): Promise<void> {
-    if (!this.#closing) {
-      const { promise, resolve, reject } = Promise.withResolvers<void>();
-      this.#closing = promise;
-      this.#controller.abort(new Error('Telegram test user closed'));
-      void this.client.destroy().then(resolve, reject);
-    }
+    this.#closing ??= (async () => {
+      this.#controller.abort(new Error('Telegram test fixture user closed'));
+      await this.#session.close();
+    })();
     return this.#closing;
   }
 }

@@ -1,11 +1,13 @@
-import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { parseEnv } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from '../test/e2e/helpers/telegram-user.js';
-import { appendTelegramTestSession } from '../test/e2e/helpers/telegram-env.js';
+import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from './lib/telegram-test-auth.js';
+import { appendTelegramTestSession, resolveTelegramTestEnvFile } from '../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
 
-const credentials = readTelegramApplicationCredentials();
+const filename = await resolveTelegramTestEnvFile();
+const credentials = readTelegramApplicationCredentials(parseEnv(await readFile(filename, 'utf8')));
 if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Run pnpm telegram:test:login in an interactive terminal');
 const controller = new AbortController();
 const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]);
@@ -46,9 +48,8 @@ try {
   if (user.isBot) throw new Error('Telegram test provisioning requires a user account');
   const session = await exportTelegramTestSession(client, signal);
   signal.throwIfAborted();
-  const filename = resolve('.env');
   await appendTelegramTestSession(filename, session);
-  console.log(`Appended TELEGRAM_TEST_SESSION to ${filename} with permissions 0600. The session was not printed.`);
+  console.log(`Saved the session in TELEGRAM_TEST_SESSIONS in ${filename} with permissions 0600. No sessions were printed.`);
 } catch (error) {
   if (signal.aborted && error !== signal.reason) errors.push(signal.reason);
   errors.push(error);

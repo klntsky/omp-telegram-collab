@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { once, EventEmitter } from 'node:events';
-import { chmod, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -44,7 +44,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
   assert.ok(address && typeof address !== 'string');
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'collab' }],
-    instances: {}, configPath: join(directory, 'config.yaml'),
+    instances: [], configPath: join(directory, 'config.yaml'),
     publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: directory,
     omp: { executable: 'omp', args: [], maxSessions: 1, startupTimeoutMs: 1000 },
   };
@@ -61,7 +61,7 @@ test('shutdown while deleting the webhook cannot start an orphan Telegram poller
     async resolveExisting() { return undefined; },
     async setSessionTitle(): Promise<never> { throw new Error('No title change expected in lifecycle check'); },
     async attach(): Promise<never> { throw new Error('No host attachment expected in lifecycle check'); },
-    async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
+    async availableModelPresets(_instanceId: number): Promise<string[]> { return ['Fast','Slow']; },
     async modelPresetDetails(): Promise<never> { throw new Error('No model preset details expected in lifecycle check'); },
     async providerUsage(): Promise<never> { throw new Error('No provider usage query expected in lifecycle check'); },
     async listSkills() { return []; },
@@ -187,7 +187,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
   for (const [id, group] of groups) seed.enrollGroup(id!, group!);
   seed.enrollGroup(botId, chatId);
   seed.enrollGroup(secondBotId + 1, chatId - 3);
-  const session = seed.createSession({ botId, chatId, threadId: 27, instancePath: dir }, 'Closed session');
+  const session = seed.createSession({botId, chatId, threadId: 27, instanceId: 1, cwd: dir}, 'Closed session');
   seed.updateSession(session.id, { status: 'closed' });
   seed.close();
 
@@ -305,7 +305,7 @@ async function lifecycleFixture(t: TestContext, options: { startupFailure?: 'get
       { id: botId, token: botToken, miniAppShortName: 'app' },
       { id: secondBotId, token: `${secondBotId}:fixture-other-token-not-valid-on-telegram`, miniAppShortName: 'app' },
     ],
-    instances: { [dir]: { chats: groups.map(([botId, chatId]) => ({ botId: botId!, chatId: chatId! })) } },
+    instances: [{id: 1, defaultDir: dir, chats: groups.map(([botId, chatId]) => ({ botId: botId!, chatId: chatId! }))}],
     publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: dir,
     omp: { executable: 'omp', args: [], maxSessions: 8, startupTimeoutMs: 1000 },
   };
@@ -449,7 +449,7 @@ test('a readable protected configuration starts normally and preserves writable 
   await bot.bot.handleUpdate({ update_id: 99, message: { message_id: 99, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'supergroup', title: 'Lifecycle forum', is_forum: true }, from: { id: 42, is_bot: false, first_name: 'Ada', username: ownerUsername }, message_thread_id: 42, forum_topic_created: { name: 'Protected config topic', icon_color: 7322096 } } });
   const stored = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
   try {
-    assert.equal(stored.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.instancePath, fixture.config.dataDir);
+    assert.equal(stored.getTopic({botId,destination:{kind:'topic',chatId,threadId:42}})?.cwd, fixture.config.dataDir);
     assert.equal(stored.getSession(fixture.session.id)?.id, fixture.session.id);
   } finally { stored.close(); }
   await assert.rejects(runAdmin(['setup', '--max-sessions', '50'], fixture.config.configPath), /read-only/);
@@ -461,12 +461,51 @@ test('CLI chat removal is acknowledged live and revokes routing without deleting
   await fixture.start();
   const bot = fixture.bots.find(bot => bot.id === botId)!;
   await bot.authorize(chatId, 42);
-  await runAdmin(['chat', 'remove', fixture.config.dataDir, '--chat', String(chatId), '--bot', String(botId)], fixture.config.configPath);
+  await runAdmin(['chat', 'remove', '1', '--chat', String(chatId), '--bot', String(botId)], fixture.config.configPath);
   await assert.rejects(bot.authorize(chatId, 42), /assignment/);
   const stored = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
   try {
-    assert.equal(stored.getSession(fixture.session.id)?.instancePath, fixture.config.dataDir);
+    assert.equal(stored.getSession(fixture.session.id)?.cwd, fixture.config.dataDir);
     assert.equal(stored.getSession(fixture.session.id)?.status, 'closed');
+  } finally { stored.close(); }
+});
+
+test('service reload and restart preserve logical assignment when the default directory changes and old cwd is missing', { timeout: 30_000 }, async t => {
+  const fixture = await lifecycleFixture(t);
+  const missingCwd = join(fixture.config.dataDir, 'missing-session-directory');
+  const database = join(fixture.config.dataDir, 'telegram.sqlite');
+  const seed = new Store(database);
+  seed.setSessionCwd(fixture.session.id, missingCwd);
+  seed.close();
+  const running = await fixture.start();
+  const bot = fixture.bots.find(bot => bot.id === botId)!;
+  await bot.authorize(chatId, 42);
+  const nextDirectory = join(fixture.config.dataDir, 'new-default');
+  await mkdir(nextDirectory);
+  const instance = fixture.config.instances[0]!;
+  instance.defaultDir = nextDirectory;
+  fixture.config.instances = [{id: 2, defaultDir: nextDirectory, chats: []}, instance];
+  writeConfig(fixture.config);
+  assert.equal((await sessionControl(fixture.config, {}, '/reload')).status, 200);
+  await bot.authorize(chatId, 42);
+  const stored = new Store(database);
+  try {
+    assert.equal(stored.getSession(fixture.session.id)?.instanceId, 1);
+    assert.equal(stored.getSession(fixture.session.id)?.cwd, missingCwd);
+    const chats = instance.chats;
+    instance.chats = [];
+    fixture.config.instances[0]!.chats = chats;
+    writeConfig(fixture.config);
+    assert.equal((await sessionControl(fixture.config, {}, '/reload')).status, 409);
+    await bot.authorize(chatId, 42);
+    instance.chats = chats;
+    fixture.config.instances[0]!.chats = [];
+    writeConfig(fixture.config);
+    await running.close();
+    await fixture.start();
+    assert.equal(stored.getSession(fixture.session.id)?.cwd, missingCwd);
+    assert.equal(stored.getSession(fixture.session.id)?.instanceId, 1);
+    await fixture.bots.findLast(current => current.id === botId)!.authorize(chatId, 42);
   } finally { stored.close(); }
 });
 
@@ -578,12 +617,12 @@ test('private session join rejects ambiguous bot ownership, unassignment, and te
   const fixture = await lifecycleFixture(t);
   t.mock.method(BotService.prototype, 'ensureMirroring', async () => {});
   const secondBot = fixture.config.bots[1]!;
-  fixture.config.instances[fixture.config.dataDir]!.chats.push({ botId: secondBot.id, chatId });
+  fixture.config.instances[0]!.chats.push({ botId: secondBot.id, chatId });
   writeConfig(fixture.config);
   const store = new Store(join(fixture.config.dataDir, 'telegram.sqlite'));
   t.after(() => store.close());
   store.enrollGroup(secondBot.id, chatId);
-  const duplicate = store.createSession({ botId: secondBot.id, chatId, threadId: 27, instancePath: fixture.config.dataDir }, 'Other bot session');
+  const duplicate = store.createSession({botId: secondBot.id, chatId, threadId: 27, instanceId: 1, cwd: fixture.config.dataDir}, 'Other bot session');
   store.updateSession(duplicate.id, { status: 'closed' });
   await fixture.start();
   await fixture.waitNotices(fixture.groups.length);
@@ -595,13 +634,13 @@ test('private session join rejects ambiguous bot ownership, unassignment, and te
   const ambiguous = await sessionControl(fixture.config, { chatId, topicId: 27 });
   assert.equal(ambiguous.status, 409);
   assert.match(String(ambiguous.body.error), /ambiguous/);
-  fixture.config.instances[fixture.config.dataDir]!.chats =
-    fixture.config.instances[fixture.config.dataDir]!.chats.filter(chat => chat.chatId !== chatId);
+  fixture.config.instances[0]!.chats =
+    fixture.config.instances[0]!.chats.filter(chat => chat.chatId !== chatId);
   writeConfig(fixture.config);
   const unassigned = await sessionControl(fixture.config, { chatId, topicId: 27 });
   assert.equal(unassigned.status, 409);
   assert.match(String(unassigned.body.error), /No enrolled, assigned/);
-  fixture.config.instances[fixture.config.dataDir]!.chats.push({ botId, chatId });
+  fixture.config.instances[0]!.chats.push({ botId, chatId });
   fixture.config.terminated = true;
   writeConfig(fixture.config);
   const terminated = await sessionControl(fixture.config, { chatId, topicId: 27 });

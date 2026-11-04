@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,7 +9,7 @@ import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
 
-const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
+const topic = { botId, chatId, threadId: 17, instanceId: 1, cwd: '/work/project-a' };
 
 test('status identities include legacy stored rows and remain detached after replacement', () => {
   const store = new Store(':memory:');
@@ -102,7 +102,7 @@ test('topic identity survives a service restart and closing preserves its histor
       assert.equal(restored?.status, 'closed');
       assert.equal(restored?.name, 'Authentication complete');
       assert.deepEqual(restored?.runtime, { kind: 'attached', instanceId: 'instance-a', sessionId: 'omp-session-a' });
-      assert.equal(restored?.instancePath, topic.instancePath);
+      assert.equal(restored?.cwd, topic.cwd);
       assert.equal(second.getReplyTarget(original.id), 1234);
       second.setReplyTarget(original.id, undefined);
       assert.equal(second.getReplyTarget(original.id), undefined);
@@ -212,7 +212,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.hasSnapshot(original.id), true);
     assert.equal(store.rememberReply(original.id, 'omp-session', 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
-    assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
+    assert.throws(() => store.createSession({ ...topic, instanceId: 2, cwd: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
     assert.deepEqual(store.claimInitialTask(original.id), {text:'Pending instruction'});
     assert.equal(store.claimInitialTask(original.id), undefined);
@@ -222,56 +222,76 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   }
 });
 
-test('current path validation rejects retargeted assignments and mismatched history identities without rewriting files', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-validate-path-'));
-  const originalPath = join(directory, 'original');
+test('logical assignments survive default-directory changes and missing session directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-validate-identity-'));
+  const originalPath = join(directory, 'missing-original');
   const otherPath = join(directory, 'other');
-  await mkdir(originalPath);
-  await mkdir(otherPath);
   const config = emptyConfig(join(directory, 'config.yaml'));
   config.dataDir = directory;
-  config.instances = { [originalPath]: { chats: [{ botId, chatId }] } };
-  const store = new Store(':memory:');
+  config.instances = [{ id: 1, defaultDir: otherPath, chats: [{ botId, chatId }] }];
+  const store = new Store(join(directory, 'store.sqlite'));
   const runtime = new OmpRuntime(config);
   try {
-    const managed = store.createSession({ ...topic, instancePath: originalPath }, 'Managed');
-    const attached = store.createSession({ ...topic, threadId: 18, instancePath: originalPath }, 'Attached', { kind: 'attached', instanceId: 'host', sessionId: 'history' });
-    await runtime.validateSessionPaths(store.listSessions());
-    const retargeted = { ...config, instances: { [otherPath]: { chats: [{ botId, chatId }] } } };
-    for (const session of [managed, attached]) {
-      await assert.rejects(runtime.validateSessionPaths([session], retargeted), /history pinned to another instance path/);
+    for (const status of ['open', 'closed', 'detached'] as const) {
+      const session = store.createSession({ ...topic, threadId: 20 + ['open', 'closed', 'detached'].indexOf(status), cwd: originalPath }, status);
+      store.updateSession(session.id, { status });
     }
-    await runtime.validateSessionPaths(store.listSessions(), { ...config, instances: {} });
-    const sessionDirectory = join(directory, 'sessions', managed.id);
-    await mkdir(sessionDirectory, { recursive: true });
-    const history = join(sessionDirectory, 'history.jsonl');
-    const binding = join(sessionDirectory, 'binding.json');
-    const pin = { version: 1, sessionId: 'saved-history', sessionFile: history, cwd: originalPath };
-    const header = { type: 'session', version: 3, id: pin.sessionId, cwd: originalPath };
-    const historyBytes = `${JSON.stringify(header)}\n`;
-    await writeFile(history, historyBytes);
-    await writeFile(binding, JSON.stringify(pin));
-    await runtime.validateSessionPaths(store.listSessions());
-    assert.equal(await readFile(history, 'utf8'), historyBytes);
-    await writeFile(binding, JSON.stringify({ ...pin, cwd: otherPath }));
-    await assert.rejects(runtime.validateSessionPaths([managed]));
-    await writeFile(binding, JSON.stringify(pin));
-    for (const changed of [{ ...header, id: 'different-history' }, { ...header, cwd: otherPath }]) {
-      const changedBytes = `${JSON.stringify(changed)}\n`;
-      await writeFile(history, changedBytes);
-      await assert.rejects(runtime.validateSessionPaths([managed]));
-      assert.equal(await readFile(history, 'utf8'), changedBytes);
-      assert.equal(await readFile(binding, 'utf8'), JSON.stringify(pin));
+    const sessions = store.listSessions();
+    await runtime.validateSessionPaths(sessions);
+    await runtime.validateSessionPaths(sessions, { ...config, instances: [] });
+    const reassigned = { ...config, instances: [{ id: 2, defaultDir: otherPath, chats: [{ botId, chatId }] }] };
+    for (const session of sessions) {
+      await assert.rejects(runtime.validateSessionPaths([session], reassigned), /history pinned to another instance ID/);
+      assert.equal(store.getSession(session.id)?.cwd, originalPath);
     }
-    await rm(history);
-    await assert.rejects(runtime.validateSessionPaths([managed]), { code: 'ENOENT' });
-    await rm(originalPath, { recursive: true });
-    await symlink(otherPath, originalPath);
-    await assert.rejects(runtime.validateSessionPaths([attached]), /Instance path identity changed/);
-    assert.equal(store.getSession(managed.id)?.instancePath, originalPath);
+    const original = sessions[0]!;
+    const existing = store.createSession({ ...topic, threadId: original.threadId, cwd: otherPath }, 'Existing');
+    assert.equal(existing.cwd, originalPath);
+    assert.throws(() => store.createSession({ ...topic, threadId: original.threadId, instanceId: 2, cwd: originalPath }, 'Other identity'), /different instance ID/);
   } finally {
     await runtime.close();
     store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('session cwd and logical identity persist independently across database restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-session-cwd-'));
+  const filename = join(directory, 'store.sqlite');
+  let store = new Store(filename);
+  try {
+    const original = store.createSession(topic, 'Original');
+    store.setSessionCwd(original.id, '/work/selected-worktree');
+    store.setSkillCatalog(1, [{ name: 'first', description: '' }]);
+    store.setSkillCatalog(2, [{ name: 'second', description: '' }]);
+    store.close();
+    store = new Store(filename);
+    assert.equal(store.getSession(original.id)?.instanceId, 1);
+    assert.equal(store.getSession(original.id)?.cwd, '/work/selected-worktree');
+    assert.deepEqual(store.getSession(original.id)?.runtime, { kind: 'managed' });
+    assert.deepEqual(store.getSkillCatalog(1), [{ name: 'first', description: '' }]);
+    assert.deepEqual(store.getSkillCatalog(2), [{ name: 'second', description: '' }]);
+    const second = store.createSession({ ...topic, threadId: 99, instanceId: 2 }, 'Same cwd, other identity');
+    assert.equal(second.cwd, original.cwd);
+    assert.equal(second.instanceId, 2);
+    for (const instanceId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => store.createSession({ ...topic, threadId: 100, instanceId }, 'Invalid'), /positive safe integer/);
+    }
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('old database schemas are rejected rather than migrated', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-schema-cutover-'));
+  const filename = join(directory, 'store.sqlite');
+  try {
+    const store = new Store(filename);
+    store.db.exec('PRAGMA user_version=3');
+    store.close();
+    assert.throws(() => new Store(filename), /Unsupported database schema version 3/);
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

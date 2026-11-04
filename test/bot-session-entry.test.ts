@@ -39,9 +39,9 @@ test('reconciliation admits pending initial tasks without eagerly launching othe
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const instancePath = Object.keys(app.config.instances)[0]!;
-    app.store.createSession({botId,chatId,threadId:42,instancePath},'Empty topic');
-    const pending = app.store.createSession({botId,chatId,threadId:43,instancePath},'Pending topic',{kind:'managed'},{text:'Restore pending task'},123,ownerId);
+    const instancePath = app.config.instances[0]!.defaultDir;
+    app.store.createSession({botId,chatId,threadId:42, instanceId: 1, cwd: instancePath}, 'Empty topic');
+    const pending = app.store.createSession({botId,chatId,threadId:43, instanceId: 1, cwd: instancePath}, 'Pending topic',{kind:'managed'},{text:'Restore pending task'},123,ownerId);
     await app.service.reconcileConfiguration();
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'Restore pending task'}]);
@@ -56,9 +56,9 @@ test('a replacement bot starts a persisted image-only task and preserves it thro
   const app = await createSmokeApp({persistentStore:true});
   try {
     await app.update({text:'/setup'});
-    const instancePath = Object.keys(app.config.instances)[0]!;
+    const instancePath = app.config.instances[0]!.defaultDir;
     const content = {text:'',images:[{type:'image' as const,data:'aW1hZ2U=',mimeType:'image/png'}]};
-    const session = app.store.createSession({botId,chatId,threadId:44,instancePath},'Image task',undefined,content,ownerId,ownerId);
+    const session = app.store.createSession({botId,chatId,threadId:44, instanceId: 1, cwd: instancePath}, 'Image task',undefined,content,ownerId,ownerId);
     await app.service.close();
     const store = new Store(join(app.config.dataDir,'telegram.sqlite'));
     const bot = new Bot(botToken,{client:{apiRoot:app.telegramUrl}});

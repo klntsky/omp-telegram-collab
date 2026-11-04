@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
+import { writeConfig } from '../src/config.js';
 import { botId, chatId, ownerId } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 
@@ -185,7 +186,7 @@ test('removing an assignment disables output immediately and reconciliation deta
     await app.update({ text: '/new Keep working locally' });
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     const session = app.store.listSessions(botId)[0]!;
-    const assigned = app.config.instances[session.instancePath]!;
+    const assigned = app.config.instances.find(instance => instance.id === session.instanceId)!;
     const chats = assigned.chats;
     const detached: string[] = [];
     app.service.onSessionInvalidated(id => detached.push(id));
@@ -202,7 +203,7 @@ test('removing an assignment disables output immediately and reconciliation deta
     assert.deepEqual(detached, [session.id]);
     assert.equal(await app.runtime.isRunning(session), true);
     assert.equal(app.store.getSessionGeneration(session.id), 0);
-    assert.equal(app.store.getSession(session.id)?.instancePath, session.instancePath);
+    assert.equal(app.store.getSession(session.id)?.cwd, session.cwd);
     const connections = app.connectionCount;
     assigned.chats = chats;
     await app.service.reconcileConfiguration();
@@ -213,21 +214,48 @@ test('removing an assignment disables output immediately and reconciliation deta
   }
 });
 
-test('retargeted config cannot authorize, launch or mirror a session pinned to the old path', async () => {
+test('a different logical ID cannot authorize, launch or mirror a stored session even at the same directory', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({ text: '/setup' });
     await app.update({ message_thread_id: 42, forum_topic_created: { name: 'Pinned topic' } });
     const session = app.store.listSessions(botId)[0]!;
-    const original = app.config.instances[session.instancePath]!;
-    delete app.config.instances[session.instancePath];
-    app.config.instances[realpathSync(tmpdir())] = original;
+    const original = app.config.instances.find(instance => instance.id === session.instanceId)!;
+    app.config.instances = [{...original,id:original.id+1}];
     await app.update({ message_thread_id: 42, text: '@FixtureOmpBot Must not launch', entities: [{ type: 'mention', offset: 0, length: 14 }] });
     assert.equal(app.connectionCount, 0);
     assert.equal(app.store.hasPendingInitialTask(session.id), false);
     await assert.rejects(app.service.ensureMirroring(session, { instanceId: 'host', sessionId: 'history', generation: 1, url: 'unused' }));
-    assert.equal(app.store.getSession(session.id)?.instancePath, session.instancePath);
+    assert.equal(app.store.getSession(session.id)?.cwd, session.cwd);
   } finally {
     await app.close();
   }
+});
+
+test('logical identity survives shuffled duplicate directories while only new topics use defaultDir', async () => {
+  const app = await createSmokeApp({skipStartupRejection:true});
+  try {
+    await app.update({text:'/setup'});
+    await app.update({message_thread_id:42,forum_topic_created:{name:'Original cwd'}});
+    const original = app.store.listSessions(botId)[0]!;
+    const initialCwd = original.cwd;
+    const instance = app.config.instances.find(value => value.id === original.instanceId)!;
+    instance.defaultDir = realpathSync(tmpdir());
+    app.config.instances = [{id:instance.id+1,defaultDir:instance.defaultDir,chats:[]},instance];
+    writeConfig(app.config);
+    await app.service.reconcileConfiguration();
+    assert.equal(app.store.getSession(original.id)?.status,'open');
+    assert.equal(app.store.getSession(original.id)?.cwd,initialCwd);
+    await app.update({message_thread_id:42,text:'/p Existing cwd followup'});
+    await eventually(() => app.accepted.some(frame => frame.t === 'prompt' && frame.text === 'Existing cwd followup'));
+    assert.equal(app.store.getSession(original.id)?.cwd,initialCwd);
+    await app.update({text:'/new New default directory'});
+    const created = app.store.listSessions(botId).find(value => value.id !== original.id)!;
+    assert.ok(created);
+    assert.equal(created.instanceId,original.instanceId);
+    assert.equal(created.cwd,instance.defaultDir);
+    assert.notEqual(created.cwd,initialCwd);
+    assert.deepEqual(created.runtime,{kind:'managed'});
+    assert.deepEqual(app.store.getSession(original.id)?.runtime,{kind:'managed'});
+  } finally { await app.close(); }
 });

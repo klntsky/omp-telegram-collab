@@ -206,7 +206,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const store = new Store(databasePath);
   const config: AppConfig = {
     bots: [{ id: botId, token: botToken, miniAppShortName: 'app' }],
-    instances: { [directory]: { chats: [{ botId, chatId }] } },
+    instances: [{id: 1, defaultDir: directory, chats: [{ botId, chatId }]}],
     publicUrl: 'https://example.invalid', host: '127.0.0.1', port: 0, dataDir: directory,
     configPath: join(directory, 'config.yaml'),
     omp: { executable: 'omp', args: [], maxSessions: options.maxSessions ?? 5, startupTimeoutMs: 60000 },
@@ -215,7 +215,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
   const managedSessions = new Set<string>();
   const reservations = new Map<symbol,string>();
   let runtimeClosed = false;
-  const attachedHosts = new Map<string, { instancePath: string; binding: HostBinding }>();
+  const attachedHosts = new Map<string, { cwd: string; binding: HostBinding }>();
   const sessionTitles = new Map<string,string>();
   const titleChanges: {sessionId:string;title:string}[] = [];
   const topicTitleStatuses = new Map<string,{worktree:boolean;branch?:string}>();
@@ -250,9 +250,10 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       return topicTitleStatuses.get(session.id) ?? {worktree:false};
     },
     async worktree(session: TopicSession, _branch?: string) {
-      session.runtime = {kind:'managed',cwd:`/fixture/worktrees/${randomUUID()}`};
+      session.runtime = { kind: 'managed' };
+      session.cwd = `/fixture/worktrees/${randomUUID()}`;
       topicTitleStatuses.set(session.id,{worktree:true,branch:_branch});
-      return `Moved to worktree ${session.runtime.cwd}`;
+      return `Moved to worktree ${session.cwd}`;
     },
     async ensure(session: TopicSession, beforeMutation?: () => Promise<void>) {
       if (session.status !== 'open') throw new Error('Session closed');
@@ -260,7 +261,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
         const host = attachedHosts.get(session.runtime.instanceId);
         if (!host) throw new Error('OMP host is not available');
         if (host.binding.sessionId !== session.runtime.sessionId) throw new Error('Attached OMP session identity changed');
-        if (host.instancePath !== session.instancePath) throw new Error('Attached host does not belong to this instance path');
+        if (host.cwd !== session.cwd) throw new Error('Attached host does not belong to this instance path');
         return host.binding;
       }
       if (!managedSessions.has(session.id)) {
@@ -280,7 +281,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
       const host = attachedHosts.get(session.runtime.instanceId);
       if (!host) return undefined;
       if (host.binding.sessionId !== session.runtime.sessionId) throw new Error('Attached OMP session identity changed');
-      if (host.instancePath !== session.instancePath) throw new Error('Attached host does not belong to this instance path');
+      if (host.cwd !== session.cwd) throw new Error('Attached host does not belong to this instance path');
       return host.binding;
     },
     async isRunning(session: TopicSession) {
@@ -297,17 +298,17 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     },
     async attach(instanceId: string, instancePath: string) {
       const binding = { instanceId, sessionId: 'attached-conversation', generation: 1, url: 'server-only-secret-capability' };
-      attachedHosts.set(instanceId, { instancePath, binding });
+      attachedHosts.set(instanceId, { cwd: instancePath, binding });
       return binding;
     },
-    async availableModelPresets(_instancePath: string): Promise<string[]> { return ['Fast','Slow']; },
-    async modelPresetDetails(_instancePath: string, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}> {
+    async availableModelPresets(_instanceId: number): Promise<string[]> { return ['Fast','Slow']; },
+    async modelPresetDetails(_instanceId: number, name: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}> {
       if (name === 'Fast') return {modelRoles: {default: 'fixture/fast', worker: 'fixture/fast#minimal'}, defaultThinkingLevel: 'low'};
       if (name === 'Slow') return {modelRoles: {default: 'fixture/slow', worker: 'fixture/slow#medium'}, defaultThinkingLevel: 'high'};
       throw new Error(`Unknown model preset: ${name}`);
     },
-    async providerUsage(_instancePath: string): Promise<never> { throw new Error('No provider usage query configured in fixture'); },
-    async listSkills(_instancePath: string, _session?: TopicSession) {
+    async providerUsage(_instanceId: number): Promise<never> { throw new Error('No provider usage query configured in fixture'); },
+    async listSkills(_instanceId: number, _session?: TopicSession) {
       return [
         { name: 'find-skills', description: 'Discover and install agent skills' },
         { name: 'pdf-tools', description: 'Read and manipulate PDF documents' },

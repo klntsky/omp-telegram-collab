@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
 function pending(store: Store, threadId: number, botId = 1) {
-  return store.createSession({ botId, chatId: -100, threadId, instancePath: '/project' }, 'Preparation', { kind: 'managed' }, { text: `Task ${threadId}` });
+  return store.createSession({ botId, chatId: -100, threadId, instanceId: 1, cwd: '/project' }, 'Preparation', { kind: 'managed' }, { text: `Task ${threadId}` });
 }
 
 

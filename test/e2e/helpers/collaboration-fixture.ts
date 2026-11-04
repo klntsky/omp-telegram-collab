@@ -31,6 +31,8 @@ export async function setupCollaborationTest(
   let store: Store | undefined;
   let unsubscribe: Cleanup | undefined;
   let polling: Promise<void> | undefined;
+  let activePollers = 0;
+  let pollerStopFailed = false;
   let closing = false;
   let log: ((event: string, data: unknown) => void) | undefined;
   const restoreConsole: Cleanup[] = [];
@@ -56,8 +58,14 @@ export async function setupCollaborationTest(
       } catch (error) { log?.('cleanup.error', error); errors.push(error); }
     };
     if (unsubscribe) await cleanup(unsubscribe);
-    if (service) await cleanup(() => service!.close());
-    if (polling) await cleanup(() => polling);
+    const errorsBeforeStop = errors.length;
+    if (service) await cleanup(async () => {
+      try { await service!.close(); } catch (error) { pollerStopFailed = true; throw error; }
+    });
+    if (polling) await cleanup(async () => {
+      try { await polling; } catch (error) { pollerStopFailed = true; throw error; }
+    });
+    if (errors.length !== errorsBeforeStop) pollerStopFailed = true;
     if (runtime && store) {
       for (const session of store.listSessions()) {
         await cleanup(() => runtime!.kill(session));
@@ -93,14 +101,12 @@ export async function setupCollaborationTest(
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
-  }));
+  }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed }));
   omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
   config.bots = [{ id: telegram.bot.id, token: telegram.bot.token }];
-  config.instances = {
-    [omp.workspace]: { chats: [{ botId: telegram.bot.id, chatId: telegram.forum.chatId }] },
-  };
+  config.instances = [{id: 1, defaultDir: omp.workspace, chats: [{ botId: telegram.bot.id, chatId: telegram.forum.chatId }]}];
   config.omp = {
     executable: omp.executable,
     args: omp.args,
@@ -207,6 +213,7 @@ export async function setupCollaborationTest(
   async function startService(): Promise<void> {
     const ready = Promise.withResolvers<void>();
     const activeService = service!;
+    activePollers++;
     polling = activeService.start(() => {
       try {
         activeService.startBackground();
@@ -217,8 +224,9 @@ export async function setupCollaborationTest(
       }
     });
     void polling.then(() => {
+      activePollers--;
       if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
-    }, error => { if (!closing) fail(error); });
+    }, error => { activePollers--; if (!closing) fail(error); });
     await operation(ready.promise);
   }
   let lifecycle = Promise.resolve();
@@ -230,11 +238,13 @@ export async function setupCollaborationTest(
   async function pauseService(): Promise<void> {
     closing = true;
     if (service) {
-      await service.close();
+      try { await service.close(); }
+      catch (error) { pollerStopFailed = true; throw error; }
       service = undefined;
     }
     if (polling) {
-      await polling;
+      try { await polling; }
+      catch (error) { pollerStopFailed = true; throw error; }
       polling = undefined;
     }
     if (runtime) {
@@ -302,10 +312,10 @@ export async function setupCollaborationTest(
     },
     setFolderOptions(options: string[]): void {
       const updated = readConfig(config.configPath);
-      const chat = updated.instances[omp.workspace]!.chats[0]!;
+      const chat = updated.instances.find(instance => instance.id === 1)!.chats[0]!;
       chat.folder_options = options;
       writeConfig(updated);
-      Object.assign(config.instances[omp.workspace]!.chats[0]!, chat);
+      Object.assign(config.instances.find(instance => instance.id === 1)!.chats[0]!, chat);
     },
     send,
     async sendAndWait(text: string, threadId?: number): Promise<Message> {
@@ -318,21 +328,27 @@ export async function setupCollaborationTest(
     },
     waitForCondition,
     waitForMessage,
-    waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
-      return waitForMessage(message => message.sender.id === telegram.bot.id &&
-        apiCalls.some(call => {
-          if (call.method !== 'sendRichMessage') return false;
-          const payload = call.payload as {
-            chat_id: number;
-            reply_parameters?: { message_id: number };
-            message_thread_id?: number;
-          };
-          const response = call.result as { ok: boolean; result?: { message_id: number } };
-          return payload.chat_id === telegram.forum.chatId &&
-            payload.reply_parameters?.message_id === options.replyToMessageId &&
-            (options.threadId === undefined || payload.message_thread_id === options.threadId) &&
-            response.ok && response.result?.message_id === message.id;
-        }));
+    async waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
+      let messageId: number | undefined;
+      await waitForCondition(() => apiCalls.some(call => {
+        if (call.method !== 'sendRichMessage') return false;
+        const payload = call.payload as {
+          chat_id: number;
+          reply_parameters?: { message_id: number };
+          message_thread_id?: number;
+        };
+        const response = call.result as { ok: boolean; result?: { message_id: number } };
+        if (payload.chat_id !== telegram.forum.chatId ||
+            payload.reply_parameters?.message_id !== options.replyToMessageId ||
+            (options.threadId !== undefined && payload.message_thread_id !== options.threadId) ||
+            !response.ok || response.result === undefined) return false;
+        messageId = response.result.message_id;
+        return true;
+      }));
+      const [message] = await operation(telegram.user.client.getMessages(telegram.forum.chatId, messageId!));
+      if (!message) throw new Error(`Delivered Telegram reply ${messageId} is unavailable to the user client`);
+      omp.log('telegram.user.reply', message.raw);
+      return message;
     },
   };
 }
