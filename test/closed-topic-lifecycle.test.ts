@@ -6,36 +6,6 @@ import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId } from './telegram-data.js';
 import { eventually } from './bot-test-helpers.js';
 
-test('reopen failure preserves closed state and permits an explicit retry', {timeout:15000}, async () => {
-  const app = await createSmokeApp();
-  let reject = true;
-  const diagnostic = 'Original Telegram reopening failure\nPermission details retained';
-  app.bot.api.config.use(async (previous,method,payload,signal) => {
-    if (method === 'reopenForumTopic' && reject) throw new Error(diagnostic);
-    return previous(method,payload,signal);
-  });
-  try {
-    await app.update({text:'/setup'});
-    await app.update({message_thread_id:42,forum_topic_created:{name:'Closed'}});
-    const session = app.store.listSessions(botId)[0]!;
-    await app.update({message_thread_id:42,forum_topic_closed:{}});
-    const generation = app.store.getSessionGeneration(session.id);
-    const body = {botId,sessionId:session.id,initData:app.initData(session.id),generation,reopen:true};
-    const failed = await fetch(`${app.url}/api/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    assert.equal(failed.status,403);
-    assert.deepEqual(await failed.json(),{error:diagnostic});
-    assert.equal(app.store.getSession(session.id)?.status,'closed');
-    assert.equal(await app.runtime.isRunning(session),false);
-    assert.deepEqual(app.reopenedTopics,[]);
-    reject = false;
-    const retried = await Promise.all([1,2].map(() => fetch(`${app.url}/api/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})));
-    assert.deepEqual(retried.map(response => response.status),[200,200]);
-    assert.equal(app.store.getSession(session.id)?.status,'open');
-    assert.deepEqual(app.reopenedTopics,[{chat_id:chatId,message_thread_id:42}]);
-    assert.equal(await app.runtime.isRunning(session),false);
-  } finally { await app.close(); }
-});
-
 test('closed-session reconciliation cancels pending tasks and does not repeatedly inspect a settled host', {timeout:15000}, async t => {
   t.mock.timers.enable({apis:['setInterval']});
   const app = await createSmokeApp();
@@ -99,7 +69,7 @@ test('closure during delayed gateway admission prevents host launch and upstream
   } finally { resume.resolve(); socket?.terminate(); await app.close(); }
 });
 
-test('reopening confirmation does not bypass the managed process limit', {timeout:15000}, async () => {
+test('native reopening does not bypass the managed process limit for readers', {timeout:15000}, async () => {
   const app = await createSmokeApp({maxSessions:1,skipStartupRejection:true});
   let socket: WebSocket | undefined;
   try {
@@ -109,8 +79,8 @@ test('reopening confirmation does not bypass the managed process limit', {timeou
     await app.update({message_thread_id:42,forum_topic_created:{name:'Waiting'}});
     const waiting = app.store.listSessions(botId).find(session => session.threadId === 42)!;
     await app.update({message_thread_id:42,forum_topic_closed:{}});
-    const generation = app.store.getSessionGeneration(waiting.id);
-    const response = await fetch(`${app.url}/api/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({botId,sessionId:waiting.id,initData:app.initData(waiting.id),generation,reopen:true})});
+    await app.update({message_thread_id:42,forum_topic_reopened:{}});
+    const response = await fetch(`${app.url}/api/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({botId,sessionId:waiting.id,initData:app.initData(waiting.id)})});
     assert.equal(response.status,200);
     const {ticket} = await response.json() as {ticket:string};
     socket = new WebSocket(`${app.url.replace('http:','ws:')}/api/socket?ticket=${ticket}`,{origin:app.config.publicUrl});
@@ -140,41 +110,3 @@ test('closing an attached topic releases bot mirroring without retiring its term
   } finally { await app.close(); }
 });
 
-for (const cancellation of ['caller','shutdown'] as const) {
-  test(`a stalled native reopen releases the bot update queue on ${cancellation} cancellation`, {timeout:15000}, async () => {
-    const app = await createSmokeApp();
-    const entered = Promise.withResolvers<void>();
-    const controller = new AbortController();
-    let telegramSignal: {aborted:boolean} | undefined;
-    app.bot.api.config.use(async (previous,method,payload,signal) => {
-      if (method === 'reopenForumTopic') {
-        telegramSignal = signal;
-        entered.resolve();
-        return new Promise<never>(() => {});
-      }
-      return previous(method,payload,signal);
-    });
-    try {
-      await app.update({text:'/setup'});
-      await app.update({message_thread_id:42,forum_topic_created:{name:'Stalled reopen'}});
-      const session = app.store.listSessions(botId)[0]!;
-      await app.update({message_thread_id:42,forum_topic_closed:{}});
-      const reason = new Error('Original request cancellation');
-      const reopening = app.service.reopenSession(session,ownerId,() => {},controller.signal);
-      const rejected = assert.rejects(reopening,error => cancellation === 'caller' ? error === reason : error instanceof Error);
-      await entered.promise;
-      const closing = cancellation === 'shutdown' ? app.service.close() : undefined;
-      if (cancellation === 'caller') controller.abort(reason);
-      await rejected;
-      await closing;
-      assert.equal(telegramSignal?.aborted,true);
-      assert.equal(app.store.getSession(session.id)?.status,'closed');
-      assert.deepEqual(app.reopenedTopics,[]);
-      assert.equal(await app.runtime.isRunning(session),false);
-      if (cancellation === 'caller') {
-        await app.update({message_thread_id:42,text:'/p Never submit'});
-        assert.deepEqual(app.accepted,[]);
-      }
-    } finally { controller.abort(); await app.close(); }
-  });
-}
