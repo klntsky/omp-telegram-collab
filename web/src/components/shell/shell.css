@@ -1,7 +1,3 @@
-/* Shell styles (sh-*). Token vars only — no raw colors.
- * Layout: glass topbar, then one inset panel (transcript + docked composer)
- * with the agents rail framed beside it on the page background. */
-
 /* ---- app frame ---- */
 .sh-app {
 	position: relative;
@@ -131,17 +127,6 @@
 	color: var(--fg-inverse);
 	background: color-mix(in srgb, var(--fg) 86%, transparent);
 	border-color: transparent;
-}
-
-.sh-btn-stop {
-	color: var(--err);
-	background: color-mix(in srgb, var(--err) 12%, transparent);
-	border-color: color-mix(in srgb, var(--err) 30%, transparent);
-}
-
-.sh-btn-stop:hover:not(:disabled) {
-	background: color-mix(in srgb, var(--err) 18%, transparent);
-	border-color: color-mix(in srgb, var(--err) 45%, transparent);
 }
 
 .sh-btn-icon {
@@ -402,152 +387,6 @@
 
 .sh-dot-ended {
 	background: var(--err);
-}
-
-/* ---- composer (docked card at the panel foot) ---- */
-.sh-composer {
-	width: 100%;
-	max-width: 900px;
-	padding: 0 16px 16px;
-	padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-}
-
-.sh-composer-inner {
-	display: flex;
-	align-items: flex-end;
-	gap: 8px;
-	padding: 8px 8px 8px 12px;
-	border-radius: var(--radius-lg);
-	border: 1px solid transparent;
-	background:
-		linear-gradient(var(--bg-raised), var(--bg-raised)) padding-box,
-		linear-gradient(180deg, var(--edge-top), var(--edge-bottom) 60%) border-box;
-	box-shadow: var(--shadow-card);
-	transition: box-shadow 160ms ease-out;
-}
-
-.sh-composer-inner:focus-within {
-	box-shadow:
-		0 0 0 3px var(--ring-soft),
-		var(--shadow-card);
-}
-
-.sh-composer-input {
-	flex: 1;
-	min-width: 0;
-	padding: 5px 0;
-	font-size: 14px;
-	line-height: 20px;
-	color: var(--fg);
-	background: transparent;
-	border: 0;
-	resize: none;
-}
-
-.sh-composer-input::placeholder {
-	color: var(--fg-faint);
-}
-
-.sh-composer-input:disabled {
-	opacity: 0.55;
-}
-
-.sh-composer-input:focus-visible {
-	outline: none;
-}
-
-.sh-composer-actions {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	flex: none;
-}
-
-.sh-composer-ask {
-	display: grid;
-	gap: 10px;
-	padding-top: 12px;
-	border-top: 1px solid var(--border);
-}
-
-.sh-ask-title {
-	width: 100%;
-	font-size: 14px;
-	font-weight: 550;
-	color: var(--fg);
-	white-space: pre-wrap;
-}
-
-.sh-ask-options {
-	display: grid;
-	gap: 6px;
-	width: 100%;
-}
-
-.sh-ask-option {
-	display: flex;
-	align-items: flex-start;
-	gap: 10px;
-	width: 100%;
-	padding: 10px 12px;
-	color: var(--fg);
-	text-align: left;
-	background: var(--bg-raised);
-	border: 1px solid var(--border);
-	border-radius: var(--radius);
-	transition:
-		border-color 120ms ease-out,
-		background 120ms ease-out;
-}
-
-.sh-ask-option:hover {
-	border-color: var(--border-strong);
-	background: color-mix(in srgb, var(--bg-raised) 92%, var(--fg));
-}
-
-.sh-ask-option-checked {
-	border-color: var(--accent);
-	background: var(--accent-muted);
-}
-
-.sh-ask-option-marker {
-	width: 18px;
-	font: 400 13px / 20px var(--font-mono);
-	color: var(--accent);
-}
-
-.sh-ask-option-copy {
-	display: grid;
-	gap: 2px;
-	min-width: 0;
-}
-
-.sh-ask-option-label {
-	font-size: 13.5px;
-	font-weight: 500;
-}
-
-.sh-ask-option-description {
-	font-size: 12.5px;
-	line-height: 1.4;
-	color: var(--fg-muted);
-}
-
-.sh-ask-actions {
-	justify-content: flex-end;
-	width: 100%;
-}
-
-.sh-queued {
-	display: inline-flex;
-	align-items: center;
-	height: 22px;
-	padding: 0 8px;
-	font: 400 11.5px / 1 var(--font-mono);
-	color: var(--accent);
-	background: var(--accent-muted);
-	border-radius: 999px;
-	white-space: nowrap;
 }
 
 /* ---- banners ---- */
@@ -812,8 +651,7 @@
 	.sh-cwd,
 	.sh-chip-meta,
 	.sh-gauge-track,
-	.sh-btn-label,
-	.sh-queued-label {
+	.sh-btn-label {
 		display: none;
 	}
 	.sh-status {
@@ -822,23 +660,5 @@
 		justify-content: center;
 		font-size: 0;
 	}
-	.sh-composer {
-		padding: 0 8px 8px;
-		padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
-	}
-	.sh-composer-actions .sh-btn {
-		width: 34px;
-		height: 34px;
-		padding: 0;
-	}
-	.sh-ask-title,
-	.sh-ask-option-label {
-		font-size: 16px;
-	}
 }
 
-@media (any-pointer: coarse) {
-	.sh-composer-input {
-		font-size: 16px;
-	}
-}

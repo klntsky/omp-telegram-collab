@@ -10,6 +10,7 @@ import { setupCollaborationTest, type CollaborationTest } from './helpers/collab
 import { startCollaborationProcess } from './helpers/application-process.js';
 import { changeTopicClosed, clickPanel, createManagedTopic, deliveredMessageLinks, enrollForum, openPanel, reactionAttempts, replyText, sendImageDocument, setTopicClosed, waitForEditor, waitForPanel, waitForReactionAttempt } from './helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, questionScenario, questionStep, readSessionHistory, taskInput, writeScenario } from './helpers/model-tasks.js';
+import { observeBrowser } from './helpers/browser-observer.js';
 
 test('Telegram fork failures preserve completed forks and reject interrupted preparation', { timeout: 480000 }, async t => {
   const seed = createWriteTask('fork-failure-seed');
@@ -360,7 +361,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     }
     app.omp.provider.assertComplete([...prerequisites.map(task => task.name), tasks.capacityPending.name]);
   });
-  it('worktrees and forks', async () => {
+  it('worktrees and forks', async t => {
     const [me, chat, member] = await Promise.all([
       app.telegram.api.getMe(), app.telegram.api.getChat(app.telegram.forum.chatId),
       app.telegram.api.getChatMember(app.telegram.forum.chatId, app.telegram.bot.id),
@@ -415,8 +416,23 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     await app.restart();
     session = app.store.getSession(session.id)!;
     assert.deepEqual(session.runtime, worktreeRuntime);
+    const browser = await observeBrowser(t, app, session);
+    const snapshot = browser.client.getSnapshot();
+    assert.ok(JSON.stringify(snapshot.entries).includes(tasks.initial.toolCallId));
+    assert.ok(JSON.stringify(snapshot.entries).includes(tasks.initial.evidence.nonce));
+    assert.ok(JSON.stringify(snapshot.entries).includes('Original diagnostic'));
+    assert.ok(snapshot.state);
+    const historyBeforeDenied = await readSessionHistory(app.omp.dataDir, session.id);
+    await browser.denyMutations();
+    assert.equal(await readSessionHistory(app.omp.dataDir, session.id), historyBeforeDenied);
     const worktreeRestarted = await app.sendAndWait(`/p ${tasks.worktreeRestarted.prompt}`, session.threadId);
     await completeWriteTask(app, tasks.worktreeRestarted, worktreeRestarted, session.threadId);
+    await browser.waitForSnapshot(value => !value.working && value.entries.some(entry =>
+      entry.type === 'message' && entry.message.role === 'toolResult' &&
+      entry.message.toolCallId === tasks.worktreeRestarted.toolCallId && !entry.message.isError));
+    assert.ok(browser.frames.some(frame => frame.t === 'event' && frame.event.type === 'tool_execution_start'));
+    assert.ok(browser.frames.some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
+    assert.ok(JSON.stringify(browser.client.getSnapshot().entries).includes(tasks.worktreeRestarted.evidence.nonce));
     assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.worktreeRestarted.name)![0]!.messages).includes(tasks.worktree.evidence.nonce));
   
     const sourceBinding = JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8'));
@@ -471,6 +487,12 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
       await setTopicClosed(app, fork, true);
     }
     await clickPanel(app, forkSettings, -1);
+    assert.equal(browser.client.getSnapshot().phase, 'live');
+    const sourceEntries = JSON.stringify(browser.client.getSnapshot().entries);
+    assert.ok(sourceEntries.includes(tasks.worktreeRestarted.toolCallId));
+    for (const task of [tasks.forkTip, tasks.forkAnswer, tasks.forkPrompt]) {
+      assert.ok(!sourceEntries.includes(task.toolCallId));
+    }
     app.omp.provider.assertComplete([tasks.initial.name, tasks.worktree.name, tasks.worktreeRestarted.name, tasks.forkTip.name, tasks.forkAnswer.name, tasks.forkPrompt.name]);
   });
   it('questions', async t => {

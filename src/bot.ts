@@ -1524,61 +1524,9 @@ export class BotService {
     this.sessionInvalidationHandlers.add(handler);
     return () => { this.sessionInvalidationHandlers.delete(handler); };
   }
-  reopenSession(session: TopicSession, userId: number, beforeMutation: () => void, signal?: AbortSignal): Promise<TopicSession> {
-    const operation = this.updateTail.then(async () => {
-      if (!(await this.authorizeSession(session,userId,signal))) throw new Error('Administrator access required to reopen this topic');
-      signal?.throwIfAborted();
-      beforeMutation();
-      this.requireSessionAssignment(session);
-      const current = this.options.store.getSession(session.id)!;
-      if (current.status === 'detached') throw new Error('This topic is conversation-only; its session is detached');
-      if (current.status === 'closed') {
-        const deadline = new AbortController();
-        const timeoutReason = new DOMException('Telegram topic reopening timed out after 10 seconds','TimeoutError');
-        const cancellation = AbortSignal.any(signal ? [signal,this.background.signal,deadline.signal] : [this.background.signal,deadline.signal]);
-        const telegram = new TelegramAbortController();
-        const cancelTelegram = () => telegram.abort();
-        cancellation.addEventListener('abort',cancelTelegram,{once:true});
-        const timeout = setTimeout(() => deadline.abort(timeoutReason),10000);
-        try {
-          cancellation.throwIfAborted();
-          await withCancellation(this.bot.api.reopenForumTopic(current.chatId,current.threadId,telegram.signal),cancellation);
-        } finally {
-          clearTimeout(timeout);
-          cancellation.removeEventListener('abort',cancelTelegram);
-          telegram.abort();
-        }
-        beforeMutation();
-        this.requireSessionAssignment(current);
-        this.options.store.updateSession(current.id,{status:'open'});
-        this.closedSessions.delete(current.id);
-      }
-      return this.options.store.getSession(session.id)!;
-    });
-    this.updateTail = operation.then(() => undefined,() => undefined);
-    return operation;
-  }
   async ensureMirroring(session: TopicSession, binding: HostBinding, beforeMutation?: () => Promise<void>): Promise<void> {
     this.requireSessionAssignment(session);
     await this.listen(session,binding,beforeMutation);
-  }
-  async relayPrompt(session: TopicSession, user: {userId:number;username?:string;displayName:string}, text: string): Promise<void> {
-    await this.relayMiniAppText(session,user,`posted a prompt: ${text}`);
-  }
-  async relayAnswer(session: TopicSession, user: {userId:number;username?:string;displayName:string}, text: string): Promise<void> {
-    await this.relayMiniAppText(session,user,`answered: ${text}`);
-  }
-  private async relayMiniAppText(session: TopicSession, user: {userId:number;username?:string;displayName:string}, text: string): Promise<void> {
-    this.requireSessionAssignment(session);
-    const author = user.username ? `@${user.username}` : `${user.displayName} (user ID ${user.userId})`;
-    const message = `${author} ${text}`;
-    for (let offset = 0; offset < message.length;) {
-      let end = Math.min(offset+4000,message.length);
-      if (end < message.length && message.charCodeAt(end-1) >= 0xD800 && message.charCodeAt(end-1) <= 0xDBFF) end--;
-      this.requireSessionAssignment(session);
-      await sendTo(this.bot.api, topicDestination(session.chatId, session.threadId),message.slice(offset,end));
-      offset = end;
-    }
   }
   async start(onReady?: () => void): Promise<void> {
     await this.initialize();
@@ -3470,7 +3418,7 @@ export class BotService {
       await replyTo(
         ctx,
         destination,
-        'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.',
+        'This topic is closed. Reopen it in Telegram before sending work.',
       );
       return;
     }

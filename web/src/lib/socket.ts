@@ -1,7 +1,8 @@
-import type { GuestFrame, HostFrame } from "@oh-my-pi/pi-wire";
+import type { HostFrame } from "@oh-my-pi/pi-wire";
+import type { BrowserFrame } from "../../../shared/contracts";
 import { SessionAccessError } from "./telegram";
 
-export type GatewayAction = Exclude<GuestFrame, { t: "hello" }>;
+export type GatewayAction = BrowserFrame;
 
 export interface GuestTransport {
 	onOpen?: () => void;
