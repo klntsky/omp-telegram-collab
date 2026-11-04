@@ -292,21 +292,27 @@ export async function setupCollaborationTest(
     },
     waitForCondition,
     waitForMessage,
-    waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
-      return waitForMessage(message => message.sender.id === telegram.bot.id &&
-        apiCalls.some(call => {
-          if (call.method !== 'sendRichMessage') return false;
-          const payload = call.payload as {
-            chat_id: number;
-            reply_parameters?: { message_id: number };
-            message_thread_id?: number;
-          };
-          const response = call.result as { ok: boolean; result?: { message_id: number } };
-          return payload.chat_id === telegram.forum.chatId &&
-            payload.reply_parameters?.message_id === options.replyToMessageId &&
-            (options.threadId === undefined || payload.message_thread_id === options.threadId) &&
-            response.ok && response.result?.message_id === message.id;
-        }));
+    async waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
+      let messageId: number | undefined;
+      await waitForCondition(() => apiCalls.some(call => {
+        if (call.method !== 'sendRichMessage') return false;
+        const payload = call.payload as {
+          chat_id: number;
+          reply_parameters?: { message_id: number };
+          message_thread_id?: number;
+        };
+        const response = call.result as { ok: boolean; result?: { message_id: number } };
+        if (payload.chat_id !== telegram.forum.chatId ||
+            payload.reply_parameters?.message_id !== options.replyToMessageId ||
+            (options.threadId !== undefined && payload.message_thread_id !== options.threadId) ||
+            !response.ok || response.result === undefined) return false;
+        messageId = response.result.message_id;
+        return true;
+      }));
+      const [message] = await operation(telegram.user.client.getMessages(telegram.forum.chatId, messageId!));
+      if (!message) throw new Error(`Delivered Telegram reply ${messageId} is unavailable to the user client`);
+      omp.log('telegram.user.reply', message.raw);
+      return message;
     },
   };
 }
