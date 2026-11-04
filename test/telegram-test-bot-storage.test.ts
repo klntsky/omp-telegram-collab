@@ -71,6 +71,16 @@ test('creates private storage and replaces credentials in place without dropping
   assert.deepEqual(await pool(filename), [replacement, other]);
 });
 
+test('duplicate token import secures existing storage without changing retained credentials', async t => {
+  const { filename } = await fixture(t);
+  const existing = token();
+  const contents = `TELEGRAM_TEST_BOT_TOKENS='${JSON.stringify([existing])}'\n`;
+  await writeFile(filename, contents, { mode: 0o644 });
+  await appendTelegramTestBotToken(filename, existing, signal());
+  assert.equal((await stat(filename)).mode & 0o777, 0o600);
+  assert.equal(await readFile(filename, 'utf8'), contents);
+});
+
 test('invalid input and invalid canonical pools are unchanged without exposing credentials', async t => {
   const { filename } = await fixture(t);
   const good = token();
