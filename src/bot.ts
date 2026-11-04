@@ -3868,7 +3868,7 @@ export class BotService {
       void sendTo(
         this.bot.api,
         topicDestination(session.chatId, session.threadId),
-        `Session mirroring disconnected. Send a prompt to reconnect to the local host. ${this.promptHelp(session.chatId)}`,
+        'Session mirroring disconnected.',
       ).catch(() => undefined);
       return;
     }

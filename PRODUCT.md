@@ -334,7 +334,7 @@ If retirement cannot free capacity, the current supergroup owner or an administr
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
-Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
+Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts only “Session mirroring disconnected.”; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 
 If a Telegram listener closes while an authorized operation is still establishing its connection, the bot immediately reacquires the host and reconnects once before continuing. Recovery requires the same session generation, an open topic, and an unchanged assignment; termination, detachment, and kill invalidation cannot reopen the session. No prompt is replayed, and a second connection failure retains its original diagnostic.
 
