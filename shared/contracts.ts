@@ -1,5 +1,7 @@
 import type { GuestFrame, HostFrame, ImageContent } from '@oh-my-pi/pi-wire';
 
+export type BrowserFrame = Extract<GuestFrame, {t: 'fetch-transcript'}>;
+
 export interface PromptContent {
   text: string;
   images?: ImageContent[];

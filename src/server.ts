@@ -14,10 +14,10 @@ import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'relayPrompt' | 'relayAnswer' | 'requestCapacity' | 'ensureMirroring' | 'onSessionInvalidated' | 'reopenSession'>;
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'onSessionInvalidated'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
-const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional(),reopen:z.boolean().optional()}).strict();
+const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
 class SessionGenerationError extends Error {}
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
@@ -123,16 +123,11 @@ export function createServer(options: ServerOptions): GatewayServer {
               authDate:authentication.authDate,
             };
           }
-          let {session,canControl} = await withCancellation(authorize(identity,undefined,undefined,controller.signal),controller.signal);
-          if (parsed.reopen) {
-            if (parsed.generation === undefined) throw new SessionGenerationError('Reopen confirmation requires the current session generation');
-            session = await withCancellation(bot.reopenSession(session,identity.userId,() => checkGeneration(identity),controller.signal),controller.signal);
-            canControl = true;
-          }
+          const {session,canControl} = await withCancellation(authorize(identity,undefined,undefined,controller.signal),controller.signal);
           controller.signal.throwIfAborted();
           if (response.destroyed || response.writableEnded) return;
           checkGeneration(identity);
-          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),...(session.status === 'open' ? {ticket:tickets.issue({...identity,access:{session,canControl}})} : {}),canReopen:canControl,displayName:participantName(identity)});
+          json(response,200,{session:{id:session.id,name:session.name,status:session.status},generation:identity.generation,credential:issueCredential(identity,bot.token),...(session.status === 'open' ? {ticket:tickets.issue({...identity,access:{session,canControl}})} : {}),displayName:participantName(identity)});
           return;
         } finally {
           request.removeListener('aborted',abort);
@@ -198,7 +193,6 @@ export function createServer(options: ServerOptions): GatewayServer {
     let upstream: CollabConnection | undefined;
     let release: (() => void) | undefined;
     let connectedSession: TopicSession | undefined;
-    let hostReadOnly = true;
     const readAccess = identity.access;
     let closed = false;
     let tail: Promise<void> = Promise.resolve();
@@ -256,11 +250,11 @@ export function createServer(options: ServerOptions): GatewayServer {
         const batch = outgoing;
         outgoing = [];
         try {
-          const current = await authorize(identity,connectedSession,readAccess);
+          await authorize(identity,connectedSession,readAccess);
           for (const {frame,payload} of batch) {
             if (closed || ws.readyState !== WebSocket.OPEN) return;
             checkTermination();
-            const value = frame.t === 'welcome' ? JSON.stringify({...frame,readOnly:Boolean(frame.readOnly || current.session.status === 'closed' || !current.canControl)}) : payload;
+            const value = frame.t === 'welcome' ? JSON.stringify({...frame,readOnly:true}) : payload;
             const sent = Promise.withResolvers<void>();
             ws.send(value,error => error ? sent.reject(error) : sent.resolve());
             await sent.promise;
@@ -281,25 +275,10 @@ export function createServer(options: ServerOptions): GatewayServer {
       try { frame = validateGuestFrame(JSON.parse(data.toString())); }
       catch { fail(4002,'Invalid action'); return; }
       enqueue(async () => {
-        const {bot,session,canControl} = await authorize(identity,connectedSession,frame.t === 'fetch-transcript' ? readAccess : undefined);
-        switch (frame.t) {
-          case 'fetch-transcript': break;
-          case 'prompt':
-          case 'abort':
-          case 'agent-cmd':
-          case 'ui-response':
-            if (!canControl) throw new Error('Administrator access required');
-            if (session.status === 'closed') throw new Error('Archived session');
-            if (hostReadOnly) throw new Error('Host is read-only');
-            break;
-          default: throw new Error('Invalid action');
-        }
+        await authorize(identity,connectedSession,readAccess);
         if (!upstream) throw new Error('Session not connected');
         checkTermination();
-        if (frame.t === 'prompt') options.runtime.markPrompt(session.id);
         upstream.send(frame);
-        if (frame.t === 'prompt') await bot.relayPrompt(session,identity,frame.text);
-        if (frame.t === 'ui-response' && frame.value !== undefined) await bot.relayAnswer(session,identity,frame.value);
       });
     });
     enqueue(async () => {
@@ -321,7 +300,6 @@ export function createServer(options: ServerOptions): GatewayServer {
         onFrame: frame => {
           try { checkTermination(); }
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
-          if (frame.t === 'welcome') hostReadOnly = Boolean(frame.readOnly);
           options.runtime.observeFrame(session.id,frame);
           let payload: string;
           try { payload = JSON.stringify(frame); } catch { fail(1011,'Invalid host frame'); return; }

@@ -283,7 +283,7 @@ class Administration {
       return interactive ? (await this.ask(`${label} [${current}]: `)).trim() || current : current;
     };
     if (interactive) {
-      this.print('The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.');
+      this.print('The optional Mini App provides a live transcript, tool details, and subagent activity. It is read-only. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.');
       const answer = (await this.ask(`Enable Mini App? [${config.publicUrl ? 'Y/n' : 'y/N'}]: `)).trim().toLowerCase();
       if (answer && !['y', 'yes', 'n', 'no'].includes(answer)) throw new Error('Answer yes or no to enable Mini App.');
       const enabled = answer ? ['y', 'yes'].includes(answer) : config.publicUrl !== '';

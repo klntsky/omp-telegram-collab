@@ -24,9 +24,9 @@ test('anonymous-admin topic closure cancels bot work without granting a host tic
     const before = app.accepted.length;
     const response = await fetch(`${app.url}/api/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId, sessionId: session.id, initData: app.initData(session.id) }) });
     assert.equal(response.status, 200);
-    const data = await response.json() as { ticket?: string; canReopen: boolean; session: {status: string} };
+    const data = await response.json() as { ticket?: string; canReopen?: boolean; session: {status: string} };
     assert.equal(data.ticket,undefined);
-    assert.equal(data.canReopen,true);
+    assert.equal(data.canReopen,undefined);
     assert.equal(data.session.status,'closed');
     await app.update({text:'/p Must not be admitted',message_thread_id:session.threadId});
     assert.equal(await app.runtime.isRunning(session),false);

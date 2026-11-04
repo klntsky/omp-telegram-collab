@@ -16,8 +16,6 @@
 import type {
 	AgentSnapshot,
 	AssistantMessage,
-	CollabUiRequest,
-	CollabUiResponseValue,
 	HostFrame,
 	SessionEntry,
 	SessionHeader,
@@ -63,10 +61,6 @@ export interface GuestSnapshot {
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	/** agent_start..agent_end, reconciled by state.isStreaming. */
 	working: boolean;
-	/** True when the gateway or host authorizes watching only. */
-	readOnly: boolean;
-	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
-	uiRequest: CollabUiRequest | null;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
@@ -115,7 +109,6 @@ interface PendingTranscript {
 
 export class GuestClient {
 	readonly #socket: GuestTransport;
-	readonly #archived: boolean;
 	readonly #listeners = new Set<() => void>();
 	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
 	#reqSeq = 0;
@@ -147,9 +140,6 @@ export class GuestClient {
 	#streamDone = false;
 	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
 	#working = false;
-	#readOnly = false;
-	#uiRequest: CollabUiRequest | null = null;
-	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
 	readonly #connectionNoticeIds = new Set<number>();
 	#snapshot: GuestSnapshot;
@@ -164,10 +154,8 @@ export class GuestClient {
 	/** Cancels the scheduled deferred commit; null when none is pending. */
 	#cancelFrameCommit: (() => void) | null = null;
 
-	constructor(socket: GuestTransport, readonly displayName: string, archived = false) {
+	constructor(socket: GuestTransport, readonly displayName: string) {
 		this.#socket = socket;
-		this.#archived = archived;
-		this.#readOnly = archived;
 		this.#socket.onOpen = () => this.#handleOpen();
 		this.#socket.onFrame = frame => this.#applyFrameSafe(frame);
 		this.#socket.onClose = (reason, willReconnect) => this.#handleClose(reason, willReconnect);
@@ -200,30 +188,6 @@ export class GuestClient {
 	/** Cached stable reference; replaced per commit (at most once per animation frame for streaming frames). */
 	getSnapshot(): GuestSnapshot {
 		return this.#snapshot;
-	}
-
-	sendPrompt(text: string): void {
-		if (this.#readOnly || this.#phase !== "live") return;
-		this.#socket.send({ t: "prompt", text });
-	}
-
-	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
-		if (this.#readOnly || this.#phase !== "live") return;
-		this.#socket.send({ t: "ui-response", reqId, value });
-		if (this.#uiRequest?.reqId === reqId) {
-			this.#showNextUiRequest();
-			this.#commit();
-		}
-	}
-
-	sendAbort(): void {
-		if (this.#readOnly || this.#phase !== "live") return;
-		this.#socket.send({ t: "abort" });
-	}
-
-	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
-		if (this.#readOnly || this.#phase !== "live") return;
-		this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
 	}
 
 	/**
@@ -294,7 +258,6 @@ export class GuestClient {
 			pending.resolve(null);
 		}
 		this.#pendingTranscripts.clear();
-		this.#clearUiRequests();
 		this.#commit();
 		this.#socket.close();
 	}
@@ -367,8 +330,6 @@ export class GuestClient {
 				this.#lifecycle = new Map();
 				this.#unlistedBusIds.clear();
 				this.#working = frame.state.isStreaming;
-				this.#readOnly = this.#archived || frame.readOnly === true;
-				this.#clearUiRequests();
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
 				if (frame.entryCount === 0) {
@@ -449,12 +410,7 @@ export class GuestClient {
 				}
 				break;
 			case "ui-request":
-				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
-				else this.#uiRequest = frame.request;
-				break;
 			case "ui-request-end":
-				if (this.#uiRequest?.reqId === frame.reqId) this.#showNextUiRequest();
-				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
 				break;
 			case "transcript": {
 				const pending = this.#pendingTranscripts.get(frame.reqId);
@@ -628,17 +584,6 @@ export class GuestClient {
 		this.#notices = next;
 	}
 
-	#clearUiRequests(): void {
-		this.#uiRequest = null;
-		this.#uiRequestQueue = [];
-	}
-
-	#showNextUiRequest(): void {
-		const [next, ...rest] = this.#uiRequestQueue;
-		this.#uiRequest = next ?? null;
-		this.#uiRequestQueue = rest;
-	}
-
 	#buildSnapshot(): GuestSnapshot {
 		return {
 			phase: this.#phase,
@@ -657,8 +602,6 @@ export class GuestClient {
 			streamDone: this.#streamDone,
 			activeTools: this.#activeTools,
 			working: this.#working,
-			readOnly: this.#readOnly,
-			uiRequest: this.#uiRequest,
 			notices: this.#notices,
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,

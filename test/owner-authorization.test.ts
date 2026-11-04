@@ -10,7 +10,7 @@ import { writeConfig } from '../src/config.js';
 const owner = { id: ownerId, first_name: 'Ada', username: ownerUsername, is_bot: false };
 
 for (const status of ['creator', 'administrator'] as const) {
-  test(`${status} without a username can enroll, attach, and control the Mini App`, async () => {
+  test(`${status} without a username can enroll, attach, and authorize session access`, async () => {
     const app = await createSmokeApp();
     try {
       app.setCurrentMember({ status });
