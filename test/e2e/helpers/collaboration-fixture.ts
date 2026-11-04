@@ -31,6 +31,7 @@ export async function setupCollaborationTest(
   let store: Store | undefined;
   let unsubscribe: Cleanup | undefined;
   let polling: Promise<void> | undefined;
+  let activePollers = 0;
   let closing = false;
   let log: ((event: string, data: unknown) => void) | undefined;
   const restoreConsole: Cleanup[] = [];
@@ -93,7 +94,7 @@ export async function setupCollaborationTest(
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
-  }));
+  }, { canReleaseBot: () => activePollers === 0 }));
   omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
@@ -205,6 +206,7 @@ export async function setupCollaborationTest(
   async function startService(): Promise<void> {
     const ready = Promise.withResolvers<void>();
     const activeService = service!;
+    activePollers++;
     polling = activeService.start(() => {
       try {
         activeService.startBackground();
@@ -215,8 +217,9 @@ export async function setupCollaborationTest(
       }
     });
     void polling.then(() => {
+      activePollers--;
       if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
-    }, error => { if (!closing) fail(error); });
+    }, error => { activePollers--; if (!closing) fail(error); });
     await operation(ready.promise);
   }
   await omp.step('application.start', startService);

@@ -149,3 +149,11 @@ Local terminal attachment crosses the service account's private Unix control soc
 The private connection owns a runtime lease for the foreground terminal client. Disconnecting releases the lease. Service replacement closes local terminal connections so a lease cannot remain attached to an obsolete runtime generation.
 
 When the Mini App is enabled, the reverse proxy or tunnel provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.
+
+## Shared Telegram test service
+
+The development test-session server is the sole owner of its Telegram user authorization and main MTProto connection. Test processes connect through a private Unix socket under the same operating-system account. The server owns the shared peer and update state; each connected test client receives the original Telegram data through the client library's transport representation. Closing a test client cannot disconnect the shared Telegram session.
+
+The server owns persistent bot allocation. A test run receives only its exclusively assigned bot token and returns that token after application polling and resource teardown finish. BotFather provisioning is serialized as a complete conversation. The pool preserves uncertain ownership across disconnects and server restarts rather than granting the same bot to another potentially competing poller. Explicit recovery crosses an operator boundary that requires the old poller to have stopped.
+
+The test server forwards Telegram failures without rate-limit waits, request retries, or ambiguous mutation replay. Application bots still use the real Bot API directly, so the intermediary cannot hide production retry or polling behavior. PM2 supervises one server process in fork mode; exclusive local state ownership prevents a second instance from importing the same authorization. Developer setup and recovery commands belong in [Development](DEVELOPMENT.md#run-tests-against-telegrams-test-network).

@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { validateTelegramTestSession } from './telegram-user.js';
+import { validateTelegramTestSession } from '../../../scripts/lib/telegram-test-auth.js';
 import { combineTelegramErrors } from './errors.js';
 
 export async function appendTelegramTestSession(filename: string, session: string): Promise<void> {

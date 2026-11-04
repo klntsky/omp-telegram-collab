@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from '../test/e2e/helpers/telegram-user.js';
+import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from './lib/telegram-test-auth.js';
 import { appendTelegramTestSession } from '../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
 

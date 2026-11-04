@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import TelegramAbortController from 'abort-controller';
 import { Bot, type Api } from 'grammy';
-import { Chat, Conversation, tl, type Message } from '@mtcute/node';
+import { Chat, tl } from '@mtcute/node';
 import { installTelegramRetry } from '../../../src/telegram-retry.js';
 import type { TelegramTestUser } from './telegram-user.js';
 import { combineTelegramErrors } from './errors.js';
@@ -47,48 +47,6 @@ export function uniqueTelegramTestName(): string {
   return `omp_e2e_${randomBytes(8).toString('hex')}`;
 }
 
-function unexpectedBotFather(message: Message): never {
-  throw new Error(`Unexpected BotFather response:\n${message.text}`);
-}
-
-export async function createTelegramTestBot(user: TelegramTestUser, options: {
-  name?: string;
-  username?: string;
-  timeoutMs?: number;
-} = {}): Promise<TelegramTestBot> {
-  const name = options.name ?? uniqueTelegramTestName();
-  const username = options.username ?? `${uniqueTelegramTestName()}_bot`;
-  if (!/^[a-z][a-z0-9_]{1,28}bot$/i.test(username) || username.length > 32) {
-    throw new Error('Test bot username must contain 5–32 letters, digits, or underscores and end in bot');
-  }
-  const conversation = new Conversation(user.client, 'BotFather');
-  const stop = () => conversation.stop();
-  user.signal.throwIfAborted();
-  user.signal.addEventListener('abort', stop, { once: true });
-  try {
-    return await conversation.with(async () => {
-      const exchange = async (text: string) => {
-        user.signal.throwIfAborted();
-        const sent = await conversation.sendText(text, { abortSignal: user.signal });
-        return conversation.waitForResponse(undefined, { message: sent.id, timeout: options.timeoutMs ?? 30000 });
-      };
-      await exchange('/cancel');
-      const request = await exchange('/newbot');
-      if (!/how are we going to call it|choose a name for your bot/i.test(request.text)) unexpectedBotFather(request);
-      const named = await exchange(name);
-      if (!/choose a username for your bot/i.test(named.text)) unexpectedBotFather(named);
-      const created = await exchange(username);
-      const token = created.text.match(/(?<![A-Za-z0-9_:-])[1-9]\d*:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])/)?.[0];
-      if (!token) unexpectedBotFather(created);
-      const api = createTelegramTestApi(token, user.signal);
-      const me = await api.getMe();
-      if (me.username?.toLowerCase() !== username.toLowerCase()) throw new Error(`Created bot identity mismatch: expected @${username}, received @${me.username}`);
-      return { id: me.id, username: me.username, token };
-    });
-  } finally {
-    user.signal.removeEventListener('abort', stop);
-  }
-}
 
 export async function createTelegramTestForum(user: TelegramTestUser, bot: TelegramTestBot, options: {
   title?: string;
