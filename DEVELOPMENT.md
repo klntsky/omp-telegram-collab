@@ -79,7 +79,9 @@ TELEGRAM_TEST_API_ID=YOUR_APPLICATION_ID
 TELEGRAM_TEST_API_HASH=YOUR_APPLICATION_HASH
 ```
 
-Run the login command in an interactive terminal from that checkout:
+Linked worktrees share the primary checkout's `.env`, resolved through Git's common directory. Set `TELEGRAM_TEST_ENV_FILE` to an absolute shared dotenv path when using separate clones or another credential location. Every participating checkout must use the same file and operating-system account. Credential selection reads this file directly rather than trusting stale exported session values.
+
+Run commands from a checkout containing the current development scripts, with its dependencies installed. The checkout running the command does not need its own `.env`; it resolves the shared file automatically. Run login in an interactive terminal:
 
 ```sh
 pnpm telegram:test:login
@@ -87,11 +89,25 @@ pnpm telegram:test:login
 
 Enter the test-network phone number, verification code, and two-step verification password if requested. Code and password input are hidden. Login verifies the test network and retains the authorization in `TELEGRAM_TEST_SESSIONS`, a JSON array in the shared `.env` with permissions `0600`. Existing sessions are retained without printing them, logging out, or revoking them.
 
-Run `pnpm telegram:test:bots add` to save an existing test-network bot token using a hidden terminal prompt (or pipe the token through stdin; never pass it as an argument). Run `pnpm telegram:test:bots create` to explicitly create one new bot through BotFather using a retained user session. Both commands verify the token with the actual test Bot API and populate `TELEGRAM_TEST_BOT_TOKENS` in the shared `.env` without changing other bots or sessions. They print only the bot ID and dotenv path, never the token. Provision enough bots for the number of checkouts that should run concurrently. Tests only lease these reusable bots: they never invoke provisioning, create, delete, or revoke bots.
+### Set up reusable bots
+
+Import an existing test-network bot token:
+
+`pnpm telegram:test:bots add`
+
+The command accepts a hidden terminal prompt or piped stdin. Never supply a token as a command-line argument or paste it into a chat.
+
+Explicitly create another test-network bot through BotFather:
+
+`pnpm telegram:test:bots create`
+
+Both commands validate the token against the real test Bot API and save it in `TELEGRAM_TEST_BOT_TOKENS`, a JSON array in the shared `.env`. They preserve sessions and other bots, deduplicate repeated imports, and enforce `0600` permissions even when the imported token is already saved. They print only the bot ID and dotenv path, never the token. Updating credentials for an existing bot waits for its active lease to finish.
+
+Provision one bot for each checkout that should run concurrently. With one saved token, checkouts take turns; adding tokens increases available capacity. Normal test runs only lease saved bots and never invoke provisioning, create, delete, or revoke bots.
 
 Explicit creation serializes the entire BotFather conversation across checkouts. Only BotFather's explicit “too many attempts” reply is retried after its stated delay; transport failures and ambiguous mutations are not replayed. SIGINT/SIGTERM cancels waits and closes the connection without revoking the retained session. A private `0600` recovery journal under `~/.local/state/omp-telegram-test/provisioned-bots` records the chosen username before the final creation request and the returned token before verification or saving; it is removed after successful saving. If creation fails, inspect that journal privately before retrying: the remote bot may already exist. Use `add` to recover a journaled token. Do not commit or print recovery journals.
 
-Linked worktrees share the primary checkout's `.env`, resolved through Git's common directory. Set `TELEGRAM_TEST_ENV_FILE` to an absolute shared dotenv path when using separate clones or another credential location. Every participating checkout must use the same file and operating-system account. Session selection reads this file directly rather than trusting stale exported session values.
+BotFather creation limits are account-wide and still apply with independent user sessions. A long creation cooldown does not prevent tests from reusing bots already saved in the array. Use Ctrl-C to cancel provisioning; do not rerun an ambiguous creation blindly.
 
 Each fixture locks an available seed, approves a fresh QR-token authorization, stores the new session, and owns that new client's connection until teardown. Saved authorizations already in use are not reused as seeds. Definitively dead sessions are removed before another seed is tried; transient network failures and rate limits retain the credentials and original diagnostic. If no usable seed remains, run interactive login again.
 
