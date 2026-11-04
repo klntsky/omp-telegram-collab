@@ -1,5 +1,6 @@
 import { tl, type TelegramClient, type User } from '@mtcute/node';
-import { connectTelegramTestSession, type TelegramTestSession } from '../../../scripts/lib/telegram-test-client.js';
+import { forkTelegramTestSession, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
+import { createTelegramTestBot, deleteTelegramTestBot } from '../../../scripts/lib/telegram-test-botfather.js';
 
 export class TelegramTestUser {
   readonly client: TelegramClient;
@@ -13,10 +14,10 @@ export class TelegramTestUser {
     this.client = session.client;
     this.signal = signal ? AbortSignal.any([signal, this.#controller.signal]) : this.#controller.signal;
   }
-  static async connect(options: { socket?: string; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TelegramTestUser> {
+  static async connect(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TelegramTestUser> {
     const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(options.timeoutMs ?? 60000)]);
     signal.throwIfAborted();
-    const session = await connectTelegramTestSession(options.socket, signal);
+    const session = await forkTelegramTestSession(signal);
     const user = new TelegramTestUser(session, options.signal);
     const abort = () => { void user.close(); };
     signal.addEventListener('abort', abort, { once: true });
@@ -28,14 +29,13 @@ export class TelegramTestUser {
     signal.throwIfAborted();
     return this.client.call(request, { abortSignal: signal, timeout: 30000, maxRetryCount: 0, floodSleepThreshold: 0 });
   }
-  async acquireBot(): Promise<string> {
+  async createBot(): Promise<string> {
     this.signal.throwIfAborted();
-    const abort = () => { void this.close(); };
-    this.signal.addEventListener('abort', abort, { once: true });
-    try { return await this.#session.acquire(); }
-    finally { this.signal.removeEventListener('abort', abort); }
+    return createTelegramTestBot(this.client, this.signal);
   }
-  releaseBot(token: string): Promise<void> { return this.#session.release(token); }
+  deleteBot(token: string): Promise<void> {
+    return deleteTelegramTestBot(this.client, token, AbortSignal.timeout(120_000));
+  }
   close(): Promise<void> {
     this.#closing ??= this.#session.close().finally(() => this.#controller.abort(new Error('Telegram test user closed')));
     return this.#closing;

@@ -14,15 +14,18 @@ export interface TelegramTestFixture {
 }
 
 export async function teardownTelegramTestResources(options: {
-  user: Pick<TelegramTestUser, 'close' | 'releaseBot'>;
+  user: Pick<TelegramTestUser, 'close' | 'deleteBot'>;
   forumSetup?: Promise<Pick<TelegramTestForum, 'close'>>;
   token?: string;
-  canReleaseBot?: () => boolean;
+  canDeleteBot?: () => boolean;
 }): Promise<void> {
   const errors: unknown[] = [];
+  try { await (await options.forumSetup)?.close(); } catch (error) { errors.push(error); }
   try {
-    await (await options.forumSetup)?.close();
-    if (options.token && (options.canReleaseBot?.() ?? true)) await options.user.releaseBot(options.token);
+    if (options.token) {
+      if (!(options.canDeleteBot?.() ?? true)) throw new Error('Telegram bot poller did not stop; disposable bot retained in private recovery state');
+      await options.user.deleteBot(options.token);
+    }
   } catch (error) { errors.push(error); }
   try { await options.user.close(); } catch (error) { errors.push(error); }
   if (errors.length === 1) throw errors[0];
@@ -30,16 +33,15 @@ export async function teardownTelegramTestResources(options: {
 }
 
 export async function setupTelegramTest(t: Pick<TestContext, 'after' | 'signal'>, options: {
-  socket?: string;
   title?: string;
-  canReleaseBot?: () => boolean;
+  canDeleteBot?: () => boolean;
 } = {}): Promise<TelegramTestFixture> {
-  const user = await TelegramTestUser.connect({ socket: options.socket, signal: t.signal });
+  const user = await TelegramTestUser.connect({ signal: t.signal });
   let forumSetup: Promise<TelegramTestForum> | undefined;
-  let acquiredToken: string | undefined;
-  t.after(() => teardownTelegramTestResources({ user, forumSetup, token: acquiredToken, canReleaseBot: options.canReleaseBot }));
-  const token = await user.acquireBot();
-  acquiredToken = token;
+  let createdToken: string | undefined;
+  t.after(() => teardownTelegramTestResources({ user, forumSetup, token: createdToken, canDeleteBot: options.canDeleteBot }));
+  const token = await user.createBot();
+  createdToken = token;
   const me = await createTelegramTestApi(token, user.signal).getMe();
   if (!me.username) throw new Error(`Telegram test bot ${me.id} has no username`);
   const bot: TelegramTestBot = { id: me.id, username: me.username, token };

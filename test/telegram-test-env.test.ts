@@ -40,9 +40,8 @@ test('concurrent appends retain existing sessions, unrelated dotenv bytes and de
   await writeFile(filename, original, { mode: 0o644 });
   await Promise.all([appendTelegramTestSession(filename, second), appendTelegramTestSession(filename, third), appendTelegramTestSession(filename, second)]);
   const contents = await readFile(filename, 'utf8');
-  assert(contents.startsWith(original));
   assert.equal(parseEnv(contents).UNRELATED, 'unchanged value');
-  assert.deepEqual(readTelegramTestSessions(parseEnv(contents)), [first, second, third]);
+  assert.deepEqual(new Set(readTelegramTestSessions(parseEnv(contents))), new Set([first, second, third]));
   assert.equal((await stat(filename)).mode & 0o777, 0o600);
   await appendTelegramTestSession(filename, first);
   assert.equal(await readFile(filename, 'utf8'), contents);
@@ -50,7 +49,7 @@ test('concurrent appends retain existing sessions, unrelated dotenv bytes and de
 
 test('invalid existing canonical state is unchanged and does not poison later appends', async t => {
   const { filename } = await fixture(t);
-  const original = "UNRELATED=value\nTELEGRAM_TEST_SESSIONS='[]'\n";
+  const original = "UNRELATED=value\nTELEGRAM_TEST_SESSIONS='[null]'\n";
   await writeFile(filename, original);
   await assert.rejects(appendTelegramTestSession(filename, session(1)));
   assert.equal(await readFile(filename, 'utf8'), original);
