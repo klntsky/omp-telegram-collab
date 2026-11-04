@@ -149,3 +149,13 @@ Local terminal attachment crosses the service account's private Unix control soc
 The private connection owns a runtime lease for the foreground terminal client. Disconnecting releases the lease. Service replacement closes local terminal connections so a lease cannot remain attached to an obsolete runtime generation.
 
 When the Mini App is enabled, the reverse proxy or tunnel provides public HTTPS and forwards upgraded connections to the local service. Bot tokens and runtime data stay in protected server-side storage. The browser receives session access through the gateway, not direct ownership of the host's credentials.
+
+## Independent Telegram test clients
+
+Each live test worker process owns its Telegram user client, peer cache, updates, and MTProto connection. A retained authorization approves a fresh authorization for that worker; independent authorization keys isolate parallel workers and checkouts without a proxy or shared client process. Sequential fixtures borrow the client exclusively, while the worker retains ownership between fixtures and closes it at final teardown.
+
+Cross-process filesystem locks protect authorization selection and reusable bot ownership. An authorization remains exclusively owned for its worker's lifetime, so another worker cannot use an active key as its seed. Definitively invalid authorizations are removed from the shared private session store; transient failures do not revoke or discard credentials.
+
+Each checkout can lease only one bot at a time. A checkout-scoped lock serializes its bot-using fixtures, and a bot-scoped lock excludes competing checkouts. Acquisition waits cancellably for available capacity rather than creating another bot. The fixture owns its forum and must finish application polling before releasing its bot lease. Unsafe teardown retains ownership until the poller stops or the owning process exits. Tokens and sessions remain in shared private storage; test teardown neither deletes bots nor logs out retained sessions.
+
+Production application bots communicate directly with Telegram's Bot API; provisioning does not hide rate-limit failures or replay ambiguous mutations. Developer setup belongs in [Development](DEVELOPMENT.md#run-tests-against-telegrams-test-network).

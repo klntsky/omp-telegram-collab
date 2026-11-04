@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { TestContext } from 'node:test';
-import { formatWithOptions, promisify } from 'node:util';
+import { formatWithOptions, parseEnv, promisify } from 'node:util';
 import { z } from 'zod';
 import { startLocalRelay } from '../../../scripts/local-relay.js';
 import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from './fake-llm-provider.js';
 import { readSessionHistory } from './model-tasks.js';
 import type { TopicSession } from '../../../shared/contracts.js';
+import { resolveTelegramTestEnvFile } from './telegram-env.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
   scenarios: readonly FakeLlmScenario[];
@@ -22,8 +23,32 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   t.diagnostic(`E2E debug artifacts: ${logDirectory}`);
   const secrets = new Set<string>();
   const registerSecret = (value: string) => { if (value) secrets.add(value); };
-  for (const key of ['TELEGRAM_TEST_BOT_TOKEN', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSION']) {
-    if (process.env[key]) registerSecret(process.env[key]!);
+  const sharedEnv = parseEnv(await readFile(await resolveTelegramTestEnvFile(), 'utf8'));
+  for (const env of [process.env, sharedEnv]) {
+    for (const key of ['TELEGRAM_TEST_BOT_TOKENS', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSIONS']) {
+      if (env[key]) registerSecret(env[key]!);
+    }
+    if (env.TELEGRAM_TEST_BOT_TOKENS) {
+      let tokens: unknown;
+      try { tokens = JSON.parse(env.TELEGRAM_TEST_BOT_TOKENS); }
+      catch { throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings'); }
+      if (!Array.isArray(tokens) || !tokens.every((token: unknown): token is string => typeof token === 'string' && token.length > 0)) {
+        throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings');
+      }
+      for (const token of tokens) registerSecret(token);
+    }
+  }
+  if (process.env.TELEGRAM_TEST_SESSIONS) {
+    let sessions: unknown;
+    try {
+      sessions = JSON.parse(process.env.TELEGRAM_TEST_SESSIONS);
+    } catch {
+      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
+    }
+    if (!Array.isArray(sessions) || !sessions.every((session: unknown): session is string => typeof session === 'string')) {
+      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
+    }
+    for (const session of sessions) registerSecret(session);
   }
   const started = performance.now();
   let sequence = 0;

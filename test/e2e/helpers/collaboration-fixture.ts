@@ -31,6 +31,8 @@ export async function setupCollaborationTest(
   let store: Store | undefined;
   let unsubscribe: Cleanup | undefined;
   let polling: Promise<void> | undefined;
+  let activePollers = 0;
+  let pollerStopFailed = false;
   let closing = false;
   let log: ((event: string, data: unknown) => void) | undefined;
   const restoreConsole: Cleanup[] = [];
@@ -56,8 +58,14 @@ export async function setupCollaborationTest(
       } catch (error) { log?.('cleanup.error', error); errors.push(error); }
     };
     if (unsubscribe) await cleanup(unsubscribe);
-    if (service) await cleanup(() => service!.close());
-    if (polling) await cleanup(() => polling);
+    const errorsBeforeStop = errors.length;
+    if (service) await cleanup(async () => {
+      try { await service!.close(); } catch (error) { pollerStopFailed = true; throw error; }
+    });
+    if (polling) await cleanup(async () => {
+      try { await polling; } catch (error) { pollerStopFailed = true; throw error; }
+    });
+    if (errors.length !== errorsBeforeStop) pollerStopFailed = true;
     if (runtime && store) {
       for (const session of store.listSessions()) {
         await cleanup(() => runtime!.kill(session));
@@ -93,7 +101,7 @@ export async function setupCollaborationTest(
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
-  }));
+  }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed }));
   omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
@@ -205,6 +213,7 @@ export async function setupCollaborationTest(
   async function startService(): Promise<void> {
     const ready = Promise.withResolvers<void>();
     const activeService = service!;
+    activePollers++;
     polling = activeService.start(() => {
       try {
         activeService.startBackground();
@@ -215,8 +224,9 @@ export async function setupCollaborationTest(
       }
     });
     void polling.then(() => {
+      activePollers--;
       if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
-    }, error => { if (!closing) fail(error); });
+    }, error => { activePollers--; if (!closing) fail(error); });
     await operation(ready.promise);
   }
   await omp.step('application.start', startService);
@@ -261,8 +271,10 @@ export async function setupCollaborationTest(
     restart(): Promise<void> {
       return omp.step('application.restart', async () => {
         closing = true;
-        await service!.close();
-        await polling;
+        try {
+          await service!.close();
+          await polling;
+        } catch (error) { pollerStopFailed = true; throw error; }
         await runtime!.close();
         store!.close();
         Object.assign(config, readConfig(config.configPath));
