@@ -1,6 +1,10 @@
+import { after } from 'node:test';
 import { tl, type TelegramClient, type User } from '@mtcute/node';
-import { forkTelegramTestSession, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
+import { TelegramTestExecution, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
 import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
+
+const execution = new TelegramTestExecution();
+after(() => execution.close(), { timeout: 30000 });
 
 export class TelegramTestUser {
   readonly client: TelegramClient;
@@ -17,7 +21,7 @@ export class TelegramTestUser {
   static async connect(options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TelegramTestUser> {
     const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(options.timeoutMs ?? 60000)]);
     signal.throwIfAborted();
-    const session = await forkTelegramTestSession(signal);
+    const session = await execution.acquire(signal);
     const user = new TelegramTestUser(session, options.signal);
     const abort = () => { void user.close(); };
     signal.addEventListener('abort', abort, { once: true });
@@ -33,7 +37,10 @@ export class TelegramTestUser {
     return acquireTelegramTestBot(this.signal);
   }
   close(): Promise<void> {
-    this.#closing ??= this.#session.close().finally(() => this.#controller.abort(new Error('Telegram test user closed')));
+    this.#closing ??= (async () => {
+      this.#controller.abort(new Error('Telegram test fixture user closed'));
+      await this.#session.close();
+    })();
     return this.#closing;
   }
 }

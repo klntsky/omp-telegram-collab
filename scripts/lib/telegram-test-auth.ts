@@ -1,4 +1,4 @@
-import { BaseTelegramClient, MemoryStorage, TelegramClient, type RpcCallMiddleware } from '@mtcute/node';
+import { BaseTelegramClient, MemoryStorage, TelegramClient } from '@mtcute/node';
 import { readStringSession, writeStringSession } from '@mtcute/node/utils.js';
 
 export interface TelegramApplicationCredentials {
@@ -76,12 +76,13 @@ export function createTelegramTestClient(credentials: TelegramApplicationCredent
   });
 }
 
-export function createTelegramTestBaseClient(credentials: TelegramApplicationCredentials, networkBoundary?: RpcCallMiddleware): BaseTelegramClient {
+export function createTelegramTestBaseClient(credentials: TelegramApplicationCredentials, defaultDcs?: ReturnType<typeof readStringSession>['primaryDcs']): BaseTelegramClient {
   return new BaseTelegramClient({
     apiId: credentials.apiId,
     apiHash: credentials.apiHash,
     storage: new MemoryStorage(),
     testMode: true,
-    network: { middlewares: networkBoundary ? [networkBoundary] : [] },
+    defaultDcs,
+    network: { middlewares: [] },
   });
 }

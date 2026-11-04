@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { TelegramClient, tl } from '@mtcute/node';
 import { readStringSession, writeStringSession } from '@mtcute/node/utils.js';
 import { createTelegramTestBaseClient, exportTelegramTestSession, readTelegramApplicationCredentials } from './telegram-test-auth.js';
@@ -42,7 +42,7 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
         await seed.importSession(session);
         await seed.call({ _: 'users.getUsers', id: [{ _: 'inputUserSelf' }] }, { abortSignal: signal, timeout: 30000 });
         usable = true;
-        const base = createTelegramTestBaseClient(credentials);
+        const base = createTelegramTestBaseClient(credentials, readStringSession(session).primaryDcs);
         const client = new TelegramClient({ client: base, skipConversationUpdates: false });
         const childLeases = new Map<string, () => Promise<void>>();
         let approved = false;
@@ -130,5 +130,36 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
       try { await prepared.close(); } catch (cleanup) { throw combineTelegramErrors(error, cleanup); }
     }
     throw error;
+  }
+}
+
+export class TelegramTestExecution {
+  readonly #lock = `test-execution:${randomUUID()}`;
+  readonly #controller = new AbortController();
+  #session?: Promise<TelegramTestSession>;
+  #closing?: Promise<void>;
+
+  constructor(private readonly createSession = forkTelegramTestSession) {}
+
+  async acquire(signal: AbortSignal): Promise<TelegramTestSession> {
+    const scope = AbortSignal.any([signal, this.#controller.signal]);
+    scope.throwIfAborted();
+    const release = (await acquireTelegramTestLock(this.#lock, scope))!;
+    try {
+      scope.throwIfAborted();
+      const session = await (this.#session ??= this.createSession(scope));
+      scope.throwIfAborted();
+      return { client: session.client, close: release };
+    } catch (error) {
+      try { await release(); } catch (cleanup) { throw combineTelegramErrors(error, cleanup); }
+      throw error;
+    }
+  }
+
+  close(): Promise<void> {
+    return this.#closing ??= (async () => {
+      this.#controller.abort(new Error('Telegram test execution closed'));
+      await (await this.#session)?.close();
+    })();
   }
 }
