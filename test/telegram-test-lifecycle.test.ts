@@ -164,3 +164,81 @@ test('execution shutdown owns and closes a late authorization result', { timeout
   await closing;
   await assertOwned(key, false, t.signal);
 });
+
+test('failed provisioning cancellation is reported and retains the bot lease', async () => {
+  const failure = new Error('Original worker shutdown failure');
+  const cancellation = Promise.reject(failure);
+  const calls: string[] = [];
+  await assert.rejects(teardownTelegramTestResources({
+    cancellation,
+    user: { async close() { calls.push('disconnect'); } },
+    lease: { async release() { calls.push('release'); } },
+  }), error => error instanceof AggregateError && error.errors.includes(failure));
+  assert.deepEqual(calls, ['disconnect']);
+});
+
+test('provisioning cancellation must settle before forum cleanup and lease release', async () => {
+  const cancellation = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const cleanup = teardownTelegramTestResources({
+    cancellation: cancellation.promise,
+    user: { async close() { calls.push('disconnect'); } },
+    forumSetup: Promise.resolve({ async close(signal?: AbortSignal) {
+      assert.equal(signal?.aborted, false);
+      calls.push('forum');
+    } }),
+    lease: { async release() { calls.push('release'); } },
+  });
+  await setImmediate();
+  assert.deepEqual(calls, []);
+  cancellation.resolve();
+  await cleanup;
+  assert.deepEqual(calls, ['forum', 'release', 'disconnect']);
+});
+
+test('an aborted cleanup signal never releases the bot lease', async () => {
+  const parent = new AbortController();
+  const reason = new Error('Shared cleanup deadline expired');
+  const entered = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const cleanup = teardownTelegramTestResources({
+    signal: parent.signal,
+    user: { async close() { calls.push('disconnect'); } },
+    forumSetup: Promise.resolve({ async close(signal?: AbortSignal) {
+      entered.resolve();
+      await finish.promise;
+      assert.equal(signal?.aborted, true);
+    } }),
+    lease: { async release() { calls.push('release'); } },
+  });
+  const rejected = assert.rejects(cleanup, error => error === reason);
+  await entered.promise;
+  parent.abort(reason);
+  await rejected;
+  finish.resolve();
+  await setImmediate();
+  assert.deepEqual(calls, ['disconnect']);
+});
+
+test('cleanup deadline retains earlier failures and reports late failures', async t => {
+  const original = new Error('Original forum cleanup failure');
+  const expired = new Error('Cleanup deadline expired');
+  const late = new Error('Original late user shutdown failure');
+  const parent = new AbortController();
+  const entered = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const report = t.mock.method(console, 'error', () => {});
+  const cleanup = teardownTelegramTestResources({
+    signal: parent.signal,
+    forumSetup: Promise.resolve({ async close() { throw original; } }),
+    user: { async close() { entered.resolve(); await finish.promise; throw late; } },
+  });
+  await entered.promise;
+  parent.abort(expired);
+  await assert.rejects(cleanup, error => error instanceof AggregateError &&
+    error.errors.includes(original) && error.errors.includes(expired));
+  finish.resolve();
+  await setImmediate();
+  assert(report.mock.calls.some(call => call.arguments[0] === late));
+});
