@@ -37,6 +37,8 @@ import { withCancellation } from './cancellation.js';
 import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
 import type { PromptExtension } from './telegram-commands.js';
 import { TopicWriter } from './topic-writer.js';
+import { SessionFeed, type SessionFeedHandlers, type SessionFeedSubscription } from './session-feed.js';
+import { SessionHistory } from './session-history.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -49,6 +51,7 @@ export interface RuntimeLike {
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{bind(id: string): void; release(): void}>;
   /** Resolves an existing host without preparing one; undefined means confirmed absence. */
   resolveExisting(session: TopicSession): Promise<HostBinding | undefined>;
+  historySource(session: TopicSession): Promise<{sessionId: string; path: string} | undefined>;
   isRunning(session: TopicSession): Promise<boolean>;
   setSessionTitle(session: TopicSession, title: string): Promise<void>;
   attach(hostId: string, cwd: string): Promise<HostBinding>;
@@ -116,6 +119,9 @@ interface Listener {
   ompSessionId?: string;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
+  feed: SessionFeed;
+  history?: SessionHistory;
+  readers: Set<{feed: SessionFeed; connection?: CollabConnection; controller: AbortController}>;
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
@@ -1256,8 +1262,8 @@ export class BotService {
       for (const session of sessions) {
         this.options.store.cancelInitialTask(session.id);
         this.options.store.advanceSessionGeneration(session.id);
-        this.dropListener(session.id);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+        this.dropListener(session.id);
       }
       const results = await Promise.allSettled(sessions.map(session => this.options.runtime.kill(session)));
       const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
@@ -1528,6 +1534,71 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.listen(session,binding,beforeMutation);
   }
+  async subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
+    const listener = this.listeners.get(session.id);
+    if (!listener?.connection) throw new Error('Session closed');
+    this.requireFeedListener(session, listener);
+    if (session.runtime.kind === 'attached') return this.subscribeAttachedFeed(session, listener, handlers);
+    await listener.history!.ensureFresh();
+    this.requireFeedListener(session, listener);
+    const subscription = listener.feed.subscribe(handlers);
+    return {
+      send: async frame => {
+        this.requireFeedListener(session, listener);
+        if (frame.t === 'history-page') {
+          try { await listener.history!.ensureFresh(); }
+          catch {
+            this.requireFeedListener(session, listener);
+            return;
+          }
+          this.requireFeedListener(session, listener);
+        }
+        subscription.send(frame);
+      },
+      close: () => subscription.close(),
+    };
+  }
+
+  private requireFeedListener(session: TopicSession, listener: Listener): void {
+    this.requireSessionAssignment(session);
+    if (this.options.store.getSession(session.id)?.status !== 'open' ||
+        this.listeners.get(session.id) !== listener ||
+        listener.generation !== this.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+  }
+
+  private async subscribeAttachedFeed(session: TopicSession, listener: Listener, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
+    const binding = await this.options.runtime.resolveExisting(session);
+    this.requireFeedListener(session, listener);
+    if (!binding) throw new Error('Session closed');
+    const reader: {feed: SessionFeed; connection?: CollabConnection; controller: AbortController} = {
+      controller: new AbortController(),
+      feed: new SessionFeed(frame => {
+        if (!reader.connection) throw new Error('Session not connected');
+        reader.connection.send(frame);
+      }),
+    };
+    listener.readers.add(reader);
+    const close = () => {
+      listener.readers.delete(reader);
+      reader.controller.abort(new Error('Session reader closed'));
+      reader.feed.close();
+      reader.connection?.close();
+    };
+    try {
+      const connection = await (this.options.connect ?? connectCollab)(binding, 'Mini App history reader', {
+        onFrame: frame => reader.feed.accept(frame),
+        onClose: reason => reader.feed.close(reason),
+      }, AbortSignal.any([this.background.signal, reader.controller.signal]));
+      reader.connection = connection;
+      this.requireFeedListener(session, listener);
+      const subscription = reader.feed.subscribe(handlers);
+      return {send: frame => subscription.send(frame), close};
+    } catch (error) {
+      close();
+      throw error;
+    }
+  }
+
   async start(onReady?: () => void): Promise<void> {
     await this.initialize();
     if (this.stopped) return;
@@ -1611,11 +1682,19 @@ export class BotService {
     for (const item of listeners) {
       clearTimeout(item.initial?.timer);
       clearInterval(item.typingTimer);
+      item.feed.close();
       item.connection?.close();
+      for (const reader of item.readers) {
+        reader.controller.abort(new Error('Session reader closed'));
+        reader.feed.close();
+        reader.connection?.close();
+      }
+      item.readers.clear();
     }
     this.listeners.clear();
     await this.updateTail;
     await Promise.all(listeners.map((listener) => listener.tail));
+    await Promise.all(listeners.map(listener => listener.history?.close()));
     await Promise.all(this.backgroundTasks);
     await this.menuTail;
     await Promise.all(metadataCompletions);
@@ -1879,12 +1958,12 @@ export class BotService {
     this.presetRefresh = undefined;
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
-        this.dropListener(session.id);
         this.closedSessions.delete(session.id);
         this.disposeMetadataOwner(session.id);
         for (const [token, request] of this.capacityRequests)
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+        this.dropListener(session.id);
       }
     }
     if (this.options.config.terminated) {
@@ -2360,7 +2439,6 @@ export class BotService {
   }
 
   private async detachSession(session: TopicSession): Promise<void> {
-    this.dropListener(session.id);
     this.closedSessions.delete(session.id);
     for (const [token, request] of this.capacityRequests) {
       if (request.sessionId === session.id) this.capacityRequests.delete(token);
@@ -2369,6 +2447,7 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+    this.dropListener(session.id);
     const metadata = this.metadataOwners.get(session.id)?.metadata;
     await metadata?.icon.completion;
     this.disposeMetadataOwner(session.id);
@@ -3400,9 +3479,9 @@ export class BotService {
         this.options.store.advanceSessionGeneration(session.id);
       }
       this.options.store.cancelInitialTask(session.id);
-      this.dropListener(session.id);
       for (const handler of this.sessionInvalidationHandlers)
         handler(session.id, 'This topic is closed. Reopen it explicitly to connect.');
+      this.dropListener(session.id);
       void this.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
       return;
     }
@@ -3814,8 +3893,8 @@ export class BotService {
         }
         if (action === 'kill') {
           this.options.store.advanceSessionGeneration(session.id);
-          this.dropListener(session.id);
           for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+          this.dropListener(session.id);
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session, message.message_id);
           await this.setTopicStatus(session, 'finished');
@@ -3961,7 +4040,7 @@ export class BotService {
       });
   }
 
-  private dropListener(id: string): void {
+  private dropListener(id: string, reason = 'Host disconnected'): void {
     this.invalidateActivity(id);
     clearTimeout(this.reconnects.get(id));
     this.reconnects.delete(id);
@@ -3976,6 +4055,16 @@ export class BotService {
     if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
     for (const [token, question] of this.questions) {
       if (question.listener === listener) this.endQuestion(token);
+    }
+    listener?.feed.close(reason);
+    if (listener) {
+      for (const reader of listener.readers) {
+        reader.controller.abort(new Error(reason));
+        reader.feed.close(reason);
+        reader.connection?.close();
+      }
+      listener.readers.clear();
+      if (listener.history) void listener.history.close().catch(error => console.error('Could not close session history', error));
     }
     listener?.connection?.close();
   }
@@ -3998,7 +4087,12 @@ export class BotService {
     const listener: Listener = {
       sessionId: session.id,
       generation,
+      feed: new SessionFeed(frame => {
+        if (!listener.connection) throw new Error('Session not connected');
+        listener.connection.send(frame);
+      }),
       tail: Promise.resolve(),
+      readers: new Set(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
       receiptBoundary: 0,
@@ -4032,6 +4126,19 @@ export class BotService {
         await this.applySessionTitle(session);
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
+        if (session.runtime.kind === 'managed') {
+          listener.history = new SessionHistory(listener.feed, {
+            sessionId: binding.sessionId,
+            source: () => this.options.runtime.historySource(session),
+            assertActive: () => this.requireFeedListener(session, listener),
+            onError: error => {
+              this.sessionObservation(session.id).failure = {operation: 'Session history refresh', at: Date.now(), error};
+              console.error('Could not refresh session history', error);
+            },
+          });
+          await listener.history.prepare();
+          if (!active()) throw closed;
+        }
         return (this.options.connect ?? connectCollab)(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
@@ -4045,19 +4152,22 @@ export class BotService {
                 error: reason,
               };
               const connected = listener.connection !== undefined;
-              this.dropListener(session.id);
+              this.dropListener(session.id, reason);
               if (connected) this.scheduleReconnect(session);
             },
           },
+          this.background.signal,
         );
       })
-      .then((connection) => {
+      .then(async (connection) => {
         if (!active()) {
           connection.close();
           throw closed;
         }
         this.sessionObservation(session.id).mirrored = true;
         listener.connection = connection;
+        await listener.history?.start(connection);
+        if (!active()) { connection.close(); throw closed; }
         return connection;
       })
       .catch(async (error) => {
@@ -4082,7 +4192,8 @@ export class BotService {
           )
             throw error;
         } finally {
-          if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
+          if (this.listeners.get(session.id) === listener)
+            this.dropListener(session.id, error instanceof Error ? error.message : String(error));
         }
         return this.listen(session, undefined, beforeMutation, false, false);
       });
@@ -4318,7 +4429,8 @@ export class BotService {
     await ctx.answerCallbackQuery();
   }
   private relayQuestion(session: TopicSession, listener: Listener, request: CollabUiRequest): void {
-    if ([...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
+    if (listener.pendingAnswers.has(request.reqId) ||
+        [...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
     const token = randomBytes(12).toString('base64url');
     const question: PendingQuestion = {session, listener, request, messageIds:[],buttonIds:[]};
     this.questions.set(token, question);
@@ -4538,6 +4650,7 @@ export class BotService {
       return;
     const ompSessionId = listener.ompSessionId;
     if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
+    if (!replay) listener.feed.accept(frame);
     if (frame.t === 'welcome') {
       listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
       listener.snapshotReplyTarget = this.options.store.getReplyTarget(session.id);

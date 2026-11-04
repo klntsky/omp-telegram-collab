@@ -136,13 +136,49 @@ The HTTP gateway serves the Mini App and authenticates Telegram launch data for 
 
 The gateway keeps upstream room credentials on the server. Current Telegram membership authorizes a new connection flow; upgrade, initialization, transcript reads, and output reuse its read authorization without additional Telegram lookups. The gateway periodically refreshes that authorization and closes connections whose access is revoked, rather than expiring established identity on a timer. Local termination, enrollment, assignment, detachment, and session-generation checks remain independent of that snapshot and enforce local invalidation across asynchronous boundaries. Reconnects require a new flow. Read authorization is not a write capability.
 
+Each managed bot listener owns a shared session feed populated by its existing Collab connection. A private, disposable disk-backed index supplies recent and historical pages without retaining the complete history in JavaScript memory. The feed retains current live presentation state, not an event log. History readiness precedes the synchronous subscription boundary, which captures the initial page and live state before later updates can reach that viewer. Browser disconnection releases only that subscription; listener disposal invalidates its cursors, closes subscribers, and removes the index. The native OMP protocol remains unchanged.
+
+The feed owns upstream transcript-request correlation so independent viewers cannot receive one another's targeted replies. The gateway owns authorization for page requests, transcript reads, and delivery. Index failures disable the affected feed with the original diagnostic without interrupting Telegram mirroring. The browser owns historical-page merging, visible-row anchoring, and the reader's tail-following choice.
+
+The gateway orders connection initialization and per-request authorization, but independent read completions do not share that queue. A pending historical-page refresh cannot prevent a later subagent transcript request from reaching the host.
+
 Operational failures of the bot adapter's `getChat`/`getChatMember` authorization lookup are wrapped as `AuthorizationUnavailableError`, retaining the original message and error as `cause`. Telegram 4xx responses other than 429 retain their original error and remain terminal; transport errors, 429, 5xx, and lookup deadlines are recoverable. Each lookup has a ten-second deadline shared by its three Telegram reads. The bot bridges caller cancellation and service shutdown into Telegram's abort signal and races the reads against cancellation so ignored signals cannot retain authorization work. Caller and shutdown cancellation preserve their original reason; timers and listeners are released when the lookup settles. The HTTP gateway cancels abandoned authentication requests and pending admission on gateway shutdown, releases their capacity, and never issues credentials or tickets after cancellation. Validation, confirmed Telegram denial, and local lifecycle or assignment failures remain outside the recoverable boundary. The gateway fails closed on lookup unavailability: HTTP admission returns 503, and periodic refresh or queued authorization closes the socket with 1013 and the original diagnostic. Existing browser reconnection obtains fresh authorization without replaying actions; confirmed and local denials retain their existing 4003 socket behavior.
 
-The gateway accepts only transcript-fetch requests from browser clients. Prompt submission, interruption, agent commands, question answers, and topic reopening have no gateway mutation handlers. Telegram bot authorization owns interactive requests. Runtime mutation callbacks still refresh membership before join-triggered cold admission, capacity retirement, and host launch; the mirroring adapter does likewise before creating a listener with title side effects. Warm host and listener reuse do not refresh read authorization. Local session, assignment, and generation checks are repeated across asynchronous admission boundaries.
+The gateway accepts only history-page and subagent transcript-fetch requests from browser clients. Prompt submission, interruption, agent commands, question answers, and topic reopening have no gateway mutation handlers. Telegram bot authorization owns interactive requests. Runtime mutation callbacks still refresh membership before join-triggered cold admission, capacity retirement, and host launch; the mirroring adapter does likewise before creating a listener with title side effects. Warm host and listener reuse do not refresh read authorization. Local session, assignment, and generation checks are repeated across asynchronous admission boundaries.
 
 Closed-session HTTP authorization establishes identity without issuing a connection ticket. Reopening belongs to Telegram, not the browser. Only an open session can receive a live-connection ticket; later gateway and runtime admission checks remain independent of browser state.
 
 The Mini App owns read-only presentation and client reconnection. It requests fresh authorization through the gateway rather than holding upstream host capabilities. Its rendered transcript is presentation state. The gateway transport consumes retryable gateway diagnostics without forwarding them as host errors, preserving retryability even before the host welcome arrives.
+
+### Watched session history
+
+#### Motivation
+
+The shared index keeps a recent tail ready without downloading the full conversation to each browser. An append-only cache is insufficient because stock OMP can replace or remove earlier content without broadcasting replacement entries. Explicit shake operations and automatic stale-tool-result pruning both cross that boundary. Reusing entry IDs does not imply that their content is unchanged.
+
+A fresh native snapshot previously gave each new viewer an accidental freshness check. Sharing the bot's index removes that check. Cache freshness therefore belongs to the history owner, not to browser reconnection or Telegram listener replacement.
+
+#### Ownership and consistency
+
+The runtime supplies the verified managed history path and native session identity. The history owner observes the resolved parent directory because native full-file rewrites replace the file by rename. A file-only watcher can remain attached to the old inode. Held file handles pin the accepted source identity while directory notifications, periodic metadata checks, and read-boundary checks detect replacement. Notifications are hints, not authority. The filesystem boundary also validates the native session header before accepting a replaced source.
+
+OMP remains the history authority. The service does not reconstruct replicated entries directly from JSONL or depend on private native revision counters. It uses stock OMP without patches or custom builds. The watcher establishes persisted-file freshness, not an in-memory revision. It cannot detect a native mutation before persistence or certify unpersisted changes after a persistence failure.
+
+The history owner coordinates one refresh per managed listener. The Collab transport obtains another snapshot through an authenticated hello on the existing connection. Native snapshot serialization and FIFO delivery establish the boundary between replacement history and subsequent live frames. A separate temporary reader would not share that ordering.
+
+The transport distinguishes a requested refresh from initial connection setup. Refresh snapshots reach the replacement index without entering Telegram receipt recovery or historical reply delivery. Ordinary live and control frames retain their original owners. Identifiable hello refusals remain history-read failures; unrelated instruction errors stay with the instruction handler. Late snapshot frames remain fenced after a failed or timed-out refresh.
+
+The feed owns candidate index construction and publication. It replaces the accepted index only after the complete native snapshot and a compatible source check. A rewrite during refresh leaves the candidate unaccepted. A notification during publication remains pending until another refresh handles it. Cache publication rotates history cursors, not the session or authorization generation. Ordinary appends continue through the existing live connection without forcing another snapshot.
+
+The browser owns history-only replacement. Invalidation cancels older-page requests and marks retained rows as refreshing. Publication replaces them with the recent page and retires the previous cursors. Current streaming, tools, agents, and the tail-following choice remain independent of that reset. Old page replies cannot repopulate the replacement history. A reader far back in history can return to the recent page rather than downloading every preceding page again.
+
+The gateway keeps authorized outgoing delivery independent of awaited history reads. A source check or rebuild cannot hold already-arriving live updates behind the inbound request queue. Source and index errors retain their original diagnostics and leave history unverified without replacing the Telegram listener. Listener disposal owns watcher, file-handle, candidate-index, and refresh cleanup.
+
+A refresh still transfers the complete native snapshot to the bot. Native FIFO delivery can delay subsequent live frames during that transfer. Browser delivery remains paginated.
+
+#### Attached hosts
+
+Stock attached-host registry metadata does not expose a verified history path. Attached viewers therefore receive a fresh native snapshot through a viewer-owned connection and paginated index rather than reusing an unverifiable historical cache. This provides fresh joins, not managed-session rewrite tracking for an already-open attached viewer. Browser disconnection and listener invalidation dispose that reader without stopping the terminal-owned host.
 
 ## Trust boundaries
 

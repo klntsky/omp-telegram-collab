@@ -39,7 +39,7 @@ The editable Collab Web client lives in `web/src`. `web/upstream.json` records i
 pnpm verify
 ```
 
-`verify` runs live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and the CLI and OMP runtime checks, in that order. Configure the saved test-network authorization described below before running it. Use an explicit outer timeout, for example `timeout 2400s pnpm verify`.
+`verify` requires live Telegram end-to-end tests, native end-to-end tests, typechecking, the isolated suite, a production build, and the CLI and OMP runtime checks to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 2400s pnpm verify`; timeout is failure, not a skip or pass.
 
 `check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five. `test:integration` builds production artifacts and runs `smoke`.
 
@@ -48,6 +48,14 @@ Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After ch
 `smoke` runs CLI and OMP runtime checks in separate subprocesses. Run a stage with `pnpm smoke:cli` or `pnpm smoke:runtime`, or select both with `pnpm smoke cli runtime`. The CLI stage requires a current build. The runtime stage requires an installed OMP and configured model credentials for its model-executing checks.
 
 The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay. It does not verify the production relay or Telegram connectivity.
+
+Run native end-to-end checks without Telegram credentials:
+
+```sh
+timeout 540s pnpm test:native
+```
+
+`test:native` uses the installed stock OMP executable, real tools and history files, and a local forwarding relay. Only LLM responses are scripted. Set `OMP_EXECUTABLE` to select the executable. Native test environments keep their process configuration and generated files separate from normal sessions.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 

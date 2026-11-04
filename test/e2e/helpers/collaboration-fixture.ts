@@ -186,6 +186,7 @@ export async function setupCollaborationTest(
             throw error;
           }
         },
+        refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
         close() { connection.close(); },
       };
     } catch (error) {

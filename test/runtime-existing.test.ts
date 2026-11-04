@@ -92,3 +92,64 @@ else if(args[1]==='link'){
     await assert.rejects(runtime.stop(session),/does not support safe retirement/);
   } finally { await runtime.close(); await rm(directory,{recursive:true,force:true}); }
 });
+
+test('history source reads only the verified managed binding without host startup or registry access', { timeout: 5000 }, async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-history-source-')));
+  const config: AppConfig = {
+    bots: [], instances: [{ id: 1, defaultDir: directory, chats: [] }], configPath: join(directory, 'config.yaml'),
+    publicUrl: '', host: '127.0.0.1', port: 0, dataDir: directory,
+    omp: { executable: join(directory, 'must-not-launch'), args: [], maxSessions: 1, startupTimeoutMs: 500 },
+  };
+  writeConfig(config);
+  const runtime = new OmpRuntime(config);
+  t.after(async () => { await runtime.close(); await rm(directory, { recursive: true, force: true }); });
+  const session: TopicSession = {
+    id: 'topic', botId: 1, chatId: -100, threadId: 42, instanceId: 1, cwd: directory,
+    name: 'Managed topic', status: 'open', createdAt: 0, runtime: { kind: 'managed' },
+  };
+  assert.equal(await runtime.historySource(session), undefined);
+  const history = join(directory, 'native-history.jsonl');
+  const binding = join(directory, 'sessions', session.id, 'binding.json');
+  await mkdir(join(directory, 'sessions', session.id), { recursive: true });
+  await writeFile(history, `${JSON.stringify({ type: 'session', version: 3, id: 'native-id', cwd: directory })}\n`);
+  await writeFile(binding, JSON.stringify({ version: 1, sessionId: 'native-id', sessionFile: history, cwd: directory }));
+  assert.deepEqual(await runtime.historySource(session), { sessionId: 'native-id', path: history });
+  const attached: TopicSession = { ...session, runtime: { kind: 'attached', instanceId: 'attached', sessionId: 'native-id' } };
+  assert.equal(await runtime.historySource(attached), undefined);
+  await writeFile(history, `${JSON.stringify({ type: 'session', version: 3, id: 'changed-id', cwd: directory })}\n`);
+  await assert.rejects(runtime.historySource(session), /Managed OMP history identity changed/);
+  assert.equal(await runtime.historySource(attached), undefined);
+  await assert.rejects(runtime.historySource({ ...session, id: '../other' }), /Invalid managed session identifier/);
+  await assert.rejects(runtime.historySource({ ...session, instanceId: 2 }), /Instance path is not configured/);
+  await assert.rejects(stat(join(directory, 'runtime-lock.sqlite')), { code: 'ENOENT' });
+  await runtime.close();
+  await assert.rejects(runtime.historySource(session), /OMP runtime is stopping/);
+});
+
+test('history source preserves file diagnostics and rejects incompatible managed binding data', { timeout: 5000 }, async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-history-source-error-')));
+  const config: AppConfig = {
+    bots: [], instances: [{ id: 1, defaultDir: directory, chats: [] }], configPath: join(directory, 'config.yaml'),
+    publicUrl: '', host: '127.0.0.1', port: 0, dataDir: directory,
+    omp: { executable: join(directory, 'must-not-launch'), args: [], maxSessions: 1, startupTimeoutMs: 500 },
+  };
+  writeConfig(config);
+  const runtime = new OmpRuntime(config);
+  t.after(async () => { await runtime.close(); await rm(directory, { recursive: true, force: true }); });
+  const session: TopicSession = {
+    id: 'topic', botId: 1, chatId: -100, threadId: 42, instanceId: 1, cwd: directory,
+    name: 'Managed topic', status: 'open', createdAt: 0, runtime: { kind: 'managed' },
+  };
+  const history = join(directory, 'missing-history.jsonl');
+  const binding = join(directory, 'sessions', session.id, 'binding.json');
+  await mkdir(join(directory, 'sessions', session.id), { recursive: true });
+  const pin = { version: 1, sessionId: 'native-id', sessionFile: history, cwd: directory };
+  await writeFile(binding, JSON.stringify(pin));
+  await assert.rejects(runtime.historySource(session), { code: 'ENOENT', path: history });
+  await writeFile(binding, JSON.stringify({ ...pin, sessionFile: 'relative.jsonl' }));
+  await assert.rejects(runtime.historySource(session), /Managed OMP binding is incompatible/);
+  await writeFile(binding, JSON.stringify({ ...pin, cwd: join(directory, 'another') }));
+  await assert.rejects(runtime.historySource(session), /Managed OMP binding is incompatible/);
+  await writeFile(binding, '{invalid JSON');
+  await assert.rejects(runtime.historySource(session), SyntaxError);
+});

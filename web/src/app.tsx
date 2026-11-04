@@ -173,6 +173,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const drawerAgent = selectedId != null ? snap.agents.find(a => a.id === selectedId) : undefined;
 	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
 	const closeDrawer = useCallback(() => setSelectedId(null), []);
+	const loadEarlier = useCallback(() => client.loadEarlier(), [client]);
 
 	return (
 		<div className="sh-app">
@@ -197,6 +198,8 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							working={snap.working}
 							host={toolHost}
 							phase={snap.phase}
+							history={snap.history}
+							onLoadEarlier={loadEarlier}
 						/>
 					</div>
 				</section>
