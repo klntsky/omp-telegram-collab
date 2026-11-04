@@ -120,7 +120,7 @@ The private state directory under `~/.local/state/omp-telegram-test` owns cross-
 Install OMP and this checkout's dependencies, then run:
 
 ```sh
-timeout 600s pnpm test:e2e
+timeout 1800s pnpm test:e2e
 ```
 
 Set `OMP_EXECUTABLE` to choose another OMP executable.
@@ -130,6 +130,14 @@ A checkout waits cancellably if every configured bot is busy, and proceeds when 
 `test:e2e` is separate from the isolated `test` suite and runs first in `verify`. Missing credentials, provisioning failures, and timeouts fail acceptance rather than skipping tests. Inspect original Telegram diagnostics before rerunning; an ambiguous failure may already have created a remote resource. Never log or commit saved sessions or bot tokens.
 
 Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` for application workflows and `setupTelegramTest` for lower-level Telegram resources. Both register teardown with the Node test context. Keep scenario-specific transitions and expectations in test files rather than setup helpers.
+
+Select a named live workflow without running the other workflows:
+
+```sh
+timeout 300s pnpm test:one --test-name-pattern questions test/e2e/telegram.test.ts
+```
+
+Selected workflows create their own prerequisite sessions. Workflows selected together run sequentially and share one Telegram and OMP fixture.
 
 Forum provisioning retries only the explicit test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, checking for an already-created matching forum before retrying. This policy belongs to the fixture; the application bot's production rate-limit handling is exercised independently.
 

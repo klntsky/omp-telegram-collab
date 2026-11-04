@@ -65,6 +65,24 @@ export async function enrollForum(app: TelegramWorkflow): Promise<void> {
   });
 }
 
+export async function createManagedTopic(
+  app: TelegramWorkflow & { store: Pick<Store, 'isEnrolled' | 'listSessions'> },
+): Promise<TopicSession> {
+  const existingIds = new Set(app.store.listSessions().map(session => session.id));
+  const topic = await app.telegram.user.client.createForumTopic({
+    chatId: app.telegram.forum.chat, title: 'E2E workflow',
+  });
+  await app.waitForMessageHandled(topic.id);
+  const created = app.store.listSessions().filter(session =>
+    !existingIds.has(session.id) &&
+    session.botId === app.telegram.bot.id &&
+    session.chatId === app.telegram.forum.chatId &&
+    session.runtime.kind === 'managed',
+  );
+  assert.equal(created.length, 1, 'Telegram topic creation must register exactly one new managed session in the enrolled forum');
+  return created[0]!;
+}
+
 export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills', threadId?: number): Promise<TelegramPanel> {
   const start = app.apiCalls.length;
   await app.sendAndWait(command, threadId);
