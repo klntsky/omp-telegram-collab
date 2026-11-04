@@ -27,19 +27,19 @@ const schema = `
       CREATE TABLE replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
       CREATE TABLE prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
       CREATE TABLE message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
-      CREATE TABLE initial_task_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id));
+      CREATE TABLE initial_task_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id),kind TEXT NOT NULL DEFAULT 'initial' CHECK(kind IN ('initial','fork')));
 `;
 
 export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 4) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
+    if (version !== 0 && version !== 5) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database; create a fresh database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=4');
+      db.exec('PRAGMA user_version=5');
     }
     db.exec('COMMIT');
   } catch (error) {

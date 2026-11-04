@@ -147,6 +147,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const skillDirectory = join(agent, 'skills', 'e2e-review');
   await mkdir(skillDirectory, { recursive: true });
   await writeFile(join(skillDirectory, 'SKILL.md'), '---\nname: e2e-review\ndescription: Review the E2E task\n---\nPreserve the e2e-skill-loaded marker when reviewing this task.\n');
+  const followupSkillDirectory = join(agent, 'skills', 'e2e-z-followup');
+  await mkdir(followupSkillDirectory, { recursive: true });
+  await writeFile(join(followupSkillDirectory, 'SKILL.md'), '---\nname: e2e-z-followup\ndescription: Follow up on the E2E task\n---\nPreserve the e2e-followup-loaded marker.\n');
   provider = await startFakeLlmProvider({ scenarios: options.scenarios, log });
   relay = await startLocalRelay();
   const selectedModel = 'e2e/e2e-model';
@@ -154,12 +157,16 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     baseUrl: provider.baseUrl,
     api: 'openai-completions',
     apiKey: provider.apiKey,
-    models: [{ id: 'e2e-model', name: 'E2E Model', reasoning: false, input: ['text', 'image'], supportsTools: true,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1024 }],
+    models: ['e2e-model', 'e2e-alternate'].map(id => ({ id, name: id, reasoning: false, input: ['text', 'image'], supportsTools: true,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1024 })),
   } } }), { mode: 0o600 });
   await writeFile(join(agent, 'config.yml'), JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
+    modelPresets: {
+      'e2e-primary': { modelRoles: { default: selectedModel }, defaultThinkingLevel: 'high' },
+      'e2e-alternate': { modelRoles: { default: 'e2e/e2e-alternate' }, defaultThinkingLevel: 'high' },
+    },
   }), { mode: 0o600 });
   const env: Record<string, string> = {
     HOME: home,

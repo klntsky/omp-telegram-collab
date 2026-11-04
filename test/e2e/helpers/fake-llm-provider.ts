@@ -28,7 +28,7 @@ export interface FakeLlmProvider {
   failure: Promise<never>;
   waitForRequest(name: string, signal: AbortSignal): Promise<void>;
   waitForAbort(name: string, signal: AbortSignal): Promise<void>;
-  assertComplete(): void;
+  assertComplete(names?: readonly string[]): void;
   close(): Promise<void>;
 }
 
@@ -207,9 +207,15 @@ export async function startFakeLlmProvider(options: {
       if (!scenario) throw new Error(`Unknown fake LLM scenario "${name}"`);
       return bounded(Promise.race([scenario.aborted.promise, failure.promise]), signal);
     },
-    assertComplete() {
+    assertComplete(names) {
       const failures = [...errors];
-      for (const scenario of scenarios.values()) {
+      const selected = names === undefined ? [...scenarios.keys()] : names;
+      for (const name of selected) {
+        const scenario = scenarios.get(name);
+        if (!scenario) {
+          failures.push(new Error(`Unknown fake LLM scenario "${name}"`));
+          continue;
+        }
         if (scenario.completed !== scenario.steps.length || scenario.nextStep !== scenario.steps.length) {
           failures.push(new Error(`Fake LLM scenario "${scenario.name}" incomplete: ${scenario.completed}/${scenario.steps.length} responses completed, ${scenario.nextStep}/${scenario.steps.length} steps consumed`));
         }

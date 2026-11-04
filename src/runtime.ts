@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, chmod, constants, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
+import { access, chmod, constants, cp, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createConnection } from 'node:net';
@@ -26,6 +26,13 @@ export class SessionTitleUnsupportedError extends Error {
     super(message);
     this.name = 'SessionTitleUnsupportedError';
   }
+}
+
+export interface ForkTarget {
+  ompSessionId: string;
+  entryId: string;
+  parentEntryId: string | null;
+  kind: 'assistant' | 'collab-prompt';
 }
 
 interface RegistryHost {
@@ -198,6 +205,7 @@ export class OmpRuntime {
   readonly #stopping = new Map<string, Promise<void>>();
   readonly #killing = new Map<string, Promise<void>>();
   readonly #skillProcesses = new Set<ChildProcess>();
+  readonly #forks = new Set<Promise<void>>();
   readonly #skillCatalogs = new Map<string, {
     expiresAt: number;
     catalog?: Array<{ name: string; description: string }>;
@@ -314,21 +322,286 @@ export class OmpRuntime {
     return { worktree, ...(branch !== defaultBranch ? { branch } : {}) };
   }
 
-  async worktree(session: TopicSession, branch?: string): Promise<string> {
+  async fork(source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>): Promise<void> {
+    const assertSessions = () => {
+      this.#assertActive();
+      if (this.#closed) throw new Error('OMP runtime is stopping');
+      for (const session of [source, destination]) {
+        if (session.status !== 'open') throw new Error('Session closed');
+        if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot be forked');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+      }
+      if (source.id === destination.id) throw new Error('Fork destination must be independent');
+      if (source.instanceId !== destination.instanceId || !this.#config.instances.some(instance => instance.id === source.instanceId)) {
+        throw new Error('Fork sessions must belong to the same configured instance');
+      }
+      const activity = this.#hostActivity(source.id);
+      if (activity.busy || this.#pending.has(source.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before forking');
+    };
+    assertSessions();
+    if ([source, destination].some(session => this.#stopping.has(session.id) || this.#pending.has(session.id))) throw new Error('OMP runtime is stopping');
+    if (![...this.#reservations.values()].includes(destination.id)) throw new Error('Fork destination capacity must be reserved');
+    const operation = Promise.resolve().then(async () => {
+      await this.#acquire();
+      assertSessions();
+      const pin = await this.#readManagedBinding(source);
+      if (target && (!pin || target.ompSessionId !== pin.sessionId)) throw new Error('Fork anchor belongs to a different OMP conversation');
+      if (!pin) {
+        try {
+          await lstat(path.join(this.#config.dataDir, 'sessions', source.id, 'history.jsonl'));
+          throw new Error('Unpinned managed histories require explicit recovery');
+        } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+      }
+      if (await this.#readManagedBinding(destination) || this.#managed.get(destination.id)) throw new Error('Fork destination already has an OMP conversation');
+      const cwd = pin?.cwd ?? await this.#validatedSessionCwd(source);
+      if (pin) {
+        const hosts = (await this.#list(Date.now() + this.#config.omp.startupTimeoutMs)).filter(host => host.sessionId === pin.sessionId);
+        if (hosts.length > 1 || hosts.some(host => host.busy !== false)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before forking');
+      }
+      assertSessions();
+      await beforeMutation?.();
+      assertSessions();
+      const dir = path.resolve(this.#config.dataDir, 'sessions', destination.id);
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const stat = await lstat(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Managed session directory is invalid');
+      await chmod(dir, 0o700);
+      if ((await readdir(dir)).some(file => file.endsWith('.jsonl') || file === 'binding.json')) throw new Error('Fork destination already has an OMP conversation');
+      const scratch = await mkdtemp(path.join(dir, 'fork-'));
+      const finalFile = path.join(dir, 'history.jsonl');
+      let moved = false;
+      let published = false;
+      try {
+        const snapshot = path.join(scratch, 'history.jsonl');
+        const id = randomUUID();
+        const contents = pin ? await readFile(pin.sessionFile, 'utf8') : `${JSON.stringify({ type: 'session', version: 3, timestamp: new Date().toISOString(), cwd })}\n`;
+        const headerStart = JSON.parse(contents.slice(0, contents.indexOf('\n'))).type === 'title'
+          ? contents.indexOf('\n') + 1 : 0;
+        const newline = contents.indexOf('\n', headerStart);
+        const header = JSON.parse(contents.slice(headerStart, newline)) as Record<string, unknown>;
+        if (header.type !== 'session' || (pin && (header.id !== pin.sessionId || header.cwd !== cwd))) throw new Error('Managed OMP history identity changed');
+        header.id = id;
+        const titleSlot = contents.slice(0, headerStart);
+        await privateFile(snapshot, `${titleSlot}${JSON.stringify(header)}\n${contents.slice(newline + 1)}`, true);
+        const copyArtifacts = async (from: string, to: string) => {
+          try { await lstat(from); }
+          catch (error) { if (errno(error, 'ENOENT')) return; throw error; }
+          await cp(from, to, { recursive: true, errorOnExist: true, force: false });
+        };
+        const artifactPath = (file: string) => file.replace(/\.jsonl$/, '');
+        if (pin) await copyArtifacts(artifactPath(pin.sessionFile), artifactPath(snapshot));
+        const config = path.join(scratch, 'runtime.yml');
+        await privateFile(config, JSON.stringify({ collab: { autoStart: false }, startup: { checkUpdate: false, setupWizard: false } }));
+        const tree = await this.#forkRpc(snapshot, cwd, config, { type: 'get_tree' });
+        if (!Array.isArray(tree.tree) || !(tree.leafId === null || typeof tree.leafId === 'string')) throw new Error('Native OMP returned an invalid session tree');
+        const entries = new Map<string, Record<string, unknown>>();
+        const visit = (nodes: unknown[]) => {
+          for (const node of nodes) {
+            if (!record(node) || !record(node.entry) || typeof node.entry.id !== 'string' || !Array.isArray(node.children)) throw new Error('Native OMP returned an invalid session tree');
+            entries.set(node.entry.id, node.entry);
+            visit(node.children);
+          }
+        };
+        visit(tree.tree);
+        const branch: Record<string, unknown>[] = [];
+        let leaf = tree.leafId;
+        const seen = new Set<string>();
+        while (typeof leaf === 'string') {
+          const entry = entries.get(leaf);
+          if (!entry || seen.has(leaf)) throw new Error('Native OMP returned an invalid active branch');
+          seen.add(leaf);
+          branch.push(entry);
+          const parent = entry.parentId;
+          if (parent !== null && typeof parent !== 'string') throw new Error('Native OMP returned an invalid active branch');
+          leaf = parent;
+        }
+        if (target) {
+          const selected = branch.find(entry => entry.id === target.entryId);
+          if (!selected || selected.parentId !== target.parentEntryId ||
+              (target.kind === 'assistant' ? !(selected.type === 'message' && record(selected.message) && selected.message.role === 'assistant')
+                : !(selected.type === 'custom_message' && selected.customType === 'collab-prompt'))) throw new Error('Fork anchor is not on the current active branch');
+          if (target.kind === 'collab-prompt') {
+            const selectedPath = branch.slice(branch.indexOf(selected)).reverse();
+            await privateFile(snapshot, titleSlot + [header, ...selectedPath].map(entry => JSON.stringify(entry)).join('\n') + '\n');
+          }
+        }
+        assertSessions();
+        const current = await this.#readManagedBinding(source);
+        if (current?.sessionId !== pin?.sessionId || current?.sessionFile !== pin?.sessionFile) throw new Error('Managed OMP conversation changed while forking');
+        if (pin && await readFile(pin.sessionFile, 'utf8') !== contents) throw new Error('Managed OMP active history changed while forking');
+        const state = await this.#forkRpc(snapshot, cwd, config, { type: 'fork', ...(target?.kind === 'assistant' ? { entryId: target.entryId } : {}) });
+        if (typeof state.sessionId !== 'string' || state.sessionId === id || state.sessionId === pin?.sessionId || typeof state.sessionFile !== 'string') throw new Error('Native OMP fork returned an invalid session identity');
+        const nativeFile = await realpath(state.sessionFile);
+        if (!nativeFile.startsWith(`${scratch}${path.sep}`)) throw new Error('Native OMP fork escaped its destination directory');
+        const forkHeader = await readHeader(nativeFile);
+        if (forkHeader.id !== state.sessionId || forkHeader.cwd !== cwd) throw new Error('Native OMP fork history identity changed');
+        const forkContents = await readFile(nativeFile, 'utf8');
+        const forkHeaderStart = JSON.parse(forkContents.slice(0, forkContents.indexOf('\n'))).type === 'title'
+          ? forkContents.indexOf('\n') + 1 : 0;
+        const forkNewline = forkContents.indexOf('\n', forkHeaderStart);
+        const nativeHeader = JSON.parse(forkContents.slice(forkHeaderStart, forkNewline)) as Record<string, unknown>;
+        if (pin) nativeHeader.parentSession = target ? pin.sessionFile : pin.sessionId;
+        else delete nativeHeader.parentSession;
+        await privateFile(nativeFile, `${forkContents.slice(0, forkHeaderStart)}${JSON.stringify(nativeHeader)}\n${forkContents.slice(forkNewline + 1)}`);
+        await beforeMutation?.();
+        assertSessions();
+        await rename(nativeFile, finalFile);
+        moved = true;
+        try { await rename(artifactPath(nativeFile), artifactPath(finalFile)); }
+        catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+        await chmod(finalFile, 0o600);
+        await beforeMutation?.();
+        assertSessions();
+        await writeBinding(dir, { version: 1, sessionId: state.sessionId, sessionFile: finalFile, cwd });
+        published = true;
+        destination.cwd = cwd;
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+        if (moved && !published) {
+          await rm(finalFile, { force: true });
+          await rm(finalFile.replace(/\.jsonl$/, ''), { recursive: true, force: true });
+          await rm(path.join(dir, 'binding.json'), { force: true });
+        }
+      }
+    });
+    this.#forks.add(operation);
+    const stopping = operation.then(() => undefined, () => undefined);
+    this.#stopping.set(source.id, stopping);
+    this.#stopping.set(destination.id, stopping);
+    try { await operation; }
+    finally {
+      this.#forks.delete(operation);
+      if (this.#stopping.get(source.id) === stopping) this.#stopping.delete(source.id);
+      if (this.#stopping.get(destination.id) === stopping) this.#stopping.delete(destination.id);
+    }
+  }
+
+  async existingBinding(session: TopicSession): Promise<{ sessionId: string } | undefined> {
+    this.#assertActive();
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot be forked');
+    if (session.status !== 'open') throw new Error('Session closed');
+    if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance ID is not configured');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    const pin = await this.#readManagedBinding(session);
+    return pin ? { sessionId: pin.sessionId } : undefined;
+  }
+
+  async #forkRpc(sessionFile: string, cwd: string, config: string, command: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (this.#closed) throw new Error('OMP runtime is stopping');
+    const child = spawn(this.#config.omp.executable, [
+      ...this.#config.omp.args, '--mode', 'rpc', '--resume', sessionFile,
+      '--session-dir', path.dirname(sessionFile), '--cwd', cwd, '--config', config, '--no-title',
+    ], { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    this.#skillProcesses.add(child);
+    let buffer = '';
+    let diagnostics = '';
+    let failure: unknown;
+    let result: Record<string, unknown> | undefined;
+    let maxReassembledBytes = 64 * 1024 * 1024;
+    let protocolReady = false;
+    let chunks: { id: string; count: number; byteLength: number; parts: Buffer[]; received: number } | undefined;
+    const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
+    const timer = setTimeout(() => {
+      failure ??= new Error('Native OMP fork command timed out');
+      this.#killSkillProcess(child);
+    }, this.#config.omp.startupTimeoutMs);
+    child.once('error', error => { failure ??= error; });
+    child.stdin.on('error', error => { failure ??= error; this.#killSkillProcess(child); });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', part => { diagnostics += part; });
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', part => {
+      buffer += part;
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line.trim()) continue;
+        try {
+          let frame: unknown = JSON.parse(line);
+          if (!record(frame)) throw new Error('Native OMP emitted an invalid RPC frame');
+          if (frame.type === 'rpc_chunk') {
+            if (!protocolReady || typeof frame.chunkId !== 'string' || !frame.chunkId ||
+                !Number.isSafeInteger(frame.index) || !Number.isSafeInteger(frame.count) ||
+                !Number.isSafeInteger(frame.byteLength) || typeof frame.data !== 'string') throw new Error('Native OMP emitted an invalid RPC chunk');
+            const index = frame.index as number;
+            const count = frame.count as number;
+            const byteLength = frame.byteLength as number;
+            if (count < 1 || index < 0 || index >= count || byteLength < 1 || byteLength > maxReassembledBytes ||
+                count > byteLength || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.data)) throw new Error('Native OMP emitted an invalid RPC chunk');
+            if (!chunks) {
+              if (index !== 0) throw new Error('Native OMP interrupted an RPC chunk sequence');
+              chunks = { id: frame.chunkId, count, byteLength, parts: [], received: 0 };
+            }
+            if (frame.chunkId !== chunks.id || count !== chunks.count || byteLength !== chunks.byteLength || index !== chunks.parts.length) throw new Error('Native OMP interleaved RPC chunks');
+            const bytes = Buffer.from(frame.data, 'base64');
+            chunks.received += bytes.length;
+            if (chunks.received > byteLength) throw new Error('Native OMP RPC chunk exceeded declared size');
+            chunks.parts.push(bytes);
+            if (chunks.parts.length < count) continue;
+            if (chunks.received !== byteLength) throw new Error('Native OMP RPC chunk size mismatch');
+            frame = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.parts, byteLength)));
+            chunks = undefined;
+            if (!record(frame) || frame.type === 'rpc_chunk') throw new Error('Native OMP emitted an invalid reassembled RPC frame');
+          } else if (chunks) throw new Error('Native OMP interrupted an RPC chunk sequence');
+          if (frame.type === 'ready') {
+            if (typeof frame.maxReassembledFrameBytes === 'number' && Number.isSafeInteger(frame.maxReassembledFrameBytes) && frame.maxReassembledFrameBytes > 0) maxReassembledBytes = Math.min(maxReassembledBytes, frame.maxReassembledFrameBytes);
+            if (Array.isArray(frame.supportedProtocolVersions) && frame.supportedProtocolVersions.includes(2)) {
+              child.stdin.write(`${JSON.stringify({ id: 'protocol', type: 'negotiate_protocol', protocolVersion: 2 })}\n`);
+            } else child.stdin.write(`${JSON.stringify({ ...command, id: 'operation' })}\n`);
+            continue;
+          }
+          if (frame.type === 'response' && frame.id === 'protocol') {
+            if (frame.success !== true) throw new Error(typeof frame.error === 'string' ? frame.error : 'Native OMP RPC protocol negotiation failed', { cause: frame });
+            protocolReady = true;
+            child.stdin.write(`${JSON.stringify({ ...command, id: 'operation' })}\n`);
+            continue;
+          }
+          if (frame.type !== 'response' || (frame.id !== 'operation' && frame.id !== 'state')) continue;
+          if (frame.success !== true) throw new Error(typeof frame.error === 'string' ? frame.error : 'Native OMP fork RPC failed', { cause: frame });
+          if (!record(frame.data)) throw new Error('Native OMP fork returned invalid RPC data', { cause: frame });
+          if (frame.id === 'operation' && command.type === 'fork') {
+            if (frame.data.cancelled !== false) throw new Error('Native OMP fork was cancelled', { cause: frame });
+            child.stdin.write(`${JSON.stringify({ id: 'state', type: 'get_state' })}\n`);
+          } else {
+            result = frame.data;
+            child.stdin.end();
+          }
+        } catch (error) {
+          failure ??= error;
+          this.#killSkillProcess(child);
+        }
+      }
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (failure !== undefined) {
+        if (failure instanceof Error && diagnostics) failure.message += `\n${diagnostics}`;
+        reject(failure);
+      }
+      else if (code !== 0 || !result) reject(Object.assign(new Error(diagnostics || 'Native OMP fork exited without a response'), { code, signal }));
+      else resolve(result);
+    });
+    try { return await promise; }
+    finally { this.#skillProcesses.delete(child); }
+  }
+
+  async worktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
-    const reservation = await this.reserveSession(session.id);
-    try { return await this.#switchWorktree(session, branch); }
+    const reservation = await this.reserveSession(session.id, beforeMutation);
+    try { return await this.#switchWorktree(session, branch, beforeMutation); }
     finally { reservation.release(); }
   }
-  async #switchWorktree(session: TopicSession, branch?: string): Promise<string> {
+  async #switchWorktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     this.#assertActive();
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (this.#closed || this.#stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (!this.#config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     const activity = this.#hostActivity(session.id);
     if (activity.busy || activity.leases || this.#pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
-    await this.ensure(session);
+    await this.ensure(session, beforeMutation);
     const host = this.#managed.get(session.id);
     if (!host) throw new Error('Managed OMP host is not available');
     const registered = (await this.#list(Date.now() + this.#config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
@@ -337,9 +610,12 @@ export class OmpRuntime {
       throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
     }
     const operation = (async () => {
+      await beforeMutation?.();
       await this.#shutdown(session.id, host, 'worktree');
       if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      await beforeMutation?.();
       const { dir, pin } = await this.#prepare(session);
+      await beforeMutation?.();
       const result = await this.#worktreeRpc(dir, pin, branch);
       const state = result.state;
       if (state.sessionId !== pin.sessionId || typeof state.sessionFile !== 'string') {
@@ -350,7 +626,9 @@ export class OmpRuntime {
       const cwd = await realpath(header.cwd);
       await this.#validateCwd(cwd);
       if (header.id !== pin.sessionId || header.cwd !== cwd) throw new Error('Native OMP worktree history identity changed');
+      await beforeMutation?.();
       await chmod(sessionFile, 0o600);
+      await beforeMutation?.();
       await writeBinding(dir, { ...pin, cwd, sessionFile });
       session.cwd = cwd;
       if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
@@ -1232,6 +1510,7 @@ export class OmpRuntime {
       await Promise.allSettled([...this.#skillDiscovery.values()].map(discovery => discovery.promise));
       this.#skillCatalogs.clear();
       await Promise.allSettled(this.#pending.values());
+      await Promise.allSettled(this.#forks);
       await Promise.allSettled(this.#killing.values());
       await this.#acquiring?.catch(() => undefined);
       await this.retireIdle(0);
