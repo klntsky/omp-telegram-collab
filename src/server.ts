@@ -278,7 +278,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         await authorize(identity,connectedSession,readAccess);
         if (!upstream) throw new Error('Session not connected');
         checkTermination();
-        await upstream.send(frame);
+        void Promise.resolve(upstream.send(frame)).catch(failAction);
       });
     });
     enqueue(async () => {
