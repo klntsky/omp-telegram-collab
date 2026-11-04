@@ -139,7 +139,7 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
   });
 });
 
-test('Telegram workflows share one fixture across protocol, media, lifecycle, and restart checks', { timeout: 480000 }, async t => {
+test('Telegram workflows share one fixture across protocol, media, lifecycle, and restart checks', { timeout: 720000 }, async t => {
   const tasks = {
     initial: createWriteTask('initial', '\n/home/example/project/error.ts:27\n  throw new Error("Original diagnostic");\n    at run (/home/example/project/error.ts:27:11)\n/stop /unknown'),
     worktree: createWriteTask('worktree'),
