@@ -172,6 +172,14 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     identityNew: createWriteTask('identity-new'),
     identityOldRestarted: createWriteTask('identity-old-restarted'),
     identityNewRestarted: createWriteTask('identity-new-restarted'),
+    defaultsFirst: createWriteTask('defaults-first'),
+    defaultsUnchanged: createWriteTask('defaults-unchanged'),
+    defaultsSwitched: createWriteTask('defaults-switched'),
+    defaultsManual: createWriteTask('defaults-manual'),
+    defaultsNext: createWriteTask('defaults-next'),
+    capacityFirst: createWriteTask('capacity-first'),
+    capacitySecond: createWriteTask('capacity-second'),
+    capacityPending: createWriteTask('capacity-pending'),
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };
@@ -181,7 +189,9 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
       : [questionStep(name)],
   }));
   const scenarios = Object.values(tasks).map(task =>
-    task === tasks.question || task === tasks.customAnswer ? questionScenario(task) : writeScenario(task));
+    task === tasks.capacityFirst || task === tasks.capacitySecond
+      ? { name: task.name, prompt: task.prompt, steps: [{ type: 'await-abort' as const }] }
+      : task === tasks.question || task === tasks.customAnswer ? questionScenario(task) : writeScenario(task));
   let app: CollaborationTest;
   let baseline: AppConfig;
   const cleanups: Array<() => void | Promise<void>> = [];
@@ -219,12 +229,137 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     const errors: unknown[] = [];
     for (const session of app.store.listSessions(app.telegram.bot.id)) {
       if (previousIds.has(session.id)) continue;
+      if (session.status === 'open' && app.store.hasPendingInitialTask(session.id)) {
+        try { await app.sendAndWait('/kill', session.threadId); } catch (error) { errors.push(error); }
+      }
       try { await app.runtime.kill(session); } catch (error) { errors.push(error); }
     }
     if (errors.length === 1) throw errors[0];
     if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
   });
   const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
+  it('forum model presets and first-prompt skills', async () => {
+    const chooseDefault = async (field: 'default_model_preset' | 'default_new_topic_skill', value: string) => {
+      const panel = await openPanel(app, '/settings');
+      const choose = async (wanted: Record<string, string>) => {
+        const token = panel.buttons[0]!.split(':')[1]!;
+        const row = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(app.telegram.bot.id, token) as { panel: string };
+        const saved = z.object({ choices: z.array(z.record(z.string(), z.unknown())) }).parse(JSON.parse(row.panel));
+        const index = saved.choices.findIndex(action => Object.entries(wanted).every(([key, expected]) => action[key] === expected));
+        assert.ok(index >= 0, `Missing native settings action ${JSON.stringify(wanted)}`);
+        assert.ok(panel.buttons[index]!.startsWith(`settings:${token}:`));
+        await clickPanel(app, panel, index);
+      };
+      await choose({ kind: 'page', page: field === 'default_model_preset' ? 'presets' : 'skills' });
+      await choose({ kind: 'default', field, value });
+      assert.equal(savedChat()[field], value);
+      await clickPanel(app, panel, -1);
+    };
+    await chooseDefault('default_model_preset', 'e2e-alternate');
+    await chooseDefault('default_new_topic_skill', 'e2e-review');
+    const first = await app.sendAndWait(`/new ${tasks.defaultsFirst.prompt}`);
+    const firstReply = await completeWriteTask(app, tasks.defaultsFirst, first);
+    const session = app.store.getTopic({ botId: app.telegram.bot.id, destination: {
+      kind: 'topic', chatId: app.telegram.forum.chatId, threadId: firstReply.replyToMessage!.threadId!,
+    } })!;
+    assert.equal(app.omp.provider.requests.get(tasks.defaultsFirst.name)![0]!.model, 'e2e-alternate');
+    assert.equal(taskInput(app.omp.provider, tasks.defaultsFirst).text.split('/skill:e2e-review').length - 1, 1);
+    assert.equal(app.store.getNewTopicSkill(session.id), undefined);
+    await chooseDefault('default_model_preset', 'e2e-primary');
+    const unchanged = await app.sendAndWait(`/p ${tasks.defaultsUnchanged.prompt}`, session.threadId);
+    await completeWriteTask(app, tasks.defaultsUnchanged, unchanged, session.threadId);
+    assert.equal(app.omp.provider.requests.get(tasks.defaultsUnchanged.name)![0]!.model, 'e2e-alternate');
+    assert.ok(!taskInput(app.omp.provider, tasks.defaultsUnchanged).text.includes('/skill:e2e-review'));
+    await chooseDefault('default_model_preset', 'e2e-alternate');
+    const binding = await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8');
+    await app.sendAndWait('/model_preset e2e-primary', session.threadId);
+    assert.equal(savedChat().default_model_preset, 'e2e-alternate');
+    const switched = await app.sendAndWait(`/p ${tasks.defaultsSwitched.prompt}`, session.threadId);
+    await completeWriteTask(app, tasks.defaultsSwitched, switched, session.threadId);
+    assert.equal(app.omp.provider.requests.get(tasks.defaultsSwitched.name)![0]!.model, 'e2e-model');
+    assert.ok(!taskInput(app.omp.provider, tasks.defaultsSwitched).text.includes('/skill:e2e-review'));
+    assert.equal(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8'), binding);
+    await app.sendAndWait('/kill', session.threadId);
+
+    const manual = await createManagedTopic(app);
+    assert.equal(app.store.getNewTopicSkill(manual.id), 'e2e-review');
+    await chooseDefault('default_new_topic_skill', 'e2e-z-followup');
+    assert.equal(app.store.getNewTopicSkill(manual.id), 'e2e-review');
+    await app.sendAndWait('/skill_e2e_review', manual.threadId);
+    const accepted = await app.sendAndWait(`/p ${tasks.defaultsManual.prompt}`, manual.threadId);
+    await completeWriteTask(app, tasks.defaultsManual, accepted, manual.threadId);
+    const manualInput = taskInput(app.omp.provider, tasks.defaultsManual).text;
+    assert.equal(manualInput.split('/skill:e2e-review').length - 1, 1);
+    assert.ok(!manualInput.includes('/skill:e2e-z-followup'));
+    assert.equal(app.store.getNewTopicSkill(manual.id), undefined);
+    assert.equal(app.omp.provider.requests.get(tasks.defaultsManual.name)![0]!.model, 'e2e-alternate');
+    await app.sendAndWait('/kill', manual.threadId);
+    const next = await app.sendAndWait(`/new ${tasks.defaultsNext.prompt}`);
+    await completeWriteTask(app, tasks.defaultsNext, next);
+    const nextInput = taskInput(app.omp.provider, tasks.defaultsNext).text;
+    assert.equal(nextInput.split('/skill:e2e-z-followup').length - 1, 1);
+    assert.ok(!nextInput.includes('/skill:e2e-review'));
+    assert.equal(app.omp.provider.requests.get(tasks.defaultsNext.name)![0]!.model, 'e2e-alternate');
+    app.omp.provider.assertComplete([tasks.defaultsFirst.name, tasks.defaultsUnchanged.name, tasks.defaultsSwitched.name, tasks.defaultsManual.name, tasks.defaultsNext.name]);
+  });
+
+  it('managed process capacity confirmation', async t => {
+    const limit = readConfig(app.config.configPath).omp.maxSessions;
+    const prerequisites = [tasks.capacityFirst, tasks.capacitySecond];
+    assert.equal(limit, prerequisites.length);
+    const activeThreads: number[] = [];
+    for (const task of prerequisites) {
+      const existingIds = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
+      await app.sendAndWait(`/new ${task.prompt}`);
+      await app.omp.provider.waitForRequest(task.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
+      const session = app.store.listSessions(app.telegram.bot.id).find(session => !existingIds.has(session.id));
+      assert.ok(session);
+      assert.equal(await app.runtime.isRunning(session), true);
+      activeThreads.push(session.threadId);
+    }
+    assert.equal((await app.omp.listHosts()).length, limit);
+    const start = app.apiCalls.length;
+    const sent = await app.sendAndWait(`/new ${tasks.capacityPending.prompt}`);
+    const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
+    assert.ok(pending, 'Capacity-blocked /new must preserve its initial task');
+    const confirmation = await waitForPanel(app, 'folder', 'capacity:approve:', start, pending.threadId);
+    const approve = confirmation.buttons.find(data => data.startsWith('capacity:approve:'))!;
+    const cancel = confirmation.buttons.find(data => data.startsWith('capacity:cancel:'))!;
+    const click = (data: string, messageId = confirmation.messageId) => app.telegram.user.client.getCallbackAnswer({
+      chatId: app.telegram.forum.chat, message: messageId, data: Buffer.from(data),
+    });
+    const assertPending = async () => {
+      assert.equal(readConfig(app.config.configPath).omp.maxSessions, limit);
+      assert.equal(app.runtime.getSessionLimit(), limit);
+      assert.equal(app.store.hasPendingInitialTask(pending.id), true);
+      assert.deepEqual(app.omp.provider.requests.get(tasks.capacityPending.name), []);
+      await assert.rejects(stat(join(pending.cwd, tasks.capacityPending.path)), { code: 'ENOENT' });
+      assert.equal((await app.omp.listHosts()).length, limit);
+    };
+    await assertPending();
+    await click(cancel);
+    await assertPending();
+    await click(approve);
+    await assertPending();
+    const refreshStart = app.apiCalls.length;
+    await app.sendAndWait(`/p ${tasks.capacityPending.prompt}`, pending.threadId);
+    const fresh = await waitForPanel(app, 'folder', 'capacity:approve:', refreshStart, pending.threadId);
+    const freshApprove = fresh.buttons.find(data => data.startsWith('capacity:approve:'))!;
+    assert.notEqual(freshApprove, approve);
+    await assertPending();
+    await click(freshApprove, fresh.messageId);
+    await completeWriteTask(app, tasks.capacityPending, sent, pending.threadId);
+    assert.equal(readConfig(app.config.configPath).omp.maxSessions, limit * 2);
+    assert.equal(app.runtime.getSessionLimit(), limit * 2);
+    assert.equal(app.store.hasPendingInitialTask(pending.id), false);
+    assert.equal(app.omp.provider.requests.get(tasks.capacityPending.name)!.length, 2);
+    assert.ok((await readSessionHistory(app.omp.dataDir, pending.id)).includes(tasks.capacityPending.toolCallId));
+    for (const [index, threadId] of activeThreads.entries()) {
+      await app.sendAndWait('/stop', threadId);
+      await app.omp.provider.waitForAbort(prerequisites[index]!.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
+    }
+    app.omp.provider.assertComplete([...prerequisites.map(task => task.name), tasks.capacityPending.name]);
+  });
   it('worktrees and forks', async () => {
     const [me, chat, member] = await Promise.all([
       app.telegram.api.getMe(), app.telegram.api.getChat(app.telegram.forum.chatId),

@@ -39,19 +39,15 @@ The editable Collab Web client lives in `web/src`. `web/upstream.json` records i
 pnpm verify
 ```
 
-`verify` requires live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and all integration stages to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
+`verify` runs live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and the CLI and OMP runtime checks, in that order. Configure the saved test-network authorization described below before running it. Use an explicit outer timeout, for example `timeout 2400s pnpm verify`.
 
-`check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five; mocked collaborators only establish local behavior, not compatibility with the external service they imitate. `test:integration` builds production artifacts and runs `smoke`.
-
-Choose tests from the behavior in [Product](PRODUCT.md), not the inventory of internal methods. Prefer live end-to-end coverage for successful workflows across Telegram, BotService, and OMP. Keep deterministic isolated coverage for authorization, data preservation, cancellation, retry timing, and races with observable product consequences. Prefer existing bot-level scenarios over a second matrix for their internal helpers. Dependency internals, fixture self-tests, trivial accessor roundtrips, and display wording do not need permanent tests. When replacing meaningful isolated coverage with a live case, compare the actual input handling, protocol data, persisted state, and side effects; shared command names alone do not establish duplication.
+`check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five. `test:integration` builds production artifacts and runs `smoke`.
 
 Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After changing the grammar, run `pnpm generate:commands` and commit both generated files, `src/telegram-command-parser.ts` and `src/telegram-command-parser.terms.ts`. Both `pnpm check` and `pnpm build` regenerate them. The tokenizer supplies named terminals at their original message offsets; the parser reads the original message, not an encoded command alphabet. Lezer's generator is a development dependency; production uses the generated tables and `@lezer/lr` with strict parsing. Unresolved grammar conflicts fail generation. Do not add ambiguity annotations or parser recovery to accept conflicting command forms.
 
-`smoke` runs CLI, Telegram, gateway, and OMP runtime stages in separate subprocesses. Run a stage with `pnpm smoke:cli`, `pnpm smoke:telegram`, `pnpm smoke:gateway`, or `pnpm smoke:runtime`. Select several with `pnpm smoke telegram gateway`. The CLI stage requires a current build. The runtime stage requires an installed OMP and enough resources to start within its timeout. Its model-executing lifecycle checks also require configured model credentials. Local fixtures need no live Telegram credentials.
+`smoke` runs CLI and OMP runtime checks in separate subprocesses. Run a stage with `pnpm smoke:cli` or `pnpm smoke:runtime`, or select both with `pnpm smoke cli runtime`. The CLI stage requires a current build. The runtime stage requires an installed OMP and configured model credentials for its model-executing checks.
 
-The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
-
-Local fixtures use OS-assigned ephemeral ports and keep each listener bound until teardown. Use the returned `app.url` for loopback transport and `app.config.publicUrl` for the gateway Origin header; the configured public origin is independent of the listening port. Bot or gateway initialization failures close the resources already started and preserve the original startup diagnostic.
+The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay. It does not verify the production relay or Telegram connectivity.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 
@@ -62,7 +58,7 @@ timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use
 
 `test:one` accepts Node test-runner flags and one or more paths without adding the full-suite glob. Run the disposable real-process kill check with `timeout 180s pnpm exec tsx scripts/runtime-kill-smoke.ts`.
 
-Live Telegram verification requires a BotFather token and forum groups. Mini App verification also requires its BotFather registration and HTTPS deployment. Local fixtures cannot verify BotFather settings or Telegram client behavior. Keep services that own active coding sessions running while testing lifecycle notices elsewhere.
+Backend live tests do not replace a check in the Telegram Mini App client. See [README](README.md) for BotFather registration and HTTPS setup.
 
 ## Run tests against Telegram's test network
 

@@ -33,8 +33,6 @@
     "verify": "pnpm test:e2e && pnpm check && pnpm test && pnpm test:integration",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:cli": "tsx scripts/smoke.ts cli",
-    "smoke:telegram": "tsx scripts/smoke.ts telegram",
-    "smoke:gateway": "tsx scripts/smoke.ts gateway",
     "smoke:runtime": "tsx scripts/smoke.ts runtime"
   },
   "dependencies": {
