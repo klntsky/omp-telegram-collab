@@ -152,9 +152,9 @@ When the Mini App is enabled, the reverse proxy or tunnel provides public HTTPS 
 
 ## Independent Telegram test clients
 
-Each live test fixture owns its Telegram user client, peer cache, updates, and MTProto connection. A retained authorization approves a fresh authorization for that fixture; independent authorization keys isolate concurrent checkouts without a proxy or shared client process.
+Each live test worker process owns its Telegram user client, peer cache, updates, and MTProto connection. A retained authorization approves a fresh authorization for that worker; independent authorization keys isolate parallel workers and checkouts without a proxy or shared client process. Sequential fixtures borrow the client exclusively, while the worker retains ownership between fixtures and closes it at final teardown.
 
-Cross-process filesystem locks protect authorization selection and reusable bot ownership. An authorization remains exclusively owned while connected, so another fixture cannot use an active key as its seed. Definitively invalid authorizations are removed from the shared private session store; transient failures do not revoke or discard credentials.
+Cross-process filesystem locks protect authorization selection and reusable bot ownership. An authorization remains exclusively owned for its worker's lifetime, so another worker cannot use an active key as its seed. Definitively invalid authorizations are removed from the shared private session store; transient failures do not revoke or discard credentials.
 
 Each checkout can lease only one bot at a time. A checkout-scoped lock serializes its bot-using fixtures, and a bot-scoped lock excludes competing checkouts. Acquisition waits cancellably for available capacity rather than creating another bot. The fixture owns its forum and must finish application polling before releasing its bot lease. Unsafe teardown retains ownership until the poller stops or the owning process exits. Tokens and sessions remain in shared private storage; test teardown neither deletes bots nor logs out retained sessions.
 
