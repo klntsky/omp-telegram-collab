@@ -3333,7 +3333,7 @@ export class BotService {
       await replyTo(
         ctx,
         destination,
-        'This topic is closed. Reopen it in Telegram or confirm reopening in the Mini App before sending work.',
+        'This topic is closed. Reopen it in Telegram before sending work.',
       );
       return;
     }
