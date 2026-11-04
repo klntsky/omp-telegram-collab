@@ -3865,6 +3865,16 @@ export class BotService {
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
+      console.warn(JSON.stringify({
+        event: 'omp-mirror-reconnect-exhausted',
+        at: new Date().toISOString(),
+        botId: this.id,
+        sessionId: session.id,
+        chatId: session.chatId,
+        threadId: session.threadId,
+        attempts: attempt,
+        generation: this.options.store.getSessionGeneration(session.id),
+      }));
       void sendTo(
         this.bot.api,
         topicDestination(session.chatId, session.threadId),
@@ -4039,6 +4049,20 @@ export class BotService {
             onFrame: (frame) => this.onFrame(session, listener, frame),
             onClose: (reason) => {
               if (!active()) return;
+              console.warn(JSON.stringify({
+                event: 'omp-mirror-disconnected',
+                at: new Date().toISOString(),
+                botId: this.id,
+                sessionId: session.id,
+                chatId: session.chatId,
+                threadId: session.threadId,
+                instanceId: binding.instanceId,
+                hostGeneration: binding.generation,
+                ompSessionId: binding.sessionId,
+                generation,
+                connected: listener.connection !== undefined,
+                reason,
+              }));
               this.sessionObservation(session.id).failure = {
                 operation: 'Mirroring disconnected',
                 at: Date.now(),
