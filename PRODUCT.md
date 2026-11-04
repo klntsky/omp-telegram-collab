@@ -348,8 +348,8 @@ The current supergroup owner and administrators can attach a control-shared OMP 
 ### 4.1. Session history and live tracking
 
 - Opening the Mini App downloads a recent page, not the complete session history. Earlier entries load when the reader scrolls near the top or selects Show earlier.
-- Active mirrored sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Viewers share the bot's existing connection rather than opening another OMP connection.
-- Historical pages preserve entry order and the reader's visible position while live output continues. Reading earlier messages disables automatic tail following. Returning to the bottom or selecting Jump to latest resumes it, including while an earlier-page request is pending.
+- Active mirrored sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Viewers share the bot's existing connection rather than opening another OMP connection. New viewers receive the latest observed session title.
+- Historical pages preserve entry order and the reader's visible position while live output continues, including when images finish loading above the viewport. Reading earlier messages disables automatic tail following. Returning to the bottom or selecting Jump to latest resumes it, including while an earlier-page request is pending.
 - History-read timeouts retain the current transcript and offer retry. Reconnecting replaces loaded history with a fresh recent page and discards requests and cursors from the previous connection.
 - The bot's native OMP handshake is unchanged. A new bot connection receives OMP's initial snapshot before serving history. Live replay includes only state observed by that listener; it does not invent partial messages or running tools that predate the connection.
 

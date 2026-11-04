@@ -153,7 +153,12 @@ export class SessionFeed {
       ...Array.from(this.tools.values()).flatMap(tool => [tool.start, tool.update]), ...this.bus.values()]
       .filter((value): value is Retained => value !== undefined).sort((a,b) => a.order-b.order);
     const viewer: Viewer = {handlers, requests: new Set()};
-    handlers.onFrame({...this.welcome, entryCount: page.entries.length, readOnly: true});
+    const state = this.state?.frame;
+    const header = state?.t === 'state' && state.state.sessionName !== undefined &&
+      state.state.sessionName !== this.welcome.header.title
+      ? {...this.welcome.header, title: state.state.sessionName}
+      : this.welcome.header;
+    handlers.onFrame({...this.welcome, header, entryCount: page.entries.length, readOnly: true});
     handlers.onFrame({t: 'history-state', older: page.older});
     handlers.onFrame({t: 'snapshot-chunk', entries: page.entries, final: true});
     for (const value of retained) handlers.onFrame(value.frame);

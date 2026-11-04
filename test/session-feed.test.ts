@@ -109,6 +109,25 @@ test('page byte budget never truncates an indivisible oversized entry or blocks 
   assert.equal(old.older, null);
 });
 
+test('warm joins snapshot current session titles without changing earlier bootstraps', t => {
+  const feed = new SessionFeed(() => {});
+  t.after(() => feed.close());
+  const initial = welcome(0);
+  initial.header.title = 'Original';
+  feed.accept(initial);
+  feed.accept({t: 'snapshot-chunk', entries: [], final: true});
+  const first = viewer(feed);
+  feed.accept({t: 'state', state: {...state, sessionName: 'Renamed'}});
+  const second = viewer(feed);
+  feed.accept({t: 'state', state: {...state, sessionName: 'Renamed again'}});
+  const third = viewer(feed);
+  for (const [reader, title] of [[first, 'Original'], [second, 'Renamed'], [third, 'Renamed again']] as const) {
+    const bootstrap = reader.frames.find(frame => frame.t === 'welcome');
+    assert.ok(bootstrap?.t === 'welcome');
+    assert.equal(bootstrap.header.title, title);
+  }
+});
+
 test('warm bootstrap retains latest stream and active tools, not ended tools or old updates', t => {
   const feed = fixture(t);
   feed.accept({t: 'state', state: {...state, isStreaming: true}});
