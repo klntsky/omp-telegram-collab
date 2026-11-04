@@ -85,9 +85,9 @@ Run the login command in an interactive terminal from that checkout:
 pnpm telegram:test:login
 ```
 
-Enter the test-network phone number, verification code, and two-step verification password if requested. Code and password input are hidden. Login verifies the test network and appends `TELEGRAM_TEST_SESSION` to `.env` with permissions `0600`, without printing it. Do not copy that authorization into other checkouts or run another client with it. `AUTH_KEY_DUPLICATED` invalidates the authorization and requires another login.
+Enter the test-network phone number, verification code, and two-step verification password if requested. Code and password input are hidden. Login verifies the test network and appends the new authorization to `TELEGRAM_TEST_SESSIONS` in `.env` with permissions `0600`, without printing any sessions. This variable is a JSON array of unique, nonempty test-network user session strings; repeat logins retain every successful authorization and deduplicate identical sessions without logging out or revoking earlier ones. The shared server uses only the first entry, with no fallback or rotation. Do not copy an authorization into other checkouts or run another client with it. `AUTH_KEY_DUPLICATED` invalidates that authorization and requires another login.
 
-Exported environment variables take precedence over `.env`. After refreshing the saved session, unset any stale exported `TELEGRAM_TEST_SESSION` before starting or restarting the server. Stop the server before refreshing its authorization.
+Exported environment variables take precedence over `.env`. Unset any stale exported `TELEGRAM_TEST_SESSIONS` before starting or restarting the server. Stop the server before changing which authorization is first in the saved list.
 
 The PM2 configuration loads credentials from the central checkout's `.env` and excludes inherited Telegram credential variables. Its `.env` file must exist before startup.
 
@@ -122,7 +122,7 @@ Install OMP and this checkout's dependencies, then run:
 timeout 600s pnpm test:e2e
 ```
 
-Set `OMP_EXECUTABLE` to choose another OMP executable. Set `TELEGRAM_TEST_SOCKET` if the server uses a non-default socket. Test clients do not need `TELEGRAM_TEST_API_ID`, `TELEGRAM_TEST_API_HASH`, `TELEGRAM_TEST_SESSION`, or a manually selected bot token.
+Set `OMP_EXECUTABLE` to choose another OMP executable. Set `TELEGRAM_TEST_SOCKET` if the server uses a non-default socket. Test clients do not need `TELEGRAM_TEST_API_ID`, `TELEGRAM_TEST_API_HASH`, `TELEGRAM_TEST_SESSIONS`, or a manually selected bot token.
 
 Each fixture acquires a bot token, creates its own forum, and keeps its working directories, database, and OMP processes separate. Teardown stops application polling and removes the forum before returning the token to the pool. There is no separate lease ID. Unexpected disconnects and server restarts quarantine affected tokens rather than assigning a potentially live bot to another test.
 

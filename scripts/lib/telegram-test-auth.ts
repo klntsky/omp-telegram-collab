@@ -45,11 +45,25 @@ export async function exportTelegramTestSession(client: TelegramClient, signal: 
   });
 }
 
+export function readTelegramTestSessions(env: NodeJS.ProcessEnv = process.env): string[] {
+  const value = env.TELEGRAM_TEST_SESSIONS;
+  if (!value) throw new Error('Run pnpm telegram:test:login to save TELEGRAM_TEST_SESSIONS in .env before running live tests');
+  let sessions: unknown;
+  try { sessions = JSON.parse(value); } catch {
+    throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of unique nonempty Telegram test user sessions');
+  }
+  if (!Array.isArray(sessions) || sessions.length === 0
+    || sessions.some(session => typeof session !== 'string' || session.trim().length === 0)
+    || new Set(sessions).size !== sessions.length) {
+    throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of unique nonempty Telegram test user sessions');
+  }
+  for (const session of sessions) validateTelegramTestSession(session);
+  return sessions;
+}
+
 export function readTelegramTestCredentials(env: NodeJS.ProcessEnv = process.env): TelegramTestCredentials {
   const application = readTelegramApplicationCredentials(env);
-  const session = env.TELEGRAM_TEST_SESSION;
-  if (!session) throw new Error('Run pnpm telegram:test:login to save TELEGRAM_TEST_SESSION in .env before running live tests');
-  validateTelegramTestSession(session);
+  const [session] = readTelegramTestSessions(env);
   return { ...application, session };
 }
 

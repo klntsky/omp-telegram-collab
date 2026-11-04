@@ -5,7 +5,7 @@ module.exports = {
     script: 'scripts/telegram-test-server.ts',
     interpreter: process.execPath,
     node_args: ['--env-file=.env', '--import', 'tsx'],
-    filter_env: ['TELEGRAM_TEST_API_', 'TELEGRAM_TEST_SESSION', 'TELEGRAM_TEST_BOT_TOKEN', 'TELEGRAM_TEST_RECOVER_TOKEN'],
+    filter_env: ['TELEGRAM_TEST_API_', 'TELEGRAM_TEST_SESSIONS', 'TELEGRAM_TEST_BOT_TOKEN', 'TELEGRAM_TEST_RECOVER_TOKEN'],
     exec_mode: 'fork',
     instances: 1,
     watch: false,

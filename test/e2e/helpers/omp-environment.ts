@@ -22,8 +22,20 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   t.diagnostic(`E2E debug artifacts: ${logDirectory}`);
   const secrets = new Set<string>();
   const registerSecret = (value: string) => { if (value) secrets.add(value); };
-  for (const key of ['TELEGRAM_TEST_BOT_TOKEN', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSION']) {
+  for (const key of ['TELEGRAM_TEST_BOT_TOKEN', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSIONS']) {
     if (process.env[key]) registerSecret(process.env[key]!);
+  }
+  if (process.env.TELEGRAM_TEST_SESSIONS) {
+    let sessions: unknown;
+    try {
+      sessions = JSON.parse(process.env.TELEGRAM_TEST_SESSIONS);
+    } catch {
+      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
+    }
+    if (!Array.isArray(sessions) || !sessions.every((session: unknown): session is string => typeof session === 'string')) {
+      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
+    }
+    for (const session of sessions) registerSecret(session);
   }
   const started = performance.now();
   let sequence = 0;

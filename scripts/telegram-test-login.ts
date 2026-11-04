@@ -48,7 +48,7 @@ try {
   signal.throwIfAborted();
   const filename = resolve('.env');
   await appendTelegramTestSession(filename, session);
-  console.log(`Appended TELEGRAM_TEST_SESSION to ${filename} with permissions 0600. The session was not printed.`);
+  console.log(`Saved the session in TELEGRAM_TEST_SESSIONS in ${filename} with permissions 0600. No sessions were printed.`);
 } catch (error) {
   if (signal.aborted && error !== signal.reason) errors.push(signal.reason);
   errors.push(error);
