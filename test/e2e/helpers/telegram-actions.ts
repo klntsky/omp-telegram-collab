@@ -32,11 +32,55 @@ const panelCall = z.object({
   result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number(), message_thread_id: z.number().optional() }) }),
 });
 
+export function deliveredMessageLinks(
+  calls: TelegramWorkflow['apiCalls'],
+  threadId: number,
+): URL[] {
+  const message = z.object({
+    ok: z.literal(true),
+    result: z.object({
+      message_thread_id: z.number(),
+      text: z.string(),
+      entities: z.array(z.object({
+        type: z.string(), offset: z.number(), length: z.number(), url: z.string().optional(),
+      })).optional(),
+    }),
+  });
+  return calls.flatMap(call => {
+    const parsed = message.safeParse(call.result);
+    if (!parsed.success || parsed.data.result.message_thread_id !== threadId) return [];
+    const result = parsed.data.result;
+    return (result.entities ?? []).flatMap(entity => {
+      if (entity.type === 'text_link' && entity.url) return [new URL(entity.url)];
+      if (entity.type === 'url') return [new URL(result.text.slice(entity.offset, entity.offset + entity.length))];
+      return [];
+    });
+  });
+}
+
 export async function enrollForum(app: TelegramWorkflow): Promise<void> {
   await app.omp.step('telegram.enroll', async () => {
     await app.sendAndWait('/setup');
     await app.waitForCondition(() => app.store.isEnrolled(app.telegram.bot.id, app.telegram.forum.chatId));
   });
+}
+
+export async function createManagedTopic(
+  app: TelegramWorkflow & { store: Pick<Store, 'isEnrolled' | 'listSessions'> },
+): Promise<TopicSession> {
+  const existingIds = new Set(app.store.listSessions().map(session => session.id));
+  const topic = await app.telegram.user.client.createForumTopic({
+    chatId: app.telegram.forum.chat, title: 'E2E workflow',
+  });
+  await app.waitForMessageHandled(topic.id);
+  const created = app.store.listSessions().filter(session =>
+    !existingIds.has(session.id) &&
+    session.botId === app.telegram.bot.id &&
+    session.chatId === app.telegram.forum.chatId &&
+    session.runtime.kind === 'managed',
+  );
+  assert.equal(created.length, 1, 'Telegram topic creation must register exactly one new managed session in the enrolled forum');
+  return created[0]!;
 }
 
 export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills', threadId?: number): Promise<TelegramPanel> {

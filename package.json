@@ -31,11 +31,9 @@
     "telegram:test:bots": "node --env-file-if-exists=.env --import tsx scripts/telegram-test-bots.ts",
     "e2e:inspect": "tsx scripts/e2e-inspect.ts",
     "test:integration": "pnpm build && pnpm smoke",
-    "verify": "pnpm test:native && pnpm test:e2e && pnpm check && pnpm test && pnpm test:integration",
+    "verify": "pnpm test:e2e && pnpm test:native && pnpm check && pnpm test && pnpm test:integration",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:cli": "tsx scripts/smoke.ts cli",
-    "smoke:telegram": "tsx scripts/smoke.ts telegram",
-    "smoke:gateway": "tsx scripts/smoke.ts gateway",
     "smoke:runtime": "tsx scripts/smoke.ts runtime"
   },
   "dependencies": {

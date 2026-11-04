@@ -3,8 +3,6 @@ import { fileURLToPath } from 'node:url';
 
 const stages = {
   cli: './env-smoke.ts',
-  telegram: './telegram-smoke.ts',
-  gateway: './gateway-smoke.ts',
   runtime: './runtime-smoke.ts',
 };
 type Stage = keyof typeof stages;
