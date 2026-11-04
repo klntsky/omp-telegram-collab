@@ -2475,6 +2475,7 @@ export class BotService {
     let reservation: {bind(id:string):void;release():void} | undefined;
     let topic: {message_thread_id:number} | undefined;
     let destination: TopicSession | undefined;
+    let prepared = false;
     try {
       reservation = await this.options.runtime.reserveSession(undefined, check);
       await check();
@@ -2482,10 +2483,9 @@ export class BotService {
       await check();
       destination = this.options.store.createSession(
         {botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id,instancePath:source.instancePath},
-        source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id,
+        source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
       );
       reservation.bind(destination.id);
-      this.options.store.beginInitialTaskPreparation(destination.id);
       const destinationGeneration = this.options.store.getSessionGeneration(destination.id);
       const beforeMutation = async () => {
         await check();
@@ -2502,8 +2502,10 @@ export class BotService {
       if (defaultSkill) this.options.store.setNewTopicSkill(destination.id, defaultSkill);
       if (this.createsTopicWorktrees(source.chatId)) {
         await this.createTopicWorktree(destination);
-        await beforeMutation();
       }
+      await beforeMutation();
+      this.options.store.finishInitialTaskPreparation(destination.id);
+      prepared = true;
       await sendTo(this.bot.api, topicDestination(destination.chatId, destination.threadId),
         `Forked from: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${reply?.message_id ?? ctx.message!.message_id}?thread=${source.threadId}`,
         {link_preview_options:{is_disabled:true}});
@@ -2512,7 +2514,7 @@ export class BotService {
       await this.listen(destination, undefined, beforeMutation);
       await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`);
     } catch (error) {
-      if (topic) {
+      if (topic && !prepared) {
         this.options.store.detachTopic({botId:this.id,chatId:source.chatId,threadId:topic.message_thread_id});
         if (destination) this.dropListener(destination.id);
         await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`).catch(deliveryError => {

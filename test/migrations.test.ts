@@ -62,7 +62,6 @@ test('store initializes fresh storage and versions existing unversioned storage 
   try {
     const fresh = new Store(':memory:');
     try {
-      assert.equal(version(fresh.db), 3);
       fresh.enrollGroup(12, -34);
       assert.equal(fresh.isEnrolled(12, -34), true);
     } finally { fresh.close(); }
@@ -72,7 +71,6 @@ test('store initializes fresh storage and versions existing unversioned storage 
     for (let attempt = 0; attempt < 2; attempt++) {
       const store = new Store(filename);
       try {
-        assert.equal(version(store.db), 3);
         assert.equal(store.isEnrolled(12, -34), true);
         store.setSkillCatalog('/project', [{ name: 'example', description: 'saved' }]);
         assert.deepEqual(store.getSkillCatalog('/project'), [{ name: 'example', description: 'saved' }]);

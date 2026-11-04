@@ -44,6 +44,9 @@ const migrations: readonly string[] = [
   `
       CREATE TABLE initial_task_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id));
   `,
+  `
+      ALTER TABLE initial_task_preparations ADD COLUMN kind TEXT NOT NULL DEFAULT 'initial' CHECK(kind IN ('initial','fork'));
+  `,
 ];
 
 export function migrateDatabase(db: DatabaseSync, steps: readonly string[] = migrations): void {

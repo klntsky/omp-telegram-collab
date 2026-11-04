@@ -81,6 +81,8 @@ The fork has its own OMP identity, saved history, and Telegram topic. The origin
 
 Forked topics use the same automatic-worktree setting as other new managed topics. When enabled, the fork invokes OMP's native `/worktree` with its new topic's generated branch name before accepting prompts. When disabled, the fork retains the source working directory; the conversations have separate histories but share file changes. Native worktree creation retains OMP's normal uncommitted-change transfer behavior.
 
+A topic left by failed or interrupted fork preparation becomes permanently conversation-only. It cannot start a fresh session with empty history. Notification failures after successful preparation preserve the fork and its saved history.
+
 The pinned message contains only “Use /p to submit a prompt” in explicit-prompt mode or “Send a message to prompt the agent” in all-messages mode, plus the OPEN AGENT button.
 
 Admin-only button denials appear as callback-query toasts, not chat messages. Command denials remain chat replies.

@@ -137,7 +137,7 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId): TopicSession {
+  createSession(key: TopicKey & { instancePath: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId, preparation?: 'fork'): TopicSession {
     if (!key.instancePath) throw new Error('A session requires its configured instance path');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length) throw new Error('An initial task requires text or images');
@@ -153,6 +153,7 @@ export class Store {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
         if (authorityUserId !== undefined) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
       }
+      if (Number(result.changes) && preparation) this.beginInitialTaskPreparation(created.id, preparation);
       this.db.exec('COMMIT');
       return created;
     } catch (error) {
@@ -233,14 +234,25 @@ export class Store {
   hasPendingInitialTask(id: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND initial_state='pending'").get(id));
   }
-  beginInitialTaskPreparation(sessionId: string): void {
-    this.db.prepare('INSERT INTO initial_task_preparations (session_id) VALUES (?)').run(sessionId);
+  beginInitialTaskPreparation(sessionId: string, kind: 'initial' | 'fork' = 'initial'): void {
+    this.db.prepare('INSERT INTO initial_task_preparations (session_id,kind) VALUES (?,?)').run(sessionId,kind);
   }
   finishInitialTaskPreparation(sessionId: string): void {
     this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id=?').run(sessionId);
   }
   recoverInitialTaskPreparations(botId: number): void {
-    this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const interrupted = this.db.prepare("SELECT s.bot_id,s.chat_id,s.thread_id FROM sessions s JOIN initial_task_preparations p ON p.session_id=s.id WHERE s.bot_id=? AND p.kind='fork'").all(botId);
+      for (const row of interrupted) this.markDetachedTopic({
+        botId:Number(row.bot_id),chatId:Number(row.chat_id),threadId:Number(row.thread_id),
+      });
+      this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   setInitialTask(id: string, task: PromptContent, userId: number, authorityUserId = userId): void {
     if (!task.text.trim() && !task.images?.length) throw new Error('An initial task requires text or images');
