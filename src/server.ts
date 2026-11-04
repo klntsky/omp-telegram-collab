@@ -4,18 +4,17 @@ import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
-import type { HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, CollabConnection, TopicSession } from '../shared/contracts.js';
+import type { AppConfig, BrowserHostFrame, TopicSession } from '../shared/contracts.js';
 import { Store } from './store.js';
 import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
-import { connectCollab } from './collab.js';
 import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
+import type { SessionFeedSubscription } from './session-feed.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'onSessionInvalidated'>;
-export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'subscribeSessionFeed' | 'onSessionInvalidated'>;
+export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
 const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
@@ -190,13 +189,13 @@ export function createServer(options: ServerOptions): GatewayServer {
     });
   });
   function connectSocket(ws: WebSocket, identity: TicketIdentity & {access: {session: TopicSession; canControl: boolean}}): void {
-    let upstream: CollabConnection | undefined;
+    let upstream: SessionFeedSubscription | undefined;
     let release: (() => void) | undefined;
     let connectedSession: TopicSession | undefined;
     const readAccess = identity.access;
     let closed = false;
     let tail: Promise<void> = Promise.resolve();
-    let outgoing: { frame: HostFrame; payload: string }[] = [];
+    let outgoing: { frame: BrowserHostFrame; payload: string }[] = [];
     let outgoingScheduled = false;
     const unsubscribeKill = botMap.get(identity.botId)!.onSessionInvalidated((sessionId,reason) => {
       if (sessionId !== identity.sessionId) return;
@@ -296,17 +295,16 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed) return;
       checkTermination();
       await authorize(identity,session,readAccess);
-      const connection = await (options.connect ?? connectCollab)(binding,participantName(identity),{
+      const connection = bot.subscribeSessionFeed(session,{
         onFrame: frame => {
           try { checkTermination(); }
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
-          options.runtime.observeFrame(session.id,frame);
           let payload: string;
           try { payload = JSON.stringify(frame); } catch { fail(1011,'Invalid host frame'); return; }
           outgoing.push({frame,payload});
           flushOutgoing();
         },
-        onClose: () => fail(1011,'Host disconnected'),
+        onClose: reason => fail(1011,reason),
       });
       try {
         await authorize(identity,session,readAccess);

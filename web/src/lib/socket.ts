@@ -1,12 +1,11 @@
-import type { HostFrame } from "@oh-my-pi/pi-wire";
-import type { BrowserFrame } from "../../../shared/contracts";
+import type { BrowserFrame, BrowserHostFrame } from "../../../shared/contracts";
 import { SessionAccessError } from "./telegram";
 
 export type GatewayAction = BrowserFrame;
 
 export interface GuestTransport {
 	onOpen?: () => void;
-	onFrame?: (frame: HostFrame) => void;
+	onFrame?: (frame: BrowserHostFrame) => void;
 	onClose?: (reason: string, willReconnect: boolean) => void;
 	connect(): void;
 	reconnect(reason: string): void;
@@ -19,7 +18,7 @@ const BACKOFF_MAX_MS = 30_000;
 
 export class GatewaySocket implements GuestTransport {
 	onOpen?: () => void;
-	onFrame?: (frame: HostFrame) => void;
+	onFrame?: (frame: BrowserHostFrame) => void;
 	onClose?: (reason: string, willReconnect: boolean) => void;
 
 	#ticket: string | null;
@@ -77,7 +76,7 @@ export class GatewaySocket implements GuestTransport {
 		};
 		ws.onmessage = event => {
 			if (this.#ws !== ws) return;
-			let frame: HostFrame;
+			let frame: BrowserHostFrame;
 			try {
 				if (typeof event.data !== "string") throw new Error("Expected JSON");
 				const value: unknown = JSON.parse(event.data);
@@ -89,7 +88,7 @@ export class GatewaySocket implements GuestTransport {
 					gatewayError = value.message;
 					return;
 				}
-				frame = value as HostFrame;
+				frame = value as BrowserHostFrame;
 			} catch {
 				this.#finish("The session sent an invalid response. Rejoin to try again.");
 				return;

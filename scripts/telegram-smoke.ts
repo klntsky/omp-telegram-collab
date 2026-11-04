@@ -398,7 +398,7 @@ export async function createSmokeApp(options: { competingStartAfterRejection?: b
     await service.initialize();
     service.startBackground();
     await service.refreshSkillCatalogs();
-    server = createServer({ config, bots: [service], store, runtime, connect });
+    server = createServer({ config, bots: [service], store, runtime });
     url = await listen(server);
   } catch (error) {
     try { await disposeFixture(); } catch (cleanupError) {

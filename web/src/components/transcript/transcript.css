@@ -4,6 +4,7 @@
 	height: 100%;
 	overflow-y: auto;
 	overflow-x: hidden;
+	overflow-anchor: none;
 	padding: 24px 24px 16px;
 	font-family: var(--font-ui);
 	font-size: 14px;
@@ -257,6 +258,36 @@
 .tr-earlier:hover {
 	color: var(--fg-muted);
 	border-color: var(--border-strong);
+}
+
+.tr-earlier:disabled {
+	cursor: wait;
+	opacity: 0.65;
+}
+
+.tr-history-error {
+	margin: -8px 0 16px;
+	color: var(--fg-muted);
+	font-size: 12px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	text-align: center;
+}
+
+.tr-latest {
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	display: block;
+	height: 28px;
+	margin: 0 0 -28px auto;
+	padding: 0 12px;
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	background: var(--bg-raised);
+	color: var(--fg);
+	font-size: 12px;
+	cursor: pointer;
 }
 
 .tr-shimmer {

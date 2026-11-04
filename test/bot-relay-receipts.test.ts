@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, chatId, ownerId, ownerUsername } from './telegram-data.js';
@@ -249,7 +250,7 @@ test('busy streaming delivers every state frame without starving live output', {
 });
 
 
-test('opening a lazy topic can establish Telegram mirroring without submitting instructions', async () => {
+test('a lazy topic keeps Telegram delivery and upstream mirroring after its disposable history index fails', async () => {
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
@@ -258,12 +259,19 @@ test('opening a lazy topic can establish Telegram mirroring without submitting i
     assert.equal(app.connectionCount,0);
     const binding = await app.runtime.ensure(session);
     await app.service.ensureMirroring(session,binding);
+    const reasons: string[] = [];
+    app.service.subscribeSessionFeed(session, {onFrame() {}, onClose: reason => reasons.push(reason)});
+    const internal = app.service as unknown as {listeners: Map<string, {feed: {db: DatabaseSync}}>};
+    internal.listeners.get(session.id)!.feed.db.exec('DROP TABLE entries');
     app.emit({t:'entry',entry:{type:'message',id:'mirrored-mini-app-answer',parentId:null,timestamp:new Date().toISOString(),message:{
       role:'assistant',content:[{type:'text',text:'Mirrored Mini App answer'}],model:'fixture',timestamp:Date.now(),
       stopReason:'stop',usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},
     }}});
-    await eventually(() => app.messages.some(message => message.message_thread_id === session.threadId && message.rich_message !== undefined));
-    assert.equal(app.messages.at(-1)?.message_thread_id,session.threadId);
+    await eventually(() => app.messages.some(message =>
+      app.store.getMessageAnchor(session.id, binding.sessionId, chatId, Number(message.message_id))?.entryId === 'mirrored-mini-app-answer'));
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0]!, /no such table: entries/);
+    assert.equal(app.activeConnectionCount, 1);
     assert.deepEqual(app.accepted,[]);
   } finally {
     await app.close();

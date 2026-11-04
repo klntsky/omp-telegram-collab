@@ -37,6 +37,7 @@ import { withCancellation } from './cancellation.js';
 import { classifyMessage, normalizeMessage, type InputIntent, type TelegramImage } from './telegram-input.js';
 import type { PromptExtension } from './telegram-commands.js';
 import { TopicWriter } from './topic-writer.js';
+import { SessionFeed, type SessionFeedHandlers, type SessionFeedSubscription } from './session-feed.js';
 
 class AuthorizationDeniedError extends Error {}
 
@@ -114,6 +115,7 @@ interface Listener {
   ompSessionId?: string;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
+  feed: SessionFeed;
   tail: Promise<void>;
   queued: number;
   recovering: boolean;
@@ -1253,8 +1255,8 @@ export class BotService {
       for (const session of sessions) {
         this.options.store.cancelInitialTask(session.id);
         this.options.store.advanceSessionGeneration(session.id);
-        this.dropListener(session.id);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+        this.dropListener(session.id);
       }
       const results = await Promise.allSettled(sessions.map(session => this.options.runtime.kill(session)));
       const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
@@ -1525,6 +1527,15 @@ export class BotService {
     this.requireSessionAssignment(session);
     await this.listen(session,binding,beforeMutation);
   }
+  subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): SessionFeedSubscription {
+    this.requireSessionAssignment(session);
+    if (this.options.store.getSession(session.id)?.status !== 'open')
+      throw new Error('This topic is closed. Reopen it before connecting.');
+    const listener = this.listeners.get(session.id);
+    if (!listener?.connection || listener.generation !== this.options.store.getSessionGeneration(session.id))
+      throw new Error('Session closed');
+    return listener.feed.subscribe(handlers);
+  }
   async start(onReady?: () => void): Promise<void> {
     await this.initialize();
     if (this.stopped) return;
@@ -1608,6 +1619,7 @@ export class BotService {
     for (const item of listeners) {
       clearTimeout(item.initial?.timer);
       clearInterval(item.typingTimer);
+      item.feed.close();
       item.connection?.close();
     }
     this.listeners.clear();
@@ -1874,12 +1886,12 @@ export class BotService {
     this.presetRefresh = undefined;
     for (const session of this.options.store.listSessions(this.id)) {
       if (!this.sessionAssigned(session)) {
-        this.dropListener(session.id);
         this.closedSessions.delete(session.id);
         this.disposeMetadataOwner(session.id);
         for (const [token, request] of this.capacityRequests)
           if (request.sessionId === session.id) this.capacityRequests.delete(token);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+        this.dropListener(session.id);
       }
     }
     if (this.options.config.terminated) {
@@ -2355,7 +2367,6 @@ export class BotService {
   }
 
   private async detachSession(session: TopicSession): Promise<void> {
-    this.dropListener(session.id);
     this.closedSessions.delete(session.id);
     for (const [token, request] of this.capacityRequests) {
       if (request.sessionId === session.id) this.capacityRequests.delete(token);
@@ -2364,6 +2375,7 @@ export class BotService {
       if (proposal.sessionId === session.id) this.promptProposals.delete(token);
     }
     for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+    this.dropListener(session.id);
     const metadata = this.metadataOwners.get(session.id)?.metadata;
     await metadata?.icon.completion;
     this.disposeMetadataOwner(session.id);
@@ -3314,9 +3326,9 @@ export class BotService {
         this.options.store.advanceSessionGeneration(session.id);
       }
       this.options.store.cancelInitialTask(session.id);
-      this.dropListener(session.id);
       for (const handler of this.sessionInvalidationHandlers)
         handler(session.id, 'This topic is closed. Reopen it explicitly to connect.');
+      this.dropListener(session.id);
       void this.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
       return;
     }
@@ -3721,8 +3733,8 @@ export class BotService {
         }
         if (action === 'kill') {
           this.options.store.advanceSessionGeneration(session.id);
-          this.dropListener(session.id);
           for (const handler of this.sessionInvalidationHandlers) handler(session.id);
+          this.dropListener(session.id);
           await this.options.runtime.kill(session);
           this.acknowledgeMessage(session, message.message_id);
           await this.setTopicStatus(session, 'finished');
@@ -3868,7 +3880,7 @@ export class BotService {
       });
   }
 
-  private dropListener(id: string): void {
+  private dropListener(id: string, reason = 'Host disconnected'): void {
     this.invalidateActivity(id);
     clearTimeout(this.reconnects.get(id));
     this.reconnects.delete(id);
@@ -3884,6 +3896,7 @@ export class BotService {
     for (const [token, question] of this.questions) {
       if (question.listener === listener) this.endQuestion(token);
     }
+    listener?.feed.close(reason);
     listener?.connection?.close();
   }
   private listen(
@@ -3905,6 +3918,10 @@ export class BotService {
     const listener: Listener = {
       sessionId: session.id,
       generation,
+      feed: new SessionFeed(frame => {
+        if (!listener.connection) throw new Error('Session not connected');
+        listener.connection.send(frame);
+      }),
       tail: Promise.resolve(),
       queued: 0,
       recovering: this.options.store.hasSnapshot(session.id),
@@ -3952,7 +3969,7 @@ export class BotService {
                 error: reason,
               };
               const connected = listener.connection !== undefined;
-              this.dropListener(session.id);
+              this.dropListener(session.id, reason);
               if (connected) this.scheduleReconnect(session);
             },
           },
@@ -3989,7 +4006,8 @@ export class BotService {
           )
             throw error;
         } finally {
-          if (this.listeners.get(session.id) === listener) this.dropListener(session.id);
+          if (this.listeners.get(session.id) === listener)
+            this.dropListener(session.id, error instanceof Error ? error.message : String(error));
         }
         return this.listen(session, undefined, beforeMutation, false, false);
       });
@@ -4445,6 +4463,7 @@ export class BotService {
       return;
     const ompSessionId = listener.ompSessionId;
     if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
+    if (!replay) listener.feed.accept(frame);
     if (frame.t === 'welcome') {
       listener.receiptBoundary = this.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
       listener.snapshotReplyTarget = this.options.store.getReplyTarget(session.id);

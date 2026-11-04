@@ -335,7 +335,7 @@ New managed hosts remain in startup when Collab discovery temporarily reports th
 
 The Mini App retains its transcript during transient failures. Automatic reconnects use capped exponential backoff, the cached long-lived backend credential, and a fresh single-use ticket with current membership checks. Service restarts and the age of the original Telegram launch do not require reopening Telegram after the initial exchange. Reconnects do not queue or replay instructions. Leave, denied membership, invalid credentials or actions, a killed session, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available or to resume a killed session explicitly. Backend errors retain their original diagnostics rather than being replaced with expired-launch instructions.
 
-Transient connection notices disappear once the Mini App finishes reconnecting and loading the session snapshot. Unrelated session notices remain visible.
+Transient connection notices disappear once the Mini App finishes reconnecting and loading the recent session page. Unrelated session notices remain visible.
 
 Mini App transport has no custom queue-count, byte-backlog, WebSocket payload-size, or buffered-data disconnect limits. Snapshot and live-update bursts do not disconnect a session merely because pending data crosses a threshold. Authorization and protocol validation remain enforced.
 
@@ -344,6 +344,16 @@ Transient Telegram authorization lookup failures fail closed without becoming pe
 ## 4. Attached sessions and transcript
 
 The current supergroup owner and administrators can attach a control-shared OMP host whose working directory matches the assigned project. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
+
+### 4.1. Session history and live tracking
+
+- Opening the Mini App downloads a recent page, not the complete session history. Earlier entries load when the reader scrolls near the top or selects Show earlier.
+- Active mirrored sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Viewers share the bot's existing connection rather than opening another OMP connection.
+- Historical pages preserve entry order and the reader's visible position while live output continues. Reading earlier messages disables automatic tail following. Returning to the bottom or selecting Jump to latest resumes it, including while an earlier-page request is pending.
+- History-read timeouts retain the current transcript and offer retry. Reconnecting replaces loaded history with a fresh recent page and discards requests and cursors from the previous connection.
+- The bot's native OMP handshake is unchanged. A new bot connection receives OMP's initial snapshot before serving history. Live replay includes only state observed by that listener; it does not invent partial messages or running tools that predate the connection.
+
+### 4.2. Transcript presentation
 
 The Mini App collapses IRC traffic, system notices, reminders, task-result envelopes, and displayed custom notices. Disclosures reveal their contents. Ordinary prose, attachments, code examples, unknown tags, and incomplete envelopes stay visible. Hidden custom entries remain hidden.
 

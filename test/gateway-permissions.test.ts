@@ -8,6 +8,7 @@ import { GrammyError, HttpError } from 'grammy';
 import { AuthorizationUnavailableError } from '../src/auth.js';
 import { createServer } from '../src/server.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
+import type { BrowserHostFrame, HistoryCursor } from '../shared/contracts.js';
 import { createSmokeApp } from '../scripts/telegram-smoke.js';
 import { botId, ownerId, ownerUsername } from './telegram-data.js';
 
@@ -21,7 +22,7 @@ async function fixture() {
     assert.equal(response.status, 200);
     const { ticket } = await response.json() as { ticket: string };
     const socket = new WebSocket(`${app.url.replace('http:', 'ws:')}/api/socket?ticket=${ticket}`, { origin: app.config.publicUrl });
-    const frames: HostFrame[] = [];
+    const frames: BrowserHostFrame[] = [];
     socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
     await once(socket, 'open');
     const deadline = Date.now() + 5000;
@@ -33,6 +34,92 @@ async function fixture() {
   }
   return { app, session, connect };
 }
+
+test('warm viewers share mirroring while paging and private transcript reads stay isolated', async () => {
+  const {app, session, connect} = await fixture();
+  const sockets: WebSocket[] = [];
+  const waitFor = async (predicate: () => boolean) => {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+      assert.ok(Date.now() < deadline, 'shared feed output missing');
+      await delay(10);
+    }
+  };
+  try {
+    for (let i = 0; i < 245; i++) app.appendEntry({
+      type: 'custom_message', id: `history-${i}`, parentId: null, timestamp: '2026-01-01T00:00:00Z',
+      customType: 'fixture', content: String(i), display: true,
+    });
+    await app.service.ensureMirroring(session, await app.runtime.ensure(session));
+    const connections = app.connectionCount;
+    const first = await connect(); sockets.push(first.socket);
+    const second = await connect(); sockets.push(second.socket);
+    assert.equal(app.connectionCount, connections, 'viewers must reuse the persistent bot connection');
+    const recent = first.frames.find(frame => frame.t === 'snapshot-chunk');
+    const initial = first.frames.find(frame => frame.t === 'history-state');
+    assert.ok(recent?.t === 'snapshot-chunk');
+    assert.ok(initial?.t === 'history-state' && initial.older);
+    assert.deepEqual(recent.entries.map(entry => entry.id), Array.from({length: 100}, (_, i) => `history-${i + 145}`));
+    const seen = new Set(recent.entries.map(entry => entry.id));
+    let cursor: HistoryCursor | null = initial.older;
+    let reqId = 1;
+    while (cursor) {
+      const requested: HistoryCursor = cursor;
+      const requestId = reqId++;
+      first.socket.send(JSON.stringify({t: 'history-page', reqId: requestId, cursor: requested}));
+      app.emit({t: 'state', state: {cwd: session.cwd, isStreaming: true, queuedMessageCount: requestId, participants: []}});
+      await waitFor(() => first.frames.some(frame => frame.t === 'history-page' && frame.reqId === requestId) &&
+        first.frames.some(frame => frame.t === 'state' && frame.state.queuedMessageCount === requestId));
+      const reply = first.frames.find(frame => frame.t === 'history-page' && frame.reqId === requestId);
+      assert.ok(reply?.t === 'history-page');
+      assert.deepEqual(reply.cursor, requested);
+      assert.ok(reply.page.entries.length <= 100);
+      for (const entry of reply.page.entries) {
+        assert.ok(!seen.has(entry.id), 'history pages must not repeat or shift across live frames');
+        seen.add(entry.id);
+      }
+      cursor = reply.page.older;
+    }
+    assert.equal([...seen].filter(id => id.startsWith('history-')).length, 245);
+    assert.ok(!second.frames.some(frame => frame.t === 'history-page'));
+    first.socket.send(JSON.stringify({t: 'fetch-transcript', reqId: 1, agentId: 'first-worker', fromByte: 0}));
+    second.socket.send(JSON.stringify({t: 'fetch-transcript', reqId: 1, agentId: 'second-worker', fromByte: 0}));
+    await waitFor(() => app.accepted.filter(frame => frame.t === 'fetch-transcript').length === 2);
+    const requests = app.accepted.filter(frame => frame.t === 'fetch-transcript');
+    const firstRequest = requests.find(frame => frame.agentId === 'first-worker');
+    const secondRequest = requests.find(frame => frame.agentId === 'second-worker');
+    assert.ok(firstRequest && secondRequest);
+    assert.notEqual(firstRequest.reqId, secondRequest.reqId);
+    app.emit({t: 'transcript', reqId: secondRequest.reqId, text: 'second-private', newSize: 2});
+    app.emit({t: 'transcript', reqId: firstRequest.reqId, text: 'first-private', newSize: 1});
+    await waitFor(() => first.frames.some(frame => frame.t === 'transcript') && second.frames.some(frame => frame.t === 'transcript'));
+    assert.deepEqual(first.frames.filter(frame => frame.t === 'transcript'), [{t: 'transcript', reqId: 1, text: 'first-private', newSize: 1}]);
+    assert.deepEqual(second.frames.filter(frame => frame.t === 'transcript'), [{t: 'transcript', reqId: 1, text: 'second-private', newSize: 2}]);
+    const firstClosed = once(first.socket, 'close');
+    first.socket.close();
+    await firstClosed;
+    assert.equal(app.activeConnectionCount, 1, 'closing a viewer must leave mirroring alive');
+    app.emit({t: 'entry', entry: {type: 'custom_message', id: 'after-viewer-close', parentId: null,
+      timestamp: '2026-01-01T00:00:00Z', customType: 'fixture', content: 'still mirrored', display: true}});
+    await waitFor(() => second.frames.some(frame => frame.t === 'entry' && frame.entry.id === 'after-viewer-close'));
+    const disconnected = once(second.socket, 'close');
+    app.disconnect();
+    const [code, reason] = await disconnected;
+    assert.equal(code, 1011);
+    assert.equal(reason.toString(), 'Fixture relay disconnected');
+    const fresh = await connect(); sockets.push(fresh.socket);
+    const freshHistory = fresh.frames.find(frame => frame.t === 'history-state');
+    assert.ok(freshHistory?.t === 'history-state' && freshHistory.older);
+    assert.notEqual(freshHistory.older.epoch, initial.older.epoch);
+    const staleClosed = once(fresh.socket, 'close');
+    fresh.socket.send(JSON.stringify({t: 'history-page', reqId: 1, cursor: initial.older}));
+    const [, staleReason] = await staleClosed;
+    assert.equal(staleReason.toString(), 'Session history changed; reconnect to load it again');
+  } finally {
+    sockets.forEach(socket => socket.terminate());
+    await app.close();
+  }
+});
 
 for (const status of ['member', 'administrator', 'creator'] as const) {
 for (const action of [
@@ -56,7 +143,7 @@ for (const action of [
       assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
       socket.send(JSON.stringify({t:'fetch-transcript',reqId:700,agentId:'worker',fromByte:0}));
       const deadline = Date.now()+5000;
-      while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 700)) {
+      while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.agentId === 'worker')) {
         assert.ok(Date.now()<deadline,'reader transcript request missing');
         await delay(10);
       }
@@ -96,7 +183,7 @@ test('current native role controls reconnect access regardless of username', asy
     const transcript = { t: 'fetch-transcript', reqId: 900, agentId: 'worker', fromByte: 0 };
     reader.socket.send(JSON.stringify(transcript));
     const deadline = Date.now() + 5000;
-    while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 900)) {
+    while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.agentId === 'worker')) {
       assert.ok(Date.now() < deadline); await delay(10);
     }
     app.setCurrentMember({status:'creator'});
@@ -254,7 +341,7 @@ for (const change of ['role', 'membership'] as const) {
       controller.socket.send(JSON.stringify({ t: 'fetch-transcript', reqId: 902, agentId: 'worker', fromByte: 0 }));
       const deadline = Date.now() + 5000;
       while (!controller.frames.some(frame => frame.t === 'error' && frame.message === 'output admitted for this flow') ||
-        !app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 902)) {
+        !app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.agentId === 'worker')) {
         assert.ok(Date.now() < deadline, 'admitted flow lost read access');
         await delay(10);
       }

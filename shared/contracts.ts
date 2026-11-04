@@ -1,6 +1,23 @@
-import type { GuestFrame, HostFrame, ImageContent } from '@oh-my-pi/pi-wire';
+import type { GuestFrame, HostFrame, ImageContent, SessionEntry } from '@oh-my-pi/pi-wire';
 
-export type BrowserFrame = Extract<GuestFrame, {t: 'fetch-transcript'}>;
+export interface HistoryCursor {
+  epoch: string;
+  before: number;
+}
+
+export interface HistoryPage {
+  entries: SessionEntry[];
+  older: HistoryCursor | null;
+}
+
+export type BrowserFrame =
+  | Extract<GuestFrame, {t: 'fetch-transcript'}>
+  | {t: 'history-page'; reqId: number; cursor: HistoryCursor};
+
+export type BrowserHostFrame =
+  | HostFrame
+  | {t: 'history-state'; older: HistoryCursor | null}
+  | {t: 'history-page'; reqId: number; cursor: HistoryCursor; page: HistoryPage};
 
 export interface PromptContent {
   text: string;

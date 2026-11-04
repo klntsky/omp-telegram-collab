@@ -5,6 +5,7 @@ import test from 'node:test';
 import type { SessionEntry } from '@oh-my-pi/pi-wire';
 import { z } from 'zod';
 import { readConfig, writeConfig } from '../../src/config.js';
+import type { BrowserHostFrame } from '../../shared/contracts.js';
 import { setupCollaborationTest } from './helpers/collaboration-fixture.js';
 import { changeTopicClosed, clickPanel, enrollForum, openPanel, reactionAttempts, replyText, sendImageDocument, setTopicClosed, waitForEditor, waitForPanel, waitForReactionAttempt } from './helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, questionScenario, questionStep, readSessionHistory, taskInput, writeScenario } from './helpers/model-tasks.js';
@@ -109,14 +110,32 @@ test('Telegram workflows share one fixture across protocol, media, lifecycle, an
   await completeWriteTask(app, tasks.worktreeRestarted, worktreeRestarted, session.threadId);
   assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.worktreeRestarted.name)![0]!.messages).includes(tasks.worktree.evidence.nonce));
 
+  const readerFrames: BrowserHostFrame[] = [];
+  const completedEntry = app.hostFrames.findLast(frame =>
+    frame.t === 'entry' && frame.entry.type === 'message' && frame.entry.message.role === 'assistant');
+  assert.ok(completedEntry?.t === 'entry');
+  const reader = app.service.subscribeSessionFeed(session, {
+    onFrame: frame => readerFrames.push(frame),
+    onClose: reason => app.omp.log('miniapp.reader.close', { reason }),
+  });
+  t.after(() => reader.close());
+  const readerSnapshot = readerFrames.flatMap(frame => frame.t === 'snapshot-chunk' ? frame.entries : []);
+  assert.ok(readerSnapshot.some(entry => entry.id === completedEntry.entry.id));
+
   const interruptedFrames = app.hostFrames.length;
   await app.sendAndWait(`/p ${interrupted.prompt}`, session.threadId);
   await app.omp.provider.waitForRequest(interrupted.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
+  await app.waitForCondition(() => readerFrames.some(frame => frame.t === 'entry' &&
+    frame.entry.type === 'custom_message' && frame.entry.customType === 'collab-prompt' &&
+    frame.entry.content === interrupted.prompt));
+  assert.ok(readerFrames.some(frame => frame.t === 'event' && frame.event.type === 'agent_start'));
   const activeStop = await app.sendAndWait('/stop', session.threadId);
   await app.omp.provider.waitForAbort(interrupted.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
   await waitForReactionAttempt(app, activeStop.id, '🤝');
   await app.waitForCondition(() => app.hostFrames.slice(interruptedFrames).some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
   assert.equal(await app.runtime.isRunning(session), true);
+  assert.ok(readerFrames.some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
+  reader.close();
 
   for (const task of [tasks.question, tasks.customAnswer]) {
     const start = app.apiCalls.length;
