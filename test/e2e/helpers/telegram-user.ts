@@ -1,6 +1,6 @@
 import { tl, type TelegramClient, type User } from '@mtcute/node';
 import { forkTelegramTestSession, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
-import { createTelegramTestBot, deleteTelegramTestBot } from '../../../scripts/lib/telegram-test-botfather.js';
+import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
 
 export class TelegramTestUser {
   readonly client: TelegramClient;
@@ -29,12 +29,8 @@ export class TelegramTestUser {
     signal.throwIfAborted();
     return this.client.call(request, { abortSignal: signal, timeout: 30000, maxRetryCount: 0, floodSleepThreshold: 0 });
   }
-  async createBot(): Promise<string> {
-    this.signal.throwIfAborted();
-    return createTelegramTestBot(this.client, this.signal);
-  }
-  deleteBot(token: string): Promise<void> {
-    return deleteTelegramTestBot(this.client, token, AbortSignal.timeout(120_000));
+  acquireBot() {
+    return acquireTelegramTestBot(this.signal);
   }
   close(): Promise<void> {
     this.#closing ??= this.#session.close().finally(() => this.#controller.abort(new Error('Telegram test user closed')));

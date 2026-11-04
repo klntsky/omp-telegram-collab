@@ -101,7 +101,7 @@ export async function setupCollaborationTest(
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
-  }, { canDeleteBot: () => activePollers === 0 && !pollerStopFailed }));
+  }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed }));
   omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
