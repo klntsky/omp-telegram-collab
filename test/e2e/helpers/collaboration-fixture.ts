@@ -221,6 +221,31 @@ export async function setupCollaborationTest(
     }, error => { if (!closing) fail(error); });
     await operation(ready.promise);
   }
+  let lifecycle = Promise.resolve();
+  function serializeLifecycle(run: () => Promise<void>): Promise<void> {
+    const next = lifecycle.then(run);
+    lifecycle = next.catch(() => undefined);
+    return next;
+  }
+  async function pauseService(): Promise<void> {
+    closing = true;
+    if (service) {
+      await service.close();
+      service = undefined;
+    }
+    if (polling) {
+      await polling;
+      polling = undefined;
+    }
+    if (runtime) {
+      await runtime.close();
+      runtime = undefined;
+    }
+    if (store) {
+      store.close();
+      store = undefined;
+    }
+  }
   await omp.step('application.start', startService);
   async function waitForCondition(predicate: () => boolean): Promise<void> {
     const signal = AbortSignal.any([t.signal, failed.signal, AbortSignal.timeout(operationTimeoutMs)]);
@@ -255,26 +280,25 @@ export async function setupCollaborationTest(
   }
 
   return {
-    telegram, omp, config, hostFrames, guestFrames, apiCalls, updates,
+    telegram, omp, config, hostFrames, guestFrames, apiCalls, updates, topicActivityEmojis,
     get runtime() { return runtime!; },
     get store() { return store!; },
     get service() { return service!; },
     get bot() { return bot; },
+    pause(): Promise<void> {
+      return serializeLifecycle(() => omp.step('application.pause', pauseService));
+    },
     restart(): Promise<void> {
-      return omp.step('application.restart', async () => {
-        closing = true;
-        await service!.close();
-        await polling;
-        await runtime!.close();
-        store!.close();
+      return serializeLifecycle(() => omp.step('application.restart', async () => {
+        await pauseService();
         Object.assign(config, readConfig(config.configPath));
         store = new Store(databasePath);
         runtime = new OmpRuntime(config);
         bot = instrumentedBot();
-        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime: runtime!, bot, connect, topicActivityEmojis });
+        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, connect, topicActivityEmojis });
         closing = false;
         await startService();
-      });
+      }));
     },
     setFolderOptions(options: string[]): void {
       const updated = readConfig(config.configPath);
