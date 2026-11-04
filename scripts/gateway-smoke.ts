@@ -79,6 +79,7 @@ export async function verifyGatewayFlow() {
     socket.on('message', bytes => frames.push(JSON.parse(bytes.toString())));
     await once(socket, 'open');
     await waitUntil(() => frames.some(frame => frame.t === 'snapshot-chunk'), 'authenticated socket did not receive session snapshot');
+    assert.equal(frames.find(frame => frame.t === 'welcome')?.readOnly, true, 'administrators must also receive a read-only browser session');
     const connectionsBeforeReplay = app.connectionCount;
     await assertUpgradeDenied(socketUrl, app.config.publicUrl, 'an already-consumed ticket must not admit another socket');
     assert.equal(app.connectionCount, connectionsBeforeReplay, 'ticket replay must not connect to the private host');
@@ -133,7 +134,7 @@ export async function verifyGatewayFlow() {
     await waitUntil(() => app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 902), 'admitted viewer lost read-fetch access');
     assert.equal(reader.readyState, WebSocket.OPEN);
     assert.equal((await authorize()).status, 403, 'a new flow must recheck Telegram membership');
-    console.log('PASS Gateway signed Mini App authorization, cross-origin and duplicate-ticket upgrade denial without consuming valid admission, single-use ticket replay denial without disrupting the admitted socket, private capability isolation, authenticated snapshots, viewer read-only startup, fresh mutation authorization, HTTP denial after removal, and flow-scoped output/read-fetch continuity.');
+    console.log('PASS Gateway signed authorization, origin isolation, single-use tickets, private capability isolation, read-only snapshots for every role, mutation rejection, credential membership checks, and flow-scoped output/read-fetch continuity.');
   } finally {
     socket?.terminate();
     reader?.terminate();

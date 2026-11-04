@@ -34,49 +34,45 @@ async function fixture() {
   return { app, session, connect };
 }
 
-test('Mini App answers enter the response protocol without entering the prompt queue', async () => {
-  const { app, connect } = await fixture();
-  let socket: WebSocket | undefined;
-  try {
-    socket = (await connect()).socket;
-    const text = 'Deploy to staging\n  Keep <literal> **text** 😀  ';
-    socket.send(JSON.stringify({t:'ui-response',reqId:901,value:text}));
-    const deadline = Date.now()+5000;
-    while (!app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 901)) {
-      assert.ok(Date.now() < deadline,'Mini App answer missing from response protocol');
-      await delay(10);
-    }
-    assert.ok(app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 901 && frame.value === text));
-    assert.ok(!app.accepted.some(frame => frame.t === 'prompt' && frame.text === text));
-  } finally { socket?.terminate(); await app.close(); }
-});
-
+for (const status of ['member', 'administrator', 'creator'] as const) {
 for (const action of [
   { t: 'prompt', text: 'forged instruction' }, { t: 'abort' },
+  { t: 'prompt', text: 'image instruction', images: [{type:'image',data:'aA==',mimeType:'image/png'}] },
   { t: 'agent-cmd', cmd: 'kill', agentId: 'worker' },
   { t: 'agent-cmd', cmd: 'revive', agentId: 'worker' },
   { t: 'agent-cmd', cmd: 'chat', agentId: 'worker', text: 'forged subagent instruction' },
   { t: 'ui-response', reqId: 1, value: 'approve' },
+  { t: 'ui-response', reqId: 1 },
+  { t: 'hello', proto: 3, name: 'forged', writeToken: 'secret' },
 ]) {
-  test(`ordinary members can watch but cannot forge ${action.t}${'cmd' in action ? ` ${action.cmd}` : ''}`, async () => {
+  test(`${status} can watch but cannot send ${action.t}${'cmd' in action ? ` ${action.cmd}` : ''}`, async () => {
     const { app, connect } = await fixture();
     let socket: WebSocket | undefined;
     try {
-      app.setCurrentMember({ username: 'viewer', status: 'member' });
+      app.setCurrentMember({ username: 'viewer', status });
       const reader = await connect(); socket = reader.socket;
-      let marked = 0, relayed = 0;
+      let marked = 0;
       app.runtime.markPrompt = () => { marked++; };
-      app.service.relayPrompt = async () => { relayed++; };
       assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
+      socket.send(JSON.stringify({t:'fetch-transcript',reqId:700,agentId:'worker',fromByte:0}));
+      const deadline = Date.now()+5000;
+      while (!app.accepted.some(frame => frame.t === 'fetch-transcript' && frame.reqId === 700)) {
+        assert.ok(Date.now()<deadline,'reader transcript request missing');
+        await delay(10);
+      }
+      const messagesBefore = app.messages.length;
       const before = app.accepted.length;
       const closed = once(socket, 'close');
       socket.send(JSON.stringify(action));
-      await closed;
+      const [code, reason] = await closed;
+      assert.equal(code, 4002);
+      assert.equal(reason.toString(), 'Invalid action');
       assert.equal(app.accepted.length, before);
       assert.equal(marked, 0);
-      assert.equal(relayed, 0);
+      assert.equal(app.messages.length,messagesBefore);
     } finally { socket?.terminate(); await app.close(); }
   });
+}
 }
 
 test('current native role controls reconnect access regardless of username', async () => {
@@ -88,7 +84,7 @@ test('current native role controls reconnect access regardless of username', asy
     app.setCurrentMember({status:'administrator'});
     assert.equal(await app.service.authorizeSession(session, ownerId), true);
     const controller = await connect(); sockets.push(controller.socket);
-    assert.equal(controller.frames.find(frame => frame.t === 'welcome')?.readOnly, false);
+    assert.equal(controller.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
     app.setCurrentMember({ username: 'renamed', status: 'member' });
     const before = app.accepted.length;
     const closed = once(controller.socket, 'close');
@@ -105,14 +101,15 @@ test('current native role controls reconnect access regardless of username', asy
     }
     app.setCurrentMember({status:'creator'});
     const restored = await connect(); sockets.push(restored.socket);
-    assert.equal(restored.frames.find(frame => frame.t === 'welcome')?.readOnly, false);
+    assert.equal(restored.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
   } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
 });
 
-test('membership API failures preserve the original error and deny mutations', async () => {
+test('idle membership API failures preserve the original error', async t => {
   const { app, connect } = await fixture();
   let socket: WebSocket | undefined;
   try {
+    t.mock.timers.enable({apis:['setInterval']});
     socket = (await connect()).socket;
     const failure = new Error('Original membership API diagnostic');
     app.bot.api.config.use(async (previous, method, payload, signal) => {
@@ -121,7 +118,7 @@ test('membership API failures preserve the original error and deny mutations', a
     });
     const before = app.accepted.length;
     const closed = once(socket, 'close');
-    socket.send(JSON.stringify({ t: 'abort' }));
+    t.mock.timers.tick(30000);
     const [, reason] = await closed;
     assert.equal(reason.toString(), failure.message);
     assert.equal(app.accepted.length, before);
@@ -141,7 +138,7 @@ test('raw host read-only cannot be bypassed by a domain admin', async () => {
     const closed = once(socket, 'close');
     socket.send(JSON.stringify({ t: 'abort' }));
     const [, reason] = await closed;
-    assert.equal(reason.toString(), 'Host is read-only');
+    assert.equal(reason.toString(), 'Invalid action');
     assert.equal(app.accepted.length, before);
   } finally { socket?.terminate(); await app.close(); }
 });
@@ -175,7 +172,7 @@ for (const change of ['membership', 'generation'] as const) {
   });
 }
 
-test('closed topics disconnect clients and require freshly authorized reopening before host admission', {timeout:15000}, async () => {
+test('closed topics disconnect readers and can only be reopened through Telegram', {timeout:15000}, async () => {
   const { app, session, connect } = await fixture();
   let socket: WebSocket | undefined;
   const request = (extra: Record<string,unknown> = {}) => fetch(`${app.url}/api/session`, {
@@ -192,28 +189,26 @@ test('closed topics disconnect clients and require freshly authorized reopening 
     assert.equal(await app.runtime.isRunning(session),false);
     assert.equal(app.store.getSessionGeneration(session.id),oldGeneration+1);
     const response = await request();
-    const confirmation = await response.json() as {ticket?:string;generation:number;canReopen:boolean;credential:string};
+    const confirmation = await response.json() as {ticket?:string;generation:number;credential:string;canReopen?:boolean};
     assert.equal(response.status,200);
     assert.equal(confirmation.ticket,undefined);
-    assert.equal(confirmation.canReopen,true);
+    assert.equal(confirmation.canReopen,undefined);
     assert.deepEqual(app.reopenedTopics,[]);
     app.setCurrentMember({status:'member'});
     const denied = await request({reopen:true,generation:confirmation.generation,credential:confirmation.credential});
     assert.equal(denied.status,403);
     assert.equal(app.store.getSession(session.id)?.status,'closed');
     assert.deepEqual(app.reopenedTopics,[]);
-    const member = await (await request()).json() as {canReopen:boolean;ticket?:string};
-    assert.equal(member.canReopen,false);
+    const member = await (await request()).json() as {canReopen?:boolean;ticket?:string};
+    assert.equal(member.canReopen,undefined);
     assert.equal(member.ticket,undefined);
     app.setCurrentMember({status:'creator'});
-    const stale = await request({reopen:true,generation:oldGeneration});
-    assert.equal(stale.status,409);
+    const deniedAdmin = await request({reopen:true,generation:confirmation.generation,credential:confirmation.credential});
+    assert.equal(deniedAdmin.status,403);
+    assert.equal(app.store.getSession(session.id)?.status,'closed');
     assert.deepEqual(app.reopenedTopics,[]);
-    const confirmed = await request({reopen:true,generation:confirmation.generation,credential:confirmation.credential});
-    const admitted = await confirmed.json() as {ticket:string;session:{status:string}};
-    assert.equal(confirmed.status,200);
-    assert.equal(admitted.session.status,'open');
-    assert.deepEqual(app.reopenedTopics,[{chat_id:session.chatId,message_thread_id:session.threadId}]);
+    await app.update({message_thread_id:session.threadId,forum_topic_reopened:{}});
+    assert.equal(app.store.getSession(session.id)?.status,'open');
     assert.equal(await app.runtime.isRunning(session),false);
     socket = (await connect()).socket;
     assert.equal(await app.runtime.isRunning(session),true);
@@ -225,10 +220,11 @@ test('closed topics disconnect clients and require freshly authorized reopening 
   } finally { socket?.terminate(); await app.close(); }
 });
 
-test('multiline authorization diagnostics exceed close limits without losing the original message', async () => {
+test('multiline idle authorization diagnostics retain the original message', async t => {
   const { app, connect } = await fixture();
   let socket: WebSocket | undefined;
   try {
+    t.mock.timers.enable({apis:['setInterval']});
     const controller = await connect(); socket = controller.socket;
     const message = `Membership lookup failed:\n${'詳細診断'.repeat(60)}\nOriginal diagnostic retained.`;
     app.bot.api.config.use(async (previous, method, payload, signal) => {
@@ -237,7 +233,7 @@ test('multiline authorization diagnostics exceed close limits without losing the
     });
     const before = app.accepted.length;
     const closed = once(socket, 'close');
-    socket.send(JSON.stringify({ t: 'abort' }));
+    t.mock.timers.tick(30000);
     const [code] = await closed;
     assert.equal(code, 1013);
     const frames: unknown[] = controller.frames;
@@ -270,65 +266,6 @@ for (const change of ['role', 'membership'] as const) {
         assert.equal(reader.frames.find(frame => frame.t === 'welcome')?.readOnly, true);
       }
     } finally { sockets.forEach(socket => socket.terminate()); await app.close(); }
-  });
-}
-
-for (const change of ['role', 'assignment', 'generation'] as const) {
-  test(`mutations recheck ${change} changed during membership lookup`, async () => {
-    const { app, session, connect } = await fixture();
-    let socket: WebSocket | undefined;
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    try {
-      app.setCurrentMember({ status: 'creator' });
-      socket = (await connect()).socket;
-      let held = false;
-      app.bot.api.config.use(async (previous, method, payload, signal) => {
-        if (!held && method === 'getChatMember' && 'user_id' in payload && Number(payload.user_id) === ownerId) {
-          held = true; entered.resolve(); await resume.promise;
-        }
-        return previous(method, payload, signal);
-      });
-      const before = app.accepted.length;
-      const closed = once(socket, 'close');
-      socket.send(JSON.stringify({ t: 'prompt', text: 'must not pass a stale authorization' }));
-      socket.send(JSON.stringify({ t: 'abort' }));
-      await entered.promise;
-      if (change === 'role') app.setCurrentMember({status:'member'});
-      else if (change === 'assignment') app.config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
-      else app.store.advanceSessionGeneration(session.id);
-      resume.resolve();
-      await closed;
-      assert.equal(app.accepted.length, before);
-    } finally { resume.resolve(); socket?.terminate(); await app.close(); }
-  });
-}
-
-for (const change of ['membership', 'role'] as const) {
-  test(`queued mutations recheck ${change} immediately before execution`, async () => {
-    const { app, connect } = await fixture();
-    let socket: WebSocket | undefined;
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    const relay = app.service.relayAnswer.bind(app.service);
-    app.service.relayAnswer = async (...args) => {
-      entered.resolve();
-      await resume.promise;
-      await relay(...args);
-    };
-    try {
-      socket = (await connect()).socket;
-      socket.send(JSON.stringify({ t: 'ui-response', reqId: 901, value: 'authorized before revocation' }));
-      await entered.promise;
-      assert.ok(app.accepted.some(frame => frame.t === 'ui-response' && frame.reqId === 901 && frame.value === 'authorized before revocation'));
-      const closed = once(socket, 'close');
-      socket.send(JSON.stringify({ t: 'abort' }));
-      if (change === 'membership') app.setMember(false);
-      else app.setCurrentMember({ status: 'member' });
-      resume.resolve();
-      await closed;
-      assert.ok(!app.accepted.some(frame => frame.t === 'abort'), 'queued mutation used authorization from before it reached execution');
-    } finally { resume.resolve(); socket?.terminate(); await app.close(); }
   });
 }
 
@@ -618,10 +555,11 @@ for (const boundary of ['authorize', 'authorizeSession'] as const) {
 }
 
 for (const failureKind of [401, 429, 500, 'transport'] as const) {
-  test(`authorization preserves diagnostics and classifies Telegram ${failureKind} failures`, async () => {
+  test(`authorization preserves diagnostics and classifies Telegram ${failureKind} failures`, async t => {
     const { app, session, connect } = await fixture();
     let socket: WebSocket | undefined;
     try {
+      t.mock.timers.enable({apis:['setInterval']});
       socket = (await connect()).socket;
       const failure = failureKind === 'transport'
         ? new HttpError('Original authorization transport diagnostic', new Error('ECONNRESET'))
@@ -647,10 +585,10 @@ for (const failureKind of [401, 429, 500, 'transport'] as const) {
       assert.deepEqual(await response.json(), { error: failure.message });
       const before = app.accepted.length;
       const closed = once(socket, 'close');
-      socket.send(JSON.stringify({ t: 'abort' }));
+      t.mock.timers.tick(30000);
       const [code] = await closed;
       assert.equal(code, transient ? 1013 : 4003);
-      assert.equal(app.accepted.length, before, 'failed authorization must not execute mutations');
+      assert.equal(app.accepted.length, before, 'failed authorization must not forward requests');
     } finally { socket?.terminate(); await app.close(); }
   });
 }
