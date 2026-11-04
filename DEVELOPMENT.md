@@ -25,9 +25,9 @@ Configure model credentials for the development account through OMP. Do not reus
 
 ## Change the database schema
 
-Append SQL to the migration list in `src/migrations.ts`. Each list entry advances the database version by one. Keep applied entries unchanged and in order. Do not include transaction statements in migration SQL.
+Keep one current schema in `src/migrations.ts`; collapse schema changes into that definition rather than appending compatibility migrations. Update fixtures and callers together. Older schemas are unsupported and must not be imported automatically.
 
-Store startup applies pending entries in one transaction, including their version updates. A failure rolls back the entire pending upgrade and preserves the original SQLite error. There are no down migrations.
+Store startup initializes a new database atomically and rejects unsupported schemas. Schema initialization failures preserve the original SQLite diagnostic.
 
 ## Modify the Mini App
 

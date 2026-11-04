@@ -15,13 +15,13 @@ test('passive resolution adopts existing identities and never launches absent or
   const executable = join(directory,'omp');
   const history = join(directory,'history.jsonl');
   const config: AppConfig = {
-    bots:[],instances:{[directory]:{chats:[]}},configPath:join(directory,'config.yaml'),
+    bots:[],instances:[{id: 1, defaultDir: directory, chats: []}],configPath:join(directory,'config.yaml'),
     publicUrl:'',host:'127.0.0.1',port:0,dataDir:directory,
     omp:{executable,args:[],maxSessions:1,startupTimeoutMs:5000},
   };
   writeConfig(config);
   const runtime = new OmpRuntime(config);
-  const session: TopicSession = {id:'topic',botId:1,chatId:-100,threadId:42,instancePath:directory,
+  const session: TopicSession = {id:'topic',botId:1,chatId:-100,threadId:42,instanceId: 1, cwd:directory,
     name:'Existing host',status:'open',createdAt:0,runtime:{kind:'managed'}};
   const host = {instanceId:'existing-host',sessionId:'history-id',generation:7,pid:process.pid,
     cwd:directory,access:'control',relayConnected:true};

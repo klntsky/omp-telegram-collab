@@ -13,10 +13,10 @@ import { clickSettings, eventually } from './bot-test-helpers.js';
 interface App { config: AppConfig; messages: Record<string,unknown>[] }
 function configure(app: App, options: string[]) {
   const config = readConfig(app.config.configPath);
-  const chat = Object.values(config.instances)[0]!.chats[0]!;
+  const chat = config.instances[0]!.chats[0]!;
   chat.folder_options = options;
   writeConfig(config);
-  Object.assign(Object.values(app.config.instances)[0]!.chats[0]!,chat);
+  Object.assign(app.config.instances[0]!.chats[0]!,chat);
 }
 function panel(app: App, prefix = 'folder:') {
   return app.messages.findLast(message => JSON.stringify(message.reply_markup)?.includes(prefix))!;
@@ -40,7 +40,7 @@ for (const invalidation of ['role','settings','assignment','expired','actor'] as
       const choice = button(message,'0');
       if (invalidation === 'assignment') {
         const config = readConfig(app.config.configPath);
-        Object.values(config.instances)[0]!.chats = [];
+        config.instances[0]!.chats = [];
         writeConfig(config);
       }
       if (invalidation === 'role') app.setCurrentMember({status:'member'});
@@ -60,7 +60,7 @@ test('non-admin proposals obtain approval before folder or session effects', asy
   try {
     await app.update({text:'/setup'});
     await clickSettings(app,1);
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const path = join(root,'approved-folder');
     configure(app,['approved-folder','.']);
     const proposer = {id:77,is_bot:false,first_name:'Participant',username:'participant'};
@@ -89,7 +89,7 @@ test('folder selection precedes command capacity reservation and survives approv
     await app.update({text:'/setup'});
     await app.update({text:'/new running'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     configure(app,['.','other']);
     t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
     const presets = t.mock.method(app.runtime,'modelPresets',async () => 'Fast');
@@ -106,8 +106,9 @@ test('folder selection precedes command capacity reservation and survives approv
     await app.callback(markup.inline_keyboard[0]![0]!.callback_data,capacity);
     const session = app.store.listSessions(botId).find(session => session.name.includes('waiting'))!;
     assert.ok(session);
-    assert.equal(session.instancePath,root);
-    assert.deepEqual(session.runtime,{kind:'managed',cwd:realpathSync(root)});
+    assert.equal(session.cwd,root);
+    assert.deepEqual(session.runtime,{ kind: 'managed' });
+    assert.equal(session.cwd,realpathSync(root));
     assert.equal(presets.mock.callCount(),1);
     await eventually(() => app.accepted.filter(frame => frame.t === 'prompt').length === 2);
   } finally { await app.close(); }
@@ -119,13 +120,14 @@ test('folder selection precedes command capacity reservation and survives approv
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
+      const root = app.config.instances[0]!.defaultDir;
       configure(app,['..']);
       await app.update({text:'/new automatic'});
       assert.equal(panel(app),undefined);
       const sessions = app.store.listSessions(botId);
       assert.equal(sessions.length,1);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'..'))});
+      assert.deepEqual(sessions[0]!.runtime,{ kind: 'managed' });
+      assert.equal(sessions[0]!.cwd,realpathSync(join(root,'..')));
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'automatic'}]);
     } finally { await app.close(); }
@@ -136,7 +138,7 @@ test('a selected canonical folder cannot redirect through a replaced symlink bef
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const selected = join(root,'selected');
     const other = join(root,'other');
     await mkdir(selected);
@@ -162,7 +164,7 @@ test('folder settings changed during capacity confirmation cannot authorize an o
     await app.update({text:'/setup'});
     await app.update({text:'/new running'});
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     configure(app,['.','other']);
     t.mock.method(app.runtime,'availableModelPresets',async () => ['Fast']);
     t.mock.method(app.runtime,'modelPresets',async () => 'Fast');
@@ -185,7 +187,7 @@ test('folder settings changed during capacity confirmation cannot authorize an o
 
 test('folder creation rejects denied access and permissions revoked after confirmation', {skip:process.getuid?.() === 0}, async () => {
   const app = await createSmokeApp();
-  const parent = join(Object.keys(app.config.instances)[0]!,'restricted');
+  const parent = join(app.config.instances[0]!.defaultDir,'restricted');
   try {
     await app.update({text:'/setup'});
     await mkdir(parent);
@@ -226,7 +228,7 @@ test('failed pre-admission selection retains task, rotates callbacks and support
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const blocked = join(root,'blocked');
     await writeFile(blocked,'not a directory');
     configure(app,['blocked','.']);
@@ -263,11 +265,11 @@ test('Add folder appends freshly read configuration and rejects unauthorized rep
     await clickSettings(app,2,input);
     app.setCurrentMember({status:'member'});
     await app.update({text:'denied',reply_to_message:input});
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.']);
+    assert.deepEqual(readConfig(app.config.configPath).instances[0]!.chats[0]!.folder_options,['.']);
     app.setCurrentMember({status:'creator'});
     configure(app,['.','concurrent']);
     await app.update({text:'added',reply_to_message:input});
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.','concurrent','added']);
+    assert.deepEqual(readConfig(app.config.configPath).instances[0]!.chats[0]!.folder_options,['.','concurrent','added']);
   } finally { await app.close(); }
 });
 
@@ -359,7 +361,7 @@ test('queued stale callback snapshots cannot clear replacement folder controls',
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const blocked = join(root,'blocked');
     await writeFile(blocked,'not a directory');
     configure(app,['blocked','.']);
@@ -382,7 +384,7 @@ for (const transition of ['recovery'] as const) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
+      const root = app.config.instances[0]!.defaultDir;
       const blocked = join(root,'blocked');
       await writeFile(blocked,'not a directory');
       configure(app,['blocked','.']);
@@ -408,16 +410,17 @@ test('removing dot leaves a sole nondefault option and no chooser', async () => 
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     await mkdir(join(root,'project'));
     configure(app,['.','project']);
     await app.update({text:'/settings'});
     await clickSettings(app,7);
     await clickSettings(app,0);
-    assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['project']);
+    assert.deepEqual(readConfig(app.config.configPath).instances[0]!.chats[0]!.folder_options,['project']);
     await app.update({text:'/new project task'});
     assert.equal(panel(app),undefined);
-    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'project'))});
+    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{ kind: 'managed' });
+    assert.equal(app.store.listSessions(botId)[0]!.cwd,realpathSync(join(root,'project')));
   } finally { await app.close(); }
 });
 
@@ -426,7 +429,7 @@ for (const missing of [false,true]) {
     const app = await createSmokeApp();
     try {
       await app.update({text:'/setup'});
-      const root = Object.keys(app.config.instances)[0]!;
+      const root = app.config.instances[0]!.defaultDir;
       const path = join(root,'manual');
       if (!missing) await mkdir(path);
       configure(app,['manual']);
@@ -442,7 +445,8 @@ for (const missing of [false,true]) {
       const sessions = app.store.listSessions(botId);
       assert.equal(sessions.length,1);
       assert.equal(sessions[0]!.threadId,42);
-      assert.deepEqual(sessions[0]!.runtime,{kind:'managed',cwd:realpathSync(path)});
+      assert.deepEqual(sessions[0]!.runtime,{ kind: 'managed' });
+      assert.equal(sessions[0]!.cwd,realpathSync(path));
       assert.deepEqual(app.createdTopics,[]);
     } finally { await app.close(); }
   });
@@ -453,7 +457,7 @@ test('singleton proposal requires normal approval then autouses its folder', asy
   try {
     await app.update({text:'/setup'});
     await clickSettings(app,1);
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     await mkdir(join(root,'approved'));
     configure(app,['approved']);
     app.setCurrentMember({status:'member'});
@@ -466,7 +470,8 @@ test('singleton proposal requires normal approval then autouses its folder', asy
     await app.callback(callbacks(approval)[0]!,approval);
     assert.equal(panel(app),undefined);
     assert.equal(app.store.listSessions(botId).length,1);
-    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{kind:'managed',cwd:realpathSync(join(root,'approved'))});
+    assert.deepEqual(app.store.listSessions(botId)[0]!.runtime,{ kind: 'managed' });
+    assert.equal(app.store.listSessions(botId)[0]!.cwd,realpathSync(join(root,'approved')));
     await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
     assert.deepEqual(app.accepted.filter(frame => frame.t === 'prompt'),[{t:'prompt',text:'single proposal'}]);
   } finally { await app.close(); }
@@ -476,7 +481,7 @@ test('sole folder filesystem failure retains task for retry without another choi
   const app = await createSmokeApp();
   try {
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const path = join(root,'blocked');
     await writeFile(path,'not a directory');
     configure(app,['blocked']);
@@ -513,7 +518,7 @@ test('manual folder creation rechecks administrator authority before registering
   try {
     app.setCurrentMember({status:'administrator'});
     await app.update({text:'/setup'});
-    const root = Object.keys(app.config.instances)[0]!;
+    const root = app.config.instances[0]!.defaultDir;
     const path = join(root,'manual');
     configure(app,['manual']);
     await app.update({message_thread_id:42,forum_topic_created:{name:'Manual'}});
@@ -543,10 +548,10 @@ for (const mode of ['append','replace'] as const) {
       const input = panel(app,'settings:');
       await app.callback(callbacks(input)[0]!,input);
       await app.update({text:'cancelled-folder',reply_to_message:input});
-      assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,['.']);
+      assert.deepEqual(readConfig(app.config.configPath).instances[0]!.chats[0]!.folder_options,['.']);
       await clickSettings(app,mode === 'append' ? 2 : 3);
       await app.update({text:'accepted-folder',reply_to_message:panel(app,'settings:')});
-      assert.deepEqual(Object.values(readConfig(app.config.configPath).instances)[0]!.chats[0]!.folder_options,
+      assert.deepEqual(readConfig(app.config.configPath).instances[0]!.chats[0]!.folder_options,
         mode === 'append' ? ['.','accepted-folder'] : ['accepted-folder']);
       assert.deepEqual(app.store.listSessions(botId),[]);
     } finally { await app.close(); }

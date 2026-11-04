@@ -94,12 +94,20 @@ class Administration {
     if (this.deps.telegram) return this.deps.telegram(bot.token);
     return new Api(bot.token);
   }
-  instance(config: AppConfig, input: string): {path: string; instance: InstanceConfig} {
-    const literal = resolve(input);
-    const path = Object.hasOwn(config.instances, literal) ? literal : canonicalPath(input);
-    const instance = config.instances[path];
-    if (!instance) throw new Error(`No instance registered for ${path}. Use create PATH first.`);
-    return {path, instance};
+  instance(config: AppConfig, input: string): InstanceConfig {
+    const id = integer(input, 'Instance ID');
+    const instance = config.instances.find(instance => instance.id === id);
+    if (!instance) throw new Error(`Instance ${id} is not configured.`);
+    return instance;
+  }
+  nextId(config: AppConfig, store: Store, specified?: string): number {
+    const used = new Set([...config.instances.map(instance => instance.id), ...store.listSessions().map(session => session.instanceId)]);
+    let maximum = 0;
+    for (const value of used) maximum = Math.max(maximum, value);
+    const id = specified === undefined ? maximum + 1 : integer(specified, 'Instance ID');
+    if (!Number.isSafeInteger(id)) throw new Error('No safe instance ID remains.');
+    if (used.has(id)) throw new Error(`Instance ID ${id} is already configured or retained in history.`);
+    return id;
   }
   async selectBot(config: AppConfig, value?: string): Promise<BotConfig> {
     if (value !== undefined) {
@@ -142,38 +150,40 @@ class Administration {
     const user = record(member.user);
     if (user.id !== userId || user.is_bot === true || !['creator', 'administrator'].includes(String(member.status))) throw new Error('The requester is no longer a current group administrator. Request preserved.');
   }
-  historySafe(config: AppConfig, store: Store, path: string, botId: number, chatId: number): void {
+  historySafe(config: AppConfig, store: Store, instanceId: number, botId: number, chatId: number): void {
     const current = findInstance(config, botId, chatId);
-    if (current && current.path !== path) throw new Error(`This bot/chat is already assigned to ${current.path}. Remove that assignment first.`);
+    if (current && current.instance.id !== instanceId) throw new Error(`This bot/chat is already assigned to instance ${current.instance.id}. Remove that assignment first.`);
     for (const session of store.listSessions(botId)) {
-      if (session.chatId !== chatId) continue;
-      if (session.instancePath !== path || canonicalPath(session.instancePath) !== session.instancePath) throw new Error('This bot/chat has histories pinned to a different or unknown directory. It cannot be reassigned safely.');
+      if (session.chatId === chatId && session.instanceId !== instanceId) throw new Error('This bot/chat has histories pinned to a different logical instance. It cannot be reassigned safely.');
     }
   }
-  async create(input: string): Promise<void> {
-    const path = canonicalPath(input);
+  async create(input: string, specifiedId?: string): Promise<void> {
+    const defaultDir = canonicalPath(input);
     const config = this.load(true);
     this.writable(config);
-    if (config.instances[path]) throw new Error(`Instance already registered: ${path}`);
-    config.instances[path] = {chats: []};
-    await this.save(config);
-    this.print(`Created ${path}`);
+    const store = new Store(join(config.dataDir, 'telegram.sqlite'));
+    try {
+      const id = this.nextId(config, store, specifiedId);
+      config.instances.push({id, defaultDir, chats: []});
+      await this.save(config);
+      this.print(`Created instance ${id}: ${defaultDir}`);
+    } finally { store.close(); }
   }
   show(config: AppConfig, input?: string): void {
-    const entries = input === undefined ? Object.entries(config.instances) : (() => { const found = this.instance(config, input); return [[found.path, found.instance] as const]; })();
+    const entries = input === undefined ? config.instances : [this.instance(config, input)];
     if (!entries.length) { this.print('No instances configured.'); return; }
-    for (const [path, instance] of entries) this.print(`${path}\n  chats: ${instance.chats.map(chat => `${chat.chatId} (bot ${chat.botId}, all_messages_are_prompts: ${chat.all_messages_are_prompts ?? true}, users_can_propose_prompts: ${chat.users_can_propose_prompts ?? false})`).join(', ') || '(none)'}`);
+    for (const instance of entries) this.print(`${instance.id}\t${instance.defaultDir}\n  chats: ${instance.chats.map(chat => `${chat.chatId} (bot ${chat.botId}, all_messages_are_prompts: ${chat.all_messages_are_prompts ?? true}, users_can_propose_prompts: ${chat.users_can_propose_prompts ?? false})`).join(', ') || '(none)'}`);
   }
   async addChat(input: string, chatValue: string, botValue?: string, specifiedMode?: boolean, specifiedProposals?: boolean): Promise<void> {
     const config = this.load();
     this.writable(config);
-    const {path, instance} = this.instance(config, input);
-    if (canonicalPath(path) !== path) throw new Error('The registered directory now resolves to another path. Remove the old instance and explicitly register the new canonical directory.');
+    const instance = this.instance(config, input);
+    const path = instance.defaultDir;
     const bot = await this.selectBot(config, botValue);
     const chatId = integer(chatValue, 'Chat ID', Number.MIN_SAFE_INTEGER, -1);
     const store = new Store(join(config.dataDir, 'telegram.sqlite'));
     try {
-      this.historySafe(config, store, path, bot.id, chatId);
+      this.historySafe(config, store, instance.id, bot.id, chatId);
       const {chat, me} = await this.verifyForum(bot, chatId);
       const assignment = instance.chats.find(value => value.botId === bot.id && value.chatId === chatId);
       const all_messages_are_prompts = await this.selectPromptMode(assignment?.all_messages_are_prompts, specifiedMode);
@@ -184,10 +194,10 @@ class Administration {
       this.print(`Connected ${String(chat.title ?? chatId)} (${chatId}) through @${String(me.username ?? bot.id)} (${bot.id}) to ${path}.`);
     } finally { store.close(); }
   }
-  async approve(code: string, input: string | undefined, yes: boolean, specifiedMode?: boolean, specifiedProposals?: boolean): Promise<void> {
+  async approve(code: string, input: string | undefined, yes: boolean, specifiedMode?: boolean, specifiedProposals?: boolean, instanceValue?: string): Promise<void> {
     const config = this.load();
     this.writable(config);
-    if (!this.interactive && !yes) throw new Error('Noninteractive approval requires --yes and --path PATH.');
+    if (!this.interactive && !yes) throw new Error('Noninteractive approval requires --yes and --instance ID or --path PATH.');
     const store = new Store(join(config.dataDir, 'telegram.sqlite'));
     try {
       const pending = store.getSetupRequest(code);
@@ -196,15 +206,23 @@ class Administration {
       const {chat, me} = await this.verifyForum(bot, pending.chatId);
       await this.requesterAdmin(bot, pending.chatId, pending.userId);
       this.print(`Verified bot @${String(me.username ?? bot.id)} (${bot.id})\nVerified forum ${String(chat.title ?? pending.chatId)} (${pending.chatId})\nVerified requester ${pending.userId}, current group administrator.`);
-      let target = input;
+      if (input !== undefined && instanceValue !== undefined) throw new Error('Choose --instance ID or --path PATH, not both.');
+      let target = instanceValue ?? input;
       if (!target && this.interactive) {
         this.show(config);
-        target = await this.ask('Project directory where OMP will run: ');
+        target = await this.ask('Instance ID or project directory where OMP will run: ');
       }
-      if (!target) throw new Error('Approval requires --path PATH.');
-      const path = canonicalPath(target);
-      this.historySafe(config, store, path, bot.id, pending.chatId);
-      const instance = config.instances[path] ?? {chats: []};
+      if (!target) throw new Error('Approval requires --instance ID or --path PATH.');
+      let instance: InstanceConfig;
+      if (instanceValue !== undefined || (input === undefined && /^[1-9]\d*$/.test(target))) instance = this.instance(config, target);
+      else {
+        const defaultDir = canonicalPath(target);
+        const current = findInstance(config, bot.id, pending.chatId)?.instance;
+        if (current && current.defaultDir !== defaultDir) throw new Error(`This bot/chat is already assigned to instance ${current.id} with a different default directory. Use --instance ID to select it.`);
+        instance = current ?? {id: this.nextId(config, store), defaultDir, chats: []};
+      }
+      const path = instance.defaultDir;
+      this.historySafe(config, store, instance.id, bot.id, pending.chatId);
       const assignment = instance.chats.find(value => value.botId === bot.id && value.chatId === pending.chatId);
       const all_messages_are_prompts = specifiedMode ?? assignment?.all_messages_are_prompts ?? true;
       const users_can_propose_prompts = specifiedProposals ?? assignment?.users_can_propose_prompts ?? false;
@@ -215,7 +233,7 @@ class Administration {
       if (!store.getSetupRequest(code)) throw new Error('Setup request expired during approval. Ask the administrator to run /setup again.');
       if (assignment) Object.assign(assignment, {all_messages_are_prompts, users_can_propose_prompts});
       else instance.chats.push({botId: bot.id, chatId: pending.chatId, all_messages_are_prompts, users_can_propose_prompts});
-      config.instances[path] = instance;
+      if (!config.instances.includes(instance)) config.instances.push(instance);
       await this.save(config, config.dataDir, () => {
         store.enrollGroup(bot.id, pending.chatId);
         store.consumeSetupRequest(code);
@@ -306,14 +324,14 @@ class Administration {
   }
   async remove(input: string): Promise<void> {
     const config = this.load(); this.writable(config);
-    const {path, instance} = this.instance(config, input);
+    const instance = this.instance(config, input);
     if (instance.chats.length) throw new Error('Remove this instance’s chat assignments before removing the instance.');
-    delete config.instances[path];
-    await this.save(config); this.print(`Removed ${path}. Histories were retained.`);
+    config.instances = config.instances.filter(value => value.id !== instance.id);
+    await this.save(config); this.print(`Removed instance ${instance.id}. Histories were retained.`);
   }
   async removeChat(input: string, options: Options): Promise<void> {
     const chat = one(options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
-    const config = this.load(); this.writable(config); const {instance} = this.instance(config, input);
+    const config = this.load(); this.writable(config); const instance = this.instance(config, input);
     const bot = await this.selectBot(config, one(options, 'bot')); const chatId = integer(chat, 'Chat ID', Number.MIN_SAFE_INTEGER, -1);
     instance.chats = instance.chats.filter(item => item.botId !== bot.id || item.chatId !== chatId);
     await this.save(config); this.print('Chat assignment removed. Histories were retained.');
@@ -326,7 +344,7 @@ class Administration {
   async removeBot(id: string): Promise<void> {
     const config = this.load(); this.writable(config);
     const bot = await this.selectBot(config, id); config.bots = config.bots.filter(item => item.id !== bot.id);
-    for (const instance of Object.values(config.instances)) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
+    for (const instance of config.instances) instance.chats = instance.chats.filter(chat => chat.botId !== bot.id);
     await this.save(config); this.print(`Removed bot ${bot.id} and its chat assignments. Histories were retained.`);
   }
 }
@@ -382,14 +400,16 @@ export function registerAdminCommands(program: Command, configPath: () => string
     ['--clear-omp-args', 'Clear configured OMP arguments'],
   ] as const) flag(setup, flags, description, flags === '--omp-arg <arg>');
   setup.action((_values, command: Command) => admin().setup(options(command)));
-  program.command('create <path>').description('Register a project directory').action((path: string) => admin().create(path));
+  const create = program.command('create <path>').description('Register a project directory with a stable numeric ID');
+  flag(create, '--id <id>', 'Explicit unused instance ID (default: maximum configured or persisted ID plus one)');
+  create.action((path: string, _values, command: Command) => admin().create(path, one(options(command), 'id')));
   program.command('list').description('List registered project directories').action(() => { const service = admin(); service.show(service.load()); });
-  program.command('show <path>').description('Show a project and its chat assignments').action((path: string) => { const service = admin(); service.show(service.load(), path); });
-  program.command('remove <path>').description('Remove an unassigned project, retaining histories').action((path: string) => admin().remove(path));
-  const chat = program.command('chat').description('Manage project chat assignments');
-  chat.command('list <path>').description('List a project’s chat assignments').action((path: string) => { const service = admin(); service.show(service.load(), path); });
-  const addChat = chat.command('add <path>').description('Connect or update a forum chat assignment');
-  const removeChat = chat.command('remove <path>').description('Remove a chat assignment, retaining histories');
+  program.command('show <id>').description('Show an instance and its chat assignments').action((id: string) => { const service = admin(); service.show(service.load(), id); });
+  program.command('remove <id>').description('Remove an unassigned instance, retaining histories').action((id: string) => admin().remove(id));
+  const chat = program.command('chat').description('Manage instance chat assignments');
+  chat.command('list <id>').description('List an instance’s chat assignments').action((id: string) => { const service = admin(); service.show(service.load(), id); });
+  const addChat = chat.command('add <id>').description('Connect or update a forum chat assignment');
+  const removeChat = chat.command('remove <id>').description('Remove a chat assignment, retaining histories');
   for (const command of [addChat, removeChat]) {
     flag(command, '--chat <id>', 'Telegram forum chat ID');
     flag(command, '--bot <id>', 'Configured bot ID');
@@ -405,13 +425,14 @@ export function registerAdminCommands(program: Command, configPath: () => string
   removeChat.action((path: string, _values, command: Command) => admin().removeChat(path, options(command)));
   const approve = program.command('approve <code>').description('Approve a Telegram setup request');
   flag(approve, '--path <path>', 'Project directory where OMP will run');
+  flag(approve, '--instance <id>', 'Configured stable instance ID');
   flag(approve, '--yes', 'Confirm approval without prompting');
   policies(approve);
   approve.action((code: string, _values, command: Command) => {
     const values = options(command);
     const mode = one(values, 'all-messages-are-prompts');
     const proposals = one(values, 'users-can-propose-prompts');
-    return admin().approve(code, one(values, 'path'), values.has('yes'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'));
+    return admin().approve(code, one(values, 'path'), values.has('yes'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'), one(values, 'instance'));
   });
   const bot = program.command('bot').description('Manage Telegram bot credentials');
   const addBot = bot.command('add').description('Verify and register a Telegram bot');

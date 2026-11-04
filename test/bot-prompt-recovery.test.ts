@@ -124,11 +124,11 @@ for (const recovery of [
                 header: {
                   type: 'session',
                   id: binding.sessionId,
-                  cwd: targetSession.instancePath,
+                  cwd: targetSession.cwd,
                   timestamp: new Date().toISOString(),
                 },
                 state: {
-                  cwd: targetSession.instancePath,
+                  cwd: targetSession.cwd,
                   isStreaming: false,
                   queuedMessageCount: 0,
                   participants: [],

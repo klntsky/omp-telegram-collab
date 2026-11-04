@@ -125,8 +125,8 @@ test('legacy status sessions are excluded from initialization, mirroring, and to
   let restarted: BotService | undefined;
   try {
     await app.update({text:'/setup'});
-    const instancePath = Object.keys(app.config.instances)[0]!;
-    const session = app.store.createSession({botId,chatId,threadId:42,instancePath},'Legacy status history');
+    const instancePath = app.config.instances[0]!.defaultDir;
+    const session = app.store.createSession({botId,chatId,threadId:42, instanceId: 1, cwd: instancePath}, 'Legacy status history');
     app.store.db.prepare('INSERT INTO bot_status_topics VALUES (?,?,?)').run(botId,chatId,42);
     let probes = 0;
     app.runtime.topicTitleStatus = async () => { probes++; return {worktree:true,branch:'must-not-appear'}; };

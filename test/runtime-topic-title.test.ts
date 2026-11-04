@@ -28,7 +28,7 @@ async function fixture(t: TestContext, defaultBranch = 'main') {
   await git('config', 'init.defaultBranch', defaultBranch);
   await git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'Initial commit');
   const config: AppConfig = {
-    bots: [], instances: { [repository]: { chats: [] } },
+    bots: [], instances: [{id: 1, defaultDir: repository, chats: []}],
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: { executable: join(directory, 'omp'), args: [], maxSessions: 1, startupTimeoutMs: 10000 },
@@ -37,7 +37,7 @@ async function fixture(t: TestContext, defaultBranch = 'main') {
   const runtime = new OmpRuntime(config);
   activeRuntime = runtime;
   const session: TopicSession = {
-    id: 'title-session', botId: 1, chatId: -100, threadId: 2, instancePath: repository,
+    id: 'title-session', botId: 1, chatId: -100, threadId: 2, instanceId: 1, cwd: repository,
     name: 'Human title', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' },
   };
   return { directory, repository, git, config, runtime, session };
@@ -48,16 +48,16 @@ test('linked worktree status comes from Git metadata and follows its current bra
   const app = await fixture(t);
   const linked = join(app.directory, 'linked');
   await app.git('worktree', 'add', '-b', 'feature/linked', linked);
-  const session: TopicSession = { ...app.session, runtime: { kind: 'managed', cwd: linked } };
+  const session: TopicSession = { ...app.session, cwd: linked, runtime: { kind: 'managed' } };
   assert.deepEqual(await app.runtime.topicTitleStatus(session), { worktree: true, branch: 'feature/linked' });
   await app.git('switch', '-c', 'feature/primary');
   await execute('git', ['switch', 'main'], { cwd: linked });
   assert.deepEqual(await app.runtime.topicTitleStatus(session), { worktree: true });
   const subdirectory = join(linked, 'nested');
   await mkdir(subdirectory);
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', cwd: subdirectory } }), { worktree: true });
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...app.session, instancePath: linked, runtime: { kind: 'managed' } }), { worktree: true });
-  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, runtime: { kind: 'managed', cwd: app.repository } }), { worktree: false, branch: 'feature/primary' });
+  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, cwd: subdirectory, runtime: { kind: 'managed' } }), { worktree: true });
+  assert.deepEqual(await app.runtime.topicTitleStatus({ ...app.session, instanceId: 1, cwd: linked, runtime: { kind: 'managed' } }), { worktree: true });
+  assert.deepEqual(await app.runtime.topicTitleStatus({ ...session, cwd: app.repository, runtime: { kind: 'managed' } }), { worktree: false, branch: 'feature/primary' });
 });
 
 

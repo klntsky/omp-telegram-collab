@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
-const key = { botId: 1, chatId: -100, threadId: 17, instancePath: '/work/project' };
+const key = { botId: 1, chatId: -100, threadId: 17, instanceId: 1, cwd: '/work/project' };
 
 test('new topic skill snapshots and clears persist across disk restarts', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-new-topic-skill-'));

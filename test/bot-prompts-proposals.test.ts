@@ -14,8 +14,8 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
   try {
     await app.update({text:'/setup'});
     await setForumSetting(app, 0);
-    const path = Object.keys(app.config.instances)[0]!;
-    assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,false);
+    const path = app.config.instances[0]!.defaultDir;
+    assert.equal(readConfig(app.config.configPath).instances[0]!.chats[0]!.all_messages_are_prompts,false);
     await app.update({message_thread_id:42,forum_topic_created:{name:'Explicit prompts'}});
     const reactions = app.reactions.length;
     await app.update({text:'Ordinary discussion',message_thread_id:42});
@@ -56,7 +56,7 @@ test('explicit mode ignores discussion and mentions, and admits scoped /p prompt
     ]);
     await app.update({text:'/setup'});
     await setForumSetting(app, 0);
-    assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.all_messages_are_prompts,true);
+    assert.equal(readConfig(app.config.configPath).instances[0]!.chats[0]!.all_messages_are_prompts,true);
   } finally { await app.close(); }
 });
 
@@ -168,8 +168,8 @@ for (const allMessagesArePrompts of [true,false]) {
       await app.update({text:'/new Seed task'});
       await eventually(() => app.accepted.some(frame => frame.t === 'prompt'));
       const session = app.store.listSessions(botId)[0]!;
-      const path = Object.keys(app.config.instances)[0]!;
-      assert.equal(readConfig(app.config.configPath).instances[path]!.chats[0]!.users_can_propose_prompts,true);
+      const path = app.config.instances[0]!.defaultDir;
+      assert.equal(readConfig(app.config.configPath).instances[0]!.chats[0]!.users_can_propose_prompts,true);
       const proposer = {id:ownerId+5,first_name:'Grace',username:'grace',is_bot:false};
       app.setCurrentMember({username:'grace',status:'member'});
       await app.update({message_id:8100,text:allMessagesArePrompts ? 'Proposed multiline\n  task' : '/p Proposed multiline\n  task',message_thread_id:session.threadId},proposer);
@@ -212,10 +212,10 @@ for (const invalidation of ['disabled','archived','killed','removed','expired','
       await app.update({text:'Must not execute',message_thread_id:session.threadId});
       const proposal = promptProposal(app);
       app.setCurrentMember({username:ownerUsername,status:'creator'});
-      if (invalidation === 'disabled') app.config.instances[session.instancePath]!.chats[0]!.users_can_propose_prompts = false;
+      if (invalidation === 'disabled') app.config.instances.find(instance => instance.id === session.instanceId)!.chats[0]!.users_can_propose_prompts = false;
       else if (invalidation === 'archived') await app.update({message_thread_id:session.threadId,forum_topic_closed:{}});
       else if (invalidation === 'killed') await app.update({text:'/kill',message_thread_id:session.threadId});
-      else if (invalidation === 'removed') app.config.instances[session.instancePath]!.chats = [];
+      else if (invalidation === 'removed') app.config.instances.find(instance => instance.id === session.instanceId)!.chats = [];
       else if (invalidation === 'expired') {
         const now = Date.now();
         t.mock.method(Date,'now',() => now+600001);
