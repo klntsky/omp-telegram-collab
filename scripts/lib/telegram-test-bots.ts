@@ -25,6 +25,8 @@ export interface TelegramTestBotLease {
   release(): Promise<void>;
 }
 
+const activeLeases = new Set<TelegramTestBotLease>();
+
 export async function acquireTelegramTestBot(signal: AbortSignal, options: { checkoutPath?: string } = {}): Promise<TelegramTestBotLease> {
   signal.throwIfAborted();
   const checkout = await realpath(options.checkoutPath ?? (await promisify(execFile)('git', ['rev-parse', '--show-toplevel'])).stdout.trim());
@@ -36,16 +38,22 @@ export async function acquireTelegramTestBot(signal: AbortSignal, options: { che
       signal.throwIfAborted();
     }
     let releasing: Promise<void> | undefined;
-    return { token: bot.token, release() {
-      return releasing ??= (async () => { await bot.release(); await releaseCheckout!(); })();
+    const lease: TelegramTestBotLease = { token: bot.token, release() {
+      return releasing ??= (async () => {
+        await bot.release();
+        await releaseCheckout!();
+        activeLeases.delete(lease);
+      })();
     } };
+    activeLeases.add(lease);
+    return lease;
   } catch (error) {
     try { await releaseCheckout!(); } catch (cleanup) { throw combineTelegramErrors(error, cleanup); }
     throw error;
   }
 }
 
-async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
+async function readSavedBotTokens(): Promise<string[]> {
   const file = await open(await resolveTelegramTestEnvFile(), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let tokens: string[];
   let readFailure: unknown;
@@ -60,6 +68,11 @@ async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
       throw cleanup;
     }
   }
+  return tokens;
+}
+
+async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
+  const tokens = await readSavedBotTokens();
   signal.throwIfAborted();
   const stop = new AbortController();
   const waitingSignal = AbortSignal.any([signal, stop.signal]);
@@ -93,6 +106,16 @@ async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
   }
   if (cleanupErrors.length) throw combineTelegramErrors(...cleanupErrors);
   const lease = winner!;
+  let token: string;
+  try {
+    const current = (await readSavedBotTokens()).find(value => value.split(':')[0] === lease.token.split(':')[0]);
+    if (!current) throw new Error('Leased Telegram bot was removed from the configured token pool');
+    signal.throwIfAborted();
+    token = current;
+  } catch (error) {
+    try { await lease.release(); } catch (cleanup) { throw combineTelegramErrors(error, cleanup); }
+    throw error;
+  }
   let releasing: Promise<void> | undefined;
-  return { token: lease.token, release() { return releasing ??= lease.release(); } };
+  return { token, release() { return releasing ??= lease.release(); } };
 }

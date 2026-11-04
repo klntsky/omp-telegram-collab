@@ -67,6 +67,11 @@ export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['k
 
 export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number): Promise<void> {
   const start = app.apiCalls.length;
+  const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [panel.messageId]);
+  const markup = message?.raw._ === 'message' ? message.raw.replyMarkup : undefined;
+  if (markup?._ !== 'replyInlineMarkup') throw new Error(`Telegram message ${panel.messageId} has no callback keyboard`);
+  panel.buttons = markup.rows.flatMap(row => row.buttons.flatMap(button =>
+    button.type._ === 'inlineButtonTypeCallback' ? [Buffer.from(button.type.data).toString('utf8')] : []));
   const data = panel.buttons.at(index)!;
   await app.telegram.user.client.getCallbackAnswer({ chatId: app.telegram.forum.chat, message: panel.messageId, data });
   if (panel.kind !== '/settings' || index === -1) return;
