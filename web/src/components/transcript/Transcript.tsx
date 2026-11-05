@@ -257,7 +257,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const setPinnedStart = (start: SessionEntry | "beginning" | null): void => {
 		setPin({ revision: history?.revision, start });
 	};
-	const [awayFromTail, setAwayFromTail] = useState(false);
 	const tailStart = Math.max(0, entries.length - WINDOW);
 	const pinnedIndex = useMemo(
 		() => pinnedStart === "beginning" ? 0 : pinnedStart === null ? tailStart : entries.indexOf(pinnedStart),
@@ -319,7 +318,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (phase !== "live" || el === null) return;
 		setPinnedStart(null);
 		prependRef.current = null;
-		setAwayFromTail(false);
 		followTranscriptTail(el, lockRef, true);
 		lastScrollTopRef.current = el.scrollTop;
 	}, [phase]);
@@ -350,7 +348,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (start === 0 && (!history?.older || !onLoadEarlier || phase !== "live")) return;
 		captureAnchor();
 		lockRef.current = false;
-		setAwayFromTail(true);
 		earlierScrollArmedRef.current = false;
 		if (start > 0) {
 			const next = Math.max(0, start - WINDOW);
@@ -359,16 +356,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			setPinnedStart("beginning");
 			onLoadEarlier?.();
 		}
-	};
-
-	const jumpToLatest = (): void => {
-		prependRef.current = null;
-		setPinnedStart(null);
-		setAwayFromTail(false);
-		const el = rootRef.current;
-		if (!el) return;
-		followTranscriptTail(el, lockRef, true);
-		lastScrollTopRef.current = el.scrollTop;
 	};
 
 	// Tool calls committed anywhere in the session: rescanned when entries change,
@@ -408,7 +395,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				const movingUp = el.scrollTop < lastScrollTopRef.current;
 				lastScrollTopRef.current = el.scrollTop;
 				updateTranscriptTailLock(el, lockRef);
-				setAwayFromTail(!lockRef.current);
 				if (lockRef.current) {
 					prependRef.current = null;
 					if (pinnedStart !== null) setPinnedStart(null);
@@ -451,11 +437,6 @@ export function Transcript(props: TranscriptProps): ReactNode {
 					)}
 					{history?.error && <div className="tr-history-error" role="alert">{history.error}</div>}
 				</div>
-			)}
-			{awayFromTail && (
-				<button type="button" className="tr-latest" onClick={jumpToLatest}>
-					jump to latest
-				</button>
 			)}
 			{visible.map(entry => (
 				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
