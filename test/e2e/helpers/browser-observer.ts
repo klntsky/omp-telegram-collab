@@ -12,14 +12,30 @@ import type { GuestTransport } from '../../../web/src/lib/socket.js';
 import { bounded } from './async.js';
 import type { CollaborationTest } from './collaboration-fixture.js';
 
-export async function observeBrowser(t: TestContext, app: CollaborationTest, session: TopicSession) {
+export async function observeBrowser(t: TestContext, app: CollaborationTest, session: TopicSession, options: {
+  interruptSetup?: () => void;
+} = {}) {
   const signal = AbortSignal.any([t.signal, AbortSignal.timeout(120000)]);
   const publicUrl = 'https://mini-app.example';
   const config = {
     ...app.config, publicUrl,
     bots: app.config.bots.map(bot => ({ ...bot, miniAppShortName: 'e2e' })),
   };
-  const server = createServer({ config, bots: [app.service], store: app.store, runtime: app.runtime });
+  let interruptSetup = options.interruptSetup;
+  const service = app.service;
+  const server = createServer({ config, bots: [{
+    id: service.id, token: service.token,
+    authorizeSession: service.authorizeSession.bind(service),
+    requestCapacity: service.requestCapacity.bind(service),
+    onSessionInvalidated: service.onSessionInvalidated.bind(service),
+    subscribeSessionFeed: service.subscribeSessionFeed.bind(service),
+    async ensureMirroring(...args) {
+      const interrupt = interruptSetup;
+      interruptSetup = undefined;
+      interrupt?.();
+      return service.ensureMirroring(...args);
+    },
+  }], store: app.store, runtime: app.runtime });
   const sockets = new Set<WebSocket>();
   t.after(async () => {
     for (const socket of sockets) socket.terminate();
@@ -90,6 +106,12 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     };
     const unsubscribe = client.subscribe(check);
     try { check(); await bounded(ready.promise, signal); } finally { unsubscribe(); }
+  }
+  if (options.interruptSetup) {
+    const interrupted = await socket();
+    const [code, reason] = await bounded(once(interrupted, 'close'), signal);
+    assert.equal(code, 1011);
+    assert.equal(reason.toString(), 'Collab room closed');
   }
   client.connect();
   await waitForSnapshot(snapshot => snapshot.phase === 'live');

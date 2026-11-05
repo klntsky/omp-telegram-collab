@@ -334,7 +334,7 @@ If retirement cannot free capacity, the current supergroup owner or an administr
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
-The Mini App automatically rejoins after transient Collab room or transport closures, using backoff and the existing reconnect indicator without an error popup. The current transcript remains visible until the replacement snapshot arrives. Original connection diagnostics remain logged. Access revocation, topic closure, session kill, invalid protocol actions, and capacity refusal still stop automatic reconnect.
+The Mini App automatically rejoins after transient Collab room or transport closures, including failures while establishing the connection, using backoff and the existing reconnect indicator without an error popup. The current transcript remains visible until the replacement snapshot arrives. Original connection diagnostics remain logged. Access revocation, topic closure, session kill, invalid protocol actions, and capacity refusal still stop automatic reconnect.
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts only “Session mirroring disconnected.”; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 

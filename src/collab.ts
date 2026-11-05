@@ -4,6 +4,8 @@ import type { CollabConnection, CollabHandlers, HostBinding } from '../shared/co
 import { importRoomKey, open, seal } from './vendor/codec.js';
 import { encodeBase64Url, packEnvelope, parseCollabLink, unpackEnvelope } from './vendor/link.js';
 
+export class CollabTransportError extends Error {}
+
 const SETUP_TIMEOUT_MS = 60_000;
 const HOST_TYPES: Record<string, true> = {
   welcome: true, 'snapshot-chunk': true, entry: true, event: true, state: true, bus: true, agents: true,
@@ -93,7 +95,7 @@ async function openCollab(
     resolveSetup = resolve;
     rejectSetup = reject;
   });
-  const timer = setTimeout(() => finish('Collab setup timed out'), SETUP_TIMEOUT_MS);
+  const timer = setTimeout(() => finish(new CollabTransportError('Collab setup timed out')), SETUP_TIMEOUT_MS);
   const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error('Collab setup aborted'));
   signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -263,7 +265,7 @@ async function openCollab(
     if (!isBinary) {
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
-        if (control.t === 'room-closed') finish('Collab room closed');
+        if (control.t === 'room-closed') finish(new CollabTransportError('Collab room closed'));
       } catch (error) {
         console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
         finish('Invalid Collab relay control frame');
@@ -287,8 +289,8 @@ async function openCollab(
   ws.on('error', error => {
     if (closed) return;
     console.error('Collab transport error:', error);
-    finish(error);
+    finish(new CollabTransportError(error.message, {cause: error}));
   });
-  ws.on('close', (code, reason) => finish(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`));
+  ws.on('close', (code, reason) => finish(new CollabTransportError(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`)));
   return setup;
 }

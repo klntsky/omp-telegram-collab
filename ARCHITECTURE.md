@@ -150,6 +150,8 @@ Closed-session HTTP authorization establishes identity without issuing a connect
 
 The Mini App owns read-only presentation and client reconnection. It requests fresh authorization through the gateway rather than holding upstream host capabilities. Its rendered transcript is presentation state. The gateway transport consumes retryable gateway diagnostics without forwarding them as host errors, preserving retryability even before the host welcome arrives.
 
+The Collab transport identifies room and network failures separately from host validation and authorization failures. The gateway preserves that distinction during initial connection setup so the browser can retry transport failures without treating them as access denial. Retried connections still pass through ticket authorization and session-generation checks.
+
 ### Watched session history
 
 #### Motivation
