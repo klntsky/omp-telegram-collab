@@ -129,7 +129,7 @@ timeout 1800s pnpm test:e2e
 
 Set `OMP_EXECUTABLE` to choose another OMP executable.
 
-A checkout waits cancellably if every configured bot is busy, and proceeds when any bot becomes available. A per-bot lock protects the selected bot across checkouts; a per-checkout lock prevents that checkout from acquiring multiple bots simultaneously. Each fixture creates its own forum and keeps working directories, databases, and OMP processes separate. Teardown stops application polling before returning the bot to the pool. Failed or unsettled polling retains the lock rather than granting the bot to another fixture. Process exit releases native locks automatically; bot tokens and user sessions remain saved.
+A checkout waits cancellably for at most 10 seconds per lease acquisition if configured bots or authorization resources are busy. A per-bot lock protects the selected bot across checkouts; a per-checkout lock prevents that checkout from acquiring multiple bots simultaneously. Each fixture creates its own forum and keeps working directories, databases, and OMP processes separate. Teardown stops application polling before returning the bot to the pool. Failed or unsettled polling retains the lock rather than granting the bot to another fixture. Process exit releases native locks automatically; bot tokens and user sessions remain saved.
 
 `test:e2e` is separate from the isolated `test` suite and runs first in `verify`. Missing credentials, provisioning failures, and timeouts fail acceptance rather than skipping tests. Inspect original Telegram diagnostics before rerunning; an ambiguous failure may already have created a remote resource. Never log or commit saved sessions or bot tokens.
 
@@ -144,6 +144,16 @@ timeout 300s pnpm test:one --test-name-pattern questions test/e2e/telegram.test.
 Selected workflows create their own prerequisite sessions. Workflows selected together run sequentially and share one Telegram and OMP fixture.
 
 Forum provisioning retries only the explicit test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, checking for an already-created matching forum before retrying. This policy belongs to the fixture; the application bot's production rate-limit handling is exercised independently.
+
+### Diagnose deadlines before retrying
+
+The shared timeout policy lives in `scripts/lib/telegram-test-deadline.ts`. Telegram fixture setup has a 90-second total budget. Authorization has a 45-second budget within it. Individual Telegram requests have a 30-second budget. Application readiness has a 60-second budget, and workflow expectations default to 30 seconds. Cleanup uses an independent 15-second total budget. Suite-level timeouts are final guards, not provisioning deadlines.
+
+Child deadlines cannot outlive their parent. Retry delays consume the same budget. Expectations recheck their state predicates even when no external notification arrives. Polling and routine logs do not extend deadlines. Inspect the active phase and its original diagnostic before retrying a failed workflow. A timeout without a Telegram error is not evidence of a server-side error.
+
+Cancellation stops fixture requests before forum rollback; worker transport shutdown follows rollback. Fixture-user release is attempted even when cleanup has already expired, without extending the budget. Late operation and cleanup failures retain their original diagnostics in the logs.
+
+Check the failed phase, authorization lease, bot lease, and worker state before rerunning only the failed workflow. Do not unlink live locks or replay an ambiguous mutation. Reconcile remote state first. If the same phase times out again without new evidence, stop automated reruns and report the blocker. Missing credentials, contention, and expired deadlines remain acceptance failures.
 
 ### Isolated OMP and debug artifacts
 

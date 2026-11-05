@@ -15,9 +15,10 @@ import type { AppConfig, TopicSession } from '../../../shared/contracts.js';
 import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
+import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
-const operationTimeoutMs = 120_000;
-const cleanupTimeoutMs = 30_000;
+const operationTimeoutMs = telegramTestTimeouts.request;
+const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
 
 type Cleanup = () => unknown | Promise<unknown>;
 
@@ -44,23 +45,39 @@ export async function setupCollaborationTest(
   const restoreConsole: Cleanup[] = [];
   const failure = Promise.withResolvers<never>();
   const failed = new AbortController();
+  const cleanupController = new AbortController();
   void failure.promise.catch(() => undefined);
   const fail = (error: unknown) => {
     log?.('application.error', error);
     failed.abort(error);
     failure.reject(error);
   };
-  const operation = <T>(promise: Promise<T>, timeoutMs = operationTimeoutMs) => bounded(
-    Promise.race([promise, failure.promise]),
-    AbortSignal.any([t.signal, failed.signal, AbortSignal.timeout(timeoutMs)]),
+  const operation = <T>(promise: Promise<T>, timeoutMs = operationTimeoutMs) => withTelegramTestDeadline(
+    'collaboration request', timeoutMs, AbortSignal.any([t.signal, failed.signal]), async signal => {
+      const cancel = () => {
+        pollerStopFailed = true;
+        void telegram.user.cancelSetup().catch(() => undefined);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      try { return await bounded(Promise.race([promise, failure.promise]), signal); }
+      finally { signal.removeEventListener('abort', cancel); }
+    },
   );
 
   t.after(async () => {
     closing = true;
+    const cleanupTimer = setTimeout(() => cleanupController.abort(new Error('Telegram test collaboration cleanup timed out after 15000ms')), cleanupTimeoutMs);
     const errors: unknown[] = [];
     const cleanup = async (run: Cleanup) => {
       try {
-        await bounded(Promise.resolve().then(run), AbortSignal.timeout(cleanupTimeoutMs));
+        const pending = Promise.resolve(run());
+        void pending.catch(error => {
+          if (cleanupController.signal.aborted) {
+            log?.('cleanup.late.error', error);
+            t.diagnostic(`Late cleanup failure: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+          }
+        });
+        await bounded(pending, cleanupController.signal);
       } catch (error) { log?.('cleanup.error', error); errors.push(error); }
     };
     if (unsubscribe) await cleanup(unsubscribe);
@@ -82,6 +99,7 @@ export async function setupCollaborationTest(
     for (const run of ompCleanup) await cleanup(run);
     for (const run of telegramCleanup) await cleanup(run);
     for (const restore of restoreConsole) await cleanup(restore);
+    clearTimeout(cleanupTimer);
     if (errors.length === 1) throw errors[0];
     if (errors.length) throw new AggregateError(
       errors,
@@ -107,7 +125,7 @@ export async function setupCollaborationTest(
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
-  }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed }));
+  }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed, step: omp.step, cleanupSignal: cleanupController.signal }));
   omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
@@ -194,12 +212,12 @@ export async function setupCollaborationTest(
       throw error;
     }
   };
-  const stickers = await bot.api.getForumTopicIconStickers();
+  const stickers = await telegram.api.getForumTopicIconStickers();
   const [running, finished] = [...new Set(stickers.map(sticker => sticker.emoji).filter((emoji): emoji is string => Boolean(emoji)))];
   if (!running || !finished) throw new Error('Telegram test network must provide two distinct topic icon emojis');
   const topicActivityEmojis = { running, finished };
   omp.log('telegram.topic.icons', { topicActivityEmojis });
-  await bot.api.deleteWebhook({ drop_pending_updates: true });
+  await telegram.api.deleteWebhook({ drop_pending_updates: true });
   service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, connect, topicActivityEmojis });
 
   const messages: Message[] = [];
@@ -234,7 +252,8 @@ export async function setupCollaborationTest(
       activePollers--;
       if (!closing) fail(new Error('BotService polling ended before fixture teardown'));
     }, error => { activePollers--; if (!closing) fail(error); });
-    await operation(ready.promise);
+    await withTelegramTestDeadline('application readiness', telegramTestTimeouts.readiness, t.signal,
+      signal => bounded(Promise.race([ready.promise, failure.promise]), signal));
   }
   let lifecycle = Promise.resolve();
   function serializeLifecycle(run: () => Promise<void>): Promise<void> {
@@ -245,17 +264,17 @@ export async function setupCollaborationTest(
   async function pauseService(): Promise<void> {
     closing = true;
     if (service) {
-      try { await service.close(); }
+      try { await operation(service.close()); }
       catch (error) { pollerStopFailed = true; throw error; }
       service = undefined;
     }
     if (polling) {
-      try { await polling; }
+      try { await operation(polling); }
       catch (error) { pollerStopFailed = true; throw error; }
       polling = undefined;
     }
     if (runtime) {
-      await runtime.close();
+      await operation(runtime.close());
       runtime = undefined;
     }
     if (store) {
@@ -265,13 +284,25 @@ export async function setupCollaborationTest(
   }
   await omp.step('application.start', startService);
   async function waitForCondition(predicate: () => boolean): Promise<void> {
-    const signal = AbortSignal.any([t.signal, failed.signal, AbortSignal.timeout(operationTimeoutMs)]);
-    for (;;) {
-      signal.throwIfAborted();
-      const notification = changed.promise;
-      if (predicate()) return;
-      await bounded(Promise.race([notification, failure.promise]), signal);
-    }
+    await omp.step('workflow.expectation', () => withTelegramTestDeadline(
+      'expectation', telegramTestTimeouts.expectation, AbortSignal.any([t.signal, failed.signal]), async signal => {
+        const recheck = setInterval(() => {
+          const notification = changed;
+          changed = Promise.withResolvers<void>();
+          notification.resolve();
+        }, 100);
+        try {
+          for (;;) {
+            signal.throwIfAborted();
+            const notification = changed.promise;
+            if (predicate()) return;
+            await bounded(Promise.race([notification, failure.promise]), signal);
+          }
+        } finally {
+          clearInterval(recheck);
+        }
+      },
+    ));
   }
 
   async function waitForMessage(predicate: (message: Message) => boolean): Promise<Message> {
