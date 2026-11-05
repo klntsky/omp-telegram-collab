@@ -131,17 +131,23 @@ async function openCollab(
   }
 
   function queueSend(frame: GuestFrame): void {
-    if (closed || ws.readyState !== WebSocket.OPEN) throw new Error('Collab connection is closed');
+    if (closed || ws.readyState !== WebSocket.OPEN) throw new CollabTransportError('Collab connection is closed');
     sendChain = sendChain.then(async () => {
       if (closed) return;
       const envelope = packEnvelope(0, await seal(key, frame));
       if (closed) return;
       if (ws.readyState !== WebSocket.OPEN) {
-        throw new Error('Collab transport cannot accept the frame');
+        throw new CollabTransportError('Collab transport cannot accept the frame');
       }
-      await new Promise<void>((resolve, reject) => {
-        ws.send(envelope, error => error ? reject(error) : resolve());
-      });
+      const sent = Promise.withResolvers<void>();
+      try {
+        ws.send(envelope, error => error
+          ? sent.reject(new CollabTransportError(error.message, {cause: error}))
+          : sent.resolve());
+      } catch (error) {
+        throw new CollabTransportError(error instanceof Error ? error.message : String(error), {cause: error});
+      }
+      await sent.promise;
     }).catch(error => {
       if (closed) return;
       console.error('Collab send failed; delivery may be uncertain:', error);

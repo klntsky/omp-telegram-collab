@@ -19,11 +19,17 @@ test('Mini App retries a Collab room closed during gateway setup', {timeout: 480
   const session = await createManagedTopic(app);
   const generation = app.store.getSessionGeneration(session.id);
   const browser = await observeBrowser(t, app, session, {interruptSetup: app.omp.interruptNextGuest});
+  assert.ok(browser.recovery.phases.has('reconnecting'));
+  assert.ok(!browser.recovery.phases.has('ended'));
+  assert.equal(browser.recovery.authorizationRefreshes, 1);
   await browser.denyMutations();
   const sent = await app.sendAndWait(`/p ${task.prompt}`, session.threadId);
   await completeWriteTask(app, task, sent, session.threadId);
   await browser.waitForSnapshot(snapshot => JSON.stringify(snapshot.entries).includes(task.toolCallId));
   assert.equal(app.store.getSessionGeneration(session.id), generation);
+  await app.sendAndWait('/kill', session.threadId);
+  await browser.waitForSnapshot(snapshot => snapshot.phase === 'ended');
+  assert.ok(app.store.getSessionGeneration(session.id) > generation);
 });
 
 test('Telegram fork failures preserve completed forks and reject interrupted preparation', { timeout: 480000 }, async t => {
