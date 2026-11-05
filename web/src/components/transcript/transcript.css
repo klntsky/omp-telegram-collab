@@ -259,6 +259,21 @@
 	border-color: var(--border-strong);
 }
 
+.tr-earlier:disabled {
+	cursor: wait;
+	opacity: 0.65;
+}
+
+.tr-history-status,
+.tr-history-error {
+	margin: -8px 0 16px;
+	color: var(--fg-muted);
+	font-size: 12px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	text-align: center;
+}
+
 .tr-shimmer {
 	color: var(--fg-muted);
 	font-size: 12.5px;

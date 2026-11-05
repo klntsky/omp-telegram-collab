@@ -43,7 +43,14 @@ export function isAdministrator(member: unknown): boolean {
   const value = member as { status?: string; user?: { is_bot?: boolean } };
   return value.user?.is_bot === false && (value.status === 'creator' || value.status === 'administrator');
 }
-const guestSchema = z.object({ t: z.literal('fetch-transcript'), reqId: z.number().int().nonnegative().safe(), agentId: z.string().min(1).max(256), fromByte: z.number().int().nonnegative().safe() }).strict();
+const guestSchema = z.discriminatedUnion('t', [
+  z.object({ t: z.literal('fetch-transcript'), reqId: z.number().int().nonnegative().safe(), agentId: z.string().min(1).max(256), fromByte: z.number().int().nonnegative().safe() }).strict(),
+  z.object({
+    t: z.literal('history-page'),
+    reqId: z.number().int().nonnegative().safe(),
+    cursor: z.object({ epoch: z.string().min(1).max(128), before: z.number().int().nonnegative().safe() }).strict(),
+  }).strict(),
+]);
 export function validateGuestFrame(value: unknown): BrowserFrame {
   return guestSchema.parse(value);
 }

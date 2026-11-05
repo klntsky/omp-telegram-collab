@@ -2,7 +2,7 @@ import type { AssistantMessage, SessionEntry, ToolResultMessage } from "@oh-my-p
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ActiveTool, ConnectionPhase } from "../../lib/client";
+import type { ActiveTool, ConnectionPhase, GuestSnapshot } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown, StreamingMarkdown } from "./Markdown";
@@ -21,6 +21,8 @@ export interface TranscriptProps {
 	host?: ToolRenderHost;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
 	phase?: ConnectionPhase;
+	history?: GuestSnapshot["history"];
+	onLoadEarlier?: () => void;
 }
 
 interface ScrollGeometry {
@@ -245,14 +247,22 @@ const WINDOW = 100;
 const EARLIER_TRIGGER_PX = 200;
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, phase, history, onLoadEarlier } = props;
 
-	// null follows the tail. A number pins the first mounted entry while the
-	// reader is scrolled away from the bottom, so appended entries never
-	// unmount rows above the reader and shift the page under them.
-	const [pinnedStart, setPinnedStart] = useState<number | null>(null);
+	const [pin, setPin] = useState<{ revision: number | undefined; start: SessionEntry | "beginning" | null }>({
+		revision: history?.revision,
+		start: null,
+	});
+	const pinnedStart = pin.revision === history?.revision ? pin.start : null;
+	const setPinnedStart = (start: SessionEntry | "beginning" | null): void => {
+		setPin({ revision: history?.revision, start });
+	};
 	const tailStart = Math.max(0, entries.length - WINDOW);
-	const start = pinnedStart === null ? tailStart : Math.min(pinnedStart, tailStart);
+	const pinnedIndex = useMemo(
+		() => pinnedStart === "beginning" ? 0 : pinnedStart === null ? tailStart : entries.indexOf(pinnedStart),
+		[entries, pinnedStart, tailStart],
+	);
+	const start = pinnedIndex < 0 ? tailStart : Math.min(pinnedIndex, tailStart);
 	const visible = useMemo(() => entries.slice(start), [entries, start]);
 
 	// A tool result always follows its call, so visible rows only pair with visible results.
@@ -274,11 +284,31 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	 * delta, stays exact when the same commit also appends live entries.
 	 */
 	const prependRef = useRef<{ anchor: Element; offset: number } | null>(null);
+	const lastScrollTopRef = useRef(0);
+	const earlierScrollArmedRef = useRef(true);
+	const historyRevisionRef = useRef(history?.revision);
+
+	const captureAnchor = (): void => {
+		const el = rootRef.current;
+		if (!el) return;
+		prependRef.current = null;
+		const top = el.getBoundingClientRect().top;
+		for (const row of el.children) {
+			if (!row.matches(".tr-row, .tr-divider")) continue;
+			const rect = row.getBoundingClientRect();
+			if (rect.bottom <= top) continue;
+			prependRef.current = { anchor: row, offset: rect.top - top };
+			break;
+		}
+	};
 
 	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
 	useEffect(() => {
 		const el = rootRef.current;
-		if (el !== null) followTranscriptTail(el, lockRef);
+		if (el !== null) {
+			followTranscriptTail(el, lockRef);
+			lastScrollTopRef.current = el.scrollTop;
+		}
 	}, [entries, stream, activeTools, working]);
 
 	// A `live` transition (initial connect or reconnect) jumps to the latest message
@@ -287,31 +317,45 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		const el = rootRef.current;
 		if (phase !== "live" || el === null) return;
 		setPinnedStart(null);
+		prependRef.current = null;
 		followTranscriptTail(el, lockRef, true);
+		lastScrollTopRef.current = el.scrollTop;
 	}, [phase]);
+
+	useLayoutEffect(() => {
+		const replaced = historyRevisionRef.current !== history?.revision;
+		historyRevisionRef.current = history?.revision;
+		if (replaced || (history && history.freshness !== "ready")) {
+			prependRef.current = null;
+			earlierScrollArmedRef.current = false;
+		}
+		if (replaced && rootRef.current) lastScrollTopRef.current = rootRef.current.scrollTop;
+	}, [history?.revision, history?.freshness]);
 
 	// Keep the reader's content in place when earlier rows mount above it.
 	useLayoutEffect(() => {
 		const el = rootRef.current;
 		const before = prependRef.current;
 		if (el === null || before === null) return;
-		prependRef.current = null;
+		if (!history?.loading) prependRef.current = null;
 		if (!before.anchor.isConnected) return;
 		el.scrollTop += before.anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - before.offset;
-	}, [start]);
+		lastScrollTopRef.current = el.scrollTop;
+	}, [start, entries, history?.loading, history?.error, history?.freshness, history?.revision]);
 
 	const showEarlier = (): void => {
-		const el = rootRef.current;
-		if (el === null || start === 0 || prependRef.current !== null) return;
-		const top = el.getBoundingClientRect().top;
-		for (const row of el.children) {
-			if (row.classList.contains("tr-earlier")) continue;
-			const rect = row.getBoundingClientRect();
-			if (rect.bottom <= top) continue;
-			prependRef.current = { anchor: row, offset: rect.top - top };
-			break;
+		if (!rootRef.current || history?.loading || history?.freshness === "refreshing") return;
+		if (start === 0 && (!history?.older || !onLoadEarlier || phase !== "live")) return;
+		captureAnchor();
+		lockRef.current = false;
+		earlierScrollArmedRef.current = false;
+		if (start > 0) {
+			const next = Math.max(0, start - WINDOW);
+			setPinnedStart(next === 0 ? "beginning" : entries[next]!);
+		} else {
+			setPinnedStart("beginning");
+			onLoadEarlier?.();
 		}
-		setPinnedStart(Math.max(0, start - WINDOW));
 	};
 
 	// Tool calls committed anywhere in the session: rescanned when entries change,
@@ -347,24 +391,52 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
 			onScroll={() => {
 				const el = rootRef.current;
-				if (el === null) return;
+				if (el === null || el.scrollTop === lastScrollTopRef.current) return;
+				const movingUp = el.scrollTop < lastScrollTopRef.current;
+				lastScrollTopRef.current = el.scrollTop;
 				updateTranscriptTailLock(el, lockRef);
-				// Back at the bottom: drop the pin so the window trims to the tail again.
 				if (lockRef.current) {
+					prependRef.current = null;
 					if (pinnedStart !== null) setPinnedStart(null);
 				} else if (pinnedStart === null) {
-					setPinnedStart(start);
+					setPinnedStart(start === 0 ? "beginning" : entries[start]!);
 				}
-				if (el.scrollTop <= EARLIER_TRIGGER_PX) showEarlier();
+				if (history?.loading && !lockRef.current) captureAnchor();
+				if (el.scrollTop > EARLIER_TRIGGER_PX) earlierScrollArmedRef.current = true;
+				if (
+					movingUp && el.scrollTop <= EARLIER_TRIGGER_PX && earlierScrollArmedRef.current &&
+					history?.freshness !== "unverified"
+				) showEarlier();
 			}}
 		>
 			{settled && entries.length === 0 && stream === null && !working && (
 				<div className="tr-empty">no activity yet</div>
 			)}
-			{start > 0 && (
-				<button type="button" className="tr-earlier" onClick={showEarlier}>
-					show {start.toLocaleString("en-US")} earlier
-				</button>
+			{(start > 0 || history?.older || history?.loading || history?.error || history?.freshness === "refreshing") && (
+				<div className="tr-history" aria-busy={history?.loading || history?.freshness === "refreshing"}>
+					<button
+						type="button"
+						className="tr-earlier"
+						disabled={
+							history?.loading || history?.freshness === "refreshing" ||
+							(start === 0 && (phase !== "live" || !history?.older))
+						}
+						onClick={showEarlier}
+					>
+						{history?.loading ? "loading earlier…" : history?.error ? "retry earlier history" : "show earlier"}
+					</button>
+					{history?.freshness === "refreshing" && (
+						<div className="tr-history-status" role="status">Refreshing session history…</div>
+					)}
+					{history?.freshness === "unverified" && (
+						<div className="tr-history-status" role="status">
+							{history.older
+								? "History is unverified. Retry earlier history to check again."
+								: "History is unverified. Waiting for the session source to recover."}
+						</div>
+					)}
+					{history?.error && <div className="tr-history-error" role="alert">{history.error}</div>}
+				</div>
 			)}
 			{visible.map(entry => (
 				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />

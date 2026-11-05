@@ -13,6 +13,23 @@ const GUEST_TYPES: Record<string, true> = {
   prompt: true, abort: true, 'agent-cmd': true, 'fetch-transcript': true, 'ui-response': true,
 };
 
+type SnapshotFrame = Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>;
+type SnapshotOperation = {
+  welcomed: boolean;
+  total: number;
+  received: number;
+} & (
+  | {kind: 'initial'}
+  | {
+    kind: 'refresh';
+    onFrame: (frame: SnapshotFrame) => void;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+    timer: NodeJS.Timeout;
+    settled: boolean;
+  }
+);
+
 export function isStartupRejection(frame: HostFrame): boolean {
   return frame.t === 'error' && frame.message === 'prompting is unavailable until the host finishes starting up';
 }
@@ -57,6 +74,7 @@ async function openCollab(
   signal?.throwIfAborted();
   const link = parseCollabLink(binding.url);
   if ('error' in link || !link.writeToken) throw new Error('A valid control capability is required');
+  const writeToken = encodeBase64Url(link.writeToken);
   const key = await importRoomKey(link.key);
   signal?.throwIfAborted();
   const ws = new WebSocket(`${link.wsUrl}?role=guest`, {
@@ -66,9 +84,7 @@ async function openCollab(
   });
   let closed = false;
   let ready = false;
-  let welcomed = false;
-  let total = 0;
-  let received = 0;
+  let snapshot: SnapshotOperation | undefined = {kind: 'initial', welcomed: false, total: 0, received: 0};
   let sendChain = Promise.resolve();
   let receiveChain = Promise.resolve();
   let resolveSetup!: (connection: CollabConnection) => void;
@@ -86,12 +102,30 @@ async function openCollab(
     closed = true;
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
+    if (snapshot?.kind === 'refresh') rejectRefresh(snapshot, reason instanceof Error ? reason : new Error(reason));
     ws.terminate();
     if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new Error(reason));
     try {
       handlers.onClose(reason instanceof Error ? reason.message : reason);
-    } catch {
+    } catch (error) {
+      console.error('Collab close callback failed:', error);
     }
+  }
+
+  function rejectRefresh(operation: Extract<SnapshotOperation, {kind: 'refresh'}>, error: unknown): void {
+    if (operation.settled) return;
+    operation.settled = true;
+    clearTimeout(operation.timer);
+    operation.reject(error);
+  }
+
+  function sendHello(): void {
+    queueSend({
+      t: 'hello',
+      proto: COLLAB_PROTO,
+      name: name.trim().slice(0, 64) || 'Telegram member',
+      writeToken,
+    });
   }
 
   function queueSend(frame: GuestFrame): void {
@@ -106,7 +140,11 @@ async function openCollab(
       await new Promise<void>((resolve, reject) => {
         ws.send(envelope, error => error ? reject(error) : resolve());
       });
-    }).catch(() => finish('Collab send failed; delivery may be uncertain'));
+    }).catch(error => {
+      if (closed) return;
+      console.error('Collab send failed; delivery may be uncertain:', error);
+      finish(error instanceof Error ? error : `Collab send failed; delivery may be uncertain: ${String(error)}`);
+    });
   }
 
   const connection: CollabConnection = {
@@ -115,29 +153,77 @@ async function openCollab(
       if (!Object.hasOwn(GUEST_TYPES, frame.t)) throw new Error('Unsupported guest frame');
       queueSend(frame);
     },
+    async refreshSnapshot(onFrame) {
+      if (closed) throw new Error('Collab connection is closed');
+      if (!ready) throw new Error('Collab snapshot is not ready');
+      if (snapshot) throw new Error('Collab snapshot refresh is already in progress');
+      const {promise, resolve, reject} = Promise.withResolvers<void>();
+      const operation: Extract<SnapshotOperation, {kind: 'refresh'}> = {
+        kind: 'refresh', welcomed: false, total: 0, received: 0, onFrame, resolve, reject, settled: false,
+        timer: setTimeout(() => rejectRefresh(operation, new Error('Collab snapshot refresh timed out')), SETUP_TIMEOUT_MS),
+      };
+      snapshot = operation;
+      try {
+        sendHello();
+      } catch (error) {
+        snapshot = undefined;
+        rejectRefresh(operation, error);
+      }
+      return promise;
+    },
     close() {
       finish('closed');
     },
   };
 
   function deliver(frame: HostFrame): void {
-    if (frame.t === 'welcome') {
-      if (welcomed || frame.proto !== COLLAB_PROTO || frame.header?.id !== binding.sessionId) {
-        throw new Error('Collab session identity mismatch');
-      }
-      if (frame.readOnly) throw new Error('Collab host refused control access');
-      if (!Number.isSafeInteger(frame.entryCount) || frame.entryCount < 0) throw new Error('Invalid Collab snapshot');
-      welcomed = true;
-      total = frame.entryCount;
-    } else if (!welcomed && frame.t === 'snapshot-chunk') {
-      throw new Error('Collab snapshot arrived before welcome');
+    if (frame.t === 'error' && snapshot?.kind === 'refresh' && !snapshot.welcomed &&
+        (frame.message === 'Session transition in progress; join again when it completes' ||
+         /^protocol mismatch: host speaks v\d+, guest sent v\d+$/.test(frame.message))) {
+      const operation = snapshot;
+      snapshot = undefined;
+      rejectRefresh(operation, new Error(frame.message));
+      return;
     }
-    if (frame.t === 'snapshot-chunk') {
-      if (ready || !Array.isArray(frame.entries) || typeof frame.final !== 'boolean') {
-        throw new Error('Invalid Collab snapshot chunk');
+    if (frame.t === 'welcome' || frame.t === 'snapshot-chunk') {
+      const operation = snapshot;
+      if (!operation) throw new Error('Unexpected Collab snapshot');
+      if (frame.t === 'welcome') {
+        if (operation.welcomed || frame.proto !== COLLAB_PROTO || frame.header?.id !== binding.sessionId) {
+          throw new Error('Collab session identity mismatch');
+        }
+        if (frame.readOnly) throw new Error('Collab host refused control access');
+        if (!Number.isSafeInteger(frame.entryCount) || frame.entryCount < 0) throw new Error('Invalid Collab snapshot');
+        operation.welcomed = true;
+        operation.total = frame.entryCount;
+      } else {
+        if (!operation.welcomed) throw new Error('Collab snapshot arrived before welcome');
+        if (!Array.isArray(frame.entries) || typeof frame.final !== 'boolean') {
+          throw new Error('Invalid Collab snapshot chunk');
+        }
+        operation.received += frame.entries.length;
+        if (operation.received > operation.total || (frame.final && operation.received !== operation.total)) {
+          throw new Error('Collab snapshot count mismatch');
+        }
       }
-      received += frame.entries.length;
-      if (received > total || (frame.final && received !== total)) throw new Error('Collab snapshot count mismatch');
+      if (operation.kind === 'refresh') {
+        if (!operation.settled) {
+          try {
+            operation.onFrame(frame);
+          } catch (error) {
+            rejectRefresh(operation, error);
+          }
+        }
+        if (frame.t === 'snapshot-chunk' && frame.final) {
+          snapshot = undefined;
+          clearTimeout(operation.timer);
+          if (!operation.settled) {
+            operation.settled = true;
+            operation.resolve();
+          }
+        }
+        return;
+      }
     }
     handlers.onFrame(frame);
     if (welcomeOnly && frame.t === 'welcome') {
@@ -156,6 +242,7 @@ async function openCollab(
     }
     if (!ready && frame.t === 'snapshot-chunk' && frame.final) {
       ready = true;
+      snapshot = undefined;
       clearTimeout(timer);
       resolveSetup(connection);
     }
@@ -163,14 +250,11 @@ async function openCollab(
 
   ws.on('open', () => {
     try {
-      queueSend({
-        t: 'hello',
-        proto: COLLAB_PROTO,
-        name: name.trim().slice(0, 64) || 'Telegram member',
-        writeToken: encodeBase64Url(link.writeToken!),
-      });
-    } catch {
-      finish('Collab hello failed');
+      sendHello();
+    } catch (error) {
+      if (closed) return;
+      console.error('Collab hello failed:', error);
+      finish(error instanceof Error ? error : `Collab hello failed: ${String(error)}`);
     }
   });
   ws.on('message', (data, isBinary) => {
@@ -180,7 +264,8 @@ async function openCollab(
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
         if (control.t === 'room-closed') finish('Collab room closed');
-      } catch {
+      } catch (error) {
+        console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
         finish('Invalid Collab relay control frame');
       }
       return;
@@ -194,10 +279,16 @@ async function openCollab(
       if (!frame || typeof frame !== 'object' || !Object.hasOwn(HOST_TYPES, frame.t)) throw new Error('Invalid Collab host frame');
       deliver(frame as HostFrame);
     }).catch(error => {
-      finish(error instanceof Error ? error.message : 'Collab receive failed');
+      if (closed) return;
+      console.error('Collab receive failed:', error);
+      finish(error instanceof Error ? error : new Error(`Collab receive failed: ${String(error)}`, {cause: error}));
     });
   });
-  ws.on('error', () => finish('Collab transport error'));
-  ws.on('close', code => finish(`Collab connection closed (${code})`));
+  ws.on('error', error => {
+    if (closed) return;
+    console.error('Collab transport error:', error);
+    finish(error);
+  });
+  ws.on('close', (code, reason) => finish(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`));
   return setup;
 }

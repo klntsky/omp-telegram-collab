@@ -5,7 +5,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 ![OMP Telegram Collab conversations organized into Telegram forum topics](assets/telegram-topics.jpg)
 
 - Give each topic its own conversation and saved history.
-- Send prompts and answer agent questions in Telegram. Watch the read-only Mini App for live transcripts and tool details.
+- Send prompts and answer agent questions in Telegram. Open the read-only Mini App at the latest messages, load earlier history on demand, and follow live output and tool details.
 - Attach existing local OMP sessions.
 - Share project directories across groups with configurable prompt approval.
 - Edit the included Collab Web client without an iframe.
@@ -22,7 +22,8 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ✅ | Resume saved session history (`/resume`) | Send a prompt in an existing managed topic to resume its history. |
 | ✅ | Rename a session (`/rename`) | Rename the Telegram topic to update its managed OMP session title. Attached hosts must be renamed in their terminal. |
 | ❌ | Move a session or manage workspace directories (`/move`, `/add-dir`, `/remove-dir`, `/dirs`) | No dedicated workspace controls. |
-| ❌ | Branch, rewind, fork, or switch history branches (`/branch`, `/rewind`, `/fork`, `/tree`) | No history mutation controls. |
+| ✅ | Fork a conversation (`/fork`) | `/fork` creates a separate topic. Reply to a request or agent answer to select the fork point. The new topic follows the forum's automatic-worktree setting. |
+| ❌ | Branch, rewind, or switch history branches (`/branch`, `/rewind`, `/tree`) | No in-place history mutation controls. |
 | ❌ | Reset context, delete a session, refresh provider state, or retry a failed turn (`/clear`, `/delete`, `/fresh`, `/retry`) | No equivalent controls. |
 | ✅ | Move a session into a worktree (`/wt`, `/worktree`) | `/worktree [branch]` invokes OMP's native operation, keeping the topic's conversation and carrying changes according to OMP's settings. In General, it creates a topic first. |
 | ✅ | Share a running session through Collab (`/collab`, `omp collab`) | `/attach INSTANCE_ID` creates a topic connected to an existing local host. |

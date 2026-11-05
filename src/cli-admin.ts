@@ -33,22 +33,29 @@ export async function notifyReload(config: AppConfig, socketDataDir = config.dat
     let body = '';
     response.setEncoding('utf8');
     response.on('data', (chunk: string) => { if (body.length < 8192) body += chunk; });
-    response.on('error', () => reject(failure()));
+    response.on('error', error => { console.error('Configuration reload response failed.', error); reject(error); });
     response.on('aborted', () => reject(failure()));
     response.on('end', () => {
-      if (response.statusCode === 200) {
-        try {
-          const result: unknown = JSON.parse(body);
-          if (result && typeof result === 'object' && 'ok' in result && result.ok === true) { acknowledge(); return; }
-        } catch { reject(failure()); return; }
-      }
+      try {
+        const result: unknown = JSON.parse(body);
+        if (result && typeof result === 'object') {
+          if (response.statusCode === 200 && 'ok' in result && result.ok === true) { acknowledge(); return; }
+          if ('error' in result && typeof result.error === 'string') {
+            const error = new Error(`${failure().message}\n${result.error}`);
+            if ('code' in result) Object.assign(error, { code: result.code });
+            if ('signal' in result) Object.assign(error, { signal: result.signal });
+            reject(error);
+            return;
+          }
+        }
+      } catch (error) { console.error('Configuration reload acknowledgement was invalid.', error); reject(error); return; }
       reject(failure());
     });
   });
   const timer = setTimeout(() => req.destroy(failure()), 5000);
   req.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') acknowledge();
-    else reject(failure());
+    else { console.error('Configuration reload request failed.', error); reject(error); }
   });
   req.end(JSON.stringify({ configPath: config.configPath }));
   try { await promise; } finally { clearTimeout(timer); req.destroy(); }

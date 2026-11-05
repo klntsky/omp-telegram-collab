@@ -9,7 +9,9 @@ import { BotService } from '../../../src/bot.js';
 import { emptyConfig, readConfig, writeConfig } from '../../../src/config.js';
 import { OmpRuntime } from '../../../src/runtime.js';
 import { Store } from '../../../src/store.js';
-import type { FakeLlmScenario } from './fake-llm-provider.js';
+import type { FakeLlmProvider, FakeLlmScenario } from './fake-llm-provider.js';
+import type { TelegramTestFixture } from './telegram-fixture.js';
+import type { AppConfig, TopicSession } from '../../../shared/contracts.js';
 import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
@@ -22,9 +24,13 @@ type Cleanup = () => unknown | Promise<unknown>;
 
 
 export async function setupCollaborationTest(
-  t: Pick<TestContext, 'after' | 'signal' | 'diagnostic' | 'mock'>,
+  t: {
+    signal: AbortSignal;
+    diagnostic(message: string): void;
+    after(cleanup: () => void | Promise<void>): void;
+  },
   options: { scenarios: readonly FakeLlmScenario[] },
-) {
+): Promise<CollaborationTest> {
   const telegramCleanup: Cleanup[] = [];
   const ompCleanup: Cleanup[] = [];
   let service: BotService | undefined;
@@ -109,12 +115,12 @@ export async function setupCollaborationTest(
   log = omp.log;
   void omp.provider.failure.catch(fail);
   for (const method of ['log', 'error'] as const) {
-    const original = console[method].bind(console);
-    const mocked = t.mock.method(console, method, (...args: unknown[]) => {
+    const original = console[method];
+    console[method] = (...args: unknown[]) => {
       omp.log(`application.console.${method}`, args);
-      original(omp.formatDiagnostic(args));
-    });
-    restoreConsole.push(() => mocked.mock.restore());
+      original.call(console, omp.formatDiagnostic(args));
+    };
+    restoreConsole.push(() => { console[method] = original; });
   }
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
@@ -198,6 +204,7 @@ export async function setupCollaborationTest(
             throw error;
           }
         },
+        refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
         close() { connection.close(); },
       };
     } catch (error) {
@@ -248,6 +255,33 @@ export async function setupCollaborationTest(
     await withTelegramTestDeadline('application readiness', telegramTestTimeouts.readiness, t.signal,
       signal => bounded(Promise.race([ready.promise, failure.promise]), signal));
   }
+  let lifecycle = Promise.resolve();
+  function serializeLifecycle(run: () => Promise<void>): Promise<void> {
+    const next = lifecycle.then(run);
+    lifecycle = next.catch(() => undefined);
+    return next;
+  }
+  async function pauseService(): Promise<void> {
+    closing = true;
+    if (service) {
+      try { await operation(service.close()); }
+      catch (error) { pollerStopFailed = true; throw error; }
+      service = undefined;
+    }
+    if (polling) {
+      try { await operation(polling); }
+      catch (error) { pollerStopFailed = true; throw error; }
+      polling = undefined;
+    }
+    if (runtime) {
+      await operation(runtime.close());
+      runtime = undefined;
+    }
+    if (store) {
+      store.close();
+      store = undefined;
+    }
+  }
   await omp.step('application.start', startService);
   async function waitForCondition(predicate: () => boolean): Promise<void> {
     await omp.step('workflow.expectation', () => withTelegramTestDeadline(
@@ -285,28 +319,25 @@ export async function setupCollaborationTest(
   }
 
   return {
-    telegram, omp, config, hostFrames, guestFrames, apiCalls, updates,
+    telegram, omp, config, hostFrames, guestFrames, apiCalls, updates, topicActivityEmojis,
     get runtime() { return runtime!; },
     get store() { return store!; },
     get service() { return service!; },
     get bot() { return bot; },
+    pause(): Promise<void> {
+      return serializeLifecycle(() => omp.step('application.pause', pauseService));
+    },
     restart(): Promise<void> {
-      return omp.step('application.restart', async () => {
-        closing = true;
-        try {
-          await operation(service!.close());
-          if (polling) await operation(polling);
-        } catch (error) { pollerStopFailed = true; throw error; }
-        await operation(runtime!.close());
-        store!.close();
+      return serializeLifecycle(() => omp.step('application.restart', async () => {
+        await pauseService();
         Object.assign(config, readConfig(config.configPath));
         store = new Store(databasePath);
         runtime = new OmpRuntime(config);
         bot = instrumentedBot();
-        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime: runtime!, bot, connect, topicActivityEmojis });
+        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, connect, topicActivityEmojis });
         closing = false;
         await startService();
-      });
+      }));
     },
     setFolderOptions(options: string[]): void {
       const updated = readConfig(config.configPath);
@@ -349,4 +380,43 @@ export async function setupCollaborationTest(
       return message;
     },
   };
+}
+
+export interface CollaborationTest {
+  telegram: TelegramTestFixture;
+  omp: {
+    workspace: string;
+    dataDir: string;
+    executable: string;
+    args: string[];
+    relayUrl: string;
+    provider: FakeLlmProvider;
+    log(event: string, data: unknown): void;
+    step<T>(name: string, action: () => Promise<T>): Promise<T>;
+    git(cwd: string, ...args: string[]): Promise<string>;
+    listHosts(): Promise<{ sessionId: string; cwd: string; pid: number }[]>;
+    assertWorktree(session: TopicSession, branch?: string): Promise<void>;
+    formatDiagnostic(args: unknown[]): string;
+    logDirectory: string;
+    registerSecret(value: string): void;
+  };
+  config: AppConfig;
+  hostFrames: HostFrame[];
+  guestFrames: GuestFrame[];
+  apiCalls: { method: string; payload: unknown; result: unknown }[];
+  updates: Update[];
+  topicActivityEmojis: { running: string; finished: string };
+  readonly runtime: OmpRuntime;
+  readonly store: Store;
+  readonly service: BotService;
+  readonly bot: Bot;
+  pause(): Promise<void>;
+  restart(): Promise<void>;
+  setFolderOptions(options: string[]): void;
+  send(text: string, threadId?: number): Promise<Message>;
+  sendAndWait(text: string, threadId?: number): Promise<Message>;
+  waitForMessageHandled(messageId: number): Promise<void>;
+  waitForCondition(predicate: () => boolean): Promise<void>;
+  waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
+  waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }

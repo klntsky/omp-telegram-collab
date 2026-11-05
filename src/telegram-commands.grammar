@@ -17,7 +17,7 @@ SkillPrompt { SkillToken Any* }
 // /kill, and /terminate never become implicit preparation steps.
 Inspection { (command_list_admins | command_session | command_status | command_usage | command_cli) Any* }
 Configuration { (command_settings | command_setup) Any* }
-Lifecycle { (command_stop | command_kill | command_detach | command_terminate) Any* }
+Lifecycle { (command_stop | command_kill | command_detach | command_terminate | command_fork) Any* }
 Guidance { command_help Any* }
 Start { command_start Any* }
 OptionalArgument { (command_worktree | command_model_preset) Any* }
@@ -28,7 +28,7 @@ Any {
   TextToken | command_new | command_p | command_worktree | command_model_preset |
   command_skills | command_attach | command_settings | command_setup |
   command_list_admins | command_detach | command_session | command_status |
-  command_usage | command_stop | command_kill | command_terminate |
+  command_usage | command_stop | command_kill | command_terminate | command_fork |
   command_help | command_start | command_cli | SkillToken | UnknownToken
 }
 
@@ -42,7 +42,7 @@ Any {
   command_new, command_p, command_worktree, command_model_preset,
   command_skills, command_attach, command_settings, command_setup,
   command_list_admins, command_detach, command_session, command_status,
-  command_usage, command_stop, command_kill, command_terminate,
+  command_usage, command_stop, command_kill, command_terminate, command_fork,
   command_help, command_start, command_cli, SkillToken, UnknownToken, TextToken
 }
 

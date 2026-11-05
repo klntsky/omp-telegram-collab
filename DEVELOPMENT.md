@@ -39,19 +39,23 @@ The editable Collab Web client lives in `web/src`. `web/upstream.json` records i
 pnpm verify
 ```
 
-`verify` requires live Telegram end-to-end tests, typechecking, the isolated suite, a production build, and all integration stages to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 900s pnpm verify`; timeout is failure, not a skip or pass.
+`verify` requires live Telegram end-to-end tests, native end-to-end tests, typechecking, the isolated suite, a production build, and the CLI and OMP runtime checks to pass, in that order. Configure the saved test-network authorization described below before running it. Run it on the pull request revision in a disposable checkout, not on master. Use an explicit outer timeout, for example `timeout 2400s pnpm verify`; timeout is failure, not a skip or pass.
 
-`check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five; mocked collaborators only establish local behavior, not compatibility with the external service they imitate. `test:integration` builds production artifacts and runs `smoke`.
-
-Choose tests from the behavior in [Product](PRODUCT.md), not the inventory of internal methods. Prefer live end-to-end coverage for successful workflows across Telegram, BotService, and OMP. Keep deterministic isolated coverage for authorization, data preservation, cancellation, retry timing, and races with observable product consequences. Prefer existing bot-level scenarios over a second matrix for their internal helpers. Dependency internals, fixture self-tests, trivial accessor roundtrips, and display wording do not need permanent tests. When replacing meaningful isolated coverage with a live case, compare the actual input handling, protocol data, persisted state, and side effects; shared command names alone do not establish duplication.
+`check` typechecks the backend, Mini App, tests, and TypeScript scripts. `test` runs isolated test files with concurrency five. `test:integration` builds production artifacts and runs `smoke`.
 
 Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After changing the grammar, run `pnpm generate:commands` and commit both generated files, `src/telegram-command-parser.ts` and `src/telegram-command-parser.terms.ts`. Both `pnpm check` and `pnpm build` regenerate them. The tokenizer supplies named terminals at their original message offsets; the parser reads the original message, not an encoded command alphabet. Lezer's generator is a development dependency; production uses the generated tables and `@lezer/lr` with strict parsing. Unresolved grammar conflicts fail generation. Do not add ambiguity annotations or parser recovery to accept conflicting command forms.
 
-`smoke` runs CLI, Telegram, gateway, and OMP runtime stages in separate subprocesses. Run a stage with `pnpm smoke:cli`, `pnpm smoke:telegram`, `pnpm smoke:gateway`, or `pnpm smoke:runtime`. Select several with `pnpm smoke telegram gateway`. The CLI stage requires a current build. The runtime stage requires an installed OMP and enough resources to start within its timeout. Its model-executing lifecycle checks also require configured model credentials. Local fixtures need no live Telegram credentials.
+`smoke` runs CLI and OMP runtime checks in separate subprocesses. Run a stage with `pnpm smoke:cli` or `pnpm smoke:runtime`, or select both with `pnpm smoke cli runtime`. The CLI stage requires a current build. The runtime stage requires an installed OMP and configured model credentials for its model-executing checks.
 
-The Telegram stage uses a local fake Telegram HTTP service; the gateway stage uses real loopback HTTP/WebSocket transport but substitutes the host connector. Neither establishes live Telegram or actual OMP compatibility. The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay; it does not establish compatibility with the production relay. Passing local integration checks is not evidence that BotFather settings, deployed networking, or Telegram clients work.
+The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay. It does not verify the production relay or Telegram connectivity.
 
-Local fixtures use OS-assigned ephemeral ports and keep each listener bound until teardown. Use the returned `app.url` for loopback transport and `app.config.publicUrl` for the gateway Origin header; the configured public origin is independent of the listening port. Bot or gateway initialization failures close the resources already started and preserve the original startup diagnostic.
+Run native end-to-end checks without Telegram credentials:
+
+```sh
+timeout 540s pnpm test:native
+```
+
+`test:native` uses the installed stock OMP executable, real tools and history files, and a local forwarding relay. Only LLM responses are scripted. Set `OMP_EXECUTABLE` to select the executable. Native test environments keep their process configuration and generated files separate from normal sessions.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 
@@ -62,7 +66,7 @@ timeout 60s pnpm test:one --test-name-pattern '^WebSocket tickets are single-use
 
 `test:one` accepts Node test-runner flags and one or more paths without adding the full-suite glob. Run the disposable real-process kill check with `timeout 180s pnpm exec tsx scripts/runtime-kill-smoke.ts`.
 
-Live Telegram verification requires a BotFather token and forum groups. Mini App verification also requires its BotFather registration and HTTPS deployment. Local fixtures cannot verify BotFather settings or Telegram client behavior. Keep services that own active coding sessions running while testing lifecycle notices elsewhere.
+Backend live tests do not replace a check in the Telegram Mini App client. See [README](README.md) for BotFather registration and HTTPS setup.
 
 ## Run tests against Telegram's test network
 
@@ -120,7 +124,7 @@ The private state directory under `~/.local/state/omp-telegram-test` owns cross-
 Install OMP and this checkout's dependencies, then run:
 
 ```sh
-timeout 600s pnpm test:e2e
+timeout 1800s pnpm test:e2e
 ```
 
 Set `OMP_EXECUTABLE` to choose another OMP executable.
@@ -130,6 +134,14 @@ A checkout waits cancellably for at most 10 seconds per lease acquisition if con
 `test:e2e` is separate from the isolated `test` suite and runs first in `verify`. Missing credentials, provisioning failures, and timeouts fail acceptance rather than skipping tests. Inspect original Telegram diagnostics before rerunning; an ambiguous failure may already have created a remote resource. Never log or commit saved sessions or bot tokens.
 
 Use `setupCollaborationTest` from `test/e2e/helpers/collaboration-fixture.ts` for application workflows and `setupTelegramTest` for lower-level Telegram resources. Both register teardown with the Node test context. Keep scenario-specific transitions and expectations in test files rather than setup helpers.
+
+Select a named live workflow without running the other workflows:
+
+```sh
+timeout 300s pnpm test:one --test-name-pattern questions test/e2e/telegram.test.ts
+```
+
+Selected workflows create their own prerequisite sessions. Workflows selected together run sequentially and share one Telegram and OMP fixture.
 
 Forum provisioning retries only the explicit test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, checking for an already-created matching forum before retrying. This policy belongs to the fixture; the application bot's production rate-limit handling is exercised independently.
 
@@ -182,7 +194,13 @@ Use `pm2 logs omp-telegram-collab` for deployed service diagnostics. If configur
 
 Use `/status` in General or the affected topic before inspecting process logs; see [Product](PRODUCT.md) for its diagnostic scope and interpretation. Status observations reset with the bot process, so use the service logs when investigating failures from a previous process.
 
+Active mirror disconnects emit `omp-mirror-disconnected` JSON records to the service logs before listener cleanup or recovery. Records retain the exact close reason, timestamp, bot/topic/session identifiers, OMP host identity and generation, listener generation, and whether the connection completed setup. `omp-mirror-reconnect-exhausted` records identify sessions that reach the five-attempt recovery limit. Correlate these records with the existing `reconnect:<sessionId>` background failure diagnostics. Capability URLs and write tokens are not included. These records preserve observed disconnects across bot restarts when service-log retention is enabled; they do not by themselves establish the underlying network or host cause.
+
 Failure diagnostics preserve the original operation error, including multiline OMP discovery messages. Telegram operation failures are logged, and subprocess failure reports retain available exit codes, signals, and killed status. Inspect those original diagnostics rather than treating a generic startup or Telegram failure summary as the cause.
+
+Best-effort Telegram notices, reactions, question-control cleanup, polling retries, and initial-task retries log their original failures. Topic metadata and host-status lookup failures also reach the service logs rather than only in-memory status. Collab transport and callback failures, lifecycle listener and socket errors, idle retirement, Mini App operations, and service control requests retain local diagnostics. Collab disconnect records include the close code and any supplied close explanation. CLI reload preserves the service's multiline error, exit code, and signal. Configuration filesystem failures retain the original primary cause; additional cleanup failures appear in `cleanupErrors` and the error message, without preventing remaining cleanup attempts. Expected HTTP authorization cancellation is recognized by its original abort reason and is not logged as a request failure. Expected cancellation, missing-file checks, validation of untrusted input, and promise-chain catches with another error owner remain quiet. Raw relay control frames are not logged.
+
+The Mini App logs WebSocket construction and send exceptions in the browser console without changing reconnect behavior. Original error objects are retained when safe. Diagnostics containing the socket URL or ticket retain their other details with those secrets replaced by `[redacted]`.
 
 During new managed-host startup, an `omp collab link` failure with `no active Collab host matches` returns to host discovery until the existing `startupTimeoutMs` deadline. The runtime preserves the last original subprocess error if the deadline expires. If the final discovery probe is killed at that deadline, its error is retained as the original rejection's `cause`, rather than replacing the rejection's exit code and diagnostics. This recovery does not apply to attached hosts, existing managed hosts, or identity-validation failures.
 

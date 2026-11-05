@@ -1,12 +1,11 @@
-import type { HostFrame } from "@oh-my-pi/pi-wire";
-import type { BrowserFrame } from "../../../shared/contracts";
+import type { BrowserFrame, BrowserHostFrame } from "../../../shared/contracts";
 import { SessionAccessError } from "./telegram";
 
 export type GatewayAction = BrowserFrame;
 
 export interface GuestTransport {
 	onOpen?: () => void;
-	onFrame?: (frame: HostFrame) => void;
+	onFrame?: (frame: BrowserHostFrame) => void;
 	onClose?: (reason: string, willReconnect: boolean) => void;
 	connect(): void;
 	reconnect(reason: string): void;
@@ -17,9 +16,27 @@ export interface GuestTransport {
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 
+function logSocketError(context: string, error: unknown, ticket: string, url: string): void {
+	const secrets = [url, ticket, encodeURIComponent(ticket),
+		new URLSearchParams({ ticket }).toString().slice("ticket=".length)].filter(Boolean);
+	const redact = (value: string): string => {
+		for (const secret of secrets) value = value.split(secret).join("[redacted]");
+		return value;
+	};
+	if (!(error instanceof Error)) {
+		console.error(context, redact(String(error)));
+		return;
+	}
+	const message = redact(error.message);
+	const stack = error.stack === undefined ? undefined : redact(error.stack);
+	const name = redact(error.name);
+	console.error(context, message === error.message && stack === error.stack && name === error.name
+		? error : { name, message, stack, redacted: true });
+}
+
 export class GatewaySocket implements GuestTransport {
 	onOpen?: () => void;
-	onFrame?: (frame: HostFrame) => void;
+	onFrame?: (frame: BrowserHostFrame) => void;
 	onClose?: (reason: string, willReconnect: boolean) => void;
 
 	#ticket: string | null;
@@ -66,7 +83,8 @@ export class GatewaySocket implements GuestTransport {
 		let ws: WebSocket;
 		try {
 			ws = new WebSocket(url);
-		} catch {
+		} catch (error) {
+			logSocketError("Session WebSocket construction failed:", error, ticket, url.href);
 			this.reconnect("Could not connect to the session. Reconnecting…");
 			return;
 		}
@@ -77,7 +95,7 @@ export class GatewaySocket implements GuestTransport {
 		};
 		ws.onmessage = event => {
 			if (this.#ws !== ws) return;
-			let frame: HostFrame;
+			let frame: BrowserHostFrame;
 			try {
 				if (typeof event.data !== "string") throw new Error("Expected JSON");
 				const value: unknown = JSON.parse(event.data);
@@ -89,7 +107,7 @@ export class GatewaySocket implements GuestTransport {
 					gatewayError = value.message;
 					return;
 				}
-				frame = value as HostFrame;
+				frame = value as BrowserHostFrame;
 			} catch {
 				this.#finish("The session sent an invalid response. Rejoin to try again.");
 				return;
@@ -130,7 +148,9 @@ export class GatewaySocket implements GuestTransport {
 		const text = JSON.stringify(frame);
 		try {
 			ws.send(text);
-		} catch {
+		} catch (error) {
+			logSocketError("Session WebSocket send failed; delivery is uncertain:", error,
+				new URL(ws.url).searchParams.get("ticket") ?? "", ws.url);
 			this.reconnect("Could not send to the session. Reconnecting; delivery is uncertain.");
 		}
 	}

@@ -38,6 +38,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | --- | --- |
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
 | `/worktree [branch]` | Run OMP's native worktree operation in the current topic's managed session. In General, create an empty session topic first. The optional argument is a branch name, not a task. |
+| `/fork` | Copy the current managed conversation into a new topic. Reply to an anchored request or agent answer to copy history through that entry. Requires the current supergroup owner or an administrator. |
 | Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit, or immediately when automatic topic worktrees are enabled. |
 | `/p <prompt>` | Submit a prompt in either prompt mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
@@ -84,6 +85,14 @@ Background recovery waits for in-progress topic preparation and task forwarding 
 A current supergroup owner or administrator can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same administrator or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.
 
 Each forum can enable automatic topic worktrees through `/settings`. The `create_topic_worktrees` setting defaults to `false`. When enabled, every new managed session topic, including a manually created topic, invokes OMP's native `/worktree` before its initial prompt. The branch name is `t.me/c/<internal chat>/<topic>`, where the internal chat ID is the supergroup chat ID without its `-100` prefix and the topic is its thread ID. Attached sessions and existing topics are unchanged. Explicit `/worktree [branch]` keeps its normal branch-argument semantics.
+
+`/fork` accepts no arguments and runs only in an open managed session topic. Bare `/fork` copies the current conversation. An explicit reply selects the exact persisted OMP entry for that Telegram message, including the selected request or answer. Unanchored messages and entries outside the current history branch are rejected rather than treated as a request to copy the conversation tip. The source must be idle. Attached sessions remain terminal-owned.
+
+The fork has its own OMP identity, saved history, and Telegram topic. The original topic, history, host, and existing connections remain unchanged. The bot replies in the original topic with a link to the new topic. The new topic links back to the specific source message at the fork point, including its message ID in the link. The new topic has its own pinned OPEN AGENT button and `/cli` terminal connection command. Copied answers are not replayed as new Telegram messages, and `/fork` does not submit a prompt or consume pending skills.
+
+Forked topics use the same automatic-worktree setting as other new managed topics. When enabled, the fork invokes OMP's native `/worktree` with its new topic's generated branch name before accepting prompts. When disabled, the fork retains the source working directory; the conversations have separate histories but share file changes. Native worktree creation retains OMP's normal uncommitted-change transfer behavior.
+
+A topic left by failed or interrupted fork preparation becomes permanently conversation-only. It cannot start a fresh session with empty history. Notification failures after successful preparation preserve the fork and its saved history.
 
 The pinned message contains only “Use /p to submit a prompt” in explicit-prompt mode or “Send a message to prompt the agent” in all-messages mode, plus the OPEN AGENT button.
 
@@ -325,7 +334,7 @@ If retirement cannot free capacity, the current supergroup owner or an administr
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. The bot marks an initial task submitted before sending it and retries only explicit startup rejection. A crash between those steps may require resending the task. Disconnects never replay possibly executed instructions.
 
-Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts a notice; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
+Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts only “Session mirroring disconnected.”; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 
 If a Telegram listener closes while an authorized operation is still establishing its connection, the bot immediately reacquires the host and reconnects once before continuing. Recovery requires the same session generation, an open topic, and an unchanged assignment; termination, detachment, and kill invalidation cannot reopen the session. No prompt is replayed, and a second connection failure retains its original diagnostic.
 
@@ -335,7 +344,7 @@ New managed hosts remain in startup when Collab discovery temporarily reports th
 
 The Mini App retains its transcript during transient failures. Automatic reconnects use capped exponential backoff, the cached long-lived backend credential, and a fresh single-use ticket with current membership checks. Service restarts and the age of the original Telegram launch do not require reopening Telegram after the initial exchange. Reconnects do not queue or replay instructions. Leave, denied membership, invalid credentials or actions, a killed session, or full capacity stop automatic reconnect. Use Rejoin after capacity becomes available or to resume a killed session explicitly. Backend errors retain their original diagnostics rather than being replaced with expired-launch instructions.
 
-Transient connection notices disappear once the Mini App finishes reconnecting and loading the session snapshot. Unrelated session notices remain visible.
+Transient connection notices disappear once the Mini App finishes reconnecting and loading the recent session page. Unrelated session notices remain visible.
 
 Mini App transport has no custom queue-count, byte-backlog, WebSocket payload-size, or buffered-data disconnect limits. Snapshot and live-update bursts do not disconnect a session merely because pending data crosses a threshold. Authorization and protocol validation remain enforced.
 
@@ -344,6 +353,20 @@ Transient Telegram authorization lookup failures fail closed without becoming pe
 ## 4. Attached sessions and transcript
 
 The current supergroup owner and administrators can attach a control-shared OMP host whose working directory matches the assigned project. Attached hosts survive service shutdown. Killing one requires restarting it locally and attaching the replacement.
+
+### 4.1. Session history and live tracking
+
+- Opening the Mini App downloads a recent page, not the complete session history. Earlier entries load when the reader scrolls near the top or selects Show earlier.
+- Active mirrored managed sessions keep their recent history and observed live message, tool, and subagent state available even when no Mini App viewer is connected. Managed viewers share the bot's existing connection rather than opening another OMP connection. New viewers receive the latest observed session title.
+- Historical pages preserve entry order and the reader's visible position while live output continues, including when images finish loading above the viewport. Reading earlier messages disables automatic tail following. Scrolling back to the bottom resumes it, including while an earlier-page request is pending.
+- History-read timeouts retain the current transcript and offer retry. Reconnecting replaces loaded history with a fresh recent page and discards requests and cursors from the previous connection.
+- The native OMP protocol is unchanged. A new bot connection receives OMP's initial snapshot before serving history. A history refresh also receives a complete native snapshot, but browser delivery remains paginated. Live replay includes only state observed by that listener; it does not invent partial messages or running tools that predate the connection.
+- Managed history observes persisted native rewrites, including automatic pruning of older tool results. Directory observation and periodic metadata checks keep the cache warm; joins and historical-page reads also check the current source. Ordinary appends do not force another snapshot.
+- A refresh marks retained history as updating, cancels pending older-page reads, and replaces the rows with a fresh recent page. Streaming, tools, subagents, and the reader's tail-following choice survive. Old page replies cannot restore replaced content. A deeply scrolled reader can return to the recent page after replacement.
+- Source failures show the original diagnostic and leave older history unverified without stopping Telegram mirroring. Freshness checks cover persisted native history, not mutations that remain only in native memory or arbitrary external edits that imitate appends.
+- Attached terminal hosts do not expose a verified history path. Each attached viewer receives a fresh snapshot and paginated index on joining through its own native connection. Already-open attached viewers do not receive managed-session rewrite tracking; reconnecting obtains a fresh snapshot.
+
+### 4.2. Transcript presentation
 
 The Mini App collapses IRC traffic, system notices, reminders, task-result envelopes, and displayed custom notices. Disclosures reveal their contents. Ordinary prose, attachments, code examples, unknown tags, and incomplete envelopes stay visible. Hidden custom entries remain hidden.
 

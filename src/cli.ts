@@ -344,6 +344,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
           response.end(JSON.stringify({ ok: true }));
         }
       })().catch(error => {
+        console.error('Service control request failed.', error);
         response.writeHead(409, { 'content-type': 'application/json' });
         const detail = error as { code?: unknown; signal?: unknown } | null;
         response.end(JSON.stringify({
