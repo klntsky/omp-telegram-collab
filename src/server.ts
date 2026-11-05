@@ -4,18 +4,17 @@ import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
-import type { HostFrame } from '@oh-my-pi/pi-wire';
-import type { AppConfig, CollabConnection, TopicSession } from '../shared/contracts.js';
+import type { AppConfig, BrowserHostFrame, TopicSession } from '../shared/contracts.js';
 import { Store } from './store.js';
 import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
-import { connectCollab } from './collab.js';
 import type { BotService, RuntimeLike } from './bot.js';
 import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
+import type { SessionFeedSubscription } from './session-feed.js';
 
-export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'onSessionInvalidated'>;
-export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; staticDir?: string }
+export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'subscribeSessionFeed' | 'onSessionInvalidated'>;
+export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: RuntimeLike; staticDir?: string }
 export interface GatewayServer extends Server { closeConnections(): Promise<void> }
 const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
@@ -200,13 +199,13 @@ export function createServer(options: ServerOptions): GatewayServer {
     });
   });
   function connectSocket(ws: WebSocket, identity: TicketIdentity & {access: {session: TopicSession; canControl: boolean}}): void {
-    let upstream: CollabConnection | undefined;
+    let upstream: SessionFeedSubscription | undefined;
     let release: (() => void) | undefined;
     let connectedSession: TopicSession | undefined;
     const readAccess = identity.access;
     let closed = false;
     let tail: Promise<void> = Promise.resolve();
-    let outgoing: { frame: HostFrame; payload: string }[] = [];
+    let outgoing: { frame: BrowserHostFrame; payload: string }[] = [];
     let outgoingScheduled = false;
     const unsubscribeKill = botMap.get(identity.botId)!.onSessionInvalidated((sessionId,reason) => {
       if (sessionId !== identity.sessionId) return;
@@ -243,25 +242,26 @@ export function createServer(options: ServerOptions): GatewayServer {
       } else ws.close(code,message);
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
+    async function failAction(error: unknown): Promise<void> {
+      console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
+      if (error instanceof ServiceTerminatedError) fail(4003,error.message);
+      else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
+      else if (error instanceof SessionCapacityError) {
+        fail(4009,error.message);
+        const session = options.store.getSession(identity.sessionId);
+        if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(error => {
+          console.error(`Mini App capacity request failed (${identity.botId}, ${identity.sessionId}).`, error);
+        });
+      } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
+    }
     function enqueue(action: () => Promise<void>): void {
       if (closed) return;
-      tail = tail.then(async () => { if (!closed) await action(); }).catch(async error => {
-        console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
-        if (error instanceof ServiceTerminatedError) fail(4003,error.message);
-        else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
-        else if (error instanceof SessionCapacityError) {
-          fail(4009,error.message);
-          const session = options.store.getSession(identity.sessionId);
-          if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(error => {
-            console.error(`Mini App capacity request failed (${identity.botId}, ${identity.sessionId}).`, error);
-          });
-        } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
-      });
+      tail = tail.then(async () => { if (!closed) await action(); }).catch(failAction);
     }
     function flushOutgoing(): void {
       if (closed || outgoingScheduled || !outgoing.length) return;
       outgoingScheduled = true;
-      enqueue(async () => {
+      void (async () => {
         // Frames arriving during this local check belong to the next batch.
         const batch = outgoing;
         outgoing = [];
@@ -279,7 +279,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           outgoingScheduled = false;
           flushOutgoing();
         }
-      });
+      })().catch(failAction);
     }
     ws.on('error',error => {
       console.error(`Mini App WebSocket failed (${identity.botId}, ${identity.sessionId}).`, error);
@@ -297,7 +297,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         await authorize(identity,connectedSession,readAccess);
         if (!upstream) throw new Error('Session not connected');
         checkTermination();
-        upstream.send(frame);
+        void Promise.resolve(upstream.send(frame)).catch(failAction);
       });
     });
     enqueue(async () => {
@@ -315,11 +315,10 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (closed) return;
       checkTermination();
       await authorize(identity,session,readAccess);
-      const connection = await (options.connect ?? connectCollab)(binding,participantName(identity),{
+      const connection = await bot.subscribeSessionFeed(session,{
         onFrame: frame => {
           try { checkTermination(); }
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
-          options.runtime.observeFrame(session.id,frame);
           let payload: string;
           try { payload = JSON.stringify(frame); } catch (error) {
             console.error(`Mini App host frame serialization failed (${identity.botId}, ${identity.sessionId}).`, error);
@@ -330,7 +329,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         },
         onClose: reason => {
           if (!closed) console.warn(`Mini App host disconnected (${identity.botId}, ${identity.sessionId}).`, reason);
-          fail(1011,'Host disconnected');
+          fail(1011,reason);
         },
       });
       try {

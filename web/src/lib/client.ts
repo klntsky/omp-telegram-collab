@@ -25,6 +25,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { GuestTransport } from "./socket";
 import { miniAppInterruptionAuthor } from "../../../shared/interruption";
+import type { BrowserHostFrame, HistoryCursor } from "../../../shared/contracts";
 
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
 
@@ -65,6 +66,14 @@ export interface GuestSnapshot {
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
 	loading: { received: number; total: number } | null;
+	history: {
+		older: HistoryCursor | null;
+		loading: boolean;
+		error: string | null;
+		freshness: "ready" | "refreshing" | "unverified";
+		/** Changes only when a history reset replaces the visible row set. */
+		revision: number;
+	};
 }
 
 const MAX_NOTICES = 50;
@@ -87,7 +96,7 @@ function scheduleFrame(callback: () => void): () => void {
 }
 
 /** High-rate frames whose publish is deferred to the next animation frame. */
-function isCoalescable(frame: HostFrame): boolean {
+function isCoalescable(frame: BrowserHostFrame): boolean {
 	if (frame.t === "event")
 		return frame.event.type === "message_update" || frame.event.type === "tool_execution_update";
 	return frame.t === "bus" && frame.channel === "task:subagent:progress";
@@ -107,6 +116,12 @@ interface PendingTranscript {
 	timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingHistory {
+	reqId: number;
+	cursor: HistoryCursor;
+	timer: ReturnType<typeof setTimeout>;
+}
+
 export class GuestClient {
 	readonly #socket: GuestTransport;
 	readonly #listeners = new Set<() => void>();
@@ -116,6 +131,11 @@ export class GuestClient {
 	#welcomed = false;
 	#welcomeTimer: ReturnType<typeof setTimeout> | null = null;
 	#snapshotProgressTimer: ReturnType<typeof setTimeout> | null = null;
+	#older: HistoryCursor | null = null;
+	#historyError: string | null = null;
+	#historyFreshness: GuestSnapshot["history"]["freshness"] = "ready";
+	#historyRevision = 0;
+	#pendingHistory: PendingHistory | null = null;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
@@ -175,6 +195,7 @@ export class GuestClient {
 	close(): void {
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+		this.#clearPendingReads();
 		this.#socket.close();
 	}
 
@@ -210,12 +231,30 @@ export class GuestClient {
 		return promise;
 	}
 
+	loadEarlier(): void {
+		if (
+			this.#phase !== "live" || this.#pendingSnapshot || this.#pendingHistory ||
+			this.#historyFreshness === "refreshing" || !this.#older
+		) return;
+		const reqId = ++this.#reqSeq;
+		const cursor = { ...this.#older };
+		const timer = setTimeout(() => {
+			this.#pendingHistory = null;
+			this.#historyError ??= "Timed out waiting for earlier history.";
+			this.#commit();
+		}, TRANSCRIPT_TIMEOUT_MS);
+		this.#pendingHistory = { reqId, cursor, timer };
+		if (this.#historyFreshness === "ready") this.#historyError = null;
+		this.#commit();
+		this.#socket.send({ t: "history-page", reqId, cursor });
+	}
+
 	/**
 	 * Test seam: apply a synthetic host frame through the real apply path. With
 	 * `flush` (default), a commit deferred to the next animation frame is
 	 * published now, so the snapshot reflects the frame on return.
 	 */
-	applyFrameForTest(frame: HostFrame, options: { flush?: boolean } = {}): void {
+	applyFrameForTest(frame: BrowserHostFrame, options: { flush?: boolean } = {}): void {
 		this.#applyFrameSafe(frame);
 		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
 	}
@@ -229,6 +268,10 @@ export class GuestClient {
 	#handleClose(reason: string, willReconnect: boolean): void {
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+		this.#clearPendingReads();
+		this.#older = null;
+		this.#historyError = null;
+		this.#historyFreshness = "ready";
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
@@ -253,13 +296,22 @@ export class GuestClient {
 		this.#phase = "ended";
 		this.#endedReason = reason;
 		this.#pendingSnapshot = null;
-		for (const [, pending] of this.#pendingTranscripts) {
+		this.#older = null;
+		this.#historyError = null;
+		this.#historyFreshness = "ready";
+		this.#clearPendingReads();
+		this.#commit();
+		this.#socket.close();
+	}
+
+	#clearPendingReads(): void {
+		for (const pending of this.#pendingTranscripts.values()) {
 			clearTimeout(pending.timer);
 			pending.resolve(null);
 		}
 		this.#pendingTranscripts.clear();
-		this.#commit();
-		this.#socket.close();
+		if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+		this.#pendingHistory = null;
 	}
 
 	#armWelcomeTimer(): void {
@@ -293,7 +345,7 @@ export class GuestClient {
 	}
 
 	/** Surfaces apply failures instead of letting the socket's recv chain swallow them. */
-	#applyFrameSafe(frame: HostFrame): void {
+	#applyFrameSafe(frame: BrowserHostFrame): void {
 		try {
 			this.#applyFrame(frame);
 		} catch (err) {
@@ -307,9 +359,13 @@ export class GuestClient {
 		}
 	}
 
-	#applyFrame(frame: HostFrame): void {
+	#applyFrame(frame: BrowserHostFrame): void {
 		switch (frame.t) {
 			case "welcome":
+				this.#clearPendingReads();
+				this.#older = null;
+				this.#historyError = null;
+				this.#historyFreshness = "ready";
 				// A fresh welcome (first join or reconnect) restarts the snapshot.
 				// Entries already on screen stay until the new snapshot replaces
 				// them once complete, so a resync never blanks the transcript.
@@ -346,7 +402,7 @@ export class GuestClient {
 				// only advance `loading`: publishing entries per chunk re-renders
 				// the transcript per chunk, and a 50 MB session is ~100 chunks.
 				const pending = this.#pendingSnapshot;
-				if (pending === null) return;
+				if (pending === null || this.#historyFreshness !== "ready") return;
 				pending.entries.push(...frame.entries);
 				// Complete on `final` or once every promised entry arrived, so a
 				// lost final chunk doesn't strand a fully received transcript.
@@ -360,6 +416,62 @@ export class GuestClient {
 				this.#pendingSnapshot = null;
 				this.#clearSnapshotProgressTimer();
 				this.#phase = "live";
+				break;
+			}
+			case "history-state":
+				if (!this.#welcomed || this.#phase === "ended" || this.#historyFreshness !== "ready") return;
+				this.#older = frame.older;
+				break;
+			case "history-invalidated":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#clearSnapshotProgressTimer();
+				this.#historyFreshness = "refreshing";
+				break;
+			case "history-reset":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#pendingSnapshot = null;
+				this.#clearSnapshotProgressTimer();
+				this.#entries = [...frame.page.entries];
+				this.#publishedEntries = [...this.#entries];
+				this.#older = frame.page.older;
+				this.#historyFreshness = "ready";
+				this.#historyError = null;
+				this.#historyRevision++;
+				this.#phase = "live";
+				break;
+			case "history-error":
+				if (!this.#welcomed || this.#phase === "ended") return;
+				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
+				this.#pendingHistory = null;
+				this.#clearSnapshotProgressTimer();
+				this.#historyFreshness = "unverified";
+				this.#historyError = frame.message;
+				break;
+			case "history-page": {
+				const pending = this.#pendingHistory;
+				if (!pending || pending.reqId !== frame.reqId) return;
+				if (
+					frame.cursor.epoch !== pending.cursor.epoch ||
+					frame.cursor.before !== pending.cursor.before ||
+					this.#older?.epoch !== pending.cursor.epoch ||
+					this.#older.before !== pending.cursor.before
+				) return;
+				if (frame.page.older && (
+					frame.page.older.epoch !== pending.cursor.epoch ||
+					frame.page.older.before >= pending.cursor.before
+				)) return;
+				clearTimeout(pending.timer);
+				this.#pendingHistory = null;
+				// A page cannot certify rows retained across a failed source refresh.
+				if (this.#historyFreshness !== "ready") break;
+				this.#historyError = null;
+				this.#entries = [...frame.page.entries, ...this.#entries];
+				this.#publishedEntries = [...this.#entries];
+				this.#older = frame.page.older;
 				break;
 			}
 			case "entry":
@@ -436,6 +548,11 @@ export class GuestClient {
 					// welcome timeout.
 					this.#end(frame.message);
 					return; // #end already committed
+				}
+				if (this.#pendingHistory) {
+					clearTimeout(this.#pendingHistory.timer);
+					this.#pendingHistory = null;
+					if (this.#historyFreshness === "ready" || this.#historyError === null) this.#historyError = frame.message;
 				}
 				this.#pushNotice("error", frame.message);
 				break;
@@ -603,6 +720,13 @@ export class GuestClient {
 			activeTools: this.#activeTools,
 			working: this.#working,
 			notices: this.#notices,
+			history: {
+				older: this.#older,
+				loading: this.#pendingHistory !== null,
+				error: this.#historyError,
+				freshness: this.#historyFreshness,
+				revision: this.#historyRevision,
+			},
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,

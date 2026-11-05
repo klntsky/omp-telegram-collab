@@ -5,7 +5,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 ![OMP Telegram Collab conversations organized into Telegram forum topics](assets/telegram-topics.jpg)
 
 - Give each topic its own conversation and saved history.
-- Send prompts and answer agent questions in Telegram. Watch the read-only Mini App for live transcripts and tool details.
+- Send prompts and answer agent questions in Telegram. Open the read-only Mini App at the latest messages, load earlier history on demand, and follow live output and tool details.
 - Attach existing local OMP sessions.
 - Share project directories across groups with configurable prompt approval.
 - Edit the included Collab Web client without an iframe.
