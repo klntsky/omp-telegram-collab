@@ -113,16 +113,20 @@ export class GatewaySocket implements GuestTransport {
 				return;
 			}
 			if (frame.t === "snapshot-chunk" && frame.final) this.#attempt = 0;
+			if (frame.t === "bye") {
+				gatewayError = frame.reason;
+				return;
+			}
 			this.onFrame?.(frame);
 		};
 		ws.onerror = () => {};
 		ws.onclose = event => {
 			if (this.#ws !== ws) return;
 			if (event.code === 4001 || event.code === 4002 || event.code === 4003 || event.code === 4009) {
-				this.#finish(event.reason || "Session unavailable. Reopen the topic’s OPEN AGENT button.");
+				this.#finish(event.reason || gatewayError || "Session unavailable. Reopen the topic’s OPEN AGENT button.");
 				return;
 			}
-			const reason = event.reason || (event.code === 1013 ? gatewayError : undefined);
+			const reason = event.reason || gatewayError;
 			this.reconnect(reason ? `${reason}\nReconnecting…` : "Disconnected from the session. Reconnecting…");
 		};
 	}

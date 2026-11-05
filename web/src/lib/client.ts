@@ -161,7 +161,6 @@ export class GuestClient {
 	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
 	#working = false;
 	#notices: readonly Notice[] = [];
-	readonly #connectionNoticeIds = new Set<number>();
 	#snapshot: GuestSnapshot;
 	/**
 	 * Published entries array, cached across commits: rebuilt only when
@@ -278,11 +277,7 @@ export class GuestClient {
 			this.#welcomed = false;
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;
-			this.#pushNotice("error", reason);
-			this.#connectionNoticeIds.add(this.#noticeSeq);
-			if (this.#connectionNoticeIds.size > MAX_NOTICES) {
-				this.#connectionNoticeIds.delete(this.#connectionNoticeIds.values().next().value!);
-			}
+			console.warn("Session connection interrupted:", reason);
 			this.#commit();
 			return;
 		}
@@ -744,10 +739,6 @@ export class GuestClient {
 	}
 
 	#commit(): void {
-		if (this.#phase === "live" && this.#connectionNoticeIds.size > 0) {
-			this.#notices = this.#notices.filter(notice => !this.#connectionNoticeIds.has(notice.id));
-			this.#connectionNoticeIds.clear();
-		}
 		if (this.#cancelFrameCommit !== null) {
 			this.#cancelFrameCommit();
 			this.#cancelFrameCommit = null;
