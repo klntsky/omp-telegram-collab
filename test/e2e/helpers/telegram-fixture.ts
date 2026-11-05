@@ -5,7 +5,7 @@ import { createTelegramTestApi, createTelegramTestForum, type TelegramTestBot, t
 import { TelegramTestInbox } from './telegram-updates.js';
 import { combineTelegramErrors } from './errors.js';
 import type { TelegramTestBotLease } from '../../../scripts/lib/telegram-test-bots.js';
-import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { telegramTestDeadlineRemaining, telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
 export interface TelegramTestFixture {
   user: TelegramTestUser;
@@ -56,8 +56,12 @@ export async function teardownTelegramTestResources(options: {
     try {
       const closing = options.user.close();
       void closing.catch(record);
-      await withTelegramTestDeadline('fixture user close', telegramTestTimeouts.cleanup,
-        cleanupSignal ?? new AbortController().signal, () => closing);
+      const signal = options.signal && cleanupSignal
+        ? AbortSignal.any([options.signal, cleanupSignal])
+        : cleanupSignal ?? options.signal ?? new AbortController().signal;
+      const remaining = Math.min(telegramTestTimeouts.cleanup,
+        Math.ceil(telegramTestDeadlineRemaining(cleanupSignal ?? signal)));
+      await withTelegramTestDeadline('fixture user close', remaining, signal, () => closing);
     } catch (error) {
       if (!errors.includes(error)) record(error);
     }

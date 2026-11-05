@@ -261,3 +261,20 @@ test('already-expired cleanup still attempts user release and records its late f
   await setImmediate();
   assert.ok(report.mock.calls.some(call => call.arguments[0] === failure));
 });
+
+test('parent cancellation still bounds the final user close attempt', async () => {
+  const parent = new AbortController();
+  const expired = new Error('Parent cancelled during user close');
+  const entered = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const cleanup = teardownTelegramTestResources({
+    signal: parent.signal,
+    user: { async close() { entered.resolve(); await finish.promise; } },
+  });
+  const rejected = assert.rejects(cleanup, error => error === expired);
+  await entered.promise;
+  parent.abort(expired);
+  await rejected;
+  finish.resolve();
+  await setImmediate();
+});
