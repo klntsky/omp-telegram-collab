@@ -107,7 +107,8 @@ async function openCollab(
     if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new Error(reason));
     try {
       handlers.onClose(reason instanceof Error ? reason.message : reason);
-    } catch {
+    } catch (error) {
+      console.error('Collab close callback failed:', error);
     }
   }
 
@@ -139,7 +140,11 @@ async function openCollab(
       await new Promise<void>((resolve, reject) => {
         ws.send(envelope, error => error ? reject(error) : resolve());
       });
-    }).catch(() => finish('Collab send failed; delivery may be uncertain'));
+    }).catch(error => {
+      if (closed) return;
+      console.error('Collab send failed; delivery may be uncertain:', error);
+      finish(error instanceof Error ? error : `Collab send failed; delivery may be uncertain: ${String(error)}`);
+    });
   }
 
   const connection: CollabConnection = {
@@ -246,8 +251,10 @@ async function openCollab(
   ws.on('open', () => {
     try {
       sendHello();
-    } catch {
-      finish('Collab hello failed');
+    } catch (error) {
+      if (closed) return;
+      console.error('Collab hello failed:', error);
+      finish(error instanceof Error ? error : `Collab hello failed: ${String(error)}`);
     }
   });
   ws.on('message', (data, isBinary) => {
@@ -257,7 +264,8 @@ async function openCollab(
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
         if (control.t === 'room-closed') finish('Collab room closed');
-      } catch {
+      } catch (error) {
+        console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
         finish('Invalid Collab relay control frame');
       }
       return;
@@ -271,10 +279,16 @@ async function openCollab(
       if (!frame || typeof frame !== 'object' || !Object.hasOwn(HOST_TYPES, frame.t)) throw new Error('Invalid Collab host frame');
       deliver(frame as HostFrame);
     }).catch(error => {
-      finish(error instanceof Error ? error : new Error('Collab receive failed', {cause: error}));
+      if (closed) return;
+      console.error('Collab receive failed:', error);
+      finish(error instanceof Error ? error : new Error(`Collab receive failed: ${String(error)}`, {cause: error}));
     });
   });
-  ws.on('error', () => finish('Collab transport error'));
-  ws.on('close', code => finish(`Collab connection closed (${code})`));
+  ws.on('error', error => {
+    if (closed) return;
+    console.error('Collab transport error:', error);
+    finish(error);
+  });
+  ws.on('close', (code, reason) => finish(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`));
   return setup;
 }

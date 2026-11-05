@@ -1155,7 +1155,7 @@ export class BotService {
       } finally {
         this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
-          await ctx.answerCallbackQuery().catch(() => undefined);
+          await ctx.answerCallbackQuery().catch(error => console.warn('Could not acknowledge Telegram callback.', error));
       }
     });
   }
@@ -1178,7 +1178,7 @@ export class BotService {
     const details = error instanceof Error ? error.message : String(error);
     await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
-    }).catch(() => undefined);
+    }).catch(deliveryError => console.error('Could not deliver Telegram operation error notice.', deliveryError));
   }
   private collectAlbum(ctx: Context): boolean {
     const message = ctx.message;
@@ -1250,7 +1250,8 @@ export class BotService {
         !this.usersCanProposePrompts(ctx.chat.id) && !(await this.currentAdmin(ctx))) return;
     await this.delivery.run(ctx.chat.id,
       () => this.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
-      () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.instance.id === assigned.instance.id).catch(() => undefined);
+      () => !this.stopped && findInstance(this.options.config,this.id,ctx.chat!.id)?.instance.id === assigned.instance.id)
+      .catch(error => console.warn('Could not show message receipt reaction.', error));
   }
   async applyTermination(): Promise<void> {
     if (!this.options.config.terminated) { this.termination = undefined; return; }
@@ -1633,6 +1634,7 @@ export class BotService {
           if (controller.signal.aborted) break;
           const temporary = error instanceof GrammyError && (error.error_code === 429 || error.error_code >= 500);
           if (!temporary && !(error instanceof HttpError)) throw error;
+          console.warn('Telegram polling failed; retrying.', error);
           const seconds = error instanceof GrammyError ? error.parameters.retry_after ?? 5 : 5;
           await retryDelay(Math.max(0, seconds) * 1000, controller.signal);
         }
@@ -2209,8 +2211,7 @@ export class BotService {
             at: Date.now(),
             error,
           };
-          if (field === 'icon')
-            console.warn(`Could not update topic status (${session.id}).`, error);
+          console.warn(`Could not synchronize topic ${field} (${session.id}).`, error);
         },
       );
       return result;
@@ -2267,12 +2268,17 @@ export class BotService {
       const value = this.topicIconValue(session, ids);
       if (value !== undefined) await metadata.icon.publish(value);
     } catch (error) {
-      if (!this.stopped)
+      if (!this.stopped && !this.options.config.terminated &&
+          this.metadataOwners.get(session.id)?.metadata === metadata &&
+          this.sessionAssigned(session) &&
+          this.options.store.getSessionGeneration(session.id) === metadata.generation) {
+        console.warn(`Could not synchronize topic icon (${session.id}).`, error);
         this.sessionObservation(session.id).failure = {
           operation: 'Topic icon synchronization',
           at: Date.now(),
           error,
         };
+      }
     }
   }
   private refreshActivity(session: TopicSession): Promise<void> {
@@ -2323,6 +2329,7 @@ export class BotService {
     })()
       .catch((error) => {
         if (active()) {
+          console.warn(`Could not look up host activity (${session.id}).`, error);
           void this.setTopicStatus(session, 'unknown');
           this.sessionObservation(session.id).failure = {
             operation: 'Host status lookup',
@@ -2858,7 +2865,8 @@ export class BotService {
     writeConfig({ ...persisted, omp: { ...persisted.omp, maxSessions: request.limit * 2 } });
     this.options.config.omp.maxSessions = request.limit * 2;
     this.options.runtime.increaseSessionLimit(request.limit);
-    await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`).catch(() => undefined);
+    await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`)
+      .catch(error => console.warn(`Could not deliver session capacity increase notice (${session.id}).`, error));
     await this.listen(session);
     await this.sendInitial(session);
   }
@@ -3415,6 +3423,8 @@ export class BotService {
           );
           void metadata.name.observe(edited.name);
           void this.applySessionTitle(session).catch((error) => {
+            if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+            console.warn(`Could not synchronize session title (${session.id}).`, error);
             this.sessionObservation(session.id).failure = {
               operation: 'Topic title synchronization',
               at: Date.now(),
@@ -3441,12 +3451,17 @@ export class BotService {
               void metadata.icon.observe(value);
             })
             .catch((error) => {
-              if (!this.stopped)
+              if (!this.stopped && !this.options.config.terminated &&
+                  this.metadataOwners.get(session.id)?.metadata === metadata &&
+                  this.sessionAssigned(session) &&
+                  this.options.store.getSessionGeneration(session.id) === metadata.generation) {
+                console.warn(`Could not synchronize topic icon (${session.id}).`, error);
                 this.sessionObservation(session.id).failure = {
                   operation: 'Topic icon synchronization',
                   at: Date.now(),
                   error,
                 };
+              }
             });
         }
       } else {
@@ -3944,11 +3959,21 @@ export class BotService {
     const current = this.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
+      console.warn(JSON.stringify({
+        event: 'omp-mirror-reconnect-exhausted',
+        at: new Date().toISOString(),
+        botId: this.id,
+        sessionId: session.id,
+        chatId: session.chatId,
+        threadId: session.threadId,
+        attempts: attempt,
+        generation: this.options.store.getSessionGeneration(session.id),
+      }));
       void sendTo(
         this.bot.api,
         topicDestination(session.chatId, session.threadId),
         'Session mirroring disconnected.',
-      ).catch(() => undefined);
+      ).catch(error => console.warn(`Could not deliver mirroring disconnected notice (${session.id}).`, error));
       return;
     }
     const generation = this.options.store.getSessionGeneration(session.id);
@@ -4146,6 +4171,20 @@ export class BotService {
             onFrame: (frame) => this.onFrame(session, listener, frame),
             onClose: (reason) => {
               if (!active()) return;
+              console.warn(JSON.stringify({
+                event: 'omp-mirror-disconnected',
+                at: new Date().toISOString(),
+                botId: this.id,
+                sessionId: session.id,
+                chatId: session.chatId,
+                threadId: session.threadId,
+                instanceId: binding.instanceId,
+                hostGeneration: binding.generation,
+                ompSessionId: binding.sessionId,
+                generation,
+                connected: listener.connection !== undefined,
+                reason,
+              }));
               this.sessionObservation(session.id).failure = {
                 operation: 'Mirroring disconnected',
                 at: Date.now(),
@@ -4339,7 +4378,8 @@ export class BotService {
   private acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.delivery.run(session.chatId,
       () => this.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
-      () => !this.stopped && this.sessionAssigned(session) && (listener === undefined || this.listeners.get(session.id) === listener)).catch(() => undefined);
+      () => !this.stopped && this.sessionAssigned(session) && (listener === undefined || this.listeners.get(session.id) === listener))
+      .catch(error => console.warn(`Could not show message acceptance reaction (${session.id}).`, error));
   }
   private endQuestion(token: string): void {
     const question = this.questions.get(token);
@@ -4357,7 +4397,8 @@ export class BotService {
       if (messageId !== receiptId) {
         void this.delivery.run(question.session.chatId,
           () => this.bot.api.editMessageReplyMarkup(question.session.chatId,messageId,{reply_markup:{inline_keyboard:[]}}),
-          () => !this.stopped && this.sessionAssigned(question.session)).catch(() => undefined);
+          () => !this.stopped && this.sessionAssigned(question.session))
+          .catch(error => console.warn(`Could not retire question controls (${question.session.id}).`, error));
       }
     }
     if (answer !== undefined) {
@@ -4481,7 +4522,8 @@ export class BotService {
         if (!active()) {
           void this.delivery.run(session.chatId,
             () => this.bot.api.editMessageReplyMarkup(session.chatId,message.message_id,{reply_markup:{inline_keyboard:[]}}),
-            () => !this.stopped && this.sessionAssigned(session)).catch(() => undefined);
+            () => !this.stopped && this.sessionAssigned(session))
+            .catch(error => console.warn(`Could not retire inactive question controls (${session.id}).`, error));
         }
       }
       if (request.kind === 'editor' && active()) {
@@ -4518,7 +4560,11 @@ export class BotService {
         try {
           await this.options.runtime.setSessionTitle(current, title);
         } catch (error) {
-          if (!owner.disposed && owner.generation === generation && owner.title === source) {
+          if (!this.stopped && !this.options.config.terminated && !owner.disposed &&
+              owner.generation === generation && owner.title === source &&
+              this.sessionAssigned(current) &&
+              this.options.store.getSessionGeneration(session.id) === generation) {
+            console.warn(`Could not synchronize session title (${session.id}).`, error);
             this.sessionObservation(session.id).failure = {
               operation: 'Session title synchronization',
               at: Date.now(),
@@ -4589,6 +4635,8 @@ export class BotService {
         source.humanTitle = source.humanTitle.slice(source.prefix.length + 1);
       publish();
     } catch (error) {
+      if (!active() || this.metadataOwners.get(session.id)?.title !== source) return;
+      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),
@@ -4627,6 +4675,8 @@ export class BotService {
       if (pending !== undefined || title !== undefined) source.humanTitle = human;
       await this.projectTopicTitle(session, human, active);
     })().catch((error) => {
+      if (!active()) return;
+      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),
@@ -4709,7 +4759,7 @@ export class BotService {
         topicDestination(session.chatId, session.threadId),
         `⛔️${interruptedBy} interrupted the chat`,
         {},
-      ).catch(() => undefined);
+      ).catch(error => console.warn(`Could not deliver interruption notice (${session.id}).`, error));
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
@@ -4779,7 +4829,7 @@ export class BotService {
           this.bot.api,
           topicDestination(session.chatId, session.threadId),
           `The host is still starting. The initial task was not admitted; send your task again after startup. ${this.promptHelp(session.chatId)}`,
-        ).catch(() => undefined);
+        ).catch(error => console.warn(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
       } else {
         initial.timer = setTimeout(() => {
           void this.authorizeInitial(session, initial.userId, initial.authorityUserId)
@@ -4802,7 +4852,9 @@ export class BotService {
               initial.phase = 'sent';
               this.sendPrompt(listener, initial.content, initial.messageId);
             })
-            .catch(() => {
+            .catch(error => {
+              if (!this.stopped && error !== this.background.signal.reason)
+                console.warn(`Could not retry initial task submission (${session.id}).`, error);
               clearTimeout(initial.timer);
               if (listener.initial === initial) listener.initial = undefined;
             });
@@ -4828,7 +4880,7 @@ export class BotService {
         topicDestination(session.chatId, session.threadId),
         prefix + frame.message,
         { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
-      ).catch(() => undefined);
+      ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
       return;
     }
     if (frame.t === 'snapshot-chunk') {
