@@ -149,7 +149,7 @@ Forum provisioning retries only the explicit test-network RPC rejection `500 CHA
 
 The shared timeout policy lives in `scripts/lib/telegram-test-deadline.ts`. Telegram fixture setup has a 90-second total budget. Authorization has a 45-second budget within it. Individual Telegram requests have a 30-second budget. Application readiness has a 60-second budget, and workflow expectations default to 30 seconds. Cleanup uses an independent 15-second total budget. Suite-level timeouts are final guards, not provisioning deadlines.
 
-Child deadlines cannot outlive their parent. Retry delays consume the same budget. Polling and routine logs do not extend deadlines. Inspect the active phase and its original diagnostic before retrying a failed workflow. A timeout without a Telegram error is not evidence of a server-side error.
+Child deadlines cannot outlive their parent. Retry delays consume the same budget. Expectations recheck their state predicates even when no external notification arrives. Polling and routine logs do not extend deadlines. Inspect the active phase and its original diagnostic before retrying a failed workflow. A timeout without a Telegram error is not evidence of a server-side error.
 
 Cancellation stops fixture requests before forum rollback; worker transport shutdown follows rollback. Fixture-user release is attempted even when cleanup has already expired, without extending the budget. Late operation and cleanup failures retain their original diagnostics in the logs.
 
