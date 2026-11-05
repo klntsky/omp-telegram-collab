@@ -649,6 +649,7 @@ export class GuestClient {
 				this.#working = false;
 				break;
 			case "notice":
+				if (event.source === "collab" && event.level === "info" && event.message.endsWith(" joined the collab session")) break;
 				if (miniAppInterruptionAuthor(event)) {
 					this.#working = false;
 					this.#activeTools = new Map();
