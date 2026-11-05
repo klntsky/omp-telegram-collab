@@ -26,11 +26,14 @@ test('parent cancellation preserves its exact reason', async () => {
   assert.equal(signal?.reason, reason);
 });
 
-test('late operation rejection is observed after deadline completion', async () => {
+test('late operation rejection is reported after deadline completion', async t => {
   const late = Promise.withResolvers<void>();
+  const failure = new Error('Late original failure');
+  const report = t.mock.method(console, 'error', () => {});
   await assert.rejects(withTelegramTestDeadline('late failure', 5, new AbortController().signal, () => late.promise), /late failure/);
-  late.reject(new Error('Late original failure'));
+  late.reject(failure);
   await delay(5);
+  assert.ok(report.mock.calls.some(call => call.arguments[1] === failure));
 });
 
 test('successful deadlines dispose timers and detach parent cancellation', async () => {

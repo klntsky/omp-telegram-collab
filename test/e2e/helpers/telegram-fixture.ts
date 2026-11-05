@@ -25,12 +25,14 @@ export async function teardownTelegramTestResources(options: {
 }): Promise<void> {
   const errors: unknown[] = [];
   let returned = false;
+  let cleanupSignal = options.signal;
   const record = (error: unknown) => {
     errors.push(error);
     if (returned) console.error(error);
   };
   try {
     await withTelegramTestDeadline('fixture cleanup', telegramTestTimeouts.cleanup, options.signal ?? new AbortController().signal, async signal => {
+      cleanupSignal = signal;
       let cancellationFailed = false;
       try { await options.cancellation; }
       catch (error) { cancellationFailed = true; record(error); }
@@ -47,11 +49,18 @@ export async function teardownTelegramTestResources(options: {
           await options.lease.release();
         }
       } catch (error) { record(error); }
-      try { await options.user.close(); } catch (error) { record(error); }
     });
   } catch (error) {
     if (!errors.includes(error)) record(error);
   } finally {
+    try {
+      const closing = options.user.close();
+      void closing.catch(record);
+      await withTelegramTestDeadline('fixture user close', telegramTestTimeouts.cleanup,
+        cleanupSignal ?? new AbortController().signal, () => closing);
+    } catch (error) {
+      if (!errors.includes(error)) record(error);
+    }
     returned = true;
   }
   if (errors.length === 1) throw errors[0];

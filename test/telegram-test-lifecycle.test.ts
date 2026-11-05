@@ -242,3 +242,22 @@ test('cleanup deadline retains earlier failures and reports late failures', asyn
   await setImmediate();
   assert(report.mock.calls.some(call => call.arguments[0] === late));
 });
+
+test('already-expired cleanup still attempts user release and records its late failure', async t => {
+  const parent = new AbortController();
+  const expired = new Error('Cleanup expired before Telegram teardown');
+  const failure = new Error('Original late user release failure');
+  const finish = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const report = t.mock.method(console, 'error', () => {});
+  parent.abort(expired);
+  await assert.rejects(teardownTelegramTestResources({
+    signal: parent.signal,
+    lease: { async release() { calls.push('lease'); } },
+    user: { async close() { calls.push('user'); await finish.promise; throw failure; } },
+  }), error => error === expired);
+  assert.deepEqual(calls, ['user']);
+  finish.resolve();
+  await setImmediate();
+  assert.ok(report.mock.calls.some(call => call.arguments[0] === failure));
+});

@@ -14,7 +14,7 @@ export class TelegramTestUser {
   account!: User;
   readonly #controller = new AbortController();
   readonly #session: TelegramTestSession;
-  #cancellation?: Promise<void>;
+  #cancelled = false;
   #closing?: Promise<void>;
   private constructor(session: TelegramTestSession, signal?: AbortSignal) {
     this.#session = session;
@@ -30,10 +30,12 @@ export class TelegramTestUser {
         signal.addEventListener('abort', abort, { once: true });
         try {
           signal.throwIfAborted();
-          user.account = await user.client.getMe();
+          user.account = await withTelegramTestDeadline('user identity', telegramTestTimeouts.request, signal,
+            () => user.client.getMe());
           signal.throwIfAborted();
           return user;
         } catch (error) {
+          await user.cancelSetup();
           try { await user.close(); }
           catch (cleanup) { throw combineTelegramErrors(error, cleanup); }
           throw error;
@@ -49,15 +51,18 @@ export class TelegramTestUser {
   acquireBot(signal: AbortSignal = this.signal) {
     return acquireTelegramTestBot(signal);
   }
-  cancelSetup(): Promise<void> {
+  async cancelSetup(): Promise<void> {
+    this.#cancelled = true;
     this.#controller.abort(new Error('Telegram test provisioning cancelled'));
-    return this.#cancellation ??= execution.close();
   }
   close(): Promise<void> {
     this.#closing ??= (async () => {
       this.#controller.abort(new Error('Telegram test fixture user closed'));
-      await this.#cancellation;
-      await this.#session.close();
+      const errors: unknown[] = [];
+      try { if (this.#cancelled) await execution.close(); } catch (error) { errors.push(error); }
+      try { await this.#session.close(); } catch (error) { errors.push(error); }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length) throw combineTelegramErrors(...errors);
     })();
     return this.#closing;
   }

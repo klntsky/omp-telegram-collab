@@ -32,11 +32,16 @@ export async function withTelegramTestDeadline<T>(
   parent.addEventListener('abort', onAbort, { once: true });
   const timeoutError = new Error(`Telegram test ${name} timed out after ${timeoutMs}ms`);
   const timer = setTimeout(() => abort(timeoutError), Math.min(timeoutMs, telegramTestDeadlineRemaining(parent)));
+  const operation = Promise.resolve().then(() => {
+    controller.signal.throwIfAborted();
+    return run(controller.signal);
+  });
+  void operation.catch(error => {
+    if (controller.signal.aborted && error !== controller.signal.reason)
+      console.error(`Telegram test ${name} failed after cancellation.`, error);
+  });
   try {
-    return await Promise.race([Promise.resolve().then(() => {
-      controller.signal.throwIfAborted();
-      return run(controller.signal);
-    }), cancelled.promise]);
+    return await Promise.race([operation, cancelled.promise]);
   } catch (error) {
     controller.abort(error);
     throw error;
