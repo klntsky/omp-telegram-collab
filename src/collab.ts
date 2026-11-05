@@ -212,6 +212,6 @@ async function openCollab(
     console.error('Collab transport error:', error);
     finish(error);
   });
-  ws.on('close', code => finish(`Collab connection closed (${code})`));
+  ws.on('close', (code, reason) => finish(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`));
   return setup;
 }

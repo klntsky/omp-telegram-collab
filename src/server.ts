@@ -82,6 +82,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     return {bot,session:current,canControl};
   }
   const server = createHttpServer((request,response) => {
+    let authorizationSignal: AbortSignal | undefined;
     void (async () => {
       response.setHeader('referrer-policy','no-referrer');
       const url = new URL(request.url ?? '/',publicOrigin);
@@ -94,6 +95,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         }
         pendingRequests++;
         const controller = new AbortController();
+        authorizationSignal = controller.signal;
         const abort = () => controller.abort(new Error('Session authentication request disconnected'));
         const close = () => { if (!response.writableFinished) abort(); };
         pendingAuthorizations.set(controller,response);
@@ -152,6 +154,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       response.writeHead(200,{'content-type':mime[extname(target)] ?? 'application/octet-stream','cache-control':extname(target) === '.html' ? 'no-store' : 'public, max-age=3600','x-content-type-options':'nosniff'});
       response.end(request.method === 'HEAD' ? undefined : data);
     })().catch(error => {
+      if (authorizationSignal?.aborted && error === authorizationSignal.reason) return;
       if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError))
         console.error('Mini App HTTP request failed.', error);
       if (response.destroyed || response.writableEnded) return;

@@ -2132,8 +2132,7 @@ export class BotService {
             at: Date.now(),
             error,
           };
-          if (field === 'icon')
-            console.warn(`Could not update topic status (${session.id}).`, error);
+          console.warn(`Could not synchronize topic ${field} (${session.id}).`, error);
         },
       );
       return result;
@@ -2190,12 +2189,17 @@ export class BotService {
       const value = this.topicIconValue(session, ids);
       if (value !== undefined) await metadata.icon.publish(value);
     } catch (error) {
-      if (!this.stopped)
+      if (!this.stopped && !this.options.config.terminated &&
+          this.metadataOwners.get(session.id)?.metadata === metadata &&
+          this.sessionAssigned(session) &&
+          this.options.store.getSessionGeneration(session.id) === metadata.generation) {
+        console.warn(`Could not synchronize topic icon (${session.id}).`, error);
         this.sessionObservation(session.id).failure = {
           operation: 'Topic icon synchronization',
           at: Date.now(),
           error,
         };
+      }
     }
   }
   private refreshActivity(session: TopicSession): Promise<void> {
@@ -2246,6 +2250,7 @@ export class BotService {
     })()
       .catch((error) => {
         if (active()) {
+          console.warn(`Could not look up host activity (${session.id}).`, error);
           void this.setTopicStatus(session, 'unknown');
           this.sessionObservation(session.id).failure = {
             operation: 'Host status lookup',
@@ -3339,6 +3344,8 @@ export class BotService {
           );
           void metadata.name.observe(edited.name);
           void this.applySessionTitle(session).catch((error) => {
+            if (this.stopped || this.options.config.terminated || !this.sessionAssigned(session)) return;
+            console.warn(`Could not synchronize session title (${session.id}).`, error);
             this.sessionObservation(session.id).failure = {
               operation: 'Topic title synchronization',
               at: Date.now(),
@@ -3365,12 +3372,17 @@ export class BotService {
               void metadata.icon.observe(value);
             })
             .catch((error) => {
-              if (!this.stopped)
+              if (!this.stopped && !this.options.config.terminated &&
+                  this.metadataOwners.get(session.id)?.metadata === metadata &&
+                  this.sessionAssigned(session) &&
+                  this.options.store.getSessionGeneration(session.id) === metadata.generation) {
+                console.warn(`Could not synchronize topic icon (${session.id}).`, error);
                 this.sessionObservation(session.id).failure = {
                   operation: 'Topic icon synchronization',
                   at: Date.now(),
                   error,
                 };
+              }
             });
         }
       } else {
@@ -4436,7 +4448,11 @@ export class BotService {
         try {
           await this.options.runtime.setSessionTitle(current, title);
         } catch (error) {
-          if (!owner.disposed && owner.generation === generation && owner.title === source) {
+          if (!this.stopped && !this.options.config.terminated && !owner.disposed &&
+              owner.generation === generation && owner.title === source &&
+              this.sessionAssigned(current) &&
+              this.options.store.getSessionGeneration(session.id) === generation) {
+            console.warn(`Could not synchronize session title (${session.id}).`, error);
             this.sessionObservation(session.id).failure = {
               operation: 'Session title synchronization',
               at: Date.now(),
@@ -4507,6 +4523,8 @@ export class BotService {
         source.humanTitle = source.humanTitle.slice(source.prefix.length + 1);
       publish();
     } catch (error) {
+      if (!active() || this.metadataOwners.get(session.id)?.title !== source) return;
+      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),
@@ -4545,6 +4563,8 @@ export class BotService {
       if (pending !== undefined || title !== undefined) source.humanTitle = human;
       await this.projectTopicTitle(session, human, active);
     })().catch((error) => {
+      if (!active()) return;
+      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),

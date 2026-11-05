@@ -88,6 +88,18 @@ function failure(path: string, keys: string[], detail: string): ConfigError {
   return new ConfigError(keys, `${detail} Configuration file: ${path}`);
 }
 
+function operationFailure(path: string, error: unknown, detail: string): ConfigError {
+  if (error instanceof ConfigError) return error;
+  return Object.assign(failure(path, ['config'], `${detail} ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+}
+
+function cleanupFailure(primary: ConfigError | undefined, error: unknown, diagnostic: ConfigError): ConfigError {
+  const result = primary ?? diagnostic;
+  if (primary) primary.message += ` ${diagnostic.message}`;
+  const previous = (result as ConfigError & { cleanupErrors?: unknown[] }).cleanupErrors ?? [];
+  return Object.assign(result, { cleanupErrors: [...previous, error] });
+}
+
 function validate(value: unknown, configPath: string): AppConfig {
   const result = configSchema.safeParse(value);
   if (!result.success) {
@@ -149,17 +161,24 @@ export function readConfig(input: string): AppConfig {
   const path = resolve(input);
   try {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let source: string;
+    let source: string = '';
+    let primary: ConfigError | undefined;
     try {
       if (!fstatSync(fd).isFile()) throw new Error();
       source = readFileSync(fd, 'utf8');
-    } finally { closeSync(fd); }
+    } catch (error) {
+      primary = operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
+    } finally {
+      try { closeSync(fd); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close configuration file.'));
+      }
+    }
+    if (primary) throw primary;
     const document = parseDocument(source, { uniqueKeys: true });
     if (document.errors.length) throw failure(path, ['config'], 'Invalid YAML (including duplicate mapping keys).');
     return validate(document.toJS({ maxAliasCount: 100 }), path);
   } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    throw Object.assign(failure(path, ['config'], `Cannot read a regular, non-symlink YAML configuration file. ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+    throw operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
   }
 }
 
@@ -224,6 +243,7 @@ export function writeConfig(config: AppConfig): void {
   const { configPath: _checkedPath, ...document } = checked;
   let temporary: string | undefined;
   let fd: number | undefined;
+  let primary: ConfigError | undefined;
   try {
     const initial = writableState(path);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -239,8 +259,9 @@ export function writeConfig(config: AppConfig): void {
       fchmodSync(fd, before.file.mode & 0o7777);
     }
     fsyncSync(fd);
-    closeSync(fd);
+    const written = fd;
     fd = undefined;
+    closeSync(written);
     const after = writableState(path);
     if (!sameFile(before.file, after.file) || before.parent.dev !== after.parent.dev || before.parent.ino !== after.parent.ino || parentPath !== realpathSync(dirname(path))) throw new Error();
     if (!before.file) {
@@ -249,16 +270,28 @@ export function writeConfig(config: AppConfig): void {
     } else renameSync(temporary, path);
     temporary = undefined;
     const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
-    try { fsyncSync(directory); } finally { closeSync(directory); }
+    try { fsyncSync(directory); } catch (error) {
+      primary = operationFailure(path, error, 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
+    } finally {
+      try { closeSync(directory); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close configuration directory.'));
+      }
+    }
   } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    throw Object.assign(failure(path, ['config'], `Cannot write configuration; the file and parent directory must both be writable and unchanged. ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+    primary = operationFailure(path, error, 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close temporary configuration file.'));
+      }
+    }
     if (temporary !== undefined) {
-      try { unlinkSync(temporary); } catch (error) { if (!errno(error, 'ENOENT')) throw Object.assign(failure(path, ['config'], `Cannot remove temporary configuration file. ${error instanceof Error ? error.message : String(error)}`), { cause: error }); }
+      try { unlinkSync(temporary); } catch (error) {
+        if (!errno(error, 'ENOENT')) primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot remove temporary configuration file.'));
+      }
     }
   }
+  if (primary) throw primary;
 }
 
 export function validateStart(config: AppConfig): void {
