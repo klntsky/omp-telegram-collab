@@ -90,7 +90,8 @@ async function openCollab(
     if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new Error(reason));
     try {
       handlers.onClose(reason instanceof Error ? reason.message : reason);
-    } catch {
+    } catch (error) {
+      console.error('Collab close callback failed:', error);
     }
   }
 
@@ -106,7 +107,11 @@ async function openCollab(
       await new Promise<void>((resolve, reject) => {
         ws.send(envelope, error => error ? reject(error) : resolve());
       });
-    }).catch(() => finish('Collab send failed; delivery may be uncertain'));
+    }).catch(error => {
+      if (closed) return;
+      console.error('Collab send failed; delivery may be uncertain:', error);
+      finish(error instanceof Error ? error : `Collab send failed; delivery may be uncertain: ${String(error)}`);
+    });
   }
 
   const connection: CollabConnection = {
@@ -169,8 +174,10 @@ async function openCollab(
         name: name.trim().slice(0, 64) || 'Telegram member',
         writeToken: encodeBase64Url(link.writeToken!),
       });
-    } catch {
-      finish('Collab hello failed');
+    } catch (error) {
+      if (closed) return;
+      console.error('Collab hello failed:', error);
+      finish(error instanceof Error ? error : `Collab hello failed: ${String(error)}`);
     }
   });
   ws.on('message', (data, isBinary) => {
@@ -180,7 +187,8 @@ async function openCollab(
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
         if (control.t === 'room-closed') finish('Collab room closed');
-      } catch {
+      } catch (error) {
+        console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
         finish('Invalid Collab relay control frame');
       }
       return;
@@ -194,10 +202,16 @@ async function openCollab(
       if (!frame || typeof frame !== 'object' || !Object.hasOwn(HOST_TYPES, frame.t)) throw new Error('Invalid Collab host frame');
       deliver(frame as HostFrame);
     }).catch(error => {
-      finish(error instanceof Error ? error.message : 'Collab receive failed');
+      if (closed) return;
+      console.error('Collab receive failed:', error);
+      finish(error instanceof Error ? error : `Collab receive failed: ${String(error)}`);
     });
   });
-  ws.on('error', () => finish('Collab transport error'));
+  ws.on('error', error => {
+    if (closed) return;
+    console.error('Collab transport error:', error);
+    finish(error);
+  });
   ws.on('close', code => finish(`Collab connection closed (${code})`));
   return setup;
 }

@@ -236,7 +236,9 @@ export class OmpRuntime {
     }
     this.#config = config;
     this.#sessionLimit = config.omp.maxSessions;
-    this.#idleTimer = setInterval(() => { void this.retireIdle().catch(() => {}); }, 60000);
+    this.#idleTimer = setInterval(() => {
+      void this.retireIdle().catch(error => console.error('OMP idle retirement failed:', error));
+    }, 60000);
     this.#idleTimer.unref();
   }
   #assertActive(): void {
@@ -1023,7 +1025,7 @@ export class OmpRuntime {
     const output = await promise;
     let result: unknown;
     try { result = JSON.parse(output); }
-    catch { throw new Error(`OMP config get ${key} returned invalid JSON`); }
+    catch (error) { throw new Error(`OMP config get ${key} returned invalid JSON`, { cause: error }); }
     if (!record(result) || result.key !== key || !Object.hasOwn(result, 'value')) {
       throw new Error(`OMP config get ${key} returned an invalid settings response`);
     }
@@ -1813,8 +1815,8 @@ export class OmpRuntime {
       const value: unknown = JSON.parse(output);
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
       return value as Record<string, unknown>;
-    } catch {
-      throw new Error('OMP discovery returned invalid JSON');
+    } catch (error) {
+      throw new Error('OMP discovery returned invalid JSON', { cause: error });
     }
   }
 
@@ -2146,7 +2148,10 @@ export class OmpRuntime {
     };
     const timer = setTimeout(() => done('unknown'), Math.max(1, requestDeadline - Date.now()));
     socket.setEncoding('utf8');
-    socket.once('error', () => done('unknown'));
+    socket.once('error', error => {
+      if (!settled) console.error(`Session ${id} retirement socket failed:`, error);
+      done('unknown');
+    });
     socket.once('connect', () => socket.write(request));
     let response = '';
     socket.on('data', data => {
@@ -2159,7 +2164,10 @@ export class OmpRuntime {
             result.pid !== lifecycle.pid) { done('unknown'); return; }
         if (typeof result.error === 'string') { done('unknown', new Error(result.error)); return; }
         done(result.outcome === 'requested' || result.outcome === 'busy' || result.outcome === 'expired' ? result.outcome : 'unknown');
-      } catch { done('unknown'); }
+      } catch (error) {
+        console.error(`Session ${id} retirement response parsing failed:`, error);
+        done('unknown');
+      }
     });
     socket.once('end', () => done('unknown'));
     socket.once('close', () => done('unknown'));

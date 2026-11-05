@@ -159,7 +159,7 @@ export function readConfig(input: string): AppConfig {
     return validate(document.toJS({ maxAliasCount: 100 }), path);
   } catch (error) {
     if (error instanceof ConfigError) throw error;
-    throw failure(path, ['config'], 'Cannot read a regular, non-symlink YAML configuration file.');
+    throw Object.assign(failure(path, ['config'], `Cannot read a regular, non-symlink YAML configuration file. ${error instanceof Error ? error.message : String(error)}`), { cause: error });
   }
 }
 
@@ -252,11 +252,11 @@ export function writeConfig(config: AppConfig): void {
     try { fsyncSync(directory); } finally { closeSync(directory); }
   } catch (error) {
     if (error instanceof ConfigError) throw error;
-    throw failure(path, ['config'], 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
+    throw Object.assign(failure(path, ['config'], `Cannot write configuration; the file and parent directory must both be writable and unchanged. ${error instanceof Error ? error.message : String(error)}`), { cause: error });
   } finally {
     if (fd !== undefined) closeSync(fd);
     if (temporary !== undefined) {
-      try { unlinkSync(temporary); } catch (error) { if (!errno(error, 'ENOENT')) throw failure(path, ['config'], 'Cannot remove temporary configuration file.'); }
+      try { unlinkSync(temporary); } catch (error) { if (!errno(error, 'ENOENT')) throw Object.assign(failure(path, ['config'], `Cannot remove temporary configuration file. ${error instanceof Error ? error.message : String(error)}`), { cause: error }); }
     }
   }
 }

@@ -142,12 +142,18 @@ export function createServer(options: ServerOptions): GatewayServer {
       const filename = resolve(root,`.${decoded === '/' ? '/index.html' : decoded}`);
       if (filename !== root && !filename.startsWith(root+sep)) { json(response,404,{error:'Not found'}); return; }
       let target = filename;
-      try { if (!(await stat(target)).isFile()) throw new Error('Not a file'); }
-      catch { if (extname(decoded)) { json(response,404,{error:'Not found'}); return; } target = resolve(root,'index.html'); }
+      let regular = false;
+      try { regular = (await stat(target)).isFile(); }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')) throw error;
+      }
+      if (!regular) { if (extname(decoded)) { json(response,404,{error:'Not found'}); return; } target = resolve(root,'index.html'); }
       const data = await readFile(target);
       response.writeHead(200,{'content-type':mime[extname(target)] ?? 'application/octet-stream','cache-control':extname(target) === '.html' ? 'no-store' : 'public, max-age=3600','x-content-type-options':'nosniff'});
       response.end(request.method === 'HEAD' ? undefined : data);
     })().catch(error => {
+      if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError))
+        console.error('Mini App HTTP request failed.', error);
       if (response.destroyed || response.writableEnded) return;
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
@@ -180,6 +186,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       upgraded = true;
       sockets.handleUpgrade(request,socket,head,ws => connectSocket(ws,identity));
     })().catch(error => {
+      console.error('Mini App WebSocket upgrade failed.', error);
       if (error instanceof ServiceTerminatedError && !socket.destroyed && !upgraded) {
         const payload = JSON.stringify({error:error.message});
         socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\nConnection: close\r\n\r\n${payload}`);
@@ -217,7 +224,10 @@ export function createServer(options: ServerOptions): GatewayServer {
         if (closed) return;
         readAccess.session = current.session;
         readAccess.canControl = current.canControl;
-      }).catch(error => fail(error instanceof AuthorizationUnavailableError ? 1013 : 4003,error instanceof Error ? error.message : 'Access or session unavailable'))
+      }).catch(error => {
+        console.error(`Mini App access refresh failed (${identity.botId}, ${identity.sessionId}).`, error);
+        fail(error instanceof AuthorizationUnavailableError ? 1013 : 4003,error instanceof Error ? error.message : 'Access or session unavailable');
+      })
         .finally(() => { refreshingAccess = false; });
     },30000);
     accessTimer.unref();
@@ -233,12 +243,15 @@ export function createServer(options: ServerOptions): GatewayServer {
     function enqueue(action: () => Promise<void>): void {
       if (closed) return;
       tail = tail.then(async () => { if (!closed) await action(); }).catch(async error => {
+        console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
         if (error instanceof ServiceTerminatedError) fail(4003,error.message);
         else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
         else if (error instanceof SessionCapacityError) {
           fail(4009,error.message);
           const session = options.store.getSession(identity.sessionId);
-          if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(() => undefined);
+          if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(error => {
+            console.error(`Mini App capacity request failed (${identity.botId}, ${identity.sessionId}).`, error);
+          });
         } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
       });
     }
@@ -265,7 +278,10 @@ export function createServer(options: ServerOptions): GatewayServer {
         }
       });
     }
-    ws.on('error',() => fail(1011,'Connection failed'));
+    ws.on('error',error => {
+      console.error(`Mini App WebSocket failed (${identity.botId}, ${identity.sessionId}).`, error);
+      fail(1011,'Connection failed');
+    });
     ws.on('close',() => { closed=true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close(); });
     ws.on('message',(data,binary) => {
       try { checkTermination(); }
@@ -302,11 +318,17 @@ export function createServer(options: ServerOptions): GatewayServer {
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
           options.runtime.observeFrame(session.id,frame);
           let payload: string;
-          try { payload = JSON.stringify(frame); } catch { fail(1011,'Invalid host frame'); return; }
+          try { payload = JSON.stringify(frame); } catch (error) {
+            console.error(`Mini App host frame serialization failed (${identity.botId}, ${identity.sessionId}).`, error);
+            fail(1011,'Invalid host frame'); return;
+          }
           outgoing.push({frame,payload});
           flushOutgoing();
         },
-        onClose: () => fail(1011,'Host disconnected'),
+        onClose: reason => {
+          if (!closed) console.warn(`Mini App host disconnected (${identity.botId}, ${identity.sessionId}).`, reason);
+          fail(1011,'Host disconnected');
+        },
       });
       try {
         await authorize(identity,session,readAccess);
