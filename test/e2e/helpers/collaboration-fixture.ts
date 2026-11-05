@@ -286,11 +286,20 @@ export async function setupCollaborationTest(
   async function waitForCondition(predicate: () => boolean): Promise<void> {
     await omp.step('workflow.expectation', () => withTelegramTestDeadline(
       'expectation', telegramTestTimeouts.expectation, AbortSignal.any([t.signal, failed.signal]), async signal => {
-        for (;;) {
-          signal.throwIfAborted();
-          const notification = changed.promise;
-          if (predicate()) return;
-          await bounded(Promise.race([notification, failure.promise]), signal);
+        const recheck = setInterval(() => {
+          const notification = changed;
+          changed = Promise.withResolvers<void>();
+          notification.resolve();
+        }, 100);
+        try {
+          for (;;) {
+            signal.throwIfAborted();
+            const notification = changed.promise;
+            if (predicate()) return;
+            await bounded(Promise.race([notification, failure.promise]), signal);
+          }
+        } finally {
+          clearInterval(recheck);
         }
       },
     ));
