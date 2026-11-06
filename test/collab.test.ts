@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import WebSocket from 'ws';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import { CollabTransportError, connectCollab, readCollabState } from '../src/collab.js';
-import { hostFrames, state, welcome } from './collab-fixture.js';
+import { emptySnapshot, hostFrames, state, welcome } from './collab-fixture.js';
 
 test('a room closed during setup is retryable without changing its diagnostic', {timeout: 5000}, async t => {
   const host = await hostFrames([]);

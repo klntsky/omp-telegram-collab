@@ -3,6 +3,7 @@ import { readConfig, writeConfig } from '../../src/config.js';
 import type { AppConfig } from '../../shared/contracts.js';
 import { setupCollaborationTest, type CollaborationTest } from './helpers/collaboration-fixture.js';
 import { enrollForum } from './helpers/telegram-actions.js';
+import { questionStep } from './helpers/model-tasks.js';
 import { createWorkflowTasks } from './scenarios/workflow-tasks.js';
 import { registerForumDefaults } from './scenarios/forum-defaults.js';
 import { registerCapacity } from './scenarios/capacity.js';

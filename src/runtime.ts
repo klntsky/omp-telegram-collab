@@ -37,9 +37,9 @@ export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
 // must observe the same identities. Domain owners receive only their required capabilities.
 export class OmpRuntime implements Omp {
   readonly #activity: RuntimeActivity;
-  readonly observeFrame: (id: string, frame: HostFrame) => void;
-  readonly markPrompt: (id: string) => void;
-  readonly retain: (id: string) => () => void;
+  observeFrame: (id: string, frame: HostFrame) => void;
+  markPrompt: (id: string) => void;
+  retain: (id: string) => () => void;
   readonly #fork: RuntimeFork;
   readonly #forkRpc: RuntimeForkRpc;
   readonly #worktree: RuntimeWorktree;
@@ -292,16 +292,16 @@ export class OmpRuntime implements Omp {
   #capacityUsed(): number {
     return new Set([...this.#managed.keys(), ...this.#reservations.values()]).size;
   }
-  readonly topicTitleStatus: (session: TopicSession) => Promise<{ worktree: boolean; branch?: string }>;
-  readonly fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
-  readonly existingBinding: (session: TopicSession) => Promise<{ sessionId: string } | undefined>;
-  readonly worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
+  topicTitleStatus: (session: TopicSession) => Promise<{ worktree: boolean; branch?: string }>;
+  fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
+  existingBinding: (session: TopicSession) => Promise<{sessionId: string} | undefined>;
+  worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
   #instanceDirectory(instanceId: number): string {
     const instance = this.#config.instances.find(instance => instance.id === instanceId);
     if (!instance) throw new Error('Instance ID is not configured');
     return instance.defaultDir;
   }
-  readonly validateSessionPaths: (sessions: TopicSession[], config?: AppConfig) => Promise<void>;
+  validateSessionPaths: (sessions: TopicSession[], config?: AppConfig) => Promise<void>;
   async retireIdle(idleMs = 300000): Promise<number> {
     let retired = 0;
     const candidates = [...this.#managed.entries()].sort(([a],[b]) => this.#activity.hostActivity(a).lastUsed-this.#activity.hostActivity(b).lastUsed);
@@ -317,9 +317,9 @@ export class OmpRuntime implements Omp {
     await this.#admission.claimManaged(session.id, beforeMutation);
     return this.#startup.ensureManaged(session,beforeMutation);
   }
-  readonly isRunning: (session: TopicSession) => Promise<boolean>;
-  readonly historySource: (session: TopicSession) => Promise<{ sessionId: string; path: string } | undefined>;
-  readonly resolveExisting: (session: TopicSession) => Promise<HostBinding | undefined>;
+  isRunning: (session: TopicSession) => Promise<boolean>;
+  historySource: (session: TopicSession) => Promise<{ sessionId: string; path: string } | undefined>;
+  resolveExisting: (session: TopicSession) => Promise<HostBinding | undefined>;
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     if (session.status !== 'open') return Promise.reject(new Error('Session closed'));
     try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
@@ -340,9 +340,9 @@ export class OmpRuntime implements Omp {
     this.#pending.set(session.id, result);
     return result;
   }
-  readonly providerUsage: (instanceId: number) => Promise<{ heading: string; table: string }[]>;
-  readonly availableModelPresets: (instanceId: number, discoveryCwd?: string) => Promise<string[]>;
-  readonly modelPresetDetails: (instanceId: number, name: string, discoveryCwd?: string) => Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
+  providerUsage: (instanceId: number) => Promise<{ heading: string; table: string }[]>;
+  availableModelPresets: (instanceId: number, discoveryCwd?: string) => Promise<string[]>;
+  modelPresetDetails: (instanceId: number, name: string, discoveryCwd?: string) => Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
   async listSkills(instanceId: number, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     this.#assertActive();
@@ -370,11 +370,11 @@ export class OmpRuntime implements Omp {
       .map(value => ({ name: value.name, description: value.description }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
-  readonly setSessionTitle: (session: TopicSession, title: string) => Promise<void>;
-  readonly modelPresets: (session: TopicSession, name?: string) => Promise<string>;
-  readonly attach: (instanceId: string, instancePath: string) => Promise<HostBinding>;
-  readonly stop: (session: TopicSession) => Promise<boolean>;
-  readonly kill: (session: TopicSession) => Promise<void>;
+  setSessionTitle: (session: TopicSession, title: string) => Promise<void>;
+  modelPresets: (session: TopicSession, name?: string) => Promise<string>;
+  attach: (instanceId: string, instancePath: string) => Promise<HostBinding>;
+  stop: (session: TopicSession) => Promise<boolean>;
+  kill: (session: TopicSession) => Promise<void>;
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
