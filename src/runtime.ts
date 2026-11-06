@@ -192,6 +192,7 @@ async function readHeader(file: string): Promise<{ id: string; cwd: string }> {
   }
 }
 
+// Terminal joins launch only the native client; they must not acquire service-owned runtime resources.
 export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
   joinTerminal(executable, url) {
     return spawn(executable, ['join', url], { stdio: 'inherit', shell: false });
