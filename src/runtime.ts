@@ -13,7 +13,9 @@ import { findInstance, refreshTermination } from './config.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
 import { withCancellation } from './cancellation.js';
 import { formatUsage } from './usage.js';
-import { readHistoryHeader } from './history-watch.js';
+import { HistoryWatch, readHistoryHeader } from './history-watch.js';
+import { connectCollab, readCollabState } from './collab.js';
+import type { Omp } from './omp.js';
 
 export class SessionCapacityError extends Error {
   constructor(readonly limit: number) {
@@ -190,7 +192,17 @@ async function readHeader(file: string): Promise<{ id: string; cwd: string }> {
   }
 }
 
-export class OmpRuntime {
+export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
+  joinTerminal(executable, url) {
+    return spawn(executable, ['join', url], { stdio: 'inherit', shell: false });
+  },
+};
+
+export class OmpRuntime implements Omp {
+  readonly connectCollab: Omp['connectCollab'] = connectCollab;
+  readonly readCollabState: Omp['readCollabState'] = readCollabState;
+  readonly watchHistory: Omp['watchHistory'] = HistoryWatch.open;
+  readonly joinTerminal: Omp['joinTerminal'] = terminalOmp.joinTerminal;
   readonly #config: AppConfig;
   readonly #pending = new Map<string, Promise<HostBinding>>();
   readonly #managed = new Map<string, ManagedHost | null>();

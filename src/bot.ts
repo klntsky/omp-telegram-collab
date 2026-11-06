@@ -22,7 +22,8 @@ import type {
 } from '../shared/contracts.js';
 import { Store, type PendingSkillKey } from './store.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from './auth.js';
-import { connectCollab, isStartupRejection, readCollabState } from './collab.js';
+import { isStartupRejection } from './collab.js';
+import type { Omp } from './omp.js';
 import { renderTelegramMarkdown } from './telegram-markdown.js';
 import { SessionCapacityError, SessionTitleUnsupportedError } from './runtime.js';
 import { configWritable, defaultConfigPath, findInstance, readConfig, writeConfig, refreshTermination } from './config.js';
@@ -42,35 +43,7 @@ import { SessionHistory } from './session-history.js';
 
 class AuthorizationDeniedError extends Error {}
 
-export interface RuntimeLike {
-  fork(source: TopicSession, destination: TopicSession, target?: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'}, beforeMutation?: () => Promise<void>): Promise<void>;
-  existingBinding(session: TopicSession): Promise<{sessionId:string} | undefined>;
-  worktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string>;
-  topicTitleStatus(session: TopicSession): Promise<{worktree: boolean; branch?: string}>;
-  ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
-  reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{bind(id: string): void; release(): void}>;
-  /** Resolves an existing host without preparing one; undefined means confirmed absence. */
-  resolveExisting(session: TopicSession): Promise<HostBinding | undefined>;
-  historySource(session: TopicSession): Promise<{sessionId: string; path: string} | undefined>;
-  isRunning(session: TopicSession): Promise<boolean>;
-  setSessionTitle(session: TopicSession, title: string): Promise<void>;
-  attach(hostId: string, cwd: string): Promise<HostBinding>;
-  stop(session: TopicSession): Promise<boolean>;
-  kill(session: TopicSession): Promise<void>;
-  modelPresets(session: TopicSession, name?: string): Promise<string>;
-  availableModelPresets(instanceId: number, discoveryCwd?: string): Promise<string[]>;
-  modelPresetDetails(instanceId: number, name: string, discoveryCwd?: string): Promise<{modelRoles: Record<string, string>; defaultThinkingLevel?: string}>;
-  providerUsage(instanceId: number): Promise<{ heading: string; table: string }[]>;
-  listSkills(instanceId: number, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<{name: string; description: string}[]>;
-  getSessionLimit(): number;
-  setSessionLimit(limit: number): void;
-  increaseSessionLimit(expectedLimit: number): boolean;
-  observeFrame(sessionId: string, frame: HostFrame): void;
-  markPrompt(sessionId: string): void;
-  retain(sessionId: string): () => void;
-  close(): Promise<void>;
-}
-export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: RuntimeLike; connect?: typeof connectCollab; readState?: typeof readCollabState; bot?: Bot<Context>; configWritable?: () => boolean; topicActivityEmojis?: { running: string; finished: string } }
+export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: Omp; bot?: Bot<Context>; configWritable?: () => boolean; topicActivityEmojis?: { running: string; finished: string } }
 type TopicActivity = 'unknown' | 'running' | 'finished';
 type KnownTopicActivity = Exclude<TopicActivity, 'unknown'>;
 interface TopicMetadata {
@@ -1586,7 +1559,7 @@ export class BotService {
       reader.connection?.close();
     };
     try {
-      const connection = await (this.options.connect ?? connectCollab)(binding, 'Mini App history reader', {
+      const connection = await this.options.runtime.connectCollab(binding, 'Mini App history reader', {
         onFrame: frame => reader.feed.accept(frame),
         onClose: reason => reader.feed.close(reason),
       }, AbortSignal.any([this.background.signal, reader.controller.signal]));
@@ -2308,7 +2281,7 @@ export class BotService {
         return;
       }
       const state = await withCancellation(
-        (this.options.readState ?? readCollabState)(
+        this.options.runtime.readCollabState(
           binding,
           `Telegram @${this.bot.botInfo!.username} activity`,
           signal,
@@ -4155,6 +4128,7 @@ export class BotService {
           listener.history = new SessionHistory(listener.feed, {
             sessionId: binding.sessionId,
             source: () => this.options.runtime.historySource(session),
+            watch: (source, options) => this.options.runtime.watchHistory(source, options),
             assertActive: () => this.requireFeedListener(session, listener),
             onError: error => {
               this.sessionObservation(session.id).failure = {operation: 'Session history refresh', at: Date.now(), error};
@@ -4164,7 +4138,7 @@ export class BotService {
           await listener.history.prepare();
           if (!active()) throw closed;
         }
-        return (this.options.connect ?? connectCollab)(
+        return this.options.runtime.connectCollab(
           binding,
           `Telegram @${this.bot.botInfo!.username}`,
           {

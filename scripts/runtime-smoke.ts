@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import type { AppConfig } from '../shared/contracts.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime, SessionCapacityError } from '../src/runtime.js';
-import { connectCollab } from '../src/collab.js';
 import { startLocalRelay } from './local-relay.js';
 import { formatCollabLink, parseCollabLink } from '../src/vendor/link.js';
 import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
@@ -73,7 +72,7 @@ try {
     url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
   };
   await assert.rejects(async () => {
-    const unauthorized = await connectCollab(forgedBinding, 'Forged capability verifier', {
+    const unauthorized = await runtime.connectCollab(forgedBinding, 'Forged capability verifier', {
       onFrame(frame) {
         assert.notEqual(frame.t, 'welcome', 'a rejected control welcome must not reach the consumer');
         assert.notEqual(frame.t, 'snapshot-chunk', 'a rejected control snapshot must not reach the consumer');
@@ -83,7 +82,7 @@ try {
     unauthorized.close();
     assert.fail('a valid room key with a forged write token must not obtain a control connection');
   }, /Collab host refused control access/);
-  const guest = await connectCollab(first, 'Smoke verifier', {
+  const guest = await runtime.connectCollab(first, 'Smoke verifier', {
     onFrame(frame) {
       frames.push(frame.t);
       if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Telegram title → actual OMP');
@@ -117,7 +116,7 @@ try {
   assert.equal(resumed.sessionId,first.sessionId,'idle retirement preserves the exact OMP conversation');
   assert.notEqual(resumed.instanceId,first.instanceId,'a retired conversation resumes in a fresh process');
   await assertProcessCwd(session.id, selectedFolder);
-  const resumedGuest = await connectCollab(resumed, 'Resume verifier', {
+  const resumedGuest = await runtime.connectCollab(resumed, 'Resume verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.id, first.sessionId);
       if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Live Telegram rename', 'native title persists across a fresh host process');
@@ -125,7 +124,7 @@ try {
     onClose() {},
   });
   resumedGuest.close();
-  await assert.rejects(connectCollab({ ...resumed, sessionId: 'different-conversation' }, 'Identity verifier', {
+  await assert.rejects(runtime.connectCollab({ ...resumed, sessionId: 'different-conversation' }, 'Identity verifier', {
     onFrame() { assert.fail('mismatched session data must not reach a consumer'); },
     onClose() {},
   }));
@@ -136,7 +135,7 @@ try {
   const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instanceId: 2, cwd: secondPath, runtime: { kind: 'managed' as const } };
   const secondBinding = await runtime.ensure(secondSession);
   assert.notEqual(secondBinding.sessionId, resumed.sessionId);
-  const secondGuest = await connectCollab(secondBinding, 'Instance path verifier', {
+  const secondGuest = await runtime.connectCollab(secondBinding, 'Instance path verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.cwd, secondPath);
     },
@@ -199,7 +198,7 @@ try {
     assert.equal(await readFile(join(worktreePath, 'untracked'), 'utf8'), 'dirty untracked\n');
     const moved = await runtime.ensure(worktreeSession);
     assert.equal(moved.sessionId, binding.sessionId);
-    const guest = await connectCollab(moved, 'Worktree verifier', {
+    const guest = await runtime.connectCollab(moved, 'Worktree verifier', {
       onFrame(frame) {
         if (frame.t === 'welcome') assert.equal(frame.header.cwd, worktreePath);
       },

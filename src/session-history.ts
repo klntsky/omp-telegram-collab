@@ -1,10 +1,12 @@
 import type { CollabConnection } from '../shared/contracts.js';
-import { HistoryWatch, type HistoryCheckpoint, type HistorySource } from './history-watch.js';
+import type { HistoryWatch, HistoryCheckpoint, HistorySource } from './history-watch.js';
+import type { Omp } from './omp.js';
 import { SessionFeed } from './session-feed.js';
 
 export interface SessionHistoryOptions {
   sessionId: string;
   source(): Promise<HistorySource | undefined>;
+  watch: Omp['watchHistory'];
   assertActive(): void;
   onError(error: unknown): void;
 }
@@ -29,7 +31,7 @@ export class SessionHistory {
     const source = await this.options.source();
     this.assertActive();
     if (!source || source.sessionId !== this.options.sessionId) throw new Error('Managed OMP history source is unavailable');
-    const watch = await HistoryWatch.open(source, {
+    const watch = await this.options.watch(source, {
       pollIntervalMs: 5_000,
       onChange: state => {
         if (this.closed) return;
