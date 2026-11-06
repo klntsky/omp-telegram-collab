@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFile, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { hostSupervisorPath, hostLifecyclePath } from '../host-assets.js';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
 import { privateFile } from './files.js';
@@ -122,7 +122,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       deps.assertActive();
       if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
       const child = spawn(process.execPath, [
-        fileURLToPath(new URL('../host-supervisor.mjs',import.meta.url)),
+        hostSupervisorPath,
         deps.config.omp.executable,
         ...launch.args,
         '--cwd',pin.cwd,
@@ -130,7 +130,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         '--session-dir',dir,
         '--resume',pin.sessionFile,
         '--no-title',
-        '--extension',fileURLToPath(new URL('../host-lifecycle.mjs',import.meta.url)),
+        '--extension',hostLifecyclePath,
       ], {
         cwd: pin.cwd,
         env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
