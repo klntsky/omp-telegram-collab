@@ -64,7 +64,7 @@ const configSchema = z.object({
       folder_options: z.array(relativeFolderPath).default([]).transform(paths => [...new Set(paths)]),
       typing_indicators: z.enum(['disabled', 'streaming', 'inference']).default('disabled'),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
-      default_new_topic_skill: z.string().refine(isMentionableSkillName).optional(),
+      default_new_topic_skills: z.array(z.string().refine(isMentionableSkillName)).refine(names => new Set(names).size === names.length, 'Skill names must be unique').optional(),
     }).strict()),
   }).strict()),
   publicUrl: publicUrlSchema,

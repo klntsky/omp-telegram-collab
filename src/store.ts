@@ -216,14 +216,14 @@ export class Store {
   advanceSessionGeneration(id: string): void {
     this.db.prepare('INSERT INTO session_generations VALUES (?,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1').run(id);
   }
-  setNewTopicSkill(sessionId: string, name: string): void {
-    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name').run(sessionId, name);
+  setNewTopicSkills(sessionId: string, names: string[]): void {
+    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET names=excluded.names').run(sessionId, JSON.stringify([...new Set(names)]));
   }
-  getNewTopicSkill(sessionId: string): string | undefined {
-    const row = this.db.prepare('SELECT name FROM new_topic_skills WHERE session_id=?').get(sessionId);
-    return row ? String(row.name) : undefined;
+  getNewTopicSkills(sessionId: string): string[] {
+    const row = this.db.prepare('SELECT names FROM new_topic_skills WHERE session_id=?').get(sessionId);
+    return row ? JSON.parse(String(row.names)) as string[] : [];
   }
-  clearNewTopicSkill(sessionId: string): void {
+  clearNewTopicSkills(sessionId: string): void {
     this.db.prepare('DELETE FROM new_topic_skills WHERE session_id=?').run(sessionId);
   }
   hasPendingInitialTask(id: string): boolean {

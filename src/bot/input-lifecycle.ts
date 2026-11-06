@@ -24,7 +24,7 @@ export interface InputLifecycleDependencies {
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   createsTopicWorktrees(chatId: number): boolean;
   currentAdmin(ctx: Context): Promise<boolean>;
-  defaultNewTopicSkill(chatId: number): string | undefined;
+  defaultNewTopicSkills(chatId: number): string[];
   delivery: TelegramDelivery;
   dropListener(id: string, reason?: string): void;
   folderSettings(chatId: number): { instanceId: number; defaultDir: string; options: string[]; };
@@ -58,6 +58,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           return true;
         }
         const title = message.forum_topic_created.name;
+        const defaultSkills = deps.defaultNewTopicSkills(ctx.chat.id);
         const folderFingerprint = JSON.stringify(deps.folderSettings(ctx.chat.id));
         const epoch = deps.admissionEpoch;
         await deps.chooseFolder(ctx,undefined,async (cwd,authority) => {
@@ -83,8 +84,8 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             title,
             {kind:'managed'},
           );
-          const defaultSkill = deps.defaultNewTopicSkill(ctx.chat!.id);
-          if (defaultSkill) deps.store.setNewTopicSkill(created.id, defaultSkill);
+
+          if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
           if (deps.createsTopicWorktrees(ctx.chat!.id)) {
             await deps.authorize(ctx.chat!.id, authority.from!.id);
             if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
