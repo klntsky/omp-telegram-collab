@@ -649,7 +649,12 @@ export class GuestClient {
 				this.#working = false;
 				break;
 			case "notice":
-				if (event.source === "collab" && event.level === "info" && event.message.endsWith(" joined the collab session")) break;
+				// Join announcements have no structured subtype; match only the verified producer's
+				// two informational forms so other notices and participant-state frames survive.
+				// https://github.com/can1357/oh-my-pi/blob/fbc3ac6a148d24d50f573e9b531999e32bae42eb/packages/coding-agent/src/collab/host.ts#L846-L850
+				if (event.source === "collab" && event.level === "info" &&
+					(event.message.endsWith(" joined the collab session") ||
+					 event.message.endsWith(" joined the collab session (read-only)"))) break;
 				if (miniAppInterruptionAuthor(event)) {
 					this.#working = false;
 					this.#activeTools = new Map();

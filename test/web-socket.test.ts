@@ -32,6 +32,8 @@ for (const code of [1011, 4003]) {
           header: {type: 'session', id: 'session', cwd: '/work', timestamp: new Date(0).toISOString()},
           state: {isStreaming: false, queuedMessageCount: 0, cwd: '/work', participants: []}, agents: []},
         {t: 'snapshot-chunk', entries: [], final: true},
+        {t: 'event', event: {type: 'notice', level: 'info', source: 'collab',
+          message: 'Observer joined the collab session (read-only)'}},
       ];
       for (const frame of frames) socket.send(JSON.stringify(frame));
     });

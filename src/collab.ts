@@ -139,6 +139,8 @@ async function openCollab(
       if (ws.readyState !== WebSocket.OPEN) {
         throw new CollabTransportError('Collab transport cannot accept the frame');
       }
+      // Only actual send failures get transport classification; encoding failures
+      // stay terminal, and recovery must not replay a possibly delivered frame.
       const sent = Promise.withResolvers<void>();
       try {
         ws.send(envelope, error => error

@@ -113,6 +113,8 @@ export class GatewaySocket implements GuestTransport {
 				return;
 			}
 			if (frame.t === "snapshot-chunk" && frame.final) this.#attempt = 0;
+			// Long diagnostics precede the close frame; its code, not bye alone, decides
+			// whether recovery is allowed. Ending here would bypass transient retries.
 			if (frame.t === "bye") {
 				gatewayError = frame.reason;
 				return;
