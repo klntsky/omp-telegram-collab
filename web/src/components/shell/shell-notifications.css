@@ -1,0 +1,147 @@
+/* ---- banners ---- */
+.sh-banner {
+	position: fixed;
+	top: calc(var(--topbar-h) + 10px);
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 50;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 30px;
+	padding: 0 14px 0 12px;
+	font-size: 12.5px;
+	white-space: nowrap;
+	color: var(--fg);
+	background: var(--glass);
+	backdrop-filter: blur(14px) saturate(160%);
+	-webkit-backdrop-filter: blur(14px) saturate(160%);
+	border: 1px solid var(--border-strong);
+	border-radius: 999px;
+	box-shadow: var(--shadow-overlay);
+	animation: rise 360ms var(--ease-out) backwards;
+}
+
+.sh-banner-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--warn);
+	animation: pulse 1.2s ease-in-out infinite;
+}
+
+.sh-ended {
+	position: fixed;
+	inset: 0;
+	z-index: 50;
+	display: grid;
+	place-items: center;
+	padding: 16px;
+	background: var(--backdrop);
+}
+
+.sh-ended-card {
+	width: 100%;
+	max-width: 340px;
+	padding: 22px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: var(--glass);
+	backdrop-filter: blur(20px) saturate(170%);
+	-webkit-backdrop-filter: blur(20px) saturate(170%);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-xl);
+	box-shadow: var(--shadow-overlay);
+	animation: rise 360ms var(--ease-out) backwards;
+}
+
+.sh-ended-title {
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.sh-ended-reason {
+	font-size: 13px;
+	color: var(--fg-muted);
+}
+
+.sh-ended-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 10px;
+}
+
+/* ---- toasts ---- */
+.sh-toasts {
+	position: fixed;
+	right: 16px;
+	left: 16px;
+	bottom: 16px;
+	z-index: 60;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-width: 340px;
+	margin-left: auto;
+}
+
+.sh-toast {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 10px 12px;
+	font-size: 12.5px;
+	color: var(--fg);
+	background: var(--glass);
+	backdrop-filter: blur(16px) saturate(160%);
+	-webkit-backdrop-filter: blur(16px) saturate(160%);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-overlay);
+	animation: rise 360ms var(--ease-out) backwards;
+}
+
+.sh-toast::before {
+	content: "";
+	flex: none;
+	width: 7px;
+	height: 7px;
+	margin-top: 6px;
+	border-radius: 50%;
+	background: var(--fg-faint);
+}
+
+.sh-toast-info::before {
+	background: var(--accent);
+}
+
+.sh-toast-warning::before {
+	background: var(--warn);
+}
+
+.sh-toast-error::before {
+	background: var(--err);
+}
+
+.sh-toast-msg {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.sh-toast-close {
+	flex: none;
+	display: inline-flex;
+	padding: 2px;
+	color: var(--fg-faint);
+	background: none;
+	border: none;
+	border-radius: var(--radius-sm);
+}
+
+.sh-toast-close:hover {
+	color: var(--fg);
+}
+

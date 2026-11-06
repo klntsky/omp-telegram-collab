@@ -1,0 +1,190 @@
+/* ---- brand ---- */
+.sh-brand {
+	display: inline-flex;
+	align-items: center;
+	gap: 9px;
+	flex: none;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.sh-mark {
+	flex: none;
+	display: block;
+}
+
+.sh-brand-slash {
+	color: var(--fg-faint);
+	font-weight: 300;
+	font-size: 18px;
+	opacity: 0.6;
+}
+
+.sh-brand-app {
+	font-weight: 500;
+}
+
+/* ---- header (glass) ---- */
+.sh-header {
+	position: relative;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	min-height: var(--topbar-h);
+	padding: 8px 12px 8px 16px;
+	padding-top: calc(8px + env(safe-area-inset-top, 0px));
+	background: color-mix(in srgb, var(--bg) 72%, transparent);
+	backdrop-filter: blur(14px) saturate(160%);
+	-webkit-backdrop-filter: blur(14px) saturate(160%);
+}
+
+.sh-header-left {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.sh-header-right {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: none;
+}
+
+.sh-title {
+	font-size: 14px;
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.sh-cwd {
+	font: 400 11.5px / 1.5 var(--font-mono);
+	color: var(--fg-faint);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+/* Connection status pill: dot + word. */
+.sh-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	height: 26px;
+	padding: 0 10px 0 9px;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--fg-muted);
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	white-space: nowrap;
+}
+
+.sh-gauge {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	height: 26px;
+	padding: 0 10px;
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+}
+
+.sh-gauge-track {
+	width: 56px;
+	height: 4px;
+	background: var(--border-strong);
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.sh-gauge-fill {
+	display: block;
+	height: 100%;
+	background: var(--accent-gradient);
+	border-radius: inherit;
+	transition: width 360ms var(--ease-out);
+}
+
+.sh-gauge-warn .sh-gauge-fill {
+	background: var(--warn);
+}
+
+.sh-gauge-pct {
+	font: 400 11.5px / 1 var(--font-mono);
+	color: var(--fg-muted);
+}
+
+.sh-gauge-warn .sh-gauge-pct {
+	color: var(--warn);
+}
+
+.sh-avatars {
+	display: inline-flex;
+	padding-left: 4px;
+}
+
+.sh-avatar {
+	width: 24px;
+	height: 24px;
+	font: 600 10.5px / 22px var(--font-ui);
+	text-align: center;
+	color: var(--fg-muted);
+	background: var(--bg-overlay);
+	border: 1px solid var(--border-strong);
+	border-radius: 50%;
+	margin-left: -6px;
+	box-shadow: 0 0 0 2px var(--bg);
+}
+
+.sh-avatar:first-child {
+	margin-left: 0;
+}
+
+.sh-avatar-host {
+	color: var(--fg);
+	border-color: var(--accent);
+}
+
+.sh-dot {
+	position: relative;
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--fg-faint);
+}
+
+.sh-dot-live {
+	background: var(--live);
+}
+
+.sh-dot-live::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: 50%;
+	background: inherit;
+	animation: ping 1.6s var(--ease-out) infinite;
+}
+
+.sh-dot-reconnecting,
+.sh-dot-connecting,
+.sh-dot-waiting {
+	background: var(--warn);
+	animation: pulse 1.2s ease-in-out infinite;
+}
+
+.sh-dot-ended {
+	background: var(--err);
+}
+

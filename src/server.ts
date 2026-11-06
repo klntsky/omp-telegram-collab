@@ -9,7 +9,7 @@ import { Store } from './store.js';
 import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
 import type { BotService } from './bot.js';
 import type { Omp } from './omp.js';
-import { SessionCapacityError } from './runtime.js';
+import { SessionCapacityError } from './runtime/types.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 import type { SessionFeedSubscription } from './session-feed.js';

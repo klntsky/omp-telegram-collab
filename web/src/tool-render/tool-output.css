@@ -1,0 +1,147 @@
+/* ---- output / code blocks ---- */
+
+.tv-out {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.tv-pre {
+	margin: 0;
+	padding: 7px 9px;
+	border-radius: 4px;
+	background: var(--tv-inset);
+	font-family: var(--tv-mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	overflow-x: auto;
+	tab-size: 3;
+}
+
+.tv-pre--wrap {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.tv-pre--bare {
+	background: none;
+	padding: 0 1px;
+}
+
+.tv-pre--error {
+	color: var(--tv-err);
+}
+
+.tv-out-title {
+	padding: 0 1px 3px;
+	font-size: 10px;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--tv-faint);
+}
+
+.tv-expand {
+	align-self: flex-start;
+	margin-top: 3px;
+	padding: 0 1px;
+	background: none;
+	border: 0;
+	font-family: var(--tv-mono);
+	font-size: 10.5px;
+	color: var(--tv-faint);
+	cursor: pointer;
+}
+
+.tv-expand:hover {
+	color: var(--tv-fg);
+	text-decoration: underline;
+}
+
+.tv-expand:focus-visible {
+	outline: 2px solid var(--tv-ring);
+	outline-offset: 1px;
+	border-radius: 2px;
+}
+
+/* ---- command line (bash/ssh) ---- */
+
+.tv-cmd {
+	display: flex;
+	gap: 7px;
+	font-size: 11.5px;
+}
+
+.tv-cmd-prompt {
+	flex: none;
+	color: var(--tv-accent);
+	user-select: none;
+}
+
+.tv-cmd-text {
+	min-width: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.tv-cmd-env {
+	color: var(--tv-faint);
+}
+
+/* ---- diff ---- */
+
+.tv-diff {
+	margin: 0;
+	border-radius: 4px;
+	background: var(--tv-inset);
+	font-size: 11.5px;
+	line-height: 1.5;
+	overflow-x: auto;
+	padding: 5px 0;
+}
+
+.tv-diff-row {
+	padding: 0 9px;
+	white-space: pre;
+}
+
+.tv-diff-row--add {
+	background: color-mix(in oklch, var(--tv-ok) 11%, transparent);
+	color: color-mix(in oklch, var(--tv-ok) 70%, var(--tv-fg));
+}
+
+.tv-diff-row--del {
+	background: color-mix(in oklch, var(--tv-err) 11%, transparent);
+	color: color-mix(in oklch, var(--tv-err) 70%, var(--tv-fg));
+}
+
+.tv-diff-row--hunk {
+	color: var(--tv-faint);
+}
+
+.tv-diff-row--gap {
+	color: var(--tv-faint);
+	user-select: none;
+}
+
+/* ---- cells (eval / ast ops) ---- */
+
+.tv-cells {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.tv-cell {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.tv-cell-title {
+	padding: 0 1px 3px;
+	font-size: 10px;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--tv-faint);
+}
+

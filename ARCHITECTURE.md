@@ -8,6 +8,8 @@ The CLI owns configuration management and starts the service. The running servic
 
 Commander owns the CLI command tree, argument and option parsing, and generated help. Command actions receive parsed values before accessing configuration or external services. Administration owns configuration mutations and Telegram verification; the session-join operation receives validated coordinates rather than raw command-line arguments.
 
+CLI command registration and interactive input do not own a running service generation. The generation owner acquires readiness resources and closes them in reverse dependency order; the service coordinator owns serialized reloads, control sockets, configuration observation, and foreground join leases. Administration operations share protected configuration mutation and reload acknowledgement without taking over those service lifetimes.
+
 Configuration is the authority for logical instance identities, default directories, bot identities, chat assignments, and service settings. Telegram owns group administrator roles. Neither roles nor runtime storage can override configured instance assignments. Configuration lookup uses stable instance identity rather than list position or directory equality, so distinct instances can share a directory. The service coordinates reloads so components apply a validated configuration while managed host processes and histories remain independently recoverable.
 
 The service configuration owns the Mini App mode. An empty public origin keeps the gateway stopped; a configured origin enables it. The bot adapter uses the same configuration to publish Mini App commands and launch controls. Network availability does not change this choice.
@@ -29,6 +31,8 @@ The configuration layer owns the persistent service-termination switch. Telegram
 ## Telegram integration
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into operations on `Omp`. It does not own OMP's conversation history or execute model turns itself.
+
+The bot coordinator owns polling, initialization, shutdown, and the public adapter boundary. Input scheduling owns serialized updates and album collection before routing to authorization, session commands, or prompt admission. Independent interaction owners retain settings, presets, folders, capacity requests, and questions. Connection and recovery owners retain listeners and reconnect work; frame projection, receipts, typing, and topic metadata operate through explicit dependencies rather than reaching into the coordinator's private state. Composition supplies those dependencies without transferring their resource lifetimes.
 
 grammY owns Telegram contexts and API transport. The bot adapter retains polling readiness, input ordering, cancellation, and shutdown acknowledgements rather than delegating those guarantees to framework-managed polling. The administration CLI uses grammY's API client without starting a poller.
 
@@ -90,6 +94,8 @@ The runtime manager owns host discovery, startup, attachment, capacity, activity
 
 `Omp` is the single application-facing TypeScript contract for OMP communication. Bot adapters and the gateway depend on that contract, not on transport implementations. `OmpRuntime` implements host lifecycle, native CLI and RPC operations, lifecycle sockets, Collab connections and activity reads, and managed-history watcher acquisition. Returned connections and watchers retain their own protocol and resource lifetimes.
 
+The runtime coordinator retains the shared host ledger, admission reservations, operation fences, and shutdown ordering. Dedicated owners execute complete startup, retirement, termination, fork, and worktree transactions against that ledger through narrow capabilities. Registry and path owners validate process, binding, and history identity; native settings, controls, and skill discovery retain their own subprocess and cache lifetimes. Activity and admission consume the same ledger, so separating operations cannot independently count capacity or bypass a retirement fence.
+
 The terminal join client uses the `joinTerminal` portion of the same contract through `terminalOmp`. It does not construct a service runtime or acquire service-owned lifecycle resources. The local control service still authorizes and resolves the host before the terminal launches OMP.
 
 Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
@@ -126,6 +132,8 @@ The configuration layer owns validated, atomic updates to the protected YAML fil
 
 The store owns initialization of the current database schema and rejects unsupported schemas before store operations begin. It does not convert historical layouts or infer missing instance identities from directories. Native conversation identity scopes admission provenance and message anchors; filesystem directory equality never grants access to another instance's history.
 
+The store is the sole SQLite connection and transaction owner. Its prompt ledger owns submission provenance, receipt correlation, message anchors, and reply snapshots on that same connection. Separating those queries does not create another connection, transaction boundary, or source of session authority.
+
 Pending initial tasks retain the submitting member and the authorizing administrator as separate admission identities. The bot checks current membership and administrator authority before submission, including recovery and explicit startup retries. The authorization boundary distinguishes confirmed membership or role denial from operational lookup failures and lifecycle cancellation. Only confirmed denial cancels pending admission; operational failures propagate without discarding the unsent task. Persisted actor identities are provenance, not permission grants.
 
 New-topic preparation owns a per-session database gate until setup, forwarding, and confirmed task aliases are recorded. The store checks that gate inside the atomic initial-task claim, so maintenance cannot admit an unfinished preparation. The adapter releases the gate on both success and failure. Bot initialization recovers gates left by an earlier process before input and background recovery start; opening another store does not release a live gate. Releasing a gate does not change pending, submitted, or cancelled task intent.
@@ -153,6 +161,10 @@ The gateway accepts only history-page and subagent transcript-fetch requests fro
 Closed-session HTTP authorization establishes identity without issuing a connection ticket. Reopening belongs to Telegram, not the browser. Only an open session can receive a live-connection ticket; later gateway and runtime admission checks remain independent of browser state.
 
 The Mini App owns read-only presentation and client reconnection. It requests fresh authorization through the gateway rather than holding upstream host capabilities. Its rendered transcript is presentation state. The gateway transport consumes retryable gateway diagnostics without forwarding them as host errors, preserving retryability even before the host welcome arrives.
+
+The browser client coordinates ordered frame dispatch, connection phases, and a shared monotonic request identity. History owns retained rows, snapshot assembly, and page-cursor validation; live presentation owns streaming, tools, agents, and notices. Transcript reads own their pending correlations and cleanup, while publication owns animation-frame coalescing. Transcript row rendering is independent of viewport windowing and tail-following state.
+
+Presentation styles are grouped by component responsibility and loaded through ordered cascade entrypoints. Eval rendering separates input normalization, execution-result interpretation, and output presentation without changing the wire formats it displays. Vendored Markdown parser modules remain in their pinned upstream units, including larger parser files, so upstream comparison and security updates do not require reconstructing an artificial local split; provenance is recorded in the browser's upstream manifest.
 
 The Collab transport identifies room and network failures, including socket-send failures, separately from encoding, host validation, and authorization failures. The gateway preserves that distinction during initial connection setup so the browser can retry transport failures without treating them as access denial. Reconnection does not replay a failed send. Retried connections still pass through ticket authorization and session-generation checks.
 
