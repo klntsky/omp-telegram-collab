@@ -64,6 +64,8 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     });
     if (!response.ok) {
       const diagnostic = await response.text();
+      // Match authorizeSession in web/src/lib/telegram.ts so this fixture cannot
+      // recover across an access denial or invalidated session generation.
       if ([401, 403, 404, 409].includes(response.status)) throw new SessionAccessError(diagnostic, response.status);
       throw new Error(diagnostic);
     }

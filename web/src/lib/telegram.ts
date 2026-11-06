@@ -108,6 +108,10 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 				message = error.error;
 			}
 		} catch {}
+		// Invalid access or a stale session generation requires explicit rejoin,
+		// so automatic recovery cannot undo /kill. See src/server.ts /api/session.
+		// Other statuses retain the existing retry path, including temporary
+		// authorization outages reported by the gateway as 503.
 		if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409) {
 			throw new SessionAccessError(message, response.status);
 		}
