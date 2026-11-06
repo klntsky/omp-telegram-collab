@@ -4,7 +4,6 @@ import { Bot } from 'grammy';
 import type { Update } from 'grammy/types';
 import type { Message } from '@mtcute/node';
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
-import type { Omp } from '../../../src/omp.js';
 import { BotService } from '../../../src/bot.js';
 import { emptyConfig, readConfig, writeConfig } from '../../../src/config.js';
 import { OmpRuntime } from '../../../src/runtime.js';
@@ -16,6 +15,7 @@ import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { createCollaborationObserver } from './collaboration-observer.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -148,73 +148,16 @@ export async function setupCollaborationTest(
   const handledMessages = new Set<number>();
   const apiCalls: { method: string; payload: unknown; result: unknown }[] = [];
   let changed = Promise.withResolvers<void>();
-  function instrumentedBot() {
-    const value = new Bot(telegram.bot.token, { client: { environment: 'test' } });
-    value.api.config.use(async (previous, method, payload, signal) => {
-      omp.log('telegram.api.request', { method, payload });
-      try {
-        const result = await previous(method, payload, signal);
-        apiCalls.push({ method, payload, result });
-        const notification = changed;
-        changed = Promise.withResolvers<void>();
-        notification.resolve();
-        omp.log('telegram.api.result', { method, result });
-        return result;
-      } catch (error) {
-        omp.log('telegram.api.error', { method, error });
-        throw error;
-      }
-    });
-    value.use(async (ctx, next) => {
-      updates.push(ctx.update);
-      omp.log('telegram.update', ctx.update);
-      await next();
-      if (ctx.chat?.id === telegram.forum.chatId && ctx.message) {
-        handledMessages.add(ctx.message.message_id);
-        const notification = changed;
-        changed = Promise.withResolvers<void>();
-        notification.resolve();
-      }
-    });
-    return value;
-  }
+  const { createBot: instrumentedBot, instrumentRuntime } = createCollaborationObserver({
+    token: telegram.bot.token, chatId: telegram.forum.chatId, log: omp.log,
+    apiCalls, updates, handledMessages, hostFrames, guestFrames,
+    notify() {
+      const notification = changed;
+      changed = Promise.withResolvers<void>();
+      notification.resolve();
+    },
+  });
   let bot = instrumentedBot();
-  function instrumentRuntime(value: Omp): void {
-    const connect = value.connectCollab.bind(value);
-    value.connectCollab = async (binding, name, handlers, signal) => {
-      try {
-        const connection = await connect(binding, name, {
-          onFrame(frame) {
-            hostFrames.push(frame);
-            omp.log('collab.host.frame', frame);
-            handlers.onFrame(frame);
-            const notification = changed;
-            changed = Promise.withResolvers<void>();
-            notification.resolve();
-          },
-          onClose(reason) {
-            omp.log('collab.close', { reason });
-            handlers.onClose(reason);
-          },
-        }, signal);
-        return {
-          send(frame) {
-            guestFrames.push(frame);
-            omp.log('collab.guest.frame', frame);
-            try { connection.send(frame); } catch (error) {
-              omp.log('collab.send.error', { error });
-              throw error;
-            }
-          },
-          refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
-          close() { connection.close(); },
-        };
-      } catch (error) {
-        omp.log('collab.connect.error', { error });
-        throw error;
-      }
-    };
-  }
   instrumentRuntime(runtime);
   const stickers = await telegram.api.getForumTopicIconStickers();
   const [running, finished] = [...new Set(stickers.map(sticker => sticker.emoji).filter((emoji): emoji is string => Boolean(emoji)))];

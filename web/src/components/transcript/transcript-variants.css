@@ -1,0 +1,56 @@
+/* ---- compact variant (agent drawer) ---- */
+
+.tr-root--compact {
+	padding: 12px 14px 16px;
+	font-size: 13px;
+}
+
+.tr-root--compact .tr-row {
+	grid-template-columns: 52px 1fr;
+	gap: 0 8px;
+	padding: 3px 0;
+}
+
+.tr-root--compact .tr-gutter {
+	font-size: 10.5px;
+}
+
+.tr-root--compact .tv-pre {
+	max-height: 200px;
+	overflow-y: auto;
+}
+
+/* ---- animation ---- */
+
+@keyframes tr-pulse {
+	0%,
+	100% {
+		opacity: 0.45;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
+/* ---- responsive mobile styles ---- */
+@media (max-width: 640px) {
+	.tr-row {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 8px 0;
+	}
+	.tr-root {
+		padding: 16px 14px 12px;
+	}
+	.tr-gutter,
+	.tr-row--user .tr-gutter {
+		text-align: left;
+		padding-top: 0;
+		font-size: 11px;
+		margin-bottom: 2px;
+	}
+	.tr-gutter:empty {
+		display: none;
+	}
+}

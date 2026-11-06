@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test, type TestContext } from 'node:test';
-import { notifyReload, runAdmin, type AdminDependencies } from '../src/cli-admin.js';
+import { runAdmin, type AdminDependencies } from '../src/cli-admin.js';
+import { notifyReload } from '../src/cli/reload.js';
 import { canonicalPath, ConfigError, emptyConfig, readConfig, writeConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
 

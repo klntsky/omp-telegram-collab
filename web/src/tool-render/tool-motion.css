@@ -1,0 +1,23 @@
+/* ---- animation ---- */
+
+@keyframes tv-rot {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.tv-spin {
+		animation: tv-pulse 1.4s ease-in-out infinite;
+	}
+
+	.tv-chev {
+		transition: none;
+	}
+
+	@keyframes tv-pulse {
+		50% {
+			opacity: 0.35;
+		}
+	}
+}

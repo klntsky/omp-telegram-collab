@@ -16,7 +16,6 @@
 import type {
 	AgentSnapshot,
 	AssistantMessage,
-	HostFrame,
 	SessionEntry,
 	SessionHeader,
 	SessionState,
@@ -24,7 +23,10 @@ import type {
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
 import type { GuestTransport } from "./socket";
-import { miniAppInterruptionAuthor } from "../../../shared/interruption";
+import { GuestLiveState } from "./client-live";
+import { GuestHistory } from "./client-history";
+import { GuestTranscriptReads } from "./client-transcripts";
+import { GuestPublication } from "./client-publication";
 import type { BrowserHostFrame, HistoryCursor } from "../../../shared/contracts";
 
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
@@ -76,32 +78,10 @@ export interface GuestSnapshot {
 	};
 }
 
-const MAX_NOTICES = 50;
-const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
-/** Commit delay when `requestAnimationFrame` is unavailable (tests, non-DOM hosts). */
-const FRAME_FALLBACK_MS = 16;
-
-/** Runs `callback` on the next animation frame; returns its cancel function. */
-function scheduleFrame(callback: () => void): () => void {
-	if (typeof requestAnimationFrame === "function") {
-		const id = requestAnimationFrame(callback);
-		return () => cancelAnimationFrame(id);
-	}
-	const timer = setTimeout(callback, FRAME_FALLBACK_MS);
-	return () => clearTimeout(timer);
-}
-
-/** High-rate frames whose publish is deferred to the next animation frame. */
-function isCoalescable(frame: BrowserHostFrame): boolean {
-	if (frame.t === "event")
-		return frame.event.type === "message_update" || frame.event.type === "tool_execution_update";
-	return frame.t === "bus" && frame.channel === "task:subagent:progress";
-}
-
 /**
  * One fetch-transcript round trip.
  * - `rows`: decoded JSONL from `fromByte`; `newSize` is the next offset base.
@@ -111,67 +91,31 @@ function isCoalescable(frame: BrowserHostFrame): boolean {
  */
 export type TranscriptResult = { kind: "rows"; text: string; newSize: number } | { kind: "error"; message: string };
 
-interface PendingTranscript {
-	resolve: (result: TranscriptResult | null) => void;
-	timer: ReturnType<typeof setTimeout>;
-}
-
-interface PendingHistory {
-	reqId: number;
-	cursor: HistoryCursor;
-	timer: ReturnType<typeof setTimeout>;
-}
-
 export class GuestClient {
 	readonly #socket: GuestTransport;
+	readonly #history = new GuestHistory(
+		() => ++this.#reqSeq,
+		frame => this.#socket.send(frame),
+		() => this.#commit(),
+		pending => pending ? this.#armSnapshotProgressTimer() : this.#clearSnapshotProgressTimer(),
+		() => { this.#phase = "live"; },
+	);
 	readonly #listeners = new Set<() => void>();
-	readonly #pendingTranscripts = new Map<number, PendingTranscript>();
+	readonly #transcriptReads = new GuestTranscriptReads(
+		() => ++this.#reqSeq,
+		frame => this.#socket.send(frame),
+	);
 	#reqSeq = 0;
-	#noticeSeq = 0;
 	#welcomed = false;
 	#welcomeTimer: ReturnType<typeof setTimeout> | null = null;
 	#snapshotProgressTimer: ReturnType<typeof setTimeout> | null = null;
-	#older: HistoryCursor | null = null;
-	#historyError: string | null = null;
-	#historyFreshness: GuestSnapshot["history"]["freshness"] = "ready";
-	#historyRevision = 0;
-	#pendingHistory: PendingHistory | null = null;
 
 	#phase: ConnectionPhase = "connecting";
 	#endedReason: string | null = null;
 	#header: SessionHeader | null = null;
-	#entries: SessionEntry[] = [];
-	/**
-	 * Snapshot in flight since `welcome`: chunk entries, plus live `entry`
-	 * frames that arrived meanwhile (published after the snapshot, at the tail).
-	 */
-	#pendingSnapshot: { entries: SessionEntry[]; live: SessionEntry[]; total: number } | null = null;
-	#state: SessionState | null = null;
-	#agents: readonly AgentSnapshot[] = [];
-	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
-	#lifecycle: ReadonlyMap<string, SubagentLifecyclePayload> = new Map();
-	/**
-	 * Bus-map keys absent from the latest `agents` frame. Progress can arrive
-	 * before its agent is listed, so such keys survive one `agents` frame and
-	 * are pruned only if the next one still omits them.
-	 */
-	#unlistedBusIds = new Set<string>();
-	#stream: AssistantMessage | null = null;
-	#streamDone = false;
-	#activeTools: ReadonlyMap<string, ActiveTool> = new Map();
-	#working = false;
-	#notices: readonly Notice[] = [];
+	readonly #live = new GuestLiveState();
 	#snapshot: GuestSnapshot;
-	/**
-	 * Published entries array, cached across commits: rebuilt only when
-	 * `#entries` is mutated (welcome/snapshot-chunk/entry frames). Every
-	 * other frame (streaming message_update, state, bus, agents) reuses the
-	 * same reference, so entry-identity consumers (Transcript memo,
-	 * useSyncExternalStore) skip their O(n) scans per token.
-	 */
-	#publishedEntries: readonly SessionEntry[] = [];
-	/** Cancels the scheduled deferred commit; null when none is pending. */
-	#cancelFrameCommit: (() => void) | null = null;
+	readonly #publication = new GuestPublication();
 
 	constructor(socket: GuestTransport, readonly displayName: string) {
 		this.#socket = socket;
@@ -216,36 +160,11 @@ export class GuestClient {
 	 * session end) where re-polling from the same cursor is correct.
 	 */
 	fetchTranscript(agentId: string, fromByte: number): Promise<TranscriptResult | null> {
-		const reqId = ++this.#reqSeq;
-		let resolve!: (result: TranscriptResult | null) => void;
-		const promise = new Promise<TranscriptResult | null>(res => {
-			resolve = res;
-		});
-		const timer = setTimeout(() => {
-			this.#pendingTranscripts.delete(reqId);
-			resolve(null);
-		}, TRANSCRIPT_TIMEOUT_MS);
-		this.#pendingTranscripts.set(reqId, { resolve, timer });
-		this.#socket.send({ t: "fetch-transcript", reqId, agentId, fromByte });
-		return promise;
+		return this.#transcriptReads.fetchTranscript(agentId, fromByte);
 	}
 
 	loadEarlier(): void {
-		if (
-			this.#phase !== "live" || this.#pendingSnapshot || this.#pendingHistory ||
-			this.#historyFreshness === "refreshing" || !this.#older
-		) return;
-		const reqId = ++this.#reqSeq;
-		const cursor = { ...this.#older };
-		const timer = setTimeout(() => {
-			this.#pendingHistory = null;
-			this.#historyError ??= "Timed out waiting for earlier history.";
-			this.#commit();
-		}, TRANSCRIPT_TIMEOUT_MS);
-		this.#pendingHistory = { reqId, cursor, timer };
-		if (this.#historyFreshness === "ready") this.#historyError = null;
-		this.#commit();
-		this.#socket.send({ t: "history-page", reqId, cursor });
+		this.#history.loadEarlier(this.#phase === "live");
 	}
 
 	/**
@@ -255,7 +174,7 @@ export class GuestClient {
 	 */
 	applyFrameForTest(frame: BrowserHostFrame, options: { flush?: boolean } = {}): void {
 		this.#applyFrameSafe(frame);
-		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
+		if ((options.flush ?? true) && this.#publication.pending) this.#commit();
 	}
 
 	#handleOpen(): void {
@@ -268,15 +187,13 @@ export class GuestClient {
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
 		this.#clearPendingReads();
-		this.#older = null;
-		this.#historyError = null;
-		this.#historyFreshness = "ready";
+		this.#history.resetCursor();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
 			this.#welcomed = false;
 			// The next welcome restarts the snapshot; drop the partial one.
-			this.#pendingSnapshot = null;
+			this.#history.pendingSnapshot = null;
 			console.warn("Session connection interrupted:", reason);
 			this.#commit();
 			return;
@@ -290,23 +207,16 @@ export class GuestClient {
 		this.#clearSnapshotProgressTimer();
 		this.#phase = "ended";
 		this.#endedReason = reason;
-		this.#pendingSnapshot = null;
-		this.#older = null;
-		this.#historyError = null;
-		this.#historyFreshness = "ready";
+		this.#history.pendingSnapshot = null;
+		this.#history.resetCursor();
 		this.#clearPendingReads();
 		this.#commit();
 		this.#socket.close();
 	}
 
 	#clearPendingReads(): void {
-		for (const pending of this.#pendingTranscripts.values()) {
-			clearTimeout(pending.timer);
-			pending.resolve(null);
-		}
-		this.#pendingTranscripts.clear();
-		if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
-		this.#pendingHistory = null;
+		this.#transcriptReads.clear();
+		this.#history.clearPending();
 	}
 
 	#armWelcomeTimer(): void {
@@ -349,7 +259,7 @@ export class GuestClient {
 				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
 				return;
 			}
-			this.#pushNotice("error", `failed to apply ${frame.t} frame`);
+			this.#live.pushNotice("error", `failed to apply ${frame.t} frame`);
 			this.#commit();
 		}
 	}
@@ -358,29 +268,9 @@ export class GuestClient {
 		switch (frame.t) {
 			case "welcome":
 				this.#clearPendingReads();
-				this.#older = null;
-				this.#historyError = null;
-				this.#historyFreshness = "ready";
-				// A fresh welcome (first join or reconnect) restarts the snapshot.
-				// Entries already on screen stay until the new snapshot replaces
-				// them once complete, so a resync never blanks the transcript.
+				this.#history.welcome(frame.entryCount);
 				this.#header = frame.header;
-				if (frame.entryCount === 0) {
-					this.#entries = [];
-					this.#publishedEntries = [];
-					this.#pendingSnapshot = null;
-				} else {
-					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
-				}
-				this.#state = frame.state;
-				this.#agents = [...frame.agents];
-				this.#stream = null;
-				this.#streamDone = false;
-				this.#activeTools = new Map();
-				this.#progress = new Map();
-				this.#lifecycle = new Map();
-				this.#unlistedBusIds.clear();
-				this.#working = frame.state.isStreaming;
+				this.#live.reset(frame.state, frame.agents);
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
 				if (frame.entryCount === 0) {
@@ -391,145 +281,47 @@ export class GuestClient {
 				}
 				this.#endedReason = null;
 				break;
-			case "snapshot-chunk": {
-				// Buffer fragments and publish the transcript once, when the
-				// snapshot completes (as the TUI guest does). Intermediate chunks
-				// only advance `loading`: publishing entries per chunk re-renders
-				// the transcript per chunk, and a 50 MB session is ~100 chunks.
-				const pending = this.#pendingSnapshot;
-				if (pending === null || this.#historyFreshness !== "ready") return;
-				pending.entries.push(...frame.entries);
-				// Complete on `final` or once every promised entry arrived, so a
-				// lost final chunk doesn't strand a fully received transcript.
-				if (!frame.final && pending.entries.length < pending.total) {
-					this.#armSnapshotProgressTimer();
-					break;
-				}
-				this.#entries = pending.entries;
-				this.#entries.push(...pending.live);
-				this.#publishedEntries = [...this.#entries];
-				this.#pendingSnapshot = null;
-				this.#clearSnapshotProgressTimer();
-				this.#phase = "live";
-				break;
-			}
+			case "snapshot-chunk":
 			case "history-state":
-				if (!this.#welcomed || this.#phase === "ended" || this.#historyFreshness !== "ready") return;
-				this.#older = frame.older;
-				break;
 			case "history-invalidated":
-				if (!this.#welcomed || this.#phase === "ended") return;
-				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
-				this.#pendingHistory = null;
-				this.#clearSnapshotProgressTimer();
-				this.#historyFreshness = "refreshing";
-				break;
 			case "history-reset":
-				if (!this.#welcomed || this.#phase === "ended") return;
-				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
-				this.#pendingHistory = null;
-				this.#pendingSnapshot = null;
-				this.#clearSnapshotProgressTimer();
-				this.#entries = [...frame.page.entries];
-				this.#publishedEntries = [...this.#entries];
-				this.#older = frame.page.older;
-				this.#historyFreshness = "ready";
-				this.#historyError = null;
-				this.#historyRevision++;
-				this.#phase = "live";
-				break;
 			case "history-error":
-				if (!this.#welcomed || this.#phase === "ended") return;
-				if (this.#pendingHistory) clearTimeout(this.#pendingHistory.timer);
-				this.#pendingHistory = null;
-				this.#clearSnapshotProgressTimer();
-				this.#historyFreshness = "unverified";
-				this.#historyError = frame.message;
+			case "history-page":
+				if (!this.#history.apply(frame, this.#welcomed, this.#phase === "ended")) return;
 				break;
-			case "history-page": {
-				const pending = this.#pendingHistory;
-				if (!pending || pending.reqId !== frame.reqId) return;
-				if (
-					frame.cursor.epoch !== pending.cursor.epoch ||
-					frame.cursor.before !== pending.cursor.before ||
-					this.#older?.epoch !== pending.cursor.epoch ||
-					this.#older.before !== pending.cursor.before
-				) return;
-				if (frame.page.older && (
-					frame.page.older.epoch !== pending.cursor.epoch ||
-					frame.page.older.before >= pending.cursor.before
-				)) return;
-				clearTimeout(pending.timer);
-				this.#pendingHistory = null;
-				// A page cannot certify rows retained across a failed source refresh.
-				if (this.#historyFreshness !== "ready") break;
-				this.#historyError = null;
-				this.#entries = [...frame.page.entries, ...this.#entries];
-				this.#publishedEntries = [...this.#entries];
-				this.#older = frame.page.older;
-				break;
-			}
 			case "entry":
 				// The committed row supersedes the finished stream ghost, even when
 				// the row is buffered behind an in-flight snapshot.
-				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
-					this.#stream = null;
-					this.#streamDone = false;
+				if (this.#live.streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
+					this.#live.stream = null;
+					this.#live.streamDone = false;
 				}
-				if (this.#pendingSnapshot !== null) {
-					this.#pendingSnapshot.live.push(frame.entry);
-					break;
-				}
-				this.#entries.push(frame.entry);
-				this.#publishedEntries = [...this.#entries];
+				this.#history.append(frame.entry);
 				break;
 			case "event":
-				this.#applyEvent(frame.event);
+				this.#live.applyEvent(frame.event);
 				break;
 			case "state":
-				this.#state = frame.state;
-				// Host state is authoritative for liveness in both directions: the
-				// payload is built at fire time, so `isStreaming` is never stale.
-				// This covers a connected guest that misses the discrete `agent_start`
-				// without receiving a new `welcome` (for example, mid-stream).
-				this.#working = frame.state.isStreaming;
-				if (!frame.state.isStreaming) {
-					// Host idle implies no tool can be running, so clear any card
-					// pinned by a dropped `tool_execution_end` off this signal.
-					this.#activeTools = new Map();
-					if (this.#streamDone) {
-						this.#stream = null;
-						this.#streamDone = false;
-					}
-				}
+				this.#live.applyState(frame.state);
 				break;
 			case "agents":
-				this.#agents = [...frame.agents];
-				this.#pruneBusMaps();
+				this.#live.agents = [...frame.agents];
+				this.#live.pruneBusMaps();
 				break;
 			case "bus":
 				if (frame.channel === "task:subagent:progress") {
 					const payload = frame.data as SubagentProgressPayload;
-					this.#progress = new Map(this.#progress).set(payload.progress.id, payload);
+					this.#live.progress = new Map(this.#live.progress).set(payload.progress.id, payload);
 				} else if (frame.channel === "task:subagent:lifecycle") {
 					const payload = frame.data as SubagentLifecyclePayload;
-					this.#lifecycle = new Map(this.#lifecycle).set(payload.id, payload);
+					this.#live.lifecycle = new Map(this.#live.lifecycle).set(payload.id, payload);
 				}
 				break;
 			case "ui-request":
 			case "ui-request-end":
 				break;
 			case "transcript": {
-				const pending = this.#pendingTranscripts.get(frame.reqId);
-				if (pending) {
-					this.#pendingTranscripts.delete(frame.reqId);
-					clearTimeout(pending.timer);
-					pending.resolve(
-						frame.error !== undefined
-							? { kind: "error", message: frame.error }
-							: { kind: "rows", text: frame.text, newSize: frame.newSize },
-					);
-				}
+				this.#transcriptReads.apply(frame);
 				break;
 			}
 			case "bye":
@@ -544,162 +336,19 @@ export class GuestClient {
 					this.#end(frame.message);
 					return; // #end already committed
 				}
-				if (this.#pendingHistory) {
-					clearTimeout(this.#pendingHistory.timer);
-					this.#pendingHistory = null;
-					if (this.#historyFreshness === "ready" || this.#historyError === null) this.#historyError = frame.message;
+				if (this.#history.pendingHistory) {
+					clearTimeout(this.#history.pendingHistory.timer);
+					this.#history.pendingHistory = null;
+					if (this.#history.historyFreshness === "ready" || this.#history.historyError === null) this.#history.historyError = frame.message;
 				}
-				this.#pushNotice("error", frame.message);
+				this.#live.pushNotice("error", frame.message);
 				break;
 			default:
 				// unknown frame type from a newer host — ignore
 				break;
 		}
-		if (isCoalescable(frame)) this.#scheduleCommit();
+		if (GuestPublication.coalesces(frame)) this.#scheduleCommit();
 		else this.#commit();
-	}
-
-	/**
-	 * Drops progress/lifecycle payloads of agents the host no longer lists.
-	 * A key missing from this `agents` frame is pruned when it was already
-	 * missing from the previous one; the one-frame grace covers progress that
-	 * outran its agent's registration.
-	 */
-	#pruneBusMaps(): void {
-		if (this.#progress.size === 0 && this.#lifecycle.size === 0) {
-			this.#unlistedBusIds.clear();
-			return;
-		}
-		const listed = new Set<string>();
-		for (const agent of this.#agents) listed.add(agent.id);
-		const previouslyUnlisted = this.#unlistedBusIds;
-		const unlisted = new Set<string>();
-		const prune = <V>(map: ReadonlyMap<string, V>): ReadonlyMap<string, V> => {
-			let kept: Map<string, V> | null = null;
-			for (const [id, value] of map) {
-				const drop = !listed.has(id) && previouslyUnlisted.has(id);
-				if (!listed.has(id) && !drop) unlisted.add(id);
-				if (drop && kept === null) {
-					kept = new Map();
-					for (const [keptId, keptValue] of map) {
-						if (keptId === id) break;
-						kept.set(keptId, keptValue);
-					}
-				} else if (!drop && kept !== null) {
-					kept.set(id, value);
-				}
-			}
-			return kept ?? map;
-		};
-		this.#progress = prune(this.#progress);
-		this.#lifecycle = prune(this.#lifecycle);
-		this.#unlistedBusIds = unlisted;
-	}
-
-	#applyEvent(event: Extract<HostFrame, { t: "event" }>["event"]): void {
-		switch (event.type) {
-			case "message_start":
-			case "message_update":
-				if (event.message.role === "assistant") {
-					this.#stream = event.message;
-					this.#streamDone = false;
-				}
-				break;
-			case "message_end":
-				if (event.message.role === "assistant") {
-					this.#stream = event.message;
-					this.#streamDone = true;
-				}
-				break;
-			case "tool_execution_start": {
-				const tool: ActiveTool = {
-					toolCallId: event.toolCallId,
-					toolName: event.toolName,
-					args: event.args,
-					intent: event.intent,
-					startedAt: Date.now(),
-				};
-				this.#activeTools = new Map(this.#activeTools).set(event.toolCallId, tool);
-				break;
-			}
-			case "tool_execution_update": {
-				const existing = this.#activeTools.get(event.toolCallId);
-				const tool: ActiveTool = existing
-					? { ...existing, partialResult: event.partialResult }
-					: {
-							toolCallId: event.toolCallId,
-							toolName: event.toolName,
-							args: event.args,
-							partialResult: event.partialResult,
-							startedAt: Date.now(),
-						};
-				this.#activeTools = new Map(this.#activeTools).set(event.toolCallId, tool);
-				break;
-			}
-			case "tool_execution_end": {
-				const next = new Map(this.#activeTools);
-				next.delete(event.toolCallId);
-				this.#activeTools = next;
-				break;
-			}
-			case "agent_start":
-				this.#working = true;
-				break;
-			case "agent_end":
-				this.#working = false;
-				break;
-			case "notice":
-				// Join announcements have no structured subtype; match only the verified producer's
-				// two informational forms so other notices and participant-state frames survive.
-				// https://github.com/can1357/oh-my-pi/blob/fbc3ac6a148d24d50f573e9b531999e32bae42eb/packages/coding-agent/src/collab/host.ts#L846-L850
-				if (event.source === "collab" && event.level === "info" &&
-					(event.message.endsWith(" joined the collab session") ||
-					 event.message.endsWith(" joined the collab session (read-only)"))) break;
-				if (miniAppInterruptionAuthor(event)) {
-					this.#working = false;
-					this.#activeTools = new Map();
-					if (this.#state) {
-						this.#state = { ...this.#state, isStreaming: false, isAborting: false, queuedMessageCount: 0 };
-					}
-					if (this.#stream && !this.#streamDone) {
-						this.#stream = { ...this.#stream, stopReason: "aborted" };
-						this.#streamDone = true;
-					}
-				}
-				this.#pushNotice(event.level, event.message);
-				break;
-			case "auto_retry_start":
-				this.#pushNotice("info", `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
-				break;
-			case "auto_retry_end":
-				if (!event.success) this.#pushNotice("error", event.finalError ?? "retry failed");
-				break;
-			case "auto_compaction_start":
-				this.#pushNotice("info", `compacting context (${event.reason})`);
-				break;
-			case "auto_compaction_end":
-				if (!event.skipped) {
-					this.#pushNotice(
-						"info",
-						event.aborted
-							? "compaction aborted"
-							: event.errorMessage
-								? `compaction failed: ${event.errorMessage}`
-								: "context compacted",
-					);
-				}
-				break;
-			default:
-				// turn_start/turn_end/thinking_level_changed/unknown — ignore
-				break;
-		}
-	}
-
-	#pushNotice(level: Notice["level"], message: string): void {
-		const notice: Notice = { id: ++this.#noticeSeq, level, message, at: Date.now() };
-		const next = [...this.#notices, notice];
-		if (next.length > MAX_NOTICES) next.splice(0, next.length - MAX_NOTICES);
-		this.#notices = next;
 	}
 
 	#buildSnapshot(): GuestSnapshot {
@@ -711,44 +360,36 @@ export class GuestClient {
 			// entry-mutating frame replaces it, so non-entry frames
 			// (streaming updates, state, bus) don't invalidate entry-identity
 			// consumers per token.
-			entries: this.#publishedEntries,
-			state: this.#state,
-			agents: this.#agents,
-			progress: this.#progress,
-			lifecycle: this.#lifecycle,
-			stream: this.#stream,
-			streamDone: this.#streamDone,
-			activeTools: this.#activeTools,
-			working: this.#working,
-			notices: this.#notices,
+			entries: this.#history.publishedEntries,
+			state: this.#live.state,
+			agents: this.#live.agents,
+			progress: this.#live.progress,
+			lifecycle: this.#live.lifecycle,
+			stream: this.#live.stream,
+			streamDone: this.#live.streamDone,
+			activeTools: this.#live.activeTools,
+			working: this.#live.working,
+			notices: this.#live.notices,
 			history: {
-				older: this.#older,
-				loading: this.#pendingHistory !== null,
-				error: this.#historyError,
-				freshness: this.#historyFreshness,
-				revision: this.#historyRevision,
+				older: this.#history.older,
+				loading: this.#history.pendingHistory !== null,
+				error: this.#history.historyError,
+				freshness: this.#history.historyFreshness,
+				revision: this.#history.historyRevision,
 			},
-			loading: this.#pendingSnapshot && {
-				received: this.#pendingSnapshot.entries.length,
-				total: this.#pendingSnapshot.total,
+			loading: this.#history.pendingSnapshot && {
+				received: this.#history.pendingSnapshot.entries.length,
+				total: this.#history.pendingSnapshot.total,
 			},
 		};
 	}
 
-	/** Publishes on the next animation frame; a synchronous commit before then supersedes it. */
 	#scheduleCommit(): void {
-		if (this.#cancelFrameCommit !== null) return;
-		this.#cancelFrameCommit = scheduleFrame(() => {
-			this.#cancelFrameCommit = null;
-			this.#commit();
-		});
+		this.#publication.schedule(() => this.#commit());
 	}
 
 	#commit(): void {
-		if (this.#cancelFrameCommit !== null) {
-			this.#cancelFrameCommit();
-			this.#cancelFrameCommit = null;
-		}
+		this.#publication.clear();
 		this.#snapshot = this.#buildSnapshot();
 		for (const listener of this.#listeners) listener();
 	}

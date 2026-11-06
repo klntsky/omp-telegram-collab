@@ -1,0 +1,55 @@
+/* ---- syntax tokens (highlight.js, scoped) ----
+ * Minimal monochrome-plus-accent palette; only applies when the host exposes
+ * a global hljs (the HTML export page). */
+
+.tv-pre .hljs-comment,
+.tv-pre .hljs-quote {
+	color: var(--tv-faint);
+	font-style: italic;
+}
+
+.tv-pre .hljs-keyword,
+.tv-pre .hljs-selector-tag,
+.tv-pre .hljs-section,
+.tv-pre .hljs-name,
+.tv-pre .hljs-tag {
+	color: color-mix(in oklch, var(--tv-accent) 72%, var(--tv-fg));
+}
+
+.tv-pre .hljs-string,
+.tv-pre .hljs-regexp,
+.tv-pre .hljs-addition {
+	color: var(--tv-ok);
+}
+
+.tv-pre .hljs-number,
+.tv-pre .hljs-literal,
+.tv-pre .hljs-symbol,
+.tv-pre .hljs-bullet,
+.tv-pre .hljs-link,
+.tv-pre .hljs-meta {
+	color: var(--tv-warn);
+}
+
+.tv-pre .hljs-title,
+.tv-pre .hljs-attr,
+.tv-pre .hljs-attribute,
+.tv-pre .hljs-selector-id,
+.tv-pre .hljs-selector-class,
+.tv-pre .hljs-type,
+.tv-pre .hljs-built_in {
+	color: color-mix(in oklch, var(--tv-fg) 80%, var(--tv-accent));
+}
+
+.tv-pre .hljs-deletion {
+	color: var(--tv-err);
+}
+
+.tv-pre .hljs-emphasis {
+	font-style: italic;
+}
+
+.tv-pre .hljs-strong {
+	font-weight: 600;
+}
+
