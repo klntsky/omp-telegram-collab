@@ -151,8 +151,8 @@ export class OmpRuntime implements Omp {
       assertActive: () => runtime.#assertActive(),
       get closed() { return runtime.#closed; },
       stopping: this.#stopping,
-      isRunning: (session) => runtime.#sessions.isRunning(session),
-      retain: (id) => runtime.#activity.retain(id),
+      isRunning: (session) => runtime.isRunning(session),
+      retain: (id) => runtime.retain(id),
       ensure: (session, beforeMutation) => runtime.ensure(session, beforeMutation),
       lifecycle: (id) => runtime.#ownership.lifecycle(id),
       managed: this.#managed,
@@ -350,7 +350,8 @@ export class OmpRuntime implements Omp {
     const instancePath = this.#instanceDirectory(instanceId);
     if (session && session.instanceId !== instanceId) throw new Error('Session does not belong to this instance ID');
     let values: unknown;
-    if (session?.runtime.kind === 'managed' && await this.#sessions.isRunning(session)) {
+    // Preserve the public activity port's dispatch, including operation instrumentation.
+    if (session?.runtime.kind === 'managed' && await this.isRunning(session)) {
       if (!(await this.#ownership.lifecycle(session.id))?.skills) {
         throw new Error('OMP host does not support skill discovery. Kill this managed host and send a new prompt to load the updated lifecycle extension.');
       }
