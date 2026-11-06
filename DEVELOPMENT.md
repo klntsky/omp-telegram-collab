@@ -143,7 +143,7 @@ timeout 300s pnpm test:one --test-name-pattern questions test/e2e/telegram.test.
 
 Selected workflows create their own prerequisite sessions. Workflows selected together run sequentially and share one Telegram and OMP fixture.
 
-Forum provisioning retries only the explicit test-network RPC rejection `500 CHAT_OCCUPY_LOC_FAILED`, checking for an already-created matching forum before retrying. This policy belongs to the fixture; the application bot's production rate-limit handling is exercised independently.
+Forum provisioning reconciles an already-created matching forum before retrying the explicit test-network rejection `500 CHAT_OCCUPY_LOC_FAILED`. Fixture RPCs also retry explicit `420 FLOOD_WAIT_X` rejections after the required delay, only when it fits the original request budget; longer waits fail with the original diagnostic and budget context. This follows [TDLib's delay and total-budget handling](https://github.com/tdlib/td/blob/master/td/telegram/net/NetQueryDelayer.cpp). Ambiguous transport failures are not replayed. These policies belong to the fixture; the application bot's production rate-limit handling is exercised independently.
 
 ### Diagnose deadlines before retrying
 
@@ -151,7 +151,7 @@ The shared timeout policy lives in `scripts/lib/telegram-test-deadline.ts`. Tele
 
 Child deadlines cannot outlive their parent. Retry delays consume the same budget. Expectations recheck their state predicates even when no external notification arrives. Polling and routine logs do not extend deadlines. Inspect the active phase and its original diagnostic before retrying a failed workflow. A timeout without a Telegram error is not evidence of a server-side error.
 
-Cancellation stops fixture requests before forum rollback; worker transport shutdown follows rollback. Fixture-user release is attempted even when cleanup has already expired, without extending the budget. Late operation and cleanup failures retain their original diagnostics in the logs.
+Cancellation stops fixture requests before forum rollback; worker transport shutdown follows rollback. Successful sequential fixtures reuse their authorization. A cancelled fixture retires its own authorization owner so later fixtures do not inherit a closed execution. Fixture-user release is attempted even when cleanup has already expired, without extending the budget. Late operation and cleanup failures retain their original diagnostics in the logs.
 
 Check the failed phase, authorization lease, bot lease, and worker state before rerunning only the failed workflow. Do not unlink live locks or replay an ambiguous mutation. Reconcile remote state first. If the same phase times out again without new evidence, stop automated reruns and report the blocker. Missing credentials, contention, and expired deadlines remain acceptance failures.
 

@@ -13,6 +13,7 @@ import { SessionCapacityError } from './runtime.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 import type { SessionFeedSubscription } from './session-feed.js';
+import { CollabTransportError } from './collab.js';
 
 export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'subscribeSessionFeed' | 'onSessionInvalidated'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: Omp; staticDir?: string }
@@ -247,6 +248,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
       if (error instanceof ServiceTerminatedError) fail(4003,error.message);
       else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
+      else if (error instanceof CollabTransportError) fail(1011,error.message);
       else if (error instanceof SessionCapacityError) {
         fail(4009,error.message);
         const session = options.store.getSession(identity.sessionId);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { test, type TestContext } from 'node:test';
-import { WebSocketServer } from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { COLLAB_PROTO, WRITE_TOKEN_BYTES, type GuestFrame, type HostFrame, type SessionEntry } from '@oh-my-pi/pi-wire';
-import { connectCollab, readCollabState } from '../src/collab.js';
+import { CollabTransportError, connectCollab, readCollabState } from '../src/collab.js';
 import { generateRoomKey, importRoomKey, open, seal } from '../src/vendor/codec.js';
 import { encodeBase64Url, formatCollabLink, packEnvelope, unpackEnvelope } from '../src/vendor/link.js';
 
@@ -70,6 +70,43 @@ async function hostFrames(frames: HostFrame[]) {
 }
 
 const emptySnapshot: Extract<HostFrame, {t: 'snapshot-chunk'}> = {t: 'snapshot-chunk', entries: [], final: true};
+
+test('a room closed during setup is retryable without changing its diagnostic', {timeout: 5000}, async t => {
+  const host = await hostFrames([]);
+  t.after(() => host.close());
+  const reasons: string[] = [];
+  const connection = connectCollab(host.binding, 'Guest', {
+    onFrame(frame) { assert.fail(`Unexpected frame: ${frame.t}`); },
+    onClose(reason) { reasons.push(reason); },
+  });
+  const rejected = assert.rejects(connection, error =>
+    error instanceof CollabTransportError && error.message === 'Collab room closed');
+  const [socket] = await host.connected;
+  socket.send(JSON.stringify({t: 'room-closed'}));
+  await rejected;
+  assert.deepEqual(reasons, ['Collab room closed']);
+});
+
+test('a hello send racing socket closure remains retryable with its original cause', {timeout: 5000}, async t => {
+  const host = await hostFrames([]);
+  t.after(() => host.close());
+  const send = WebSocket.prototype.send;
+  t.mock.method(WebSocket.prototype, 'send', function(this: WebSocket, ...args: Parameters<WebSocket['send']>) {
+    this.close(1001, 'Closing during hello send');
+    return send.apply(this, args);
+  });
+  const reasons: string[] = [];
+  await assert.rejects(connectCollab(host.binding, 'Guest', {
+    onFrame(frame) { assert.fail(`Unexpected frame: ${frame.t}`); },
+    onClose(reason) { reasons.push(reason); },
+  }), error => {
+    assert.ok(error instanceof CollabTransportError);
+    assert.ok(error.cause instanceof Error);
+    assert.equal(error.message, error.cause.message);
+    assert.deepEqual(reasons, [error.message]);
+    return true;
+  });
+});
 
 function historyEntry(id: string): SessionEntry {
   return {type: 'custom_message', id, parentId: null, timestamp: new Date(0).toISOString(), customType: 'fixture', content: id, display: true};
