@@ -10,7 +10,6 @@ import { promisify } from 'node:util';
 import * as pty from '@lydell/node-pty';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
-import { connectCollab } from '../src/collab.js';
 import { startLocalRelay } from './local-relay.js';
 import { writeConfig } from '../src/config.js';
 
@@ -107,7 +106,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     const resumed = await runtime.ensure(managed);
     assert.equal(resumed.sessionId, first.sessionId, 'managed kill must preserve the exact conversation');
     assert.notEqual(resumed.instanceId, first.instanceId, 'resuming after kill must use a fresh process');
-    const guest = await connectCollab(resumed, 'Kill history verifier', {
+    const guest = await runtime.connectCollab(resumed, 'Kill history verifier', {
       onFrame(frame) { if (frame.t === 'welcome') assert.equal(frame.header.id, first.sessionId); },
       onClose() {},
     });

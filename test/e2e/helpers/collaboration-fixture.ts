@@ -4,7 +4,7 @@ import { Bot } from 'grammy';
 import type { Update } from 'grammy/types';
 import type { Message } from '@mtcute/node';
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
-import { connectCollab } from '../../../src/collab.js';
+import type { Omp } from '../../../src/omp.js';
 import { BotService } from '../../../src/bot.js';
 import { emptyConfig, readConfig, writeConfig } from '../../../src/config.js';
 import { OmpRuntime } from '../../../src/runtime.js';
@@ -179,46 +179,50 @@ export async function setupCollaborationTest(
     return value;
   }
   let bot = instrumentedBot();
-  const connect: typeof connectCollab = async (binding, name, handlers, signal) => {
-    try {
-      const connection = await connectCollab(binding, name, {
-        onFrame(frame) {
-          hostFrames.push(frame);
-          omp.log('collab.host.frame', frame);
-          handlers.onFrame(frame);
-          const notification = changed;
-          changed = Promise.withResolvers<void>();
-          notification.resolve();
-        },
-        onClose(reason) {
-          omp.log('collab.close', { reason });
-          handlers.onClose(reason);
-        },
-      }, signal);
-      return {
-        send(frame) {
-          guestFrames.push(frame);
-          omp.log('collab.guest.frame', frame);
-          try { connection.send(frame); } catch (error) {
-            omp.log('collab.send.error', { error });
-            throw error;
-          }
-        },
-        refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
-        close() { connection.close(); },
-      };
-    } catch (error) {
-      omp.log('collab.connect.error', { error });
-      throw error;
-    }
-  };
+  function instrumentRuntime(value: Omp): void {
+    const connect = value.connectCollab.bind(value);
+    value.connectCollab = async (binding, name, handlers, signal) => {
+      try {
+        const connection = await connect(binding, name, {
+          onFrame(frame) {
+            hostFrames.push(frame);
+            omp.log('collab.host.frame', frame);
+            handlers.onFrame(frame);
+            const notification = changed;
+            changed = Promise.withResolvers<void>();
+            notification.resolve();
+          },
+          onClose(reason) {
+            omp.log('collab.close', { reason });
+            handlers.onClose(reason);
+          },
+        }, signal);
+        return {
+          send(frame) {
+            guestFrames.push(frame);
+            omp.log('collab.guest.frame', frame);
+            try { connection.send(frame); } catch (error) {
+              omp.log('collab.send.error', { error });
+              throw error;
+            }
+          },
+          refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
+          close() { connection.close(); },
+        };
+      } catch (error) {
+        omp.log('collab.connect.error', { error });
+        throw error;
+      }
+    };
+  }
+  instrumentRuntime(runtime);
   const stickers = await telegram.api.getForumTopicIconStickers();
   const [running, finished] = [...new Set(stickers.map(sticker => sticker.emoji).filter((emoji): emoji is string => Boolean(emoji)))];
   if (!running || !finished) throw new Error('Telegram test network must provide two distinct topic icon emojis');
   const topicActivityEmojis = { running, finished };
   omp.log('telegram.topic.icons', { topicActivityEmojis });
   await telegram.api.deleteWebhook({ drop_pending_updates: true });
-  service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, connect, topicActivityEmojis });
+  service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, topicActivityEmojis });
 
   const messages: Message[] = [];
   const receive = (message: Message) => {
@@ -342,8 +346,9 @@ export async function setupCollaborationTest(
         Object.assign(config, readConfig(config.configPath));
         store = new Store(databasePath);
         runtime = new OmpRuntime(config);
+        instrumentRuntime(runtime);
         bot = instrumentedBot();
-        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, connect, topicActivityEmojis });
+        service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, topicActivityEmojis });
         closing = false;
         await startService();
       }));

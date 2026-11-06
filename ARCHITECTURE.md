@@ -28,7 +28,7 @@ The configuration layer owns the persistent service-termination switch. Telegram
 
 ## Telegram integration
 
-Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into runtime and Collab operations. It does not own OMP's conversation history or execute model turns itself.
+Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into operations on `Omp`. It does not own OMP's conversation history or execute model turns itself.
 
 grammY owns Telegram contexts and API transport. The bot adapter retains polling readiness, input ordering, cancellation, and shutdown acknowledgements rather than delegating those guarantees to framework-managed polling. The administration CLI uses grammY's API client without starting a poller.
 
@@ -87,6 +87,10 @@ The bot adapter owns two-way session-title reconciliation between Telegram topic
 ## OMP execution and lifecycle
 
 The runtime manager owns host discovery, startup, attachment, capacity, activity tracking, and process identity checks. Managed hosts run interactive OMP in PTYs under detached supervisors. The supervisor boundary lets hosts outlive a service process and lets the next service recover them. Attached hosts remain owned by their original terminal.
+
+`Omp` is the single application-facing TypeScript contract for OMP communication. Bot adapters and the gateway depend on that contract, not on transport implementations. `OmpRuntime` implements host lifecycle, native CLI and RPC operations, lifecycle sockets, Collab connections and activity reads, and managed-history watcher acquisition. Returned connections and watchers retain their own protocol and resource lifetimes.
+
+The terminal join client uses the `joinTerminal` portion of the same contract through `terminalOmp`. It does not construct a service runtime or acquire service-owned lifecycle resources. The local control service still authorizes and resolves the host before the terminal launches OMP.
 
 Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
 

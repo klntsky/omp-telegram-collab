@@ -6,7 +6,6 @@ import test, { type TestContext } from 'node:test';
 import type { HostFrame, SessionEntry } from '@oh-my-pi/pi-wire';
 import { z } from 'zod';
 import type { BrowserHostFrame, CollabConnection, TopicSession } from '../../shared/contracts.js';
-import { connectCollab } from '../../src/collab.js';
 import { emptyConfig, writeConfig } from '../../src/config.js';
 import { OmpRuntime } from '../../src/runtime.js';
 import { SessionFeed, type SessionFeedSubscription } from '../../src/session-feed.js';
@@ -129,6 +128,7 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   const history = new SessionHistory(feed, {
     sessionId: binding.sessionId,
     source: () => runtime.historySource(session),
+    watch: (source, options) => runtime.watchHistory(source, options),
     assertActive() {
       if (closing) throw new Error('Native acceptance session is closing');
     },
@@ -138,7 +138,7 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   await history.prepare();
   const hostFrames: HostFrame[] = [];
   let nativeCloses = 0;
-  const native = await connectCollab(binding, 'Native history acceptance', {
+  const native = await runtime.connectCollab(binding, 'Native history acceptance', {
     onFrame(frame) {
       hostFrames.push(frame);
       omp.log('native.host.frame', frame);
