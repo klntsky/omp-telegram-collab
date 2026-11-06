@@ -120,7 +120,12 @@ export function createProcessKill(deps: ProcessKillDependencies): RuntimeProcess
         const current = (await deps.list(Date.now() + 5000)).find(value => value.instanceId === host.instanceId);
         if (!current || current.pid !== host.pid || current.sessionId !== host.sessionId ||
             current.generation !== host.generation || current.cwd !== host.cwd) {
-          throw new Error('OMP host identity changed before kill');
+          // Keep both snapshots on the original refusal so its owner can diagnose
+          // a registry transition without weakening the process-identity fence.
+          throw Object.assign(new Error('OMP host identity changed before kill'), {
+            expectedHost: host,
+            observedHost: current ?? null,
+          });
         }
         if (pin) {
           const argv = (await readFile(`/proc/${host.pid}/cmdline`, 'utf8')).split('\0');
