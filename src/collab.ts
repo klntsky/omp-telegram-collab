@@ -4,6 +4,8 @@ import type { CollabConnection, CollabHandlers, HostBinding } from '../shared/co
 import { importRoomKey, open, seal } from './vendor/codec.js';
 import { encodeBase64Url, packEnvelope, parseCollabLink, unpackEnvelope } from './vendor/link.js';
 
+export class CollabTransportError extends Error {}
+
 const SETUP_TIMEOUT_MS = 60_000;
 const HOST_TYPES: Record<string, true> = {
   welcome: true, 'snapshot-chunk': true, entry: true, event: true, state: true, bus: true, agents: true,
@@ -93,7 +95,7 @@ async function openCollab(
     resolveSetup = resolve;
     rejectSetup = reject;
   });
-  const timer = setTimeout(() => finish('Collab setup timed out'), SETUP_TIMEOUT_MS);
+  const timer = setTimeout(() => finish(new CollabTransportError('Collab setup timed out')), SETUP_TIMEOUT_MS);
   const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error('Collab setup aborted'));
   signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -129,17 +131,25 @@ async function openCollab(
   }
 
   function queueSend(frame: GuestFrame): void {
-    if (closed || ws.readyState !== WebSocket.OPEN) throw new Error('Collab connection is closed');
+    if (closed || ws.readyState !== WebSocket.OPEN) throw new CollabTransportError('Collab connection is closed');
     sendChain = sendChain.then(async () => {
       if (closed) return;
       const envelope = packEnvelope(0, await seal(key, frame));
       if (closed) return;
       if (ws.readyState !== WebSocket.OPEN) {
-        throw new Error('Collab transport cannot accept the frame');
+        throw new CollabTransportError('Collab transport cannot accept the frame');
       }
-      await new Promise<void>((resolve, reject) => {
-        ws.send(envelope, error => error ? reject(error) : resolve());
-      });
+      // Only actual send failures get transport classification; encoding failures
+      // stay terminal, and recovery must not replay a possibly delivered frame.
+      const sent = Promise.withResolvers<void>();
+      try {
+        ws.send(envelope, error => error
+          ? sent.reject(new CollabTransportError(error.message, {cause: error}))
+          : sent.resolve());
+      } catch (error) {
+        throw new CollabTransportError(error instanceof Error ? error.message : String(error), {cause: error});
+      }
+      await sent.promise;
     }).catch(error => {
       if (closed) return;
       console.error('Collab send failed; delivery may be uncertain:', error);
@@ -263,7 +273,7 @@ async function openCollab(
     if (!isBinary) {
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
-        if (control.t === 'room-closed') finish('Collab room closed');
+        if (control.t === 'room-closed') finish(new CollabTransportError('Collab room closed'));
       } catch (error) {
         console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
         finish('Invalid Collab relay control frame');
@@ -287,8 +297,8 @@ async function openCollab(
   ws.on('error', error => {
     if (closed) return;
     console.error('Collab transport error:', error);
-    finish(error);
+    finish(new CollabTransportError(error.message, {cause: error}));
   });
-  ws.on('close', (code, reason) => finish(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`));
+  ws.on('close', (code, reason) => finish(new CollabTransportError(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`)));
   return setup;
 }

@@ -12,6 +12,26 @@ import { changeTopicClosed, clickPanel, createManagedTopic, deliveredMessageLink
 import { completeWriteTask, createWriteTask, questionScenario, questionStep, readSessionHistory, taskInput, writeScenario } from './helpers/model-tasks.js';
 import { observeBrowser } from './helpers/browser-observer.js';
 
+test('Mini App retries a Collab room closed during gateway setup', {timeout: 480000}, async t => {
+  const task = createWriteTask('miniapp-setup-recovery');
+  const app = await setupCollaborationTest(t, {scenarios: [writeScenario(task)]});
+  await enrollForum(app);
+  const session = await createManagedTopic(app);
+  const generation = app.store.getSessionGeneration(session.id);
+  const browser = await observeBrowser(t, app, session, {interruptSetup: app.omp.interruptNextGuest});
+  assert.ok(browser.recovery.phases.has('reconnecting'));
+  assert.ok(!browser.recovery.phases.has('ended'));
+  assert.equal(browser.recovery.authorizationRefreshes, 1);
+  await browser.denyMutations();
+  const sent = await app.sendAndWait(`/p ${task.prompt}`, session.threadId);
+  await completeWriteTask(app, task, sent, session.threadId);
+  await browser.waitForSnapshot(snapshot => JSON.stringify(snapshot.entries).includes(task.toolCallId));
+  assert.equal(app.store.getSessionGeneration(session.id), generation);
+  await app.sendAndWait('/kill', session.threadId);
+  await browser.waitForSnapshot(snapshot => snapshot.phase === 'ended');
+  assert.ok(app.store.getSessionGeneration(session.id) > generation);
+});
+
 test('Telegram fork failures preserve completed forks and reject interrupted preparation', { timeout: 480000 }, async t => {
   const seed = createWriteTask('fork-failure-seed');
   const recovery = createWriteTask('fork-notification-recovery');

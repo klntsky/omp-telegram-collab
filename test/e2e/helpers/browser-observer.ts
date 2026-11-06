@@ -3,23 +3,39 @@ import { once } from 'node:events';
 import type { TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
-import type { HostFrame } from '@oh-my-pi/pi-wire';
-import type { TopicSession } from '../../../shared/contracts.js';
+import type { BrowserHostFrame, TopicSession } from '../../../shared/contracts.js';
 import { issueCredential } from '../../../src/auth.js';
 import { createServer } from '../../../src/server.js';
-import { GuestClient, type GuestSnapshot } from '../../../web/src/lib/client.js';
-import type { GuestTransport } from '../../../web/src/lib/socket.js';
+import { GuestClient, type ConnectionPhase, type GuestSnapshot } from '../../../web/src/lib/client.js';
+import { GatewaySocket } from '../../../web/src/lib/socket.js';
+import { SessionAccessError } from '../../../web/src/lib/telegram.js';
 import { bounded } from './async.js';
 import type { CollaborationTest } from './collaboration-fixture.js';
 
-export async function observeBrowser(t: TestContext, app: CollaborationTest, session: TopicSession) {
+export async function observeBrowser(t: TestContext, app: CollaborationTest, session: TopicSession, options: {
+  interruptSetup?: () => void;
+} = {}) {
   const signal = AbortSignal.any([t.signal, AbortSignal.timeout(120000)]);
   const publicUrl = 'https://mini-app.example';
   const config = {
     ...app.config, publicUrl,
     bots: app.config.bots.map(bot => ({ ...bot, miniAppShortName: 'e2e' })),
   };
-  const server = createServer({ config, bots: [app.service], store: app.store, runtime: app.runtime });
+  let interruptSetup = options.interruptSetup;
+  const service = app.service;
+  const server = createServer({ config, bots: [{
+    id: service.id, token: service.token,
+    authorizeSession: service.authorizeSession.bind(service),
+    requestCapacity: service.requestCapacity.bind(service),
+    onSessionInvalidated: service.onSessionInvalidated.bind(service),
+    subscribeSessionFeed: service.subscribeSessionFeed.bind(service),
+    async ensureMirroring(...args) {
+      const interrupt = interruptSetup;
+      interruptSetup = undefined;
+      interrupt?.();
+      return service.ensureMirroring(...args);
+    },
+  }], store: app.store, runtime: app.runtime });
   const sockets = new Set<WebSocket>();
   t.after(async () => {
     for (const socket of sockets) socket.terminate();
@@ -34,18 +50,25 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
   assert.ok(address && typeof address !== 'string');
   const origin = `http://127.0.0.1:${address.port}`;
   const account = app.telegram.user.account;
+  const generation = app.store.getSessionGeneration(session.id);
   const credential = issueCredential({
     botId: app.telegram.bot.id, sessionId: session.id,
-    generation: app.store.getSessionGeneration(session.id), userId: account.id,
+    generation, userId: account.id,
     displayName: String(account.id), authDate: Math.floor(Date.now() / 1000),
   }, app.telegram.bot.token);
   app.omp.registerSecret(credential);
-  async function authenticate() {
+  async function authenticate(requestSignal = signal) {
     const response = await fetch(`${origin}/api/session`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, signal,
-      body: JSON.stringify({ botId: app.telegram.bot.id, sessionId: session.id, initData: credential, credential }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, signal: requestSignal,
+      body: JSON.stringify({ botId: app.telegram.bot.id, sessionId: session.id, initData: credential, credential, generation }),
     });
-    assert.equal(response.status, 200, await response.clone().text());
+    if (!response.ok) {
+      const diagnostic = await response.text();
+      // Match authorizeSession in web/src/lib/telegram.ts so this fixture cannot
+      // recover across an access denial or invalidated session generation.
+      if ([401, 403, 404, 409].includes(response.status)) throw new SessionAccessError(diagnostic, response.status);
+      throw new Error(diagnostic);
+    }
     const result = z.object({ ticket: z.string(), displayName: z.string() }).parse(await response.json());
     app.omp.registerSecret(result.ticket);
     return result;
@@ -59,28 +82,27 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     connection.once('close', () => sockets.delete(connection));
     return connection;
   }
-  const frames: HostFrame[] = [];
-  let connection: WebSocket;
-  const transport: GuestTransport = {
-    connect() {
-      void socket().then(value => {
-        connection = value;
-        value.on('open', () => transport.onOpen?.());
-        value.on('message', data => {
-          const frame = JSON.parse(data.toString()) as HostFrame;
-          frames.push(frame);
-          transport.onFrame?.(frame);
-        });
-        value.on('close', (_code, reason) => transport.onClose?.(reason.toString(), false));
-        value.on('error', error => transport.onClose?.(error.message, false));
-      }).catch(error => transport.onClose?.(String(error), false));
-    },
-    close() { connection?.close(); },
-    reconnect(reason) { transport.onClose?.(reason, false); },
-    send(frame) { connection.send(JSON.stringify(frame)); },
-  };
+  const frames: BrowserHostFrame[] = [];
+  const recovery = {phases: new Set<ConnectionPhase>(), authorizationRefreshes: 0};
+  const {ticket} = await authenticate();
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', {configurable: true, value: {location: {href: origin}}});
+  const transport = new GatewaySocket(ticket, async requestSignal => {
+    const refreshed = await authenticate(AbortSignal.any([signal, requestSignal]));
+    recovery.authorizationRefreshes++;
+    return refreshed.ticket;
+  });
   const client = new GuestClient(transport, String(account.id));
   t.after(() => client.close());
+  t.after(() => {
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  });
+  const receive = transport.onFrame;
+  assert.ok(receive);
+  transport.onFrame = frame => { frames.push(frame); receive(frame); };
+  recovery.phases.add(client.getSnapshot().phase);
+  t.after(client.subscribe(() => recovery.phases.add(client.getSnapshot().phase)));
   async function waitForSnapshot(predicate: (snapshot: GuestSnapshot) => boolean) {
     const ready = Promise.withResolvers<void>();
     const check = () => {
@@ -95,7 +117,7 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
   await waitForSnapshot(snapshot => snapshot.phase === 'live');
   assert.ok(frames.some(frame => frame.t === 'welcome' && frame.readOnly));
   return {
-    client, frames, waitForSnapshot,
+    client, frames, waitForSnapshot, recovery,
     async denyMutations() {
       const before = await app.runtime.isRunning(session);
       const reopen = await fetch(`${origin}/api/session`, {
