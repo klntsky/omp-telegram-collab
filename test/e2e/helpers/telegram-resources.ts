@@ -86,7 +86,9 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
       if (!raw) throw new Error('Telegram did not return the created forum channel');
       chat = new Chat(raw);
     } catch (error) {
-      if (!tl.RpcError.is(error, 'CHAT_OCCUPY_LOC_FAILED') || error.code !== 500) throw error;
+      // TelegramTestUser.call retains earlier flood rejections before the final service diagnostic.
+      const rejection: unknown = error instanceof AggregateError ? error.errors.at(-1) : error;
+      if (!tl.RpcError.is(rejection, 'CHAT_OCCUPY_LOC_FAILED') || rejection.code !== 500) throw error;
       try {
         const dialogs = user.client.iterDialogs({ archived: 'keep' });
         for (;;) {

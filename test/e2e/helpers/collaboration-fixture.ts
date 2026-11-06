@@ -230,9 +230,9 @@ export async function setupCollaborationTest(
     }
   }
   await omp.step('application.start', startService);
-  async function waitForCondition(predicate: () => boolean): Promise<void> {
-    await omp.step('workflow.expectation', () => withTelegramTestDeadline(
-      'expectation', telegramTestTimeouts.expectation, AbortSignal.any([t.signal, failed.signal]), async signal => {
+  async function waitForCondition(predicate: () => boolean, timeoutMs: number = telegramTestTimeouts.expectation, name = 'expectation'): Promise<void> {
+    await omp.step(`workflow.${name}`, () => withTelegramTestDeadline(
+      name, timeoutMs, AbortSignal.any([t.signal, failed.signal]), async signal => {
         const recheck = setInterval(() => {
           const notification = changed;
           changed = Promise.withResolvers<void>();
@@ -306,11 +306,12 @@ export async function setupCollaborationTest(
     send,
     async sendAndWait(text: string, threadId?: number): Promise<Message> {
       const sent = await send(text, threadId);
-      await waitForCondition(() => handledMessages.has(sent.id));
+      // Worktree commands can start a host, then run a separate native RPC. Both own a startup deadline.
+      await waitForCondition(() => handledMessages.has(sent.id), config.omp.startupTimeoutMs * 2 + telegramTestTimeouts.request, 'message-handling');
       return sent;
     },
     waitForMessageHandled(messageId: number): Promise<void> {
-      return waitForCondition(() => handledMessages.has(messageId));
+      return waitForCondition(() => handledMessages.has(messageId), config.omp.startupTimeoutMs * 2 + telegramTestTimeouts.request, 'message-handling');
     },
     waitForCondition,
     waitForMessage,

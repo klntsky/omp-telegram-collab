@@ -147,7 +147,7 @@ Forum provisioning reconciles an already-created matching forum before retrying 
 
 ### Diagnose deadlines before retrying
 
-The shared timeout policy lives in `scripts/lib/telegram-test-deadline.ts`. Telegram fixture setup has a 90-second total budget. Authorization has a 45-second budget within it. Individual Telegram requests have a 30-second budget. Application readiness has a 60-second budget, and workflow expectations default to 30 seconds. Cleanup uses an independent 15-second total budget. Suite-level timeouts are final guards, not provisioning deadlines.
+The shared timeout policy lives in `scripts/lib/telegram-test-deadline.ts`. Telegram fixture setup has a 90-second total budget. Authorization has a 45-second budget within it. Individual Telegram requests have a 30-second budget. Application readiness has a 60-second budget, and workflow expectations default to 30 seconds. Waiting for an input update to finish allows two configured OMP startup budgets plus one Telegram request budget because a worktree command can start a host and then run a separate native RPC. Cleanup uses an independent 15-second total budget. Suite-level timeouts are final guards, not provisioning deadlines.
 
 Child deadlines cannot outlive their parent. Retry delays consume the same budget. Expectations recheck their state predicates even when no external notification arrives. Polling and routine logs do not extend deadlines. Inspect the active phase and its original diagnostic before retrying a failed workflow. A timeout without a Telegram error is not evidence of a server-side error.
 

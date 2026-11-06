@@ -25,6 +25,7 @@ import { createOwnership, type RuntimeOwnership } from './runtime/ownership.js';
 import { createAdmission, type RuntimeAdmission } from './runtime/admission.js';
 import { createSessions, type RuntimeSessions } from './runtime/sessions.js';
 import { createTermination, type RuntimeTermination } from './runtime/termination.js';
+import { createWorktreeCleanup, type RuntimeWorktreeCleanup } from './runtime/worktree-cleanup.js';
 
 // Terminal joins launch only the native client; they must not acquire service-owned runtime resources.
 export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
@@ -43,6 +44,7 @@ export class OmpRuntime implements Omp {
   readonly #fork: RuntimeFork;
   readonly #forkRpc: RuntimeForkRpc;
   readonly #worktree: RuntimeWorktree;
+  readonly #worktreeCleanup: RuntimeWorktreeCleanup;
   readonly #paths: RuntimePaths;
   readonly #registry: RuntimeRegistry;
   readonly #settings: RuntimeSettings;
@@ -122,6 +124,19 @@ export class OmpRuntime implements Omp {
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
       skillProcesses: this.#skillProcesses,
+    });
+    this.#worktreeCleanup = createWorktreeCleanup({
+      config: this.#config,
+      get closed() { return runtime.#closed; },
+      assertActive: () => runtime.#assertActive(),
+      acquire: () => runtime.#ownership.acquire(),
+      stopping: this.#stopping,
+      pending: this.#pending,
+      managed: this.#managed,
+      hostActivity: id => runtime.#activity.hostActivity(id),
+      readManagedBinding: session => runtime.#paths.readManagedBinding(session),
+      list: deadline => runtime.#registry.list(deadline),
+      lifecycle: id => runtime.#ownership.lifecycle(id),
     });
     this.#paths = createPaths({
       config: this.#config,
@@ -235,6 +250,8 @@ export class OmpRuntime implements Omp {
     this.fork = this.#fork.fork;
     this.worktree = this.#worktree.worktree;
     this.topicTitleStatus = this.#worktree.topicTitleStatus;
+    this.inspectWorktree = this.#worktreeCleanup.inspectWorktree;
+    this.deleteWorktree = this.#worktreeCleanup.deleteWorktree;
     this.validateSessionPaths = this.#paths.validateSessionPaths;
     this.attach = this.#registry.attach;
     this.providerUsage = this.#settings.providerUsage;
@@ -296,6 +313,8 @@ export class OmpRuntime implements Omp {
   fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
   existingBinding: (session: TopicSession) => Promise<{sessionId: string} | undefined>;
   worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
+  inspectWorktree: Omp['inspectWorktree'];
+  deleteWorktree: Omp['deleteWorktree'];
   #instanceDirectory(instanceId: number): string {
     const instance = this.#config.instances.find(instance => instance.id === instanceId);
     if (!instance) throw new Error('Instance ID is not configured');
