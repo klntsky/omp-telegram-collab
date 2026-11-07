@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { tl, type TelegramClient, type User } from '@mtcute/node';
 import { TelegramTestExecution, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
 import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
-import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { telegramTestTimeouts, telegramTestDeadlineRemaining, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { combineTelegramErrors } from './errors.js';
 
 let execution = new TelegramTestExecution();
@@ -48,12 +48,13 @@ export class TelegramTestUser {
         }
       });
   }
-  async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal): Promise<tl.RpcCallReturn[T['_']]> {
+  async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal, timeoutMs: number = telegramTestTimeouts.request): Promise<tl.RpcCallReturn[T['_']]> {
     const failures: unknown[] = [];
-    const deadline = performance.now() + telegramTestTimeouts.request;
+    const budget = Math.min(timeoutMs, telegramTestDeadlineRemaining(signal));
+    const deadline = performance.now() + budget;
     try {
       // Explicit cleanup signals must survive fixture cancellation until rollback ends.
-      return await withTelegramTestDeadline(`Telegram ${request._}`, telegramTestTimeouts.request, signal, async bounded => {
+      return await withTelegramTestDeadline(`Telegram ${request._}`, budget, signal, async bounded => {
         for (;;) {
           bounded.throwIfAborted();
           try {

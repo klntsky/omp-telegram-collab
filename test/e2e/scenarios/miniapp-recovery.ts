@@ -7,10 +7,6 @@ import { observeBrowser } from '../helpers/browser-observer.js';
 import test from 'node:test';
 
 export function registerMiniAppRecovery(): void {
-// Provision the short independent case after the long shared workflows: consecutive
-// forum creations produced live FLOOD_WAIT_40, beyond the unchanged 30-second RPC budget.
-// TDLib also accounts server-requested delays against a total query budget:
-// https://github.com/tdlib/td/blob/master/td/telegram/net/NetQueryDelayer.cpp (NetQueryDelayer::delay).
 test('Mini App retries a Collab room closed during gateway setup', {timeout: 480000}, async t => {
   const task = createWriteTask('miniapp-setup-recovery');
   const app = await setupCollaborationTest(t, {scenarios: [writeScenario(task)]});
