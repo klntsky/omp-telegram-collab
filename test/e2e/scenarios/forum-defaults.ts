@@ -13,9 +13,9 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
   it('forum model presets and first-prompt skills', async () => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
-    const chooseDefault = async (field: 'default_model_preset' | 'default_new_topic_skill', value: string) => {
+    const chooseDefault = async (field: 'default_model_preset' | 'default_new_topic_skills', value?: string, expectedSkills?: string[]) => {
       const panel = await openPanel(app, '/settings');
-      const choose = async (wanted: Record<string, string>) => {
+      const choose = async (wanted: Record<string, string | undefined>) => {
         const token = panel.buttons[0]!.split(':')[1]!;
         const row = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?').get(app.telegram.bot.id, token) as { panel: string };
         const saved = z.object({ choices: z.array(z.record(z.string(), z.unknown())) }).parse(JSON.parse(row.panel));
@@ -26,11 +26,13 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
       };
       await choose({ kind: 'page', page: field === 'default_model_preset' ? 'presets' : 'skills' });
       await choose({ kind: 'default', field, value });
-      assert.equal(savedChat()[field], value);
+      if (field === 'default_new_topic_skills') assert.deepEqual(savedChat()[field] ?? [], expectedSkills);
+      else assert.equal(savedChat()[field], value);
       await clickPanel(app, panel, -1);
     };
     await chooseDefault('default_model_preset', 'e2e-alternate');
-    await chooseDefault('default_new_topic_skill', 'e2e-review');
+    await chooseDefault('default_new_topic_skills', 'e2e-review', ['e2e-review']);
+    await chooseDefault('default_new_topic_skills', 'e2e-z-followup', ['e2e-review', 'e2e-z-followup']);
     const first = await app.sendAndWait(`/new ${tasks.defaultsFirst.prompt}`);
     const firstReply = await completeWriteTask(app, tasks.defaultsFirst, first);
     const session = app.store.getTopic({ botId: app.telegram.bot.id, destination: {
@@ -38,7 +40,8 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
     } })!;
     assert.equal(app.omp.provider.requests.get(tasks.defaultsFirst.name)![0]!.model, 'e2e-alternate');
     assert.equal(taskInput(app.omp.provider, tasks.defaultsFirst).text.split('/skill:e2e-review').length - 1, 1);
-    assert.equal(app.store.getNewTopicSkill(session.id), undefined);
+    assert.equal(taskInput(app.omp.provider, tasks.defaultsFirst).text.split('/skill:e2e-z-followup').length - 1, 1);
+    assert.deepEqual(app.store.getNewTopicSkills(session.id), []);
     await chooseDefault('default_model_preset', 'e2e-primary');
     const unchanged = await app.sendAndWait(`/p ${tasks.defaultsUnchanged.prompt}`, session.threadId);
     await completeWriteTask(app, tasks.defaultsUnchanged, unchanged, session.threadId);
@@ -56,22 +59,25 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
     await app.sendAndWait('/kill', session.threadId);
 
     const manual = await createManagedTopic(app);
-    assert.equal(app.store.getNewTopicSkill(manual.id), 'e2e-review');
-    await chooseDefault('default_new_topic_skill', 'e2e-z-followup');
-    assert.equal(app.store.getNewTopicSkill(manual.id), 'e2e-review');
+    assert.deepEqual(app.store.getNewTopicSkills(manual.id), ['e2e-review', 'e2e-z-followup']);
+    await chooseDefault('default_new_topic_skills', 'e2e-review', ['e2e-z-followup']);
+    assert.deepEqual(app.store.getNewTopicSkills(manual.id), ['e2e-review', 'e2e-z-followup']);
+    await chooseDefault('default_new_topic_skills', undefined, []);
+    assert.equal(savedChat().default_new_topic_skills, undefined);
+    assert.deepEqual(app.store.getNewTopicSkills(manual.id), ['e2e-review', 'e2e-z-followup']);
     await app.sendAndWait('/skill_e2e_review', manual.threadId);
     const accepted = await app.sendAndWait(`/p ${tasks.defaultsManual.prompt}`, manual.threadId);
     await completeWriteTask(app, tasks.defaultsManual, accepted, manual.threadId);
     const manualInput = taskInput(app.omp.provider, tasks.defaultsManual).text;
     assert.equal(manualInput.split('/skill:e2e-review').length - 1, 1);
-    assert.ok(!manualInput.includes('/skill:e2e-z-followup'));
-    assert.equal(app.store.getNewTopicSkill(manual.id), undefined);
+    assert.equal(manualInput.split('/skill:e2e-z-followup').length - 1, 1);
+    assert.deepEqual(app.store.getNewTopicSkills(manual.id), []);
     assert.equal(app.omp.provider.requests.get(tasks.defaultsManual.name)![0]!.model, 'e2e-alternate');
     await app.sendAndWait('/kill', manual.threadId);
     const next = await app.sendAndWait(`/new ${tasks.defaultsNext.prompt}`);
     await completeWriteTask(app, tasks.defaultsNext, next);
     const nextInput = taskInput(app.omp.provider, tasks.defaultsNext).text;
-    assert.equal(nextInput.split('/skill:e2e-z-followup').length - 1, 1);
+    assert.ok(!nextInput.includes('/skill:e2e-z-followup'));
     assert.ok(!nextInput.includes('/skill:e2e-review'));
     assert.equal(app.omp.provider.requests.get(tasks.defaultsNext.name)![0]!.model, 'e2e-alternate');
     app.omp.provider.assertComplete([tasks.defaultsFirst.name, tasks.defaultsUnchanged.name, tasks.defaultsSwitched.name, tasks.defaultsManual.name, tasks.defaultsNext.name]);

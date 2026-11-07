@@ -19,7 +19,7 @@ export interface InputPromptsDependencies {
   store: BotOptions['store'];
   promptImages(attachments: TelegramImage[]): Promise<ImageContent[]>;
   requestKind(token: string): CollabUiRequest['kind'] | undefined;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkill?: string; }, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
   skills: SkillPicker;
   submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void;
   usersCanProposePrompts(chatId: number): boolean;

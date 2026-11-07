@@ -112,6 +112,13 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const separateSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === separateReply.replyToMessage?.threadId)!;
     assert.notEqual(separateSession.id, session.id);
     await app.omp.assertWorktree(separateSession);
+    assert.ok(app.apiCalls.some(call => {
+      if (call.method !== 'forwardMessage') return false;
+      const payload = call.payload as {chat_id: number; message_id: number; message_thread_id: number};
+      const result = call.result as {ok: boolean};
+      return result.ok && payload.chat_id === session.chatId &&
+        payload.message_id === separate.id && payload.message_thread_id === separateSession.threadId;
+    }));
     assert.equal(app.store.getSession(session.id)?.status, 'detached');
     assert.equal(await app.runtime.isRunning(session), true);
     assert.equal(await readSessionHistory(app.omp.dataDir, session.id), detachedHistory);

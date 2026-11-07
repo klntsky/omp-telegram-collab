@@ -24,7 +24,7 @@ export interface CapacityDependencies {
   folderSettings(chatId: number): {instanceId: number; defaultDir: string; options: string[]};
   listen(session: TopicSession): Promise<void>;
   sendInitial(session: TopicSession): Promise<void>;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, skills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, skills?: {names:string[];topicSkills:string[]}, cwd?: string): Promise<void>;
 }
 
 export class CapacityAdmission {

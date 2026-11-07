@@ -18,6 +18,7 @@ interface TaskWorkflow {
   omp: { provider: FakeLlmProvider };
   store: Pick<Store, 'getTopic'>;
   telegram: { bot: { id: number }; forum: { chatId: number } };
+  waitForTaskStarted(name: string): Promise<void>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }
 const requestMessages = z.array(z.object({
@@ -56,6 +57,7 @@ export function writeReadScenario(task: WriteTask): FakeLlmScenario {
 }
 
 export async function completeWriteTask(app: TaskWorkflow, task: WriteTask, sent: Message, threadId?: number): Promise<Message> {
+  await app.waitForTaskStarted(task.name);
   const reply = await app.waitForReply({ replyToMessageId: sent.id, threadId });
   assert.equal(reply.chat.id, app.telegram.forum.chatId);
   assert.equal(reply.sender.id, app.telegram.bot.id);

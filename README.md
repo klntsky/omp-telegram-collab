@@ -337,6 +337,26 @@ Select an existing instance during enrollment with `approve REQUEST_CODE --insta
 
 The old directory-keyed configuration and older database schemas are not supported. Back up existing configuration and runtime data before replacing them; the service does not convert them automatically.
 
+## Choose default skills for new topics
+
+Open `/settings` as a group administrator and select **Default skills**. Press a skill to select or deselect it. Selected skills show ✅. Changes save immediately, and **No default skills** clears the selection.
+
+New managed topics inherit every selected skill for their first accepted Telegram task. Existing topics keep their original selection. Explicitly queued skills combine with the defaults without duplicate mentions.
+
+The current configuration field is `default_new_topic_skills`, an ordered list of canonical skill names. Before deploying this format over a configuration with `default_new_topic_skill`, replace each scalar entry with a one-element `default_new_topic_skills` list and remove the old key. The service does not read the old format.
+
+For an existing schema-5 database, stop the service and back up the configuration and SQLite database before the cutover. Convert the configuration and apply the following transaction to the service database before starting the new build. This preserves pending topic-default snapshots. Run it once, only against schema 5.
+
+```sql
+BEGIN IMMEDIATE;
+ALTER TABLE new_topic_skills RENAME COLUMN name TO names;
+UPDATE new_topic_skills SET names = json_array(names);
+UPDATE settings_panels
+SET panel = json_set(panel, '$.revision', json_extract(panel, '$.revision') + 1);
+PRAGMA user_version = 6;
+COMMIT;
+```
+
 ## Choose a session folder
 
 Open `/settings` as a group administrator and select **Runtime folders**. Choose **Add folder**, then reply to that exact message with a relative path on the agent's computer. Adding appends without replacing existing options. To replace all options, explicitly choose **Replace folders** and reply with relative paths, one per line. Use **Remove** to delete any option, including `.`, or **Clear folders** to empty the list. Missing folders are allowed in the list. Equivalent relative paths are normalized and deduplicated in order.

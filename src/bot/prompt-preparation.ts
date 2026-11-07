@@ -31,9 +31,9 @@ export class PromptPreparation {
       return {type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType};
     }));
   }
-  defaultNewTopicSkill(chatId: number): string | undefined {
+  defaultNewTopicSkills(chatId: number): string[] {
     return findInstance(this.deps.options.config,this.deps.id(),chatId)?.instance.chats
-      .find(chat => chat.botId === this.deps.id() && chat.chatId === chatId)?.default_new_topic_skill;
+      .find(chat => chat.botId === this.deps.id() && chat.chatId === chatId)?.default_new_topic_skills?.slice() ?? [];
   }
   async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))

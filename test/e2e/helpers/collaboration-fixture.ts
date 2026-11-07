@@ -230,9 +230,13 @@ export async function setupCollaborationTest(
     }
   }
   await omp.step('application.start', startService);
-  async function waitForCondition(predicate: () => boolean): Promise<void> {
-    await omp.step('workflow.expectation', () => withTelegramTestDeadline(
-      'expectation', telegramTestTimeouts.expectation, AbortSignal.any([t.signal, failed.signal]), async signal => {
+  async function waitForCondition(
+    predicate: () => boolean,
+    phase = 'expectation',
+    timeoutMs: number = telegramTestTimeouts.expectation,
+  ): Promise<void> {
+    await omp.step(`workflow.${phase}`, () => withTelegramTestDeadline(
+      phase, timeoutMs, AbortSignal.any([t.signal, failed.signal]), async signal => {
         const recheck = setInterval(() => {
           const notification = changed;
           changed = Promise.withResolvers<void>();
@@ -274,6 +278,13 @@ export async function setupCollaborationTest(
     });
   }
 
+  function waitForMessageHandled(messageId: number): Promise<void> {
+    // /new and /fork handlers can provision an OMP host before returning.
+    // Their completion barrier must honor the application's startup contract,
+    // rather than consuming the shorter post-startup assertion deadline.
+    return waitForCondition(() => handledMessages.has(messageId), 'message handling', config.omp.startupTimeoutMs);
+  }
+
   return {
     telegram, omp, config, hostFrames, guestFrames, apiCalls, updates, topicActivityEmojis,
     get runtime() { return runtime!; },
@@ -306,11 +317,18 @@ export async function setupCollaborationTest(
     send,
     async sendAndWait(text: string, threadId?: number): Promise<Message> {
       const sent = await send(text, threadId);
-      await waitForCondition(() => handledMessages.has(sent.id));
+      await waitForMessageHandled(sent.id);
       return sent;
     },
-    waitForMessageHandled(messageId: number): Promise<void> {
-      return waitForCondition(() => handledMessages.has(messageId));
+    waitForMessageHandled,
+    async waitForTaskStarted(name: string): Promise<void> {
+      // A handled update may only have queued an initial task: automatic
+      // worktree provisioning and host connection continue in the background.
+      // Observe the actual model request before starting the reply deadline.
+      await omp.step('workflow.task startup', () => withTelegramTestDeadline(
+        'task startup', config.omp.startupTimeoutMs, AbortSignal.any([t.signal, failed.signal]),
+        signal => omp.provider.waitForRequest(name, signal),
+      ));
     },
     waitForCondition,
     waitForMessage,
@@ -374,6 +392,7 @@ export interface CollaborationTest {
   send(text: string, threadId?: number): Promise<Message>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
+  waitForTaskStarted(name: string): Promise<void>;
   waitForCondition(predicate: () => boolean): Promise<void>;
   waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
