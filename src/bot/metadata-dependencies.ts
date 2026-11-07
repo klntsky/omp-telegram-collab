@@ -17,6 +17,5 @@ export interface ActivityDependencies {
   getListener(id: string): Listener | undefined;
   dropListener(id: string): void;
   clearSessionRequests(id: string): void;
-  offerWorktreeCleanup(session: TopicSession, generation: number): Promise<void>;
   runBackground(label: string, operation: () => Promise<void>): Promise<void>;
 }

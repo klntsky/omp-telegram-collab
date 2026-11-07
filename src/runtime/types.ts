@@ -37,12 +37,7 @@ export interface DurableBinding {
   sessionId: string;
   sessionFile: string;
   cwd: string;
-  removedWorktree?: {
-    path: string;
-    gitDir: string;
-    commonDir: string;
-    directory: { dev: number; ino: number };
-  };
+  removedWorktree?: true;
 }
 
 export interface ManagedHost {

@@ -134,9 +134,11 @@ export class TopicActivityMonitor {
       if (
         !state ||
         state.generation !== this.deps.options.store.getSessionGeneration(session.id) ||
-        !state.pending
+        (!state.settled && !state.pending)
       ) {
         void this.activity.runBackground(`close:${session.id}`, () => this.windDownClosedSession(session));
+      } else if (state.settled) {
+        void this.publishTopicIcon(session);
       }
       return;
     }
@@ -189,10 +191,7 @@ export class TopicActivityMonitor {
       this.activity.dropListener(session.id);
       this.activity.clearSessionRequests(session.id);
     }
-    if (state.settled) return Promise.all([
-      this.setTopicStatus(session, 'finished'),
-      this.activity.offerWorktreeCleanup(session, generation),
-    ]).then(() => undefined);
+    if (state.settled) return this.setTopicStatus(session, 'finished');
     if (state.pending) return state.pending;
     const current = state;
     const pending = (
@@ -211,10 +210,7 @@ export class TopicActivityMonitor {
         )
           return;
         current.settled = settled;
-        if (settled) await Promise.all([
-          this.setTopicStatus(session, 'finished'),
-          this.activity.offerWorktreeCleanup(session, generation),
-        ]);
+        if (settled) await this.setTopicStatus(session, 'finished');
       })
       .finally(() => {
         current.pending = undefined;

@@ -113,7 +113,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     getListener: connections.listeners.get.bind(connections.listeners),
     dropListener: connections.dropListener.bind(connections),
     clearSessionRequests: (id) => { capacity.invalidateSession(id); admission.invalidateProposals(id); },
-    offerWorktreeCleanup: (session, generation) => cleanup.offer(session, generation),
     runBackground: maintenance.runBackground.bind(maintenance),
   });
   const recovery: MirrorRecovery = new MirrorRecovery({
@@ -396,8 +395,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     bot, config: options.config, store: options.store, runtime: options.runtime, delivery: connections.delivery,
     botId: lifecycle.id.bind(lifecycle), stopped: lifecycle.stopped.bind(lifecycle),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
-    authorize: authorization.authorize.bind(authorization),
-    currentAdmin: authorization.currentAdmin.bind(authorization),
+    authorizeSession: authorization.authorizeSession.bind(authorization),
   });
   const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
   return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, input };
