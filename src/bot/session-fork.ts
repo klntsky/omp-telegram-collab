@@ -37,12 +37,12 @@ export class SessionFork {
         throw new Error('The source session changed before the fork completed');
     };
     await check();
+    const binding = await this.dependencies.options.runtime.existingBinding(source);
     let target: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'} | undefined;
     const replied = ctx.message?.reply_to_message;
     const reply = replied && !replied.forum_topic_created && replied.message_id !== source.threadId
       ? replied : undefined;
     if (reply) {
-      const binding = await this.dependencies.options.runtime.existingBinding(source);
       target = binding && this.dependencies.options.store.getMessageAnchor(source.id, binding.sessionId, source.chatId, reply.message_id);
       if (!target || reply.message_thread_id !== source.threadId)
         throw new Error('Reply to a persisted message in the current session to select a fork point.');
