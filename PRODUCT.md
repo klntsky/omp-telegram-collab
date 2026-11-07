@@ -194,7 +194,7 @@ Reply quotes never attach the quoted message's photos or image documents to the 
 
 Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Active or expired agent-question replies retain their dedicated handling, except for discussion handoffs described in section 1.3. Detached topics remain conversation-only.
 
-Telegram's implicit reply to a topic's creation message is topic-routing metadata, not an intentional reply to the bot. Ordinary messages with that metadata remain ignored when `all_messages_are_prompts` is `false`, including topics created by this bot.
+Telegram's implicit reply to a topic's creation message is topic-routing metadata, not an intentional reply to the bot. Ordinary messages with that metadata remain ignored when `all_messages_are_prompts` is `false`, including topics created by this bot. New-topic creation forwards the user's request but does not try to forward that service message.
 
 Other commands, forwarded messages, and bot messages are not prompts. Non-admin `/new` requests follow the proposal setting too.
 

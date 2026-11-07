@@ -177,12 +177,16 @@ export class TopicCreation {
       );
       await this.dependencies.announce(session);
       const source = ctx.message;
-      if (task !== undefined && source?.reply_to_message) {
+      const reply = source?.reply_to_message;
+      // Topic-creation replies are routing metadata, not forwardable context.
+      // TDLib rejects service content in MessageContent.cpp::can_forward_message_content:
+      // https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp
+      if (task !== undefined && reply && !reply.forum_topic_created && reply.message_id !== source?.message_thread_id) {
         await forwardTo(
           this.dependencies.bot.api,
           topicDestination(session.chatId, session.threadId),
           ctx.chat!.id,
-          source.reply_to_message.message_id,
+          reply.message_id,
         );
       }
       if (task !== undefined)
