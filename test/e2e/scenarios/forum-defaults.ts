@@ -46,7 +46,11 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
     assert.ok(!taskInput(app.omp.provider, tasks.defaultsUnchanged).text.includes('/skill:e2e-review'));
     await chooseDefault('default_model_preset', 'e2e-alternate');
     const binding = await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8');
-    await app.sendAndWait('/model_preset e2e-primary', session.threadId);
+    const presets = await openPanel(app, '/model_preset', session.threadId);
+    const names = await app.runtime.availableModelPresets(session.instanceId, session.cwd);
+    const selected = names.indexOf('e2e-primary');
+    assert.ok(selected >= 0);
+    await clickPanel(app, presets, selected);
     assert.equal(savedChat().default_model_preset, 'e2e-alternate');
     const switched = await app.sendAndWait(`/p ${tasks.defaultsSwitched.prompt}`, session.threadId);
     await completeWriteTask(app, tasks.defaultsSwitched, switched, session.threadId);

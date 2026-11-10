@@ -153,7 +153,7 @@ export interface SettingsPanel {
   folderInput?: 'append' | 'replace';
   folderInputEnded?: boolean;
 }
-export type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'back' | 'use' | 'default' | 'cancel'};
+export type PresetAction = {kind: 'select'; name: string} | {kind: 'page'; offset: number} | {kind: 'default' | 'cancel'};
 export interface PresetPanel {
   token: string;
   chatId: number;
