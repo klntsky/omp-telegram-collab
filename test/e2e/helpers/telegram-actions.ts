@@ -110,9 +110,9 @@ export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['k
   return panel!;
 }
 
-export async function submitCallback(app: TelegramWorkflow, panel: TelegramPanel, data: string | Uint8Array): Promise<void> {
-  await app.telegram.user.client.getCallbackAnswer({
-    chatId: app.telegram.forum.chat, message: panel.messageId, data,
+export async function submitCallback(app: TelegramWorkflow, panel: TelegramPanel, data: string | Uint8Array, client = app.telegram.user.client): Promise<void> {
+  await client.getCallbackAnswer({
+    chatId: app.telegram.forum.chatId, message: panel.messageId, data,
   });
 }
 
@@ -125,16 +125,16 @@ export async function waitForPanelRetired(app: TelegramWorkflow, panel: Telegram
   }));
 }
 
-export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number): Promise<void> {
+export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, client = app.telegram.user.client): Promise<void> {
   const start = app.apiCalls.length;
-  const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [panel.messageId]);
+  const [message] = await client.getMessages(app.telegram.forum.chatId, [panel.messageId]);
   const markup = message?.raw._ === 'message' ? message.raw.replyMarkup : undefined;
   if (markup?._ !== 'replyInlineMarkup') throw new Error(`Telegram message ${panel.messageId} has no callback keyboard`);
   const buttons = markup.rows.flatMap(row => row.buttons.flatMap(button =>
     button.type._ === 'inlineButtonTypeCallback' ? [button.type.data] : []));
   const data = buttons.at(index)!;
   assert.ok(data, `Telegram message ${panel.messageId} has no callback at index ${index}`);
-  await submitCallback(app, panel, data);
+  await submitCallback(app, panel, data, client);
   if (panel.kind !== '/settings' || index === -1) return;
   const editedPanel = z.object({ message_id: z.literal(panel.messageId), reply_markup: replyMarkup });
   await app.waitForCondition(() => {

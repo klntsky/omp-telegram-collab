@@ -1,37 +1,24 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { it } from 'node:test';
 import { z } from 'zod';
-import type { TopicSession } from '../../../shared/contracts.js';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, createManagedTopic, deliveredPanels, setTopicClosed, submitCallback, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
+import { clickPanel, createManagedTopic, deliveredPanels, setTopicClosed, submitCallback, waitForPanelRetired } from '../helpers/telegram-actions.js';
+import { applicationErrors, closeForConfirmation, createCleanupWorktree } from '../helpers/worktree-cleanup.js';
 import { readSessionHistory } from '../helpers/model-tasks.js';
-
-async function closeForConfirmation(app: CollaborationTest, session: TopicSession) {
-  let start = app.apiCalls.length;
-  await setTopicClosed(app, session, true);
-  const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:offer:', start, session.threadId);
-  start = app.apiCalls.length;
-  await clickPanel(app, offer, 0);
-  return waitForPanel(app, 'worktree-cleanup', 'wtcleanup:confirm:', start, session.threadId);
-}
 
 export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
   it('closed-topic worktree cleanup requires confirmation and preserves other directories and history', async t => {
     const app = getApp();
     const ordinary = await createManagedTopic(app);
+    await app.runtime.ensure(ordinary);
     const ordinaryStart = app.apiCalls.length;
     await setTopicClosed(app, ordinary, true);
     assert.equal(await app.runtime.inspectWorktree(app.store.getSession(ordinary.id)!), undefined);
 
-    const created = await createManagedTopic(app);
-    await app.runtime.worktree(created, 'e2e-cleanup-target');
-    app.store.setSessionCwd(created.id, created.cwd);
-    const session = app.store.getSession(created.id)!;
-    const target = await app.runtime.inspectWorktree(session);
-    assert.ok(target);
+    const { session, target } = await createCleanupWorktree(app);
     const bindingPath = join(app.omp.dataDir, 'sessions', session.id, 'binding.json');
     const binding = JSON.parse(await readFile(bindingPath, 'utf8'));
     const history = await readSessionHistory(app.omp.dataDir, session.id);
@@ -72,12 +59,8 @@ export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
       return true;
     });
     await clickPanel(app, dirty, 0);
-    const loggedFailure = z.object({ event: z.literal('application.console.error'), data: z.array(z.unknown()) });
-    await app.waitForCondition(() => readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').split('\n').some(line => {
-      if (!line) return false;
-      const event = loggedFailure.safeParse(JSON.parse(line));
-      return event.success && event.data.data.some(value => z.object({ message: z.literal(diagnostic) }).safeParse(value).success);
-    }));
+    await app.waitForCondition(() => applicationErrors(app).some(values =>
+      values.some(value => z.object({ message: z.literal(diagnostic) }).safeParse(value).success)));
     assert.equal(await readFile(dirtyFile, 'utf8'), 'retain uncommitted changes\n');
     await unlink(dirtyFile);
     await setTopicClosed(app, session, false);
