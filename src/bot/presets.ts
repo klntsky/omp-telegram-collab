@@ -65,9 +65,7 @@ export class BotPresets {
     if (panel.selected !== undefined) {
       const preset = await this.dependencies.runtime.modelPresetDetails(panel.instanceId, panel.selected, panel.continuation?.cwd ?? this.dependencies.store.getSession(panel.sessionId)?.cwd);
       text = `${panel.selected}\n\n${Object.entries(preset.modelRoles).map(([role, selector]) => `${role}: ${selector}`).join('\n')}${preset.defaultThinkingLevel === undefined ? '' : `\nDefault effort: ${preset.defaultThinkingLevel}`}`;
-      button('Use', {kind: 'use'});
       if (!panel.continuation) button('Make default', {kind: 'default'});
-      button('Back', {kind: 'back'});
       if (panel.detailOffset >= text.length) panel.detailOffset = 0;
       let end = Math.min(panel.detailOffset + 4000, text.length);
       if (end < text.length && text.charCodeAt(end - 1) >= 0xD800 && text.charCodeAt(end - 1) <= 0xDBFF) end--;
@@ -131,16 +129,12 @@ export class BotPresets {
       await ctx.answerCallbackQuery();
       return;
     }
-    if (action.kind === 'select') {
-      panel.selected = action.name;
-      panel.detailOffset = 0;
-    } else if (action.kind === 'back') delete panel.selected;
-    else if (action.kind === 'page') {
+    if (action.kind === 'page') {
       if (panel.selected === undefined) panel.listOffset = action.offset;
       else panel.detailOffset = action.offset;
     }
     else {
-      const name = panel.selected;
+      const name = action.kind === 'select' ? action.name : panel.selected;
       if (name === undefined) return;
       await this.dependencies.runtime.modelPresetDetails(panel.instanceId, name, panel.continuation?.cwd ?? this.dependencies.store.getSession(panel.sessionId)?.cwd);
       if (panel.continuation) {
@@ -167,18 +161,29 @@ export class BotPresets {
         live.default_model_preset = name;
       } else {
         const session = this.presetSession(panel);
-        const release = this.dependencies.runtime.retain(session.id);
-        try {
-          await this.dependencies.runtime.ensure(session);
+        const authorizeMutation = async () => {
+          // Session mutations need fresh permissions, not a writable configuration file.
           await this.dependencies.settingsAccess(ctx, panel);
           this.presetSession(panel);
+        };
+        const release = this.dependencies.runtime.retain(session.id);
+        try {
+          await this.dependencies.runtime.ensure(session, authorizeMutation);
+          await authorizeMutation();
           await this.dependencies.runtime.modelPresets(session, name);
         } catch (error) {
           if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
           await replyTo(ctx, panel.destination, "Can't change model preset while busy. /stop first");
+          await ctx.answerCallbackQuery();
+          return;
         } finally {
           release();
         }
+      }
+      if (action.kind === 'select') {
+        // A rejected switch must leave catalog paging and the current buttons intact.
+        panel.selected = name;
+        panel.detailOffset = 0;
       }
     }
     await this.renderPresetPanel(panel);

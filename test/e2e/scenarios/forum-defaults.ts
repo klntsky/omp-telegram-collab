@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
-import { readFile } from 'node:fs/promises';
+import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
@@ -9,9 +9,16 @@ import { completeWriteTask, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
-export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'defaultsFirst' | 'defaultsUnchanged' | 'defaultsSwitched' | 'defaultsManual' | 'defaultsNext'>): void {
-  it('forum model presets and first-prompt skills', async () => {
+export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'defaultsFirst' | 'defaultsUnchanged' | 'defaultsSwitched' | 'defaultsBusy' | 'defaultsManual' | 'defaultsNext'>): void {
+  it('forum model presets and first-prompt skills', async t => {
     const app = getApp();
+    const originalAgentConfig = await readFile(app.omp.agentConfigPath, 'utf8');
+    t.after(() => writeFile(app.omp.agentConfigPath, originalAgentConfig));
+    const settings = JSON.parse(originalAgentConfig);
+    // A real second catalog page distinguishes a rejected selection from applied details.
+    for (let i = 0; i < 32; i++) settings.modelPresets[`z-page-${i}`] = settings.modelPresets['e2e-primary'];
+    const configuredAgentConfig = JSON.stringify(settings);
+    await writeFile(app.omp.agentConfigPath, configuredAgentConfig);
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
     const chooseDefault = async (field: 'default_model_preset' | 'default_new_topic_skills', value?: string, expectedSkills?: string[]) => {
       const panel = await openPanel(app, '/settings');
@@ -49,13 +56,35 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
     assert.ok(!taskInput(app.omp.provider, tasks.defaultsUnchanged).text.includes('/skill:e2e-review'));
     await chooseDefault('default_model_preset', 'e2e-alternate');
     const binding = await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8');
-    await app.sendAndWait('/model_preset e2e-primary', session.threadId);
+    const presets = await openPanel(app, '/model_preset', session.threadId);
+    const names = await app.runtime.availableModelPresets(session.instanceId, session.cwd);
+    const selected = names.indexOf('e2e-primary');
+    assert.ok(selected >= 0);
+    const frameStart = app.hostFrames.length;
+    await app.sendAndWait(`/p ${tasks.defaultsBusy.prompt}`, session.threadId);
+    await app.omp.provider.waitForRequest(tasks.defaultsBusy.name, t.signal);
+    const mode = (await stat(app.config.configPath)).mode & 0o777;
+    await chmod(app.config.configPath, 0o400);
+    try {
+      // Telegram forwards these callbacks independently of the native model turn:
+      // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp (Client::process_new_callback_query_queue).
+      await clickPanel(app, presets, selected, false);
+      await app.sendAndWait('/stop', session.threadId);
+      await app.omp.provider.waitForAbort(tasks.defaultsBusy.name, t.signal);
+      await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame =>
+        frame.t === 'event' && frame.event.type === 'agent_end'));
+      await clickPanel(app, presets, presets.buttons.length - 1);
+      await clickPanel(app, presets, 0);
+    } finally {
+      await chmod(app.config.configPath, mode);
+    }
     assert.equal(savedChat().default_model_preset, 'e2e-alternate');
     const switched = await app.sendAndWait(`/p ${tasks.defaultsSwitched.prompt}`, session.threadId);
     await completeWriteTask(app, tasks.defaultsSwitched, switched, session.threadId);
     assert.equal(app.omp.provider.requests.get(tasks.defaultsSwitched.name)![0]!.model, 'e2e-model');
     assert.ok(!taskInput(app.omp.provider, tasks.defaultsSwitched).text.includes('/skill:e2e-review'));
     assert.equal(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8'), binding);
+    assert.equal(await readFile(app.omp.agentConfigPath, 'utf8'), configuredAgentConfig);
     await app.sendAndWait('/kill', session.threadId);
 
     const manual = await createManagedTopic(app);
@@ -80,6 +109,6 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
     assert.ok(!nextInput.includes('/skill:e2e-z-followup'));
     assert.ok(!nextInput.includes('/skill:e2e-review'));
     assert.equal(app.omp.provider.requests.get(tasks.defaultsNext.name)![0]!.model, 'e2e-alternate');
-    app.omp.provider.assertComplete([tasks.defaultsFirst.name, tasks.defaultsUnchanged.name, tasks.defaultsSwitched.name, tasks.defaultsManual.name, tasks.defaultsNext.name]);
+    app.omp.provider.assertComplete([tasks.defaultsFirst.name, tasks.defaultsUnchanged.name, tasks.defaultsSwitched.name, tasks.defaultsBusy.name, tasks.defaultsManual.name, tasks.defaultsNext.name]);
   });
 }

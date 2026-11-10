@@ -88,7 +88,7 @@ export class SettingsMutations {
                 : 'worktrees';
       const labels = {
         prompts: 'Message handling',
-        proposals: 'Who can send requests',
+        proposals: 'Who can send prompts',
         skills: 'Default skills',
         presets: 'Default model preset',
         worktrees: '🌳 Worktrees',

@@ -322,9 +322,7 @@ export async function setupCollaborationTest(
     },
     waitForMessageHandled,
     async waitForTaskStarted(name: string): Promise<void> {
-      // A handled update may only have queued an initial task: automatic
-      // worktree provisioning and host connection continue in the background.
-      // Observe the actual model request before starting the reply deadline.
+      // Initial-task recovery can still be starting OMP after its update handler returns.
       await omp.step('workflow.task startup', () => withTelegramTestDeadline(
         'task startup', config.omp.startupTimeoutMs, AbortSignal.any([t.signal, failed.signal]),
         signal => omp.provider.waitForRequest(name, signal),
@@ -363,6 +361,7 @@ export interface CollaborationTest {
     workspace: string;
     dataDir: string;
     executable: string;
+    agentConfigPath: string;
     args: string[];
     relayUrl: string;
     interruptNextGuest(): void;
