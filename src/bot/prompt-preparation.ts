@@ -5,6 +5,7 @@ import type { PromptExtension } from '../telegram-commands.js';
 import type { ImageContent } from '@oh-my-pi/pi-wire';
 import type { TelegramImage } from '../telegram-input.js';
 import { findInstance, refreshTermination } from '../config.js';
+import { contextDestination, replyTo } from '../telegram-destination.js';
 
 export interface PromptPreparationDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -16,6 +17,7 @@ export interface PromptPreparationDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   dropListener(sessionId: string): void;
+  replyPresetText(ctx: Context, text: string): Promise<void>;
 }
 
 export class PromptPreparation {
@@ -54,7 +56,8 @@ export class PromptPreparation {
         await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
         checkSession();
-        await this.deps.options.runtime.modelPresets(session, name);
+        const text = await this.deps.options.runtime.modelPresets(session, name);
+        await this.deps.replyPresetText(ctx, text);
       } finally { release(); }
     };
     let selectedPreset: string | undefined;
@@ -64,13 +67,15 @@ export class PromptPreparation {
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
       checkSession();
       if (extension.kind === 'worktree') {
+        let text: string;
         try {
-          await this.deps.options.runtime.worktree(session);
+          text = await this.deps.options.runtime.worktree(session);
           checkSession();
           this.deps.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.deps.dropListener(session.id);
         }
+        await replyTo(ctx, contextDestination(ctx), `🌳 ${text}`);
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');

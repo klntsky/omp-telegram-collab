@@ -80,11 +80,9 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
         return true;
       }
       if (!deps.usersCanProposePrompts(ctx.chat.id) && !(await deps.currentAdmin(ctx))) return true;
-      if (!intent.content.text.trim() && !intent.content.images.length &&
-          !intent.extensions?.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
-        if (intent.kind === 'session-prompt' && destination.kind !== 'general')
-          await replyTo(ctx, destination, 'Usage: /p <prompt>');
-        return true;
+      if (!intent.content.text.trim() && !intent.content.images.length) {
+        await replyTo(ctx, destination, intent.kind === 'new-task' ? 'Usage: /new <prompt>' : 'Usage: /p <prompt>');
+        if (!intent.extensions?.some(extension => extension.kind !== 'skill')) return true;
       }
       await deps.authorize(ctx.chat.id, ctx.from.id);
       const instanceId = deps.assignedId(ctx.chat.id);
