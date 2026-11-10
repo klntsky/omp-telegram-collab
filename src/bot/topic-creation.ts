@@ -1,5 +1,5 @@
 import type { Context, Bot } from 'grammy';
-import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
+import type { TopicSession, PendingPromptContent, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
@@ -25,6 +25,7 @@ export interface TopicCreationDependencies {
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   requireSessionAssignment(session: TopicSession): void;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority: Context): Promise<void>;
+  uploadDocuments(ctx: Context, session: TopicSession, content: PendingPromptContent, authority: Context): Promise<PromptContent>;
   skillKey(ctx: Context): PendingSkillKey;
   defaultNewTopicSkill(chatId: number): string | undefined;
   albumContexts(ctx: Context): readonly Context[];
@@ -38,7 +39,7 @@ export class TopicCreation {
   constructor(private readonly dependencies: TopicCreationDependencies) {}
   async newSession(
     ctx: Context,
-    task?: PromptContent,
+    task?: PendingPromptContent,
     attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string },
     name?: string,
     accepted?: () => void,
@@ -101,7 +102,7 @@ export class TopicCreation {
       attached
         ? { kind: 'attached', instanceId: attached.hostId, sessionId: attached.sessionId }
         : { kind: 'managed' },
-      attached || worktree || automaticWorktree || extensions.length ? undefined : task,
+      attached || worktree || automaticWorktree || extensions.length || task?.documents?.length ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
     );
@@ -113,7 +114,7 @@ export class TopicCreation {
         if (!(await this.dependencies.currentAdmin(authority)))
           throw new Error('Administrator access changed before worktree creation.');
         await this.dependencies.createTopicWorktree(session);
-        if (task !== undefined && !extensions.length) {
+        if (task !== undefined && !extensions.length && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
           if (!(await this.dependencies.currentAdmin(authority)))
             throw new Error('Administrator access changed before initial task submission.');
@@ -130,7 +131,7 @@ export class TopicCreation {
           });
           throw error;
         }
-        if (task !== undefined) {
+        if (task !== undefined && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
           if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
           this.dependencies.requireSessionAssignment(session);
@@ -197,6 +198,10 @@ export class TopicCreation {
         }
       await this.dependencies.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
       await this.dependencies.listen(session);
+      if (task?.documents?.length) {
+        task = await this.dependencies.uploadDocuments(ctx, session, task, authority);
+        this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
+      }
     } finally {
       this.dependencies.options.store.finishInitialTaskPreparation(session.id);
     }

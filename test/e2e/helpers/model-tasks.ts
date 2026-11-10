@@ -44,12 +44,12 @@ export function writeScenario(task: WriteTask): FakeLlmScenario {
   ] };
 }
 
-export function writeReadScenario(task: WriteTask): FakeLlmScenario {
+export function writeReadScenario(task: WriteTask, readPath = task.path): FakeLlmScenario {
   const scenario = writeScenario(task);
   return { ...scenario, steps: [
     scenario.steps[0]!,
     { type: 'tool', id: `call_read_${task.name}`, name: 'read', arguments: {
-      i: 'Reading E2E evidence', path: task.path,
+      i: 'Reading E2E evidence', path: readPath,
     } },
     ...scenario.steps.slice(1),
   ] };
@@ -85,6 +85,14 @@ export function taskInput(provider: FakeLlmProvider, task: WriteTask) {
     text: content.flatMap(part => part.text === undefined ? [] : [part.text]).join('\n'),
     images: content.flatMap(part => part.image_url ? [part.image_url.url] : []),
   };
+}
+
+export function taskReadResult(provider: FakeLlmProvider, task: WriteTask): unknown {
+  const requests = provider.requests.get(task.name)!;
+  const messages = requestMessages.parse(requests.at(-1)!.messages);
+  const result = messages.find(message => message.role === 'tool' && message.tool_call_id === `call_read_${task.name}`);
+  assert.ok(result);
+  return result.content;
 }
 
 export async function readSessionHistory(dataDir: string, sessionId: string): Promise<string> {

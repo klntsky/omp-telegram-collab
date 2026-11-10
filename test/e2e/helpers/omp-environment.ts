@@ -167,6 +167,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   } } }), { mode: 0o600 });
   await writeFile(join(agent, 'config.yml'), JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
+    // Scripted turns exclude OMP's skill-description model calls, not explicit skill invocation.
+    // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/session/settings.ts#L437-L448
+    skillful: false,
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
     ...(options.compaction ? { compaction: options.compaction } : {}),
     modelPresets: {

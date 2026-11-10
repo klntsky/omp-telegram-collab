@@ -111,7 +111,7 @@ export async function setupCollaborationTest(
     signal: t.signal,
     diagnostic: t.diagnostic.bind(t),
     after: ((run: Cleanup) => { ompCleanup.push(run); }) as TestContext['after'],
-  }, options);
+  }, {...options, tools:['write', 'read', 'ask']});
   log = omp.log;
   void omp.provider.failure.catch(fail);
   for (const method of ['log', 'error'] as const) {

@@ -301,6 +301,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     preparePrompt: preparation.preparePrompt.bind(preparation),
+    uploadDocuments: preparation.uploadDocuments.bind(preparation),
     skillKey: skills.key.bind(skills),
     defaultNewTopicSkill: preparation.defaultNewTopicSkill.bind(preparation),
     // Input routing needs this owner first; resolve album membership only during dispatch.
@@ -370,6 +371,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     renderPresetPanel: presets.renderPresetPanel.bind(presets),
     replyPresetText: presets.replyPresetText.bind(presets),
     preparePrompt: preparation.preparePrompt.bind(preparation),
+    uploadDocuments: preparation.uploadDocuments.bind(preparation),
     newSession: creation.newSession.bind(creation),
     listen: async (session) => { await connections.listen(session); },
     listener: connections.listeners.get.bind(connections.listeners),

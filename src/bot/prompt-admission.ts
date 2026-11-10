@@ -1,5 +1,5 @@
 import type { Bot, Context } from 'grammy';
-import type { PromptContent, TopicSession } from '../../shared/contracts.js';
+import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { PromptExtension } from '../telegram-commands.js';
 import { randomBytes } from 'node:crypto';
@@ -31,7 +31,8 @@ export interface PromptAdmissionDependencies {
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
-  newSession(ctx: Context, task?: PromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkill?:string}): Promise<void>;
+  uploadDocuments(ctx: Context, session: TopicSession, content: PendingPromptContent, authority: Context): Promise<PromptContent>;
+  newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkill?:string}): Promise<void>;
   listen(session: TopicSession): Promise<void>;
   listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
@@ -51,12 +52,12 @@ export class PromptAdmission {
   invalidateProposals(sessionId: string): void {
     for (const [token, proposal] of this.promptProposals) if (proposal.sessionId === sessionId) this.promptProposals.delete(token);
   }
-  async routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void> {
+  async routePrompt(ctx: Context, content: PendingPromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void> {
     const epoch = this.admissionEpoch;
     const folderFingerprint = !session ? JSON.stringify(this.deps.folderSettings(ctx.chat!.id)) : undefined;
     const generation = session ? this.deps.options.store.getSessionGeneration(session.id) : undefined;
     const instanceId = this.deps.assignedId(ctx.chat!.id);
-    const hasTask = !!content.text.trim() || !!content.images?.length;
+    const hasTask = !!content.text.trim() || !!content.images?.length || !!content.documents?.length;
     const admin = await this.deps.currentAdmin(ctx);
     if (!admin && !this.deps.usersCanProposePrompts(ctx.chat!.id)) return;
     const preparations = extensions.filter(extension => extension.kind !== 'skill');
@@ -253,7 +254,7 @@ export class PromptAdmission {
     this.deps.options.store.clearPendingSkills(key);
     for (const name of remaining) this.deps.options.store.addPendingSkill(key,name);
   }
-  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
+  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     this.deps.requireSessionAssignment(session);
     await this.deps.listen(session);
@@ -263,6 +264,7 @@ export class PromptAdmission {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
+    const prompt = await this.deps.uploadDocuments(ctx, session, content, authority);
     const messageId = ctx.message!.message_id;
     const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
       if (selected.names.length) {
@@ -280,7 +282,7 @@ export class PromptAdmission {
       if (original.message && original.message.message_id !== messageId)
         this.deps.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
     try {
-      this.deps.sendPrompt(this.deps.listener(session.id)!,content,messageId,restore);
+      this.deps.sendPrompt(this.deps.listener(session.id)!,prompt,messageId,restore);
     } catch (error) {
       restore?.();
       throw error;
