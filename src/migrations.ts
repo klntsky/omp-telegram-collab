@@ -34,12 +34,21 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 6) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
+    if (version !== 0 && version !== 5 && version !== 6) throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
-      if (existing) throw new Error('Unsupported existing database; create a fresh database');
+      if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
       db.exec('PRAGMA user_version=6');
+    } else if (version === 5) {
+      // Old callbacks describe a scalar selection; refresh them without discarding saved changes.
+      db.exec(`
+        ALTER TABLE new_topic_skills RENAME COLUMN name TO names;
+        UPDATE new_topic_skills SET names = json_array(names);
+        UPDATE settings_panels
+          SET panel = json_set(panel, '$.revision', json_extract(panel, '$.revision') + 1);
+        PRAGMA user_version=6;
+      `);
     }
     db.exec('COMMIT');
   } catch (error) {
