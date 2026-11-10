@@ -109,7 +109,7 @@ export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['k
   };
 }
 
-export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number): Promise<void> {
+export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, waitForEdit = true): Promise<void> {
   const start = app.apiCalls.length;
   const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [panel.messageId]);
   const markup = message?.raw._ === 'message' ? message.raw.replyMarkup : undefined;
@@ -118,7 +118,7 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
     button.type._ === 'inlineButtonTypeCallback' ? [button.type.data] : []));
   const data = buttons.at(index)!;
   await app.telegram.user.client.getCallbackAnswer({ chatId: app.telegram.forum.chat, message: panel.messageId, data });
-  if ((panel.kind !== '/settings' && panel.kind !== '/model_preset') || index === -1) return;
+  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/model_preset') || index === -1) return;
   const editedPanel = z.object({ message_id: z.literal(panel.messageId), reply_markup: replyMarkup });
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {

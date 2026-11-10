@@ -35,6 +35,7 @@ export function createWorkflowTasks() {
     defaultsFirst: createWriteTask('defaults-first'),
     defaultsUnchanged: createWriteTask('defaults-unchanged'),
     defaultsSwitched: createWriteTask('defaults-switched'),
+    defaultsBusy: createWriteTask('defaults-busy'),
     defaultsManual: createWriteTask('defaults-manual'),
     defaultsNext: createWriteTask('defaults-next'),
     capacityFirst: createWriteTask('capacity-first'),
@@ -49,7 +50,7 @@ export function createWorkflowTasks() {
       : [questionStep(name)],
   }));
   const scenarios = Object.values(tasks).map(task =>
-    task === tasks.capacityFirst || task === tasks.capacitySecond
+    task === tasks.defaultsBusy || task === tasks.capacityFirst || task === tasks.capacitySecond
       ? { name: task.name, prompt: task.prompt, steps: [{ type: 'await-abort' as const }] }
       : task === tasks.question || task === tasks.customAnswer ? questionScenario(task) : writeScenario(task));
   return { tasks, scenarios, interrupted, cancelledQuestion, questionControls };
