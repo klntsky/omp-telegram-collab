@@ -28,11 +28,11 @@ export async function notifyReload(config: AppConfig, socketDataDir = config.dat
       reject(failure());
     });
   });
-  const timer = setTimeout(() => req.destroy(failure()), 5000);
   req.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') acknowledge();
     else { console.error('Configuration reload request failed.', error); reject(error); }
   });
   req.end(JSON.stringify({ configPath: config.configPath }));
-  try { await promise; } finally { clearTimeout(timer); req.destroy(); }
+  // Reload includes Telegram retry delays and generation replacement, so elapsed time cannot establish failure.
+  try { await promise; } finally { req.destroy(); }
 }

@@ -245,6 +245,8 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    Check the resolved project directory before confirming. The agent gets the service account's filesystem and credential access, not an isolated view of that directory. Approval registers an existing directory; it does not create one.
 
+   Interactive prompts remain visible while awaiting input. Bot-token entry hides the token, not the prompt.
+
    <details>
    <summary>Example Telegram setup messages</summary>
 
@@ -334,6 +336,8 @@ Created instance 2: /srv/projects/backend
 Change `defaultDir` to use another existing canonical absolute directory for future sessions. Existing sessions keep their own working directories, history, and host bindings after reload or restart. Relative `folder_options` use the new default only for new sessions. Moving or deleting an old session's directory can make that session unavailable, but does not prevent the service from starting.
 
 Select an existing instance during enrollment with `approve REQUEST_CODE --instance ID`. Use `--path PATH` to register a new instance. Instance-management commands use IDs so instances sharing a directory remain distinguishable. A forum with stored sessions cannot be reassigned to another instance ID.
+
+Configuration-writing commands wait for the running service to acknowledge that the change has been applied, including Telegram command-menu updates. Telegram retry delays can keep the command waiting. A service rejection is reported with its original diagnostic; the saved configuration is retained.
 
 The old directory-keyed configuration and older database schemas are not supported. Back up existing configuration and runtime data before replacing them; the service does not convert them automatically.
 

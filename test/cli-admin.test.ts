@@ -208,7 +208,7 @@ test('reload notification requires an acknowledgement from the selected service 
     assert.deepEqual(received, {configPath: f.configPath});
     status = 409;
     delay = 0;
-    await assert.rejects(notifyReload(config), /Configuration saved/);
+    await assert.rejects(notifyReload(config), /wrong config/);
   } finally { server.close(); await once(server, 'close'); }
 });
 
