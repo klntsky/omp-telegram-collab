@@ -6,6 +6,7 @@ import { setupCollaborationTest } from '../helpers/collaboration-fixture.js';
 import { startCollaborationProcess } from '../helpers/application-process.js';
 import { enrollForum } from '../helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, readSessionHistory, writeScenario } from '../helpers/model-tasks.js';
+import { combineTelegramErrors } from '../helpers/errors.js';
 import test from 'node:test';
 
 export function registerForkFailures(): void {
@@ -88,6 +89,7 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
       configPath: app.config.configPath, topicActivityEmojis: app.topicActivityEmojis, log: app.omp.log,
     });
     let interruptedId: string | undefined;
+    const failures: unknown[] = [];
     try {
       await app.send('/fork', source.threadId);
       const prepared = await process.forkPrepared;
@@ -104,11 +106,23 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
         return Promise.all(files.filter(file => file.endsWith('.jsonl')).map(file => readFile(join(path, file), 'utf8')));
       }));
       assert.ok(nativeHistories.flat().some(contents => contents.includes(seed.toolCallId) && contents.includes(seed.evidence.nonce)));
+    } catch (error) {
+      failures.push(error);
     } finally {
-      const exit = await process.kill();
-      assert.equal(exit.signal, 'SIGKILL');
-      await app.restart();
+      try {
+        const exit = await process.kill();
+        assert.equal(exit.signal, 'SIGKILL');
+      } catch (error) {
+        if (!failures.includes(error)) failures.push(error);
+      }
+      try {
+        await app.restart();
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw combineTelegramErrors(...failures);
     const destination = app.store.getSession(interruptedId!)!;
     assert.ok(destination);
     const sent = await app.sendAndWait(`/p ${probe.prompt}`, destination.threadId);

@@ -31,13 +31,29 @@ async function main(): Promise<void> {
   const nativeFork = runtime.fork.bind(runtime);
   runtime.fork = async (source, destination, target, beforeMutation) => {
     let mutations = 0;
-    await nativeFork(source, destination, target, async () => {
-      await beforeMutation?.();
-      if (++mutations === 2) {
-        process.send!({ type: 'forkPrepared', sourceId: source.id, destinationId: destination.id });
-        await new Promise<never>(() => undefined);
-      }
-    });
+    const context = { sourceId: source.id, destinationId: destination.id };
+    process.send!({ type: 'forkProgress', ...context, stage: 'started' });
+    try {
+      await nativeFork(source, destination, target, async () => {
+        const mutation = ++mutations;
+        process.send!({ type: 'forkProgress', ...context, stage: 'authorizing', mutation });
+        await beforeMutation?.();
+        process.send!({ type: 'forkProgress', ...context, stage: 'authorized', mutation });
+        if (mutation === 2) {
+          process.send!({ type: 'forkPrepared', ...context });
+          await new Promise<never>(() => undefined);
+        }
+      });
+      throw new Error('Native fork completed without reaching the interruption barrier');
+    } catch (error) {
+      // BotService owns command errors and may deliver them to Telegram without
+      // rejecting polling. Forward the original failure before that boundary,
+      // otherwise the parent only sees an unrelated preparation timeout.
+      const diagnostic = error instanceof Error ? error.stack ?? error.message : String(error);
+      console.error(diagnostic);
+      process.send!({ type: 'failure', ...context, mutation: mutations, diagnostic });
+      throw error;
+    }
   };
   const bot = new Bot(botConfig.token, { client: { environment: 'test' } });
   const service = new BotService({ config, botConfig, token: botConfig.token, store, runtime, bot, topicActivityEmojis });
