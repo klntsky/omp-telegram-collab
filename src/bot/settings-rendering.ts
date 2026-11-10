@@ -54,7 +54,7 @@ export async function renderSettings(
         },
       );
       button(
-        `Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
+        `Who can send prompts: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
         {
           kind: 'set',
           field: 'users_can_propose_prompts',
