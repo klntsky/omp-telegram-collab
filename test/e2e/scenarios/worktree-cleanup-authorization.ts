@@ -1,47 +1,22 @@
 import assert from 'node:assert/strict';
-import { randomInt } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { it } from 'node:test';
-import { createTelegramTestClient, readTelegramApplicationCredentials } from '../../../scripts/lib/telegram-test-auth.js';
+import { forkTelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
+import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { bounded } from '../helpers/async.js';
-import { resolveTelegramTestEnvFile, withTelegramTestSessionStorage } from '../helpers/telegram-env.js';
 import { clickPanel, setTopicClosed, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
 import { createCleanupWorktree } from '../helpers/worktree-cleanup.js';
 
 export function registerWorktreeCleanupAuthorization(getApp: () => CollaborationTest): void {
   it('cleanup requires current administrator access and binds confirmation to its requesting administrator', async t => {
     const app = getApp();
-    const credentials = await withTelegramTestSessionStorage(await resolveTelegramTestEnvFile(), async storage =>
-      readTelegramApplicationCredentials(storage.env));
-    const participant = createTelegramTestClient(credentials);
-    t.after(() => participant.destroy());
     const signal = t.signal;
-    const config = await participant.call({ _: 'help.getConfig' }, { abortSignal: signal });
-    assert.equal(config.testMode, true);
-    // Real test-DC accounts and their DC-derived codes are documented by Telegram:
-    // https://core.telegram.org/api/auth#test-accounts (not a mocked authorization response).
-    const phoneNumber = `999662${randomInt(10000).toString().padStart(4, '0')}`;
-    const sent = await participant.call({
-      _: 'auth.sendCode', phoneNumber, apiId: credentials.apiId, apiHash: credentials.apiHash,
-      settings: { _: 'codeSettings' },
-    }, { abortSignal: signal });
-    assert.equal(sent._, 'auth.sentCode');
-    assert.ok('length' in sent.type);
-    // The server advertises six digits despite the five-digit documentation example.
-    // https://github.com/tdlib/td/issues/1652 records the upstream correction.
-    let authorization = await participant.call({
-      _: 'auth.signIn', phoneNumber, phoneCodeHash: sent.phoneCodeHash, phoneCode: '2'.repeat(sent.type.length),
-    }, { abortSignal: signal });
-    if (authorization._ === 'auth.authorizationSignUpRequired') {
-      authorization = await participant.call({
-        _: 'auth.signUp', phoneNumber, phoneCodeHash: sent.phoneCodeHash,
-        firstName: 'Cleanup authorization', lastName: 'E2E',
-      }, { abortSignal: signal });
-    }
-    assert.equal(authorization._, 'auth.authorization');
-    await participant.notifyLoggedIn(authorization);
-    const identity = await participant.getMe();
+    const sessionOwner = await withTelegramTestDeadline('secondary user authorization',
+      telegramTestTimeouts.authorization, signal, scope => forkTelegramTestSession(scope, app.telegram.user.account.id));
+    t.after(() => sessionOwner.close());
+    const participant = sessionOwner.client;
+    const identity = await bounded(participant.getMe(), signal);
     assert.notEqual(identity.id, app.telegram.user.account.id);
     assert.equal(identity.isBot, false);
     const owner = app.telegram.user.client;
