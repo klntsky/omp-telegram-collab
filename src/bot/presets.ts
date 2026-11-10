@@ -134,11 +134,7 @@ export class BotPresets {
       else panel.detailOffset = action.offset;
     }
     else {
-      if (action.kind === 'select') {
-        panel.selected = action.name;
-        panel.detailOffset = 0;
-      }
-      const name = panel.selected;
+      const name = action.kind === 'select' ? action.name : panel.selected;
       if (name === undefined) return;
       await this.dependencies.runtime.modelPresetDetails(panel.instanceId, name, panel.continuation?.cwd ?? this.dependencies.store.getSession(panel.sessionId)?.cwd);
       if (panel.continuation) {
@@ -165,11 +161,15 @@ export class BotPresets {
         live.default_model_preset = name;
       } else {
         const session = this.presetSession(panel);
+        const authorizeMutation = async () => {
+          // Session mutations need fresh permissions, not a writable configuration file.
+          await this.dependencies.settingsAccess(ctx, panel);
+          this.presetSession(panel);
+        };
         const release = this.dependencies.runtime.retain(session.id);
         try {
-          await this.dependencies.runtime.ensure(session);
-          await this.dependencies.settingsAccess(ctx, panel, true);
-          this.presetSession(panel);
+          await this.dependencies.runtime.ensure(session, authorizeMutation);
+          await authorizeMutation();
           await this.dependencies.runtime.modelPresets(session, name);
         } catch (error) {
           if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
@@ -179,6 +179,11 @@ export class BotPresets {
         } finally {
           release();
         }
+      }
+      if (action.kind === 'select') {
+        // A rejected switch must leave catalog paging and the current buttons intact.
+        panel.selected = name;
+        panel.detailOffset = 0;
       }
     }
     await this.renderPresetPanel(panel);

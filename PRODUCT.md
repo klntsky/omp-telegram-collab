@@ -293,6 +293,8 @@ In an open session topic, `/model_preset` opens preset buttons without starting 
 
 Large preset catalogs and long role details use page buttons. Make default remains available on every selected-preset details page.
 
+Session-only switches remain available with read-only configuration; saving a forum default requires writable configuration. A rejected busy selection leaves the current catalog and its pagination intact.
+
 **Accepted tradeoff: instance-root preset discovery.** Telegram preset-name validation and menu discovery must use the assigned instance root, including for sessions running in a worktree. Worktree-specific preset catalogs do not expand the names accepted by standalone switches or composed commands. A live host's preset listing can therefore show a worktree-only name that Telegram rejects. A root-listed name can also be unavailable in the target host; native rejection stops the sequence before task submission. This scope difference is an explicitly accepted product requirement, not a defect.
 
 Busy model-preset switches reply “Can't change model preset while busy. /stop first” without the generic service-failure wrapper.
