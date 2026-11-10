@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { setTimeout as wait } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { runAdmin, type AdminDependencies } from '../src/cli-admin.js';
 import { notifyReload } from '../src/cli/reload.js';
@@ -188,12 +189,15 @@ test('reload notification requires an acknowledgement from the selected service 
   mkdirSync(config.dataDir, {recursive: true});
   let received: unknown;
   let status = 200;
+  // Exercise the real socket acknowledgement beyond the former five-second client deadline.
+  let delay = 5100;
   const server = createServer(async (req, res) => {
     assert.equal(req.url, '/reload');
     assert.equal(req.method, 'POST');
     let text = '';
     for await (const chunk of req) text += String(chunk);
     received = JSON.parse(text);
+    await wait(delay);
     res.writeHead(status, {'content-type': 'application/json'});
     res.end(JSON.stringify(status === 200 ? {ok: true} : {error: 'wrong config'}));
   });
@@ -203,6 +207,7 @@ test('reload notification requires an acknowledgement from the selected service 
     await notifyReload(config);
     assert.deepEqual(received, {configPath: f.configPath});
     status = 409;
+    delay = 0;
     await assert.rejects(notifyReload(config), /Configuration saved/);
   } finally { server.close(); await once(server, 'close'); }
 });
