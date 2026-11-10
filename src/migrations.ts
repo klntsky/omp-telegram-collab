@@ -9,6 +9,8 @@ const schema = `
       CREATE TABLE IF NOT EXISTS initial_users (session_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_authorities (session_id TEXT PRIMARY KEY REFERENCES sessions(id),user_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_images (session_id TEXT PRIMARY KEY REFERENCES sessions(id),images TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_documents (session_id TEXT PRIMARY KEY REFERENCES sessions(id),documents TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS initial_document_setups (session_id TEXT PRIMARY KEY REFERENCES sessions(id),setup TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS initial_messages (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
@@ -34,12 +36,12 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 5) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
+    if (version !== 0 && version !== 6) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database; create a fresh database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=5');
+      db.exec('PRAGMA user_version=6');
     }
     db.exec('COMMIT');
   } catch (error) {

@@ -10,6 +10,7 @@ import { contextDestination, replyTo } from '../telegram-destination.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import type { Listener, PresetPanel, PromptProposal } from './types.js';
 import type { CapacityAdmission } from './capacity-admission.js';
+import type { PromptPreparation } from './prompt-preparation.js';
 
 export interface PromptAdmissionDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime' | 'configWritable'>;
@@ -31,7 +32,7 @@ export interface PromptAdmissionDependencies {
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
-  uploadDocuments(ctx: Context, session: TopicSession, content: PendingPromptContent, authority: Context): Promise<PromptContent>;
+  uploadDocuments: PromptPreparation['uploadDocuments'];
   newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkill?:string}): Promise<void>;
   listen(session: TopicSession): Promise<void>;
   listener(sessionId: string): Listener | undefined;
@@ -264,7 +265,10 @@ export class PromptAdmission {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
-    const prompt = await this.deps.uploadDocuments(ctx, session, content, authority);
+    const prompt = await this.deps.uploadDocuments(session, content, async () => {
+      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
+    }, contextDestination(ctx));
     const messageId = ctx.message!.message_id;
     const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
       if (selected.names.length) {

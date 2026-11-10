@@ -5,9 +5,12 @@ import type { PromptExtension } from '../telegram-commands.js';
 import type { ImageContent } from '@oh-my-pi/pi-wire';
 import type { TelegramImage } from '../telegram-input.js';
 import { findInstance, refreshTermination } from '../config.js';
-import { constants, closeSync, fstatSync, ftruncateSync, openSync, realpathSync, writeFileSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { saveDocument } from './document-file.js';
 import { basename, join } from 'node:path';
-import { contextDestination, replyTo } from '../telegram-destination.js';
+import { sendTo } from '../telegram-destination.js';
+import type { TopicDestination } from '../../shared/topic-destination.js';
+import type { InitialDocumentSetup } from '../store/initial-documents.js';
 
 export interface PromptPreparationDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -34,21 +37,20 @@ export class PromptPreparation {
       return {type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType};
     }));
   }
-  async uploadDocuments(ctx: Context, session: TopicSession, content: PendingPromptContent, authority: Context): Promise<PromptContent> {
+  async uploadDocuments(session: TopicSession, content: PendingPromptContent, authorize: () => Promise<void>, destination: TopicDestination, saved?: (remaining: PendingPromptContent) => void): Promise<PromptContent> {
     const {documents, ...prompt} = content;
     if (!documents?.length) return prompt;
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const check = async () => {
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
+      await authorize();
       if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new Error('The service is stopping');
       this.deps.requireSessionAssignment(session);
       if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
           this.deps.options.store.getSession(session.id)?.status !== 'open')
         throw new Error('The session changed before document upload.');
     };
-    const attachments: string[] = [];
-    for (const document of documents) {
+    let text = prompt.text;
+    for (const [index, document] of documents.entries()) {
       const fileName = basename(document.fileName.replaceAll('\\', '/'));
       if (!fileName || fileName === '.' || fileName === '..' || /[\x00-\x1f\x7f]/.test(fileName))
         throw new Error('The document filename is unsafe.');
@@ -63,37 +65,36 @@ export class PromptPreparation {
       const cwd = session.cwd;
       if (realpathSync(cwd) !== cwd) throw new Error('Session working directory identity changed');
       const path = join(cwd, fileName);
-      let overwritten = false;
-      let fd: number;
-      // Never follow a destination symlink or block on a FIFO before checking its type.
-      try {
-        fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-        overwritten = true;
-      }
-      try {
-        if (!fstatSync(fd).isFile()) throw new Error('The document destination is not a regular file.');
-        if (overwritten) ftruncateSync(fd, 0);
-        writeFileSync(fd, bytes);
-      } catch (error) {
-        try { closeSync(fd); } catch (closeError) {
-          throw new AggregateError([error, closeError], [error, closeError].map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n'));
-        }
-        throw error;
-      }
-      closeSync(fd);
-      await replyTo(ctx, contextDestination(ctx), `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`);
-      attachments.push(`Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`);
+      const overwritten = saveDocument(path, bytes);
+      text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
+      saved?.({...prompt, text, documents: documents.slice(index + 1)});
+      await sendTo(this.deps.bot.api, destination, `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`);
     }
-    return {...prompt, text:[prompt.text, ...attachments].filter(Boolean).join('\n\n')};
+    return {...prompt, text};
   }
   defaultNewTopicSkill(chatId: number): string | undefined {
     return findInstance(this.deps.options.config,this.deps.id(),chatId)?.instance.chats
       .find(chat => chat.botId === this.deps.id() && chat.chatId === chatId)?.default_new_topic_skill;
   }
   async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
+    return this.prepareAuthorizedPrompt(session, extensions, async () => {
+      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+    });
+  }
+  async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
+    const setup = this.deps.options.store.getInitialDocumentSetup(session.id);
+    if (!setup) return;
+    if (setup.automaticWorktree) {
+      await authorize();
+      await this.createTopicWorktree(session, authorize);
+      setup.automaticWorktree = false;
+      this.deps.options.store.setInitialDocumentSetup(session.id, setup);
+    }
+    if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(session, setup.extensions, authorize, setup);
+    this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
+  }
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, setup?: InitialDocumentSetup): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -109,25 +110,34 @@ export class PromptPreparation {
       const release = this.deps.options.runtime.retain(session.id);
       try {
         await this.deps.options.runtime.ensure(session);
-        await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-        if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+        await authorize();
         checkSession();
         await this.deps.options.runtime.modelPresets(session, name);
       } finally { release(); }
     };
-    let selectedPreset: string | undefined;
-    for (const extension of extensions) {
+    let selectedPreset = setup?.preset;
+    if (selectedPreset !== undefined) {
+      await authorize();
+      checkSession();
+      await applyPreset(selectedPreset);
+    }
+    for (const [index, extension] of extensions.entries()) {
       if (extension.kind === 'skill') continue;
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+      await authorize();
       checkSession();
       if (extension.kind === 'worktree') {
         try {
-          await this.deps.options.runtime.worktree(session);
+          await this.deps.options.runtime.worktree(session, undefined, authorize);
           checkSession();
           this.deps.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.deps.dropListener(session.id);
+        }
+        // A later preset failure must not replay the completed native worktree switch.
+        if (setup) {
+          setup.extensions = extensions.slice(index + 1);
+          setup.preset = selectedPreset;
+          this.deps.options.store.setInitialDocumentSetup(session.id, setup);
         }
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
@@ -135,8 +145,12 @@ export class PromptPreparation {
         await applyPreset(extension.name);
         selectedPreset = extension.name;
       }
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+      if (setup) {
+        setup.extensions = extensions.slice(index + 1);
+        setup.preset = selectedPreset;
+        this.deps.options.store.setInitialDocumentSetup(session.id, setup);
+      }
+      await authorize();
       checkSession();
     }
   }

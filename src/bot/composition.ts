@@ -137,6 +137,9 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     delivery: connections.delivery,
     getListener: connections.listeners.get.bind(connections.listeners),
     listen: connections.listen.bind(connections),
+    uploadDocuments: (...args) => preparation.uploadDocuments(...args),
+    prepareInitialDocuments: (...args) => preparation.prepareInitialDocuments(...args),
+    requestCapacity: (session, limit) => capacity.requestCapacity(session, limit),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
@@ -301,7 +304,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     preparePrompt: preparation.preparePrompt.bind(preparation),
-    uploadDocuments: preparation.uploadDocuments.bind(preparation),
     skillKey: skills.key.bind(skills),
     defaultNewTopicSkill: preparation.defaultNewTopicSkill.bind(preparation),
     // Input routing needs this owner first; resolve album membership only during dispatch.

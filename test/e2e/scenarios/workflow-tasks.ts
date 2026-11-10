@@ -21,6 +21,7 @@ export function createWorkflowTasks() {
     documentOverwrite: createWriteTask('document-overwrite'),
     documentOnly: { ...createWriteTask('document-only'), prompt: 'e2e-file-only-attachment.txt' },
     documentAlbum: createWriteTask('document-album'),
+    documentPreparation: createWriteTask('document-preparation'),
     followup: createWriteTask('followup', '\nPreserve this second line.'),
     general: createWriteTask('general'),
     resumed: createWriteTask('resumed'),
