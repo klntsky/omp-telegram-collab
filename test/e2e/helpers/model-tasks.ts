@@ -94,10 +94,11 @@ export async function readSessionHistory(dataDir: string, sessionId: string): Pr
 }
 
 export function questionStep(name: string) {
-  return { type: 'tool' as const, id: `call_ask_${name}`, name: 'ask', arguments: { questions: [{
-    id: name, question: 'Choose the test destination',
-    options: [{ label: 'Local' }, { label: 'Remote' }], recommended: 0,
-  }] } };
+  // Native ask walks radio fields through select/input on Collab hosts without formDialog:
+  // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/tools/ask.ts (askChoice).
+  return { type: 'tool' as const, id: `call_ask_${name}`, name: 'ask', arguments: {
+    html: `<form><fieldset><legend>Choose the test destination</legend><label><input type="radio" name="${name}" value="Local" checked>Local</label><label><input type="radio" name="${name}" value="Remote">Remote</label></fieldset></form>`,
+  } };
 }
 
 export function questionScenario(task: WriteTask): FakeLlmScenario {
