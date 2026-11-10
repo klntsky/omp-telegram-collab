@@ -165,7 +165,8 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     models: ['e2e-model', 'e2e-alternate'].map(id => ({ id, name: id, reasoning: false, input: ['text', 'image'], supportsTools: true,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1024 })),
   } } }), { mode: 0o600 });
-  await writeFile(join(agent, 'config.yml'), JSON.stringify({
+  const agentConfigPath = join(agent, 'config.yml');
+  await writeFile(agentConfigPath, JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
     ...(options.compaction ? { compaction: options.compaction } : {}),
@@ -215,5 +216,5 @@ exec -a "$0" "$command" "\${args[@]}"`;
     '--system-prompt', 'Complete the requested task with the available tools.',
   ];
   log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl, relayUrl: relay.url });
-  return { workspace, dataDir, executable, args, relayUrl: relay.url, interruptNextGuest: relay.interruptNextGuest, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
+  return { workspace, dataDir, executable, agentConfigPath, args, relayUrl: relay.url, interruptNextGuest: relay.interruptNextGuest, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
 }

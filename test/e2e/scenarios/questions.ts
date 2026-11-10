@@ -69,7 +69,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
       const request = app.hostFrames.slice(frameStart).findLast(frame => frame.t === 'ui-request');
       assert.ok(request?.t === 'ui-request');
       if (control.name === 'chat-question') {
-        await clickPanel(app, panel, 3);
+        await clickPanel(app, panel, 2);
         await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame => frame.t === 'ui-request-end' && frame.reqId === request.request.reqId));
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === request.request.reqId && frame.value === 'Chat about this'));
         await app.waitForReply({ replyToMessageId: instruction.id, threadId: session.threadId });
