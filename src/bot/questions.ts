@@ -87,8 +87,15 @@ export class BotQuestions {
           .catch(error => console.warn(`Could not retire question controls (${question.session.id}).`, error));
       }
     }
-    if (answer !== undefined) {
-      question.listener.tail = question.listener.tail.then(async () => {
+    // Serialize cleanup behind delivery so an invitation sent during completion is also removed.
+    question.listener.tail = question.listener.tail.then(async () => {
+      if (question.replyPromptId !== undefined) {
+        await this.dependencies.delivery.run(question.session.chatId,
+          () => this.dependencies.api.deleteMessage(question.session.chatId,question.replyPromptId!),
+          () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(question.session))
+          .catch(error => console.warn(`Could not remove question reply invitation (${question.session.id}).`, error));
+      }
+      if (answer !== undefined) {
         for (let offset = 0; offset < answer.length;) {
           if (this.dependencies.stopped() || !this.dependencies.sessionAssigned(question.session)) return;
           let end = Math.min(offset+4000, answer.length);
@@ -107,8 +114,8 @@ export class BotQuestions {
           }
           offset = end;
         }
-      }).catch(error => { console.warn(`Could not show question answer (${question.session.id}).`, error); });
-    }
+      }
+    }).catch(error => { console.warn(`Could not show question answer (${question.session.id}).`, error); });
   }
   submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void {
     const question = this.questions.get(token);
@@ -220,6 +227,7 @@ export class BotQuestions {
           }), active);
         if (!message) return;
         question.messageIds.push(message.message_id);
+        question.replyPromptId = message.message_id;
       }
     }).catch(error => {
       this.endQuestion(token);

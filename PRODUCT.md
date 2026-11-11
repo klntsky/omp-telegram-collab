@@ -248,6 +248,8 @@ Agent replies target the most recent Telegram prompt accepted by OMP, not the mo
 
 Agent questions include the full text, option descriptions, and numbered option buttons in compact rows of up to five, with Cancel separate. Choose Other to enter a custom multiline answer through Telegram's reply prompt. The answer goes to the question, not the prompt queue. Cancel dismisses it. Answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
 
+The custom-answer reply invitation is removed when its question ends, whether answered, cancelled, or completed from the terminal. The question and its answer or cancellation receipt remain visible.
+
 Numbered selections receive delivery reactions on the dialog message. 👀 means the bot received the selection. 🤝 replaces it only after OMP confirms the matching question response. Unrelated or repeated question completions do not acknowledge another selection. Typed answers use the same stages on the user's answer message.
 
 Choosing Chat about this in Telegram returns control to OMP to discuss the question instead of answering it. The receipt explains how to continue. Replies to the question or its receipt become session prompts in either prompt mode, with the usual quote, authorization, and proposal approval. This exception applies only to recent discussion handoffs in the original topic and session generation. Replies to other completed questions remain rejected.

@@ -94,6 +94,7 @@ export interface PendingQuestion {
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];
+  replyPromptId?: number;
   answer?: {kind:'answer' | 'discussion'; text:string};
 }
 export interface CapacityRequest {
