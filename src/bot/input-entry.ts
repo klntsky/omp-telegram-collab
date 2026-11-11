@@ -195,6 +195,7 @@ export async function routeEntry(deps: InputEntryDependencies, ctx: Context, int
           ctx,
           contextDestination(ctx),
           deps.commandHelp(ctx.chat.id, await deps.currentAdmin(ctx)),
+          { parse_mode: 'HTML' },
         );
       }
       return undefined;

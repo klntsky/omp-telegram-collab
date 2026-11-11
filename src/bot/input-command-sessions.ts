@@ -96,6 +96,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
           ctx,
           contextDestination(ctx),
           deps.commandHelp(ctx.chat.id, await deps.currentAdmin(ctx)),
+          { parse_mode: 'HTML' },
         );
         return true;
       }
