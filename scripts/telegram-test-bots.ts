@@ -6,7 +6,7 @@ import { createTelegramTestBot, saveTelegramTestBot } from './lib/telegram-test-
 
 const args = process.argv.slice(2);
 if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) {
-  console.log('Usage: pnpm telegram:test:bots add|create\nadd: read a token from hidden terminal input or piped stdin\ncreate: explicitly create one test-network bot through BotFather');
+  process.stdout.write(String('Usage: pnpm telegram:test:bots add|create\nadd: read a token from hidden terminal input or piped stdin\ncreate: explicitly create one test-network bot through BotFather') + '\n');
 } else if (args.length !== 1 || !['add', 'create'].includes(args[0]!)) {
   console.error('Usage: pnpm telegram:test:bots add|create (tokens are never accepted as arguments)');
   process.exitCode = 1;
@@ -44,7 +44,7 @@ if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) {
       }
       id = await saveTelegramTestBot(filename, token, signal);
     }
-    console.log(`Saved bot ${id} in ${filename}`);
+    process.stdout.write(String(`Saved bot ${id} in ${filename}`) + '\n');
   } catch (error) {
     console.error(formatWithOptions({ depth: null }, error).replace(/[1-9]\d*:[A-Za-z0-9_-]{30,}/g, '[REDACTED_BOT_TOKEN]'));
     process.exitCode = 1;

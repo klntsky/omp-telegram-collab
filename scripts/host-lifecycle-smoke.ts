@@ -86,7 +86,7 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     await writeFile(release,'release');
     await waitFor(()=>exists(finished),'Retirement interrupted the working command');
     await waitFor(()=>exited,'Idle host did not retire after its admitted command completed');
-    console.log('PASS actual OMP host defers retirement while a local command is working, lets it finish, then exits without a signal.');
+    process.stdout.write(String('PASS actual OMP host defers retirement while a local command is working, lets it finish, then exits without a signal.') + '\n');
   } finally {
     await writeFile(release,'release');
     if (!exited && lifecycle) {

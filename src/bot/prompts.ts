@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
 import type { CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -116,7 +117,7 @@ export class PromptReceipts {
       } catch (error) {
         if (error instanceof SessionCapacityError) {
           try { await this.deps.requestCapacity(session, error.limit); }
-          catch (deliveryError) { console.error('Could not deliver initial document preparation capacity request.', deliveryError); }
+          catch (deliveryError) { logEvent('error', 'could-not-deliver-initial-document-preparation-capacity-request', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: 'Could not deliver initial document preparation capacity request.', error: deliveryError}); }
         }
         throw error;
       }
@@ -212,6 +213,6 @@ export class PromptReceipts {
     void this.deps.delivery.run(session.chatId,
       () => this.deps.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.deps.stopped() && this.deps.sessionAssigned(session) && (listener === undefined || this.deps.getListener(session.id) === listener))
-      .catch(error => console.warn(`Could not show message acceptance reaction (${session.id}).`, error));
+      .catch(error => logEvent('warn', 'could-not-show-message-acceptance-reaction', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not show message acceptance reaction (${session.id}).`, error}));
   }
 }

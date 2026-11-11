@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -92,11 +93,11 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
           observation.failed = true;
           this.catalogObservations.set(path,observation);
         } else if (phase.includes(':')) this.deps.sessionObservation(phase.slice(phase.indexOf(':')+1)).failure = failure;
-        console.error(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
+        logEvent('error', 'bot-background-failed', {botId: this.deps.botId(), operation: phase, message: `Bot ${this.deps.botId()} background ${phase} failed.`, error});
       }
     }).finally(() => {
       this.backgroundTasks.delete(task);
-      console.log(JSON.stringify({event:'bot-background',botId:this.deps.botId(),phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted}));
+      logEvent('info', 'bot-background', {botId:this.deps.botId(),phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted});
     });
     this.backgroundTasks.add(task);
     return task;

@@ -186,6 +186,17 @@ export async function waitForEditor(app: TelegramWorkflow, start: number, thread
   return messageId!;
 }
 
+export async function waitForMessageDeleted(app: TelegramWorkflow, messageId: number): Promise<void> {
+  const deletion = z.object({
+    method: z.literal('deleteMessage'),
+    payload: z.object({ chat_id: z.literal(app.telegram.forum.chatId), message_id: z.literal(messageId) }),
+    result: z.object({ ok: z.literal(true), result: z.literal(true) }),
+  });
+  await app.waitForCondition(() => app.apiCalls.some(call => deletion.safeParse(call).success));
+  const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [messageId]);
+  assert.equal(message, null);
+}
+
 interface LifecycleWorkflow extends TelegramWorkflow {
   store: Pick<Store, 'isEnrolled' | 'getSession' | 'hasPendingCloseIcon'>;
   runtime: Pick<OmpRuntime, 'isRunning'>;
@@ -234,9 +245,8 @@ export async function waitForBackgroundCompletion(app: {
     for (let index = lines.length - 1; index >= 0; index--) {
       const entry = JSON.parse(lines[index]!);
       if (Date.parse(entry.time) < since) break;
-      const value = entry.data?.[0];
-      if (entry.event !== 'application.console.log' || typeof value !== 'string' || !value.startsWith('{"event":"bot-background",')) continue;
-      if (JSON.parse(value).phase === phase) return true;
+      if (entry.event !== 'application.log' || entry.data?.event !== 'bot-background') continue;
+      if (entry.data.phase === phase) return true;
     }
     return false;
   });

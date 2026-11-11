@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, createManagedTopic, openPanel, replyText, waitForEditor, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
+import { clickPanel, createManagedTopic, openPanel, replyText, waitForEditor, waitForMessageDeleted, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
 import { completeWriteTask } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks, WorkflowControls } from './workflow-tasks.js';
@@ -45,6 +45,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         await replyText(app, editorMessageId, session.threadId, answer);
         await completeWriteTask(app, task, instruction, session.threadId);
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === answer));
+        await waitForMessageDeleted(app, editorMessageId);
       }
     }
     const handoffStart = app.apiCalls.length;
@@ -86,6 +87,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         await clickPanel(app, cancellation, 0);
         await app.waitForCondition(() => app.hostFrames.some(frame => frame.t === 'ui-request-end' && frame.reqId === editor.request.reqId));
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === undefined));
+        await waitForMessageDeleted(app, editorMessage);
         const parent = await waitForPanel(app, 'question', 'ask:', dismissStart, session.threadId);
         const parentRequest = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(parentRequest?.t === 'ui-request' && parentRequest.request.kind === 'select');
@@ -93,7 +95,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === parentRequest.request.reqId && frame.value === undefined));
         const lateAnswer = 'Do not submit this cancelled editor reply';
-        await replyText(app, editorMessage, session.threadId, lateAnswer);
+        await replyText(app, cancellation.messageId, session.threadId, lateAnswer);
         assert.ok(!app.guestFrames.some(frame => frame.t === 'prompt' && frame.text === lateAnswer));
       }
     }

@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -138,7 +139,7 @@ export class CapacityAdmission {
     this.deps.options.config.omp.maxSessions = request.limit * 2;
     this.deps.options.runtime.increaseSessionLimit(request.limit);
     await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`)
-      .catch(error => console.warn(`Could not deliver session capacity increase notice (${session.id}).`, error));
+      .catch(error => logEvent('warn', 'could-not-deliver-session-capacity-increase-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver session capacity increase notice (${session.id}).`, error}));
     if (this.deps.options.store.hasPendingInitialTask(session.id)) await this.deps.sendInitial(session);
     else await this.deps.listen(session);
   }

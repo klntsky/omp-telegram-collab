@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import { GrammyError } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -212,7 +213,7 @@ export class TopicMetadataOwners {
             at: Date.now(),
             error,
           };
-          console.warn(`Could not synchronize topic ${field} (${session.id}).`, error);
+          logEvent('warn', 'could-not-synchronize-topic', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, field, message: `Could not synchronize topic ${field} (${session.id}).`, error});
         },
       );
       return result;

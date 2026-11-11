@@ -179,7 +179,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     await runtime.kill(managed);
     await retiring;
     assert.equal(await alive(resumedLifecycle.pid), false, 'kill must safely supersede concurrent graceful retirement');
-    console.log('PASS actual OMP recovered graceful stop, forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.');
+    process.stdout.write(String('PASS actual OMP recovered graceful stop, forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.') + '\n');
   } finally {
     if (attached && !terminalExited) await runtime.kill(attached).catch(() => {});
     if (terminal && !terminalExited) {
@@ -198,7 +198,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const relay = await startLocalRelay();
   try {
     await verifyRuntimeKill(directory, process.env.OMP_EXECUTABLE ?? 'omp', relay.url);
-    console.log('No model prompt or live Telegram API request was sent.');
+    process.stdout.write(String('No model prompt or live Telegram API request was sent.') + '\n');
   } finally {
     await relay.close();
     await rm(directory, { recursive: true, force: true });

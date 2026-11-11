@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import { randomBytes } from 'node:crypto';
 import { accessSync, constants, mkdirSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -54,7 +55,7 @@ export class FolderSelection {
         initial = {kind:'create',path};
         failure = `Create folder ${path}?`;
       } catch (error) {
-        console.error('Runtime folder selection failed.',error);
+        logEvent('error', 'runtime-folder-selection-failed', {botId: this.dependencies.botId(), chatId: source.chat?.id, message: 'Runtime folder selection failed.', error});
         initial = {kind:'failed',path,create:false};
         failure = `${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`;
       }
@@ -84,7 +85,7 @@ export class FolderSelection {
       }
       if (!pending) return;
       void source.api.editMessageText(source.chat!.id,message.message_id,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}})
-        .catch(error => console.error('Could not retire expired folder controls.',error));
+        .catch(error => logEvent('error', 'could-not-retire-expired-folder-controls', {botId: this.dependencies.botId(), chatId: source.chat?.id, message: 'Could not retire expired folder controls.', error}));
     },300000).unref();
     return true;
   }
@@ -180,7 +181,7 @@ export class FolderSelection {
       }
       cwd = resolved;
     } catch (error) {
-      console.error('Runtime folder selection failed.',error);
+      logEvent('error', 'runtime-folder-selection-failed', {botId: this.dependencies.botId(), chatId: ctx.chat.id, message: 'Runtime folder selection failed.', error});
       request.state = {kind:'failed',path,create};
       await restore(`${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`,[[
         {text:'Retry',callback_data:`folder:${token}:retry`},

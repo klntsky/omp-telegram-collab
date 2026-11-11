@@ -36,12 +36,12 @@ fs.appendFileSync(${JSON.stringify(commandsPath)},JSON.stringify(args)+'\\n');
 if(args[0]!=='collab')throw new Error('Passive resolution attempted host startup');
 const file=${JSON.stringify(statePath)};
 const state=JSON.parse(fs.readFileSync(file,'utf8'));
-if(args[1]==='list')console.log(JSON.stringify({version:1,hosts:state.hosts}));
+if(args[1]==='list')process.stdout.write(JSON.stringify({version:1,hosts:state.hosts}) + '\\n');
 else if(args[1]==='link'){
   if(state.fail){process.stderr.write('Capability lookup failed\\nOriginal diagnostic line two\\n');process.exit(23);}
   const host=state.hosts[0];
   if(state.disappear)fs.writeFileSync(file,JSON.stringify({hosts:[]}));
-  console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',url:${JSON.stringify(url)}}));
+  process.stdout.write(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',url:${JSON.stringify(url)}}) + '\\n');
 }else throw new Error('Unexpected registry command');
 `);
     await chmod(executable,0o700);

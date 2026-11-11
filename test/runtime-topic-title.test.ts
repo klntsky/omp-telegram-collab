@@ -67,7 +67,7 @@ test('attached sessions use the matching registry host cwd rather than instanceP
   await app.git('worktree', 'add', '-b', 'feature/attached', linked);
   const host = { instanceId: 'terminal', sessionId: 'terminal-session', generation: 1, pid: process.pid,
     cwd: linked, access: 'control', relayConnected: true };
-  await writeFile(app.config.omp.executable, `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))});\n`);
+  await writeFile(app.config.omp.executable, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))} + '\\n');\n`);
   await chmod(app.config.omp.executable, 0o700);
   const session: TopicSession = { ...app.session, runtime: { kind: 'attached', instanceId: host.instanceId, sessionId: host.sessionId } };
   assert.deepEqual(await app.runtime.topicTitleStatus(session), { worktree: true, branch: 'feature/attached' });
