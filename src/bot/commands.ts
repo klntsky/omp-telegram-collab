@@ -1,26 +1,30 @@
 export function help(options: { promptHelp: string; miniApp: boolean; admin: boolean }): string {
-  return [
-    'Send me a task or a question here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.',
-    `<b>Start a task</b>
+  return `Send me a task or a question here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.
+
+<b>Start a task</b>
 
 <code>/new Find why the login tests fail</code>
-Include your task in the command. Open the new topic to read the agent’s replies and continue working.`,
-    `<b>Continue in that topic</b>
+Include your task in the command. Open the new topic to read the agent’s replies and continue working.
+
+<b>Continue in that topic</b>
 
 <code>/p Check whether the same bug affects signup</code>
-${options.promptHelp.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`,
-    `<b>Group settings</b> · Group admin
+${options.promptHelp.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}
+
+<b>Group settings</b> · Group admin
 
 <code>/settings</code>
-Change group defaults, prompt permissions, runtime folders, and the session limit.`,
-    `<b>Stop work</b> · Inside a session topic
+Change group defaults, prompt permissions, runtime folders, and the session limit.
+
+<b>Stop work</b> · Inside a session topic
 
 <code>/stop</code>
 Interrupt the current task without killing the agent process.
 
 <code>/kill</code>
-Force-stop this topic’s agent process if it is stuck. In-flight work may be lost.`,
-    `<b>Other tools</b>
+Force-stop this topic’s agent process if it is stuck. In-flight work may be lost.
+
+<b>Other tools</b>
 
 <code>/skills</code>
 Choose extra instructions for your next task. Use <code>/skills clear</code> to clear your selection.
@@ -32,10 +36,12 @@ Select a skill and submit a task immediately.
 Check model-provider quotas and reset times.
 
 <code>/status</code>
-Inspect connection problems and session diagnostics.`,
-    ...(options.miniApp ? [`<code>/session</code>
-Open this topic’s live transcript and tool details in the read-only Mini App.`] : []),
-    `<b>Administrator tools</b>
+Inspect connection problems and session diagnostics.${options.miniApp ? `
+
+<code>/session</code>
+Open this topic’s live transcript and tool details in the read-only Mini App.` : ''}
+
+<b>Administrator tools</b>
 
 <code>/setup</code>
 Connect this group to a project, then open settings.
@@ -53,16 +59,18 @@ Start a new topic with a copy of this conversation. Reply to an earlier agent an
 Create a topic connected to an agent already running on the bot’s computer.
 
 <code>/detach</code>
-Permanently make this topic conversation-only.`,
-    ...(options.admin ? [`<code>/cli</code>
-Get a terminal command for joining this topic’s running agent.`] : []),
-    `<code>/terminate</code>
-Stop all agents across the service and suspend further work. Resuming requires changing the service configuration on the bot’s computer.`,
-    `<b>Find an administrator</b>
+Permanently make this topic conversation-only.${options.admin ? `
+
+<code>/cli</code>
+Get a terminal command for joining this topic’s running agent.` : ''}
+
+<code>/terminate</code>
+Stop all agents across the service and suspend further work. Resuming requires changing the service configuration on the bot’s computer.
+
+<b>Find an administrator</b>
 
 <code>/list_admins</code>
-List this group’s owner and administrators.`,
-  ].join('\n\n');
+List this group’s owner and administrators.`;
 }
 export const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
 
