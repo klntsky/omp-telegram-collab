@@ -15,12 +15,12 @@ export interface InputCommandSessionsDependencies {
   dropListener(id: string, reason?: string): void;
   forkSession(ctx: Context, source: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean): Promise<CollabConnection>;
-  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkill?: string; }): Promise<void>;
+  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkills: string[]; }): Promise<void>;
   config: BotOptions['config'];
   runtime: BotOptions['runtime'];
   store: BotOptions['store'];
   requireSessionAssignment(session: TopicSession): void;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkill?: string; }, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
   sessionMarkup(session: TopicSession): { inline_keyboard: { text: string; url: string; }[][]; };
 }
 

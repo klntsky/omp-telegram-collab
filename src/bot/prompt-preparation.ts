@@ -72,9 +72,9 @@ export class PromptPreparation {
     }
     return {...prompt, text};
   }
-  defaultNewTopicSkill(chatId: number): string | undefined {
+  defaultNewTopicSkills(chatId: number): string[] {
     return findInstance(this.deps.options.config,this.deps.id(),chatId)?.instance.chats
-      .find(chat => chat.botId === this.deps.id() && chat.chatId === chatId)?.default_new_topic_skill;
+      .find(chat => chat.botId === this.deps.id() && chat.chatId === chatId)?.default_new_topic_skills?.slice() ?? [];
   }
   async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
