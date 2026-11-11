@@ -31,7 +31,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Create arbitrary Collab share links or join arbitrary rooms (`/collab`, `/join`, `omp collab`, `omp join`) | No remote link-creation or arbitrary-room interface. |
 | ✅ | Submit text prompts | `/p <prompt>` or ordinary Telegram messages when enabled. |
 | ✅ | Submit image prompts | Send photos in Telegram, with `/p` when required by prompt policy. |
-| ✅ | Upload file attachments | Send documents, including images sent as files, to save them in the session's working directory and attach their paths to the prompt. Same-name files are overwritten with a notification; failed replacements preserve the old file. New-topic uploads survive capacity waits and service restarts. |
+| ✅ | Upload file attachments | Send documents, including images sent as files, to save them in the session's working directory |
 | ✅ | Answer agent questions | Use Telegram option buttons, Other, or Cancel. |
 | ✅ | Interrupt the current turn | `/stop`. This does not freeze all agents. |
 | ✅ | Force-kill a session host | `/kill` preserves managed history; a later prompt can resume it. |
