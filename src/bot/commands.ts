@@ -1,16 +1,67 @@
 export function help(options: { promptHelp: string; miniApp: boolean; admin: boolean }): string {
   return [
     'Send me a task or a question here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.',
-    '<b>Start a task</b>\n\n<code>/new Find why the login tests fail</code>\nInclude your task in the command. Open the new topic to read the agent’s replies and continue working.',
-    `<b>Continue in that topic</b>\n\n<code>/p Check whether the same bug affects signup</code>\n${options.promptHelp.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`,
-    '<b>Group settings</b> · Group admin\n\n<code>/settings</code>\nChange group defaults, prompt permissions, runtime folders, and the session limit.',
-    '<b>Stop work</b> · Inside a session topic\n\n<code>/stop</code>\nInterrupt the current task without killing the agent process.\n\n<code>/kill</code>\nForce-stop this topic’s agent process if it is stuck. In-flight work may be lost.',
-    '<b>Other tools</b>\n\n<code>/skills</code>\nChoose extra instructions for your next task. Use <code>/skills clear</code> to clear your selection.\n\n<code>/skill_&lt;name&gt; &lt;task&gt;</code>\nSelect a skill and submit a task immediately.\n\n<code>/usage</code>\nCheck model-provider quotas and reset times.\n\n<code>/status</code>\nInspect connection problems and session diagnostics.',
-    ...(options.miniApp ? ['<code>/session</code>\nOpen this topic’s live transcript and tool details in the read-only Mini App.'] : []),
-    '<b>Administrator tools</b>\n\n<code>/setup</code>\nConnect this group to a project, then open settings.\n\n<code>/model_preset [name]</code>\nChoose a model preset for an idle session or change the group default.\n\n<code>/worktree [branch]</code>\nMove this topic’s session into a separate Git working directory. In General, create a new topic first. The optional branch is a name, not a task.\n\n<code>/fork</code>\nStart a new topic with a copy of this conversation. Reply to an earlier agent answer to copy only through that point.\n\n<code>/attach instanceId [name]</code>\nCreate a topic connected to an agent already running on the bot’s computer.\n\n<code>/detach</code>\nPermanently make this topic conversation-only.',
-    ...(options.admin ? ['<code>/cli</code>\nGet a terminal command for joining this topic’s running agent.'] : []),
-    '<code>/terminate</code>\nStop all agents across the service and suspend further work. Resuming requires changing the service configuration on the bot’s computer.',
-    '<b>Find an administrator</b>\n\n<code>/list_admins</code>\nList this group’s owner and administrators.',
+    `<b>Start a task</b>
+
+<code>/new Find why the login tests fail</code>
+Include your task in the command. Open the new topic to read the agent’s replies and continue working.`,
+    `<b>Continue in that topic</b>
+
+<code>/p Check whether the same bug affects signup</code>
+${options.promptHelp.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')}`,
+    `<b>Group settings</b> · Group admin
+
+<code>/settings</code>
+Change group defaults, prompt permissions, runtime folders, and the session limit.`,
+    `<b>Stop work</b> · Inside a session topic
+
+<code>/stop</code>
+Interrupt the current task without killing the agent process.
+
+<code>/kill</code>
+Force-stop this topic’s agent process if it is stuck. In-flight work may be lost.`,
+    `<b>Other tools</b>
+
+<code>/skills</code>
+Choose extra instructions for your next task. Use <code>/skills clear</code> to clear your selection.
+
+<code>/skill_&lt;name&gt; &lt;task&gt;</code>
+Select a skill and submit a task immediately.
+
+<code>/usage</code>
+Check model-provider quotas and reset times.
+
+<code>/status</code>
+Inspect connection problems and session diagnostics.`,
+    ...(options.miniApp ? [`<code>/session</code>
+Open this topic’s live transcript and tool details in the read-only Mini App.`] : []),
+    `<b>Administrator tools</b>
+
+<code>/setup</code>
+Connect this group to a project, then open settings.
+
+<code>/model_preset [name]</code>
+Choose a model preset for an idle session or change the group default.
+
+<code>/worktree [branch]</code>
+Move this topic’s session into a separate Git working directory. In General, create a new topic first. The optional branch is a name, not a task.
+
+<code>/fork</code>
+Start a new topic with a copy of this conversation. Reply to an earlier agent answer to copy only through that point.
+
+<code>/attach instanceId [name]</code>
+Create a topic connected to an agent already running on the bot’s computer.
+
+<code>/detach</code>
+Permanently make this topic conversation-only.`,
+    ...(options.admin ? [`<code>/cli</code>
+Get a terminal command for joining this topic’s running agent.`] : []),
+    `<code>/terminate</code>
+Stop all agents across the service and suspend further work. Resuming requires changing the service configuration on the bot’s computer.`,
+    `<b>Find an administrator</b>
+
+<code>/list_admins</code>
+List this group’s owner and administrators.`,
   ].join('\n\n');
 }
 export const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
