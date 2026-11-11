@@ -8,33 +8,39 @@ export function formatUsage(result: unknown, now = new Date()): { heading: strin
   };
   const labels: Record<string, string> = {
     'Claude 5 Hour': 'Claude 5h', 'Claude 7 Day': 'Claude 7d', 'Cursor Models': 'Models',
-    'Other Models': 'Other', 'On-Demand Usage': 'On-demand', 'Claude & GPT (shared)': 'Claude/GPT', 'Gemini (Argon)': 'Gemini Argon',
+    'Other Models': 'Other', 'On-Demand Usage': 'On-demand', 'Claude & GPT (shared)': 'Claude/GPT (shared)', 'Gemini (Argon)': 'Gemini Argon',
   };
   const date = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' });
   const sections: { heading: string; table: string }[] = [];
   for (const report of result.reports) {
     if (!record(report) || typeof report.provider !== 'string' || !Array.isArray(report.limits)) throw new Error('Invalid OMP usage report');
     const lines = ['| Quota | Left | Reset |', '|---|---:|---|'];
-    const rows = new Map<string, { label: string; left: string; reset: string; count: number; status?: string }>();
+    const rows = new Map<string, { label: string; left: string; reset: string; count: number; shared: boolean; status?: string }>();
     for (const limit of report.limits) {
       if (!record(limit) || !record(limit.amount)) throw new Error('Invalid OMP usage limit');
       const amount = limit.amount;
       const window = record(limit.window) ? limit.window : {};
       const originalLabel = String(limit.label ?? window.label ?? 'Quota');
-      const label = labels[originalLabel] ?? originalLabel;
+      const windowLabel = typeof window.label === 'string' ? window.label : '';
+      const label = (labels[originalLabel] ?? originalLabel)
+        + (windowLabel && !originalLabel.toLowerCase().includes(windowLabel.toLowerCase()) ? ` (${windowLabel})` : '');
+      const scope = record(limit.scope) ? limit.scope : {};
+      const shared = scope.shared === true && typeof scope.sharedGroup === 'string';
       const left = !finite(amount.remaining) ? '?' : amount.unit === 'usd' ? `$${amount.remaining.toFixed(2)}`
         : `${Number(amount.remaining.toFixed(2))}${amount.unit === 'percent' ? '%' : typeof amount.unit === 'string' ? ` ${amount.unit}` : ''}`;
       const resetsAt = finite(window.resetsAt) ? new Date(window.resetsAt) : undefined;
       const reset = resetsAt && Number.isFinite(resetsAt.getTime())
-        ? resetsAt.toISOString().slice(0, 10) === now.toISOString().slice(0, 10) ? 'Today' : date.format(resetsAt) : '—';
+        ? `${resetsAt.toISOString().slice(0, 10) === now.toISOString().slice(0, 10) ? 'Today' : date.format(resetsAt)} ${time.format(resetsAt)} UTC` : '—';
       const status = typeof limit.status === 'string' && limit.status !== 'ok' ? limit.status : undefined;
-      const key = JSON.stringify([originalLabel, amount, window, status]);
+      // Shared model-family entries describe one pool, not additional capacity.
+      const key = JSON.stringify([shared ? scope.sharedGroup : originalLabel, amount, window, status]);
       const previous = rows.get(key);
       if (previous) previous.count++;
-      else rows.set(key, { label, left, reset, count: 1, status });
+      else rows.set(key, { label, left, reset, count: 1, shared, status });
     }
     for (const row of rows.values()) {
-      const label = row.label + (row.count > 1 ? ` ×${row.count}` : '');
+      const label = row.label + (row.count > 1 && !row.shared ? ` ×${row.count}` : '');
       lines.push(`| ${label} | ${row.left} | ${row.reset} |`);
       if (row.status) lines.push(`  ⚠ ${row.status}`);
     }
