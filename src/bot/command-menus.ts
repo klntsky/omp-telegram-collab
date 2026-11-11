@@ -26,7 +26,7 @@ syncCommandMenus(): Promise<void> {
   }
 
   private async publishCommandMenus(): Promise<void> {
-    const baseCommands = this.deps.config.publicUrl ? groupCommands : groupCommands.filter(command => command.command !== 'session');
+    const baseCommands = this.deps.config.publicUrl ? groupCommands : groupCommands.filter(command => command.command !== 'agent');
     const globalFingerprint = JSON.stringify(baseCommands);
     if (this.globalCommandMenu !== globalFingerprint) {
       await this.deps.bot.api.setMyCommands(baseCommands, {scope:{type:'all_group_chats'}}, this.deps.signal);

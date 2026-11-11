@@ -17,7 +17,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | Support level | OMP feature | Use from Telegram |
 | --- | --- | --- |
 | ✅ | Create a session (`/new`) | `/new <task>` creates a topic and starts its session. Configured runtime folders offer a directory picker first. |
-| 📱 | Inspect session information (`/session`) | Telegram `/session` opens the Mini App for the topic's session. |
+| 📱 | Inspect agent information (`/agent`) | Telegram `/agent` opens the Mini App for the topic's agent. |
 | ✅ | Join a shared session in a terminal (`omp join`) | `/cli` gives administrators a copyable command to join the topic's host from the bot's machine. |
 | ✅ | Resume saved session history (`/resume`) | Send a prompt in an existing managed topic to resume its history. |
 | ✅ | Rename a session (`/rename`) | Rename the Telegram topic to update its managed OMP session title. Attached hosts must be renamed in their terminal. |
@@ -27,7 +27,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Reset context, delete a session, refresh provider state, or retry a failed turn (`/clear`, `/delete`, `/fresh`, `/retry`) | No equivalent controls. |
 | ✅ | Move a session into a worktree (`/wt`, `/worktree`) | `/worktree [branch]` invokes OMP's native operation, keeping the topic's conversation and carrying changes according to OMP's settings. In General, it creates a topic first. |
 | ✅ | Share a running session through Collab (`/collab`, `omp collab`) | `/attach INSTANCE_ID` creates a topic connected to an existing local host. |
-| 📱 | Leave or join a shared Collab session (`/leave`, `/join`) | Open `/session`, then use Leave or Rejoin for that topic's connection. This does not terminate the host. |
+| 📱 | Leave or join a shared Collab session (`/leave`, `/join`) | Open `/agent`, then use Leave or Rejoin for that topic's connection. This does not terminate the host. |
 | ❌ | Create arbitrary Collab share links or join arbitrary rooms (`/collab`, `/join`, `omp collab`, `omp join`) | No remote link-creation or arbitrary-room interface. |
 | ✅ | Submit text prompts | `/p <prompt>` or ordinary Telegram messages when enabled. |
 | ✅ | Submit image prompts | Send photos in Telegram, with `/p` when required by prompt policy. |
@@ -37,7 +37,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ✅ | Force-kill a session host | `/kill` preserves managed history; a later prompt can resume it. |
 | ❌ | Orderly exit or same-flags restart (`/exit`, `/quit`, `/q`, `/restart`) | `/kill` is forceful termination, not these lifecycle operations. |
 | ✅ | Read agent replies | Replies are mirrored into the topic and streamed in the Mini App. |
-| 📱 | Inspect the full live transcript and tool calls | Open `/session` to inspect tool arguments, results, partial output, and expandable tool details. |
+| 📱 | Inspect the full live transcript and tool calls | Open `/agent` to inspect tool arguments, results, partial output, and expandable tool details. |
 | 📱 | Inspect thinking and message metadata | Expand disclosures in the Mini App transcript. |
 | 📱 | Inspect subagent roster and activity (`/hub`, `/subagents`) | Open the Mini App agent rail to see status, current tool or intent, and last activity. |
 | 📱 | Read a subagent's transcript (`/hub`, `/subagents`) | Select an agent to open its drawer. Transcript access requires an available session file. Viewers can read it too. |

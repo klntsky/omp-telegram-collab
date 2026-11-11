@@ -121,7 +121,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         });
         return true;
       }
-      if (action === 'session') {
+      if (action === 'agent') {
         if (!deps.config.publicUrl) {
           await replyTo(
             ctx,

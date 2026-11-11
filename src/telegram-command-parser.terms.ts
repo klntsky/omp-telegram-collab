@@ -10,7 +10,7 @@ export const
   command_setup = 25,
   command_list_admins = 26,
   command_detach = 27,
-  command_session = 28,
+  command_agent = 28,
   command_status = 29,
   command_usage = 30,
   command_stop = 31,
