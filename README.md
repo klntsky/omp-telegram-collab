@@ -336,3 +336,4 @@ Change `defaultDir` to use another existing canonical absolute directory for fut
 
 Select an existing instance during enrollment with `approve REQUEST_CODE --instance ID`. Use `--path PATH` to register a new instance. Instance-management commands use IDs so instances sharing a directory remain distinguishable. A forum with stored sessions cannot be reassigned to another instance ID.
 
+Only the current configuration and database schema are supported; startup never converts older formats. Back up existing configuration and runtime data before replacing them.

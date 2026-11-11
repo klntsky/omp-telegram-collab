@@ -48,7 +48,7 @@ export class TelegramTestUser {
         }
       });
   }
-  async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal, timeoutMs: number = telegramTestTimeouts.request): Promise<tl.RpcCallReturn[T['_']]> {
+  async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal): Promise<tl.RpcCallReturn[T['_']]> {
     const failures: unknown[] = [];
     // Provisioning owns a longer deadline so an explicit FLOOD_WAIT can fit
     // without extending that operation or replaying an ambiguous request.

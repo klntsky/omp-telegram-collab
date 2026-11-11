@@ -80,7 +80,7 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
       const updates = await step('telegram.forum.create', () => user.call({
         _: 'channels.createChannel', title,
         about: 'Disposable OMP Telegram end-to-end test forum', megagroup: true, forum: true,
-      }, signal, telegramTestTimeouts.provision));
+      }, signal));
       if (updates._ !== 'updates' && updates._ !== 'updatesCombined') throw new Error(`Unexpected forum creation response: ${updates._}`);
       user.client.handleClientUpdate(updates);
       const raw = updates.chats.find((value): value is tl.RawChannel => value._ === 'channel' && Boolean(value.forum));
