@@ -40,6 +40,7 @@ export function createWorkflowTasks() {
     defaultsFirst: createWriteTask('defaults-first'),
     defaultsUnchanged: createWriteTask('defaults-unchanged'),
     defaultsSwitched: createWriteTask('defaults-switched'),
+    defaultsBusy: createWriteTask('defaults-busy'),
     defaultsManual: createWriteTask('defaults-manual'),
     defaultsNext: createWriteTask('defaults-next'),
     capacityFirst: createWriteTask('capacity-first'),
@@ -48,13 +49,15 @@ export function createWorkflowTasks() {
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };
+  // Discussion is model-provided; native askChoice adds only Other automatically:
+  // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/tools/ask.ts.
   const questionControls = ['chat-question', 'dismiss-question'].map(name => ({
     name, prompt: `${name} ${tasks.initial.evidence.nonce}`, steps: name === 'chat-question'
-      ? [questionStep(name), { type: 'text' as const, text: 'Continue the discussion in Telegram.' }]
+      ? [questionStep(name, ['Local', 'Remote', 'Chat about this']), { type: 'text' as const, text: 'Continue the discussion in Telegram.' }]
       : [questionStep(name)],
   }));
   const scenarios = Object.values(tasks).map(task =>
-    task === tasks.capacityFirst || task === tasks.capacitySecond
+    task === tasks.defaultsBusy || task === tasks.capacityFirst || task === tasks.capacitySecond
       ? { name: task.name, prompt: task.prompt, steps: [{ type: 'await-abort' as const }] }
       : task === tasks.question || task === tasks.customAnswer ? questionScenario(task)
       : task === tasks.documentOnly ? writeReadScenario(task, task.prompt) : writeScenario(task));

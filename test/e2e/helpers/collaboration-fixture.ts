@@ -345,6 +345,7 @@ export interface CollaborationTest {
     workspace: string;
     dataDir: string;
     executable: string;
+    agentConfigPath: string;
     args: string[];
     relayUrl: string;
     interruptNextGuest(): void;
