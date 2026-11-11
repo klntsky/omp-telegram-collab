@@ -247,34 +247,28 @@ export class Administration {
     if (config.publicUrl) {
       for (const bot of config.bots) bot.miniAppShortName ??= 'app';
     }
-    if (config.publicUrl) {
-      config.host = await value('host', 'Listen host', config.host);
-      config.port = integer(await value('port', 'Listen port', String(config.port)), 'Port', 0, 65535);
-    } else {
-      if (options.has('host')) config.host = one(options, 'host')!;
-      if (options.has('port')) config.port = integer(one(options, 'port')!, 'Port', 0, 65535);
+    if (options.has('host')) config.host = one(options, 'host')!;
+    if (options.has('port')) config.port = integer(one(options, 'port')!, 'Port', 0, 65535);
+    config.dataDir = resolve(await value('data-dir', 'Data directory', config.dataDir));
+    if (options.has('omp-executable')) {
+      const executable = one(options, 'omp-executable')!;
+      config.omp.executable = executable.includes('/') ? resolve(executable) : executable;
     }
-    config.dataDir = resolve(await value('data-dir', 'Data directory (existing histories stay in their current directory)', config.dataDir));
-    const executable = await value('omp-executable', 'OMP executable', config.omp.executable);
-    config.omp.executable = executable.includes('/') ? resolve(executable) : executable;
-    if (interactive) {
-      const args = await value('omp-args', 'OMP arguments as a JSON array of literal strings', JSON.stringify(config.omp.args));
-      let parsed: unknown;
-      try { parsed = JSON.parse(args); } catch { throw new Error('OMP arguments must be a JSON array of strings.'); }
-      if (!Array.isArray(parsed) || !parsed.every(arg => typeof arg === 'string')) throw new Error('OMP arguments must be a JSON array of strings.');
-      config.omp.args = parsed;
-    } else if (options.has('omp-arg') || options.has('clear-omp-args')) config.omp.args = options.get('omp-arg') ?? [];
+    if (options.has('omp-arg') || options.has('clear-omp-args')) config.omp.args = options.get('omp-arg') ?? [];
     if (options.has('max-sessions')) config.omp.maxSessions = integer(one(options, 'max-sessions')!, 'Maximum sessions');
-    config.omp.startupTimeoutMs = integer(await value('startup-timeout-ms', 'OMP startup timeout in milliseconds', String(config.omp.startupTimeoutMs)), 'Startup timeout');
-    const relay = await value('relay-url', 'OMP relay URL (enter - to clear)', config.omp.relayUrl ?? '');
-    if (relay === '-' || relay === '') delete config.omp.relayUrl;
-    else config.omp.relayUrl = relay;
+    if (options.has('startup-timeout-ms')) config.omp.startupTimeoutMs = integer(one(options, 'startup-timeout-ms')!, 'Startup timeout');
+    if (options.has('relay-url')) {
+      const relay = one(options, 'relay-url')!;
+      if (relay === '-' || relay === '') delete config.omp.relayUrl;
+      else config.omp.relayUrl = relay;
+    }
     await this.save(config, previousDataDir);
     this.print(`Service configuration saved to ${config.configPath}.`);
+    if (interactive && !config.bots.length) await this.botAdd(new Map());
     const configOption = config.configPath === defaultConfigPath() ? '' : ` --config '${config.configPath.replaceAll("'", "'\\''")}'`;
-    this.print(config.bots.length
-      ? `Next on the agent's computer: run omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
-      : `Next on the agent's computer: run omp-telegram-collab${configOption} bot add, then omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
+    this.print(!interactive && !config.bots.length
+      ? `Run omp-telegram-collab${configOption} bot add, then omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`
+      : `Run omp-telegram-collab${configOption} start. Leave it running. In Telegram, add the bot to your forum and send /setup.`);
   }
   async remove(input: string): Promise<void> {
     const config = this.load(); this.writable(config);

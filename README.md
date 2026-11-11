@@ -147,11 +147,11 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```sh
    omp-telegram-collab setup
-   omp-telegram-collab bot add
    omp-telegram-collab start
    ```
 
    For the Mini App, use the public HTTPS origin of your proxy or tunnel, such as `https://omp.example.com`. The Mini App short name must match the name you register with BotFather. Keep `omp-telegram-collab start` running in this terminal.
+   Setup continues directly to bot registration when no bot is configured. Only the data directory and optional Mini App origin need configuration. OMP and listen settings use defaults, preserving existing settings on subsequent runs. Use explicit setup flags to change advanced settings. To register another bot later, run `omp-telegram-collab bot add`.
 
    <details>
    <summary>Example CLI commands and output</summary>
@@ -163,11 +163,9 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    The optional Mini App provides a live transcript, tool details, and subagent activity. It is read-only. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
    Enable Mini App? [y/N]: n
    Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
-   Next on the agent's computer: run omp-telegram-collab bot add, then omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
-
-   $ omp-telegram-collab bot add
    Bot token (hidden):
    Added @example_omp_bot (123456789).
+   Run omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
    ```
 
    Mini App example, with other prompts and output omitted:
@@ -176,10 +174,6 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    $ omp-telegram-collab setup
    Enable Mini App? [y/N]: y
    Public HTTPS origin []: https://omp.example.com
-   Listen host [127.0.0.1]:
-   Listen port [3000]:
-
-   $ omp-telegram-collab bot add
    Bot token (hidden):
    BotFather Mini App short name [app]:
    Added @example_omp_bot (123456789), Mini App app.
