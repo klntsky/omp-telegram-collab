@@ -6,6 +6,8 @@ Consumer installation requires the latest Node.js LTS selected through nvm, pnpm
 
 `omp-telegram-collab setup` edits service settings through interactive configuration prompts or command-line options. It does not ask for the session limit; configure that in Telegram `/settings`, or pass the explicit `--max-sessions` flag for automation. On completion, setup directs users to register a bot with `omp-telegram-collab bot add` when none are configured, then start the service; otherwise it directs users to start the service and send `/setup` in Telegram.
 
+Interactive terminal prompts remain visible while entering and editing answers. Secret-input prompts remain visible without echoing the token, verification code, or password.
+
 Every CLI command and nested subcommand accepts `--help` and `-h`. Top-level `help` also lists commands. Help describes command arguments and options without reading configuration, contacting Telegram, or starting the service.
 
 First-time enrollment needs no separate instance-creation step: `omp-telegram-collab approve --path PATH` registers a new instance with that existing default directory. `--instance ID` selects an existing instance instead. `omp-telegram-collab create PATH [--id ID]` remains available for explicit registration outside enrollment. Instance-management and chat-assignment commands select instances by ID, not directory.
