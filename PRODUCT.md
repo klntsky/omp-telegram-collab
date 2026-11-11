@@ -169,7 +169,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark the saved option with `(current)`, including named skills, model presets, and the options to use no default skill or the host's default model preset. Message handling distinguishes all messages from commands and replies only. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark the saved option with `(current)`, including named skills, model presets, and the options to use no default skill or the host's default model preset. Message handling distinguishes all messages from commands, mentions, and replies only. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
 
 The settings overview arrives with its controls in the initial message, without a loading placeholder.
 
@@ -185,7 +185,7 @@ Settings buttons do not expire with time, additional panels, or service restarts
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `all_messages_are_prompts` | `true` | Ordinary text and images create a new session topic from General or prompt the existing session in a session topic. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
+| `all_messages_are_prompts` | `true` | Ordinary text and images create a new session topic from General or prompt the existing session in a session topic. When `false`, use `/p <prompt>`, mention this bot, or reply to this bot's messages. Ordinary discussion and replies to other users or bots without an own-bot mention are ignored. |
 | `users_can_propose_prompts` | `false` | Prompts without sufficient administrator scope are ignored. When `true`, an authorized admin must approve them. Authorized admin prompts run directly. |
 | `create_topic_worktrees` | `false` | New managed session topics run native `/worktree` before their initial prompt, including manually created topics. Attached sessions and existing topics are unchanged. |
 | `typing_indicators` | `disabled` | `streaming` shows typing only while assistant text is streaming; `inference` shows typing throughout an active inference run, including thinking and tool work. |
@@ -197,6 +197,8 @@ Typing indicators are best effort. `/settings` offers Disabled, While typing, an
 Reply quotes never attach the quoted message's photos or documents to the AI prompt. Only uploads in the new prompt message or its album are attached. Forwarding the quoted message into a newly created topic does not submit its media to the AI.
 
 Non-command replies to this bot's own messages behave as `/p` in either mode: they include the same quote and, in General, create a new session and forward both the quoted message and the user's reply below its pin. Authorization and proposal approval remain unchanged. Active or expired agent-question replies retain their dedicated handling, except for discussion handoffs described in section 1.3. Detached topics remain conversation-only.
+
+Own-bot mentions in Telegram text or caption entities and rich messages accept prompts in either mode, using the bot's exact username case-insensitively or an explicit user mention of its ID. The addressing mention is removed from the submitted instructions; other mentions remain unchanged. Plain text without a mention entity does not address the bot. Mentioned replies retain the replied-to text as quoted context. Commands and active or expired agent-question handling retain precedence, and existing authorization, proposal approval, bot-message, and forwarded-message restrictions still apply.
 
 Telegram's implicit reply to a topic's creation message is topic-routing metadata, not an intentional reply to the bot. Ordinary messages with that metadata remain ignored when `all_messages_are_prompts` is `false`, including topics created by this bot.
 
@@ -222,7 +224,7 @@ Canonical `/skill:name` references preserve the skill name's exact case and punc
 
 The next accepted prompt starts with the selected `/skill:name` references separated by spaces, followed by a blank line and the normalized prompt, including any existing reply quote. Supported image attachments and quoting behavior are unchanged. These mentions are prompt text; the service does not implement native skill-template expansion.
 
-Photo and document albums are submitted as one prompt with all attachments, their captions in message order, and one pending-skill selection. An album's `/p` or `/new` caption follows the same topic and General routing as a single upload. When it creates a topic, the quoted source and every album message are forwarded there.
+Photo and document albums are submitted as one prompt with all attachments, their captions in message order, and one pending-skill selection. An album's `/p` or `/new` caption follows the same topic and General routing as a single upload. An own-bot mention in any album caption addresses the whole album; addressing mentions are removed using each caption's own entity offsets before the captions are combined. When it creates a topic, the quoted source and every album message are forwarded there.
 
 Pending skills are consumed when the prompt is accepted, not when a proposal or folder selection begins. Proposals freeze their composed text and selected skills for later approval. Cancelling or expiring a pending request leaves the user's selection available. Input ignored or rejected before submission retains pending skills, and a known host-starting rejection restores them. Ambiguous delivery errors do not restore selections because the prompt may already have been admitted. For `/new` or `/p` in General, the originating user's General selection accompanies the new topic's initial task and is consumed when that task is durably accepted.
 

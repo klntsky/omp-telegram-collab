@@ -117,7 +117,7 @@ createsTopicWorktrees(chatId: number): boolean {
 promptHelp(chatId: number): string {
     const input = this.allMessagesArePrompts(chatId)
       ? 'Text messages in a session topic are treated as prompts.'
-      : 'Use /p <prompt> or reply to my messages in a session topic. Ordinary messages and mentions are ignored.';
+      : 'Use /p <prompt>, mention me, or reply to my messages in a session topic. Ordinary discussion is ignored.';
     return `${input}\nIn General, /p works like /new: include the task in the command or reply to a message with text.\n${this.usersCanProposePrompts(chatId)
       ? 'Non-admin prompts require approval by a group administrator.'
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;

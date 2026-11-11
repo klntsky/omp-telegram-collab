@@ -139,7 +139,7 @@ install(): void {
       skillAliases:this.deps.skillAliases.get(ctx.chat.id) ?? new Map(),
       question,
       endedQuestion:replyKey !== undefined && this.deps.questions.hasEndedReply(replyKey) && !canDiscuss,
-    });
+    },messages);
     this.inputIntents.set(ctx,intent);
     return intent;
   }
