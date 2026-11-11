@@ -1,6 +1,6 @@
 export function help(options: { promptHelp: string; miniApp: boolean; admin: boolean }): string {
   return [
-    'Send a coding task here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.',
+    'Send me a task or a question here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.',
     'Start a task\n/new Find why the login tests fail\nInclude your task in the command. Open the new topic to read the agent’s replies and continue working.',
     `Continue in that topic\n/p Check whether the same bug affects signup\n${options.promptHelp}`,
     'Group settings (group admin)\n/settings\nChange group defaults, prompt permissions, runtime folders, and the session limit.',
