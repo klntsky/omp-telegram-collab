@@ -52,7 +52,7 @@ export class SettingsMutations {
       label: 'Maximum live sessions (service-wide)', before: original, after: String(target),
     });
     this.deps.panels.save(panel);
-    await this.deps.render(panel, config, 'capacity');
+    await this.deps.render(panel, config, 'root');
   }
   async apply(ctx: Context, panel: SettingsPanel, action: Extract<SettingsAction, {kind: 'set' | 'default' | 'typing'}>): Promise<void> {
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
