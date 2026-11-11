@@ -124,7 +124,17 @@ promptHelp(chatId: number): string {
   }
 
 commandHelp(chatId: number, admin: boolean): string {
-    return help({ promptHelp: this.promptHelp(chatId), miniApp: Boolean(this.deps.config.publicUrl), admin });
+    if (!findInstance(this.deps.config, this.deps.botId(), chatId) || !this.deps.store.isEnrolled(this.deps.botId(), chatId)) {
+      return help({ access: admin ? 'setup-admin' : 'setup-member' });
+    }
+    const proposals = this.usersCanProposePrompts(chatId);
+    return help({
+      access: admin ? 'admin' : 'member',
+      proposals,
+      allMessages: this.allMessagesArePrompts(chatId),
+      miniApp: Boolean(this.deps.config.publicUrl),
+      topicWorktrees: this.createsTopicWorktrees(chatId),
+    });
   }
 
 async currentAdmin(ctx: Context): Promise<boolean> {
