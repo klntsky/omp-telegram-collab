@@ -3,13 +3,36 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, openPanel, sendDocument, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
+import { clickPanel, openPanel, replyText, sendDocument, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 import { withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
 export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation' | 'documentCancellation' | 'documentAuthorization'>): void {
+  it('saving the live session limit returns to the settings overview', async () => {
+    const app = getApp();
+    const panel = await openPanel(app, '/settings');
+    const token = panel.buttons[0]!.split(':')[1]!;
+    const savedPanel = () => {
+      const row = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
+        .get(app.telegram.bot.id, token) as { panel: string };
+      return JSON.parse(row.panel) as { capacityInput: boolean; choices: Array<{ kind: string; page?: string }> };
+    };
+    await clickPanel(app, panel, 4);
+    assert.equal(savedPanel().capacityInput, true);
+    const target = app.runtime.getSessionLimit() + 1;
+    await replyText(app, panel.messageId, 1, String(target));
+    assert.equal(readConfig(app.config.configPath).omp.maxSessions, target);
+    assert.equal(app.runtime.getSessionLimit(), target);
+    assert.equal(savedPanel().capacityInput, false);
+    assert.ok(savedPanel().choices.some(action => action.kind === 'page' && action.page === 'capacity'));
+    await clickPanel(app, panel, 4);
+    assert.equal(savedPanel().capacityInput, true);
+    await clickPanel(app, panel, 0);
+    assert.equal(savedPanel().capacityInput, false);
+    await clickPanel(app, panel, -1);
+  });
   it('managed process capacity confirmation', async t => {
     const app = getApp();
     const limit = readConfig(app.config.configPath).omp.maxSessions;
