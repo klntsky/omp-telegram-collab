@@ -18,7 +18,7 @@ export interface TelegramWorkflow {
   waitForMessageHandled(messageId: number): Promise<void>;
 }
 export interface TelegramPanel {
-  kind: '/settings' | '/skills' | '/model_preset' | 'question' | 'folder';
+  kind: '/settings' | '/skills' | '/modelpreset' | 'question' | 'folder';
   messageId: number;
   buttons: string[];
 }
@@ -83,10 +83,10 @@ export async function createManagedTopic(
   return created[0]!;
 }
 
-export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills' | '/model_preset', threadId?: number): Promise<TelegramPanel> {
+export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills' | '/modelpreset', threadId?: number): Promise<TelegramPanel> {
   const start = app.apiCalls.length;
   await app.sendAndWait(command, threadId);
-  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : command === '/model_preset' ? 'preset:' : 'settings:', start, threadId);
+  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : command === '/modelpreset' ? 'preset:' : 'settings:', start, threadId);
 }
 
 export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['kind'], prefix: string, start: number, threadId?: number): Promise<TelegramPanel> {
@@ -118,7 +118,7 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
     button.type._ === 'inlineButtonTypeCallback' ? [button.type.data] : []));
   const data = buttons.at(index)!;
   await app.telegram.user.client.getCallbackAnswer({ chatId: app.telegram.forum.chat, message: panel.messageId, data });
-  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/model_preset') || index === -1) return;
+  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/modelpreset') || index === -1) return;
   const editedPanel = z.object({ message_id: z.literal(panel.messageId), reply_markup: replyMarkup });
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {
