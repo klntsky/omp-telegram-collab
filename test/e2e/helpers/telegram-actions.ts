@@ -186,6 +186,17 @@ export async function waitForEditor(app: TelegramWorkflow, start: number, thread
   return messageId!;
 }
 
+export async function waitForMessageDeleted(app: TelegramWorkflow, messageId: number): Promise<void> {
+  const deletion = z.object({
+    method: z.literal('deleteMessage'),
+    payload: z.object({ chat_id: z.literal(app.telegram.forum.chatId), message_id: z.literal(messageId) }),
+    result: z.object({ ok: z.literal(true), result: z.literal(true) }),
+  });
+  await app.waitForCondition(() => app.apiCalls.some(call => deletion.safeParse(call).success));
+  const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [messageId]);
+  assert.equal(message, null);
+}
+
 interface LifecycleWorkflow extends TelegramWorkflow {
   store: Pick<Store, 'isEnrolled' | 'getSession' | 'hasPendingCloseIcon'>;
   runtime: Pick<OmpRuntime, 'isRunning'>;
