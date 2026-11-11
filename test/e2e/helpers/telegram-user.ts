@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { tl, type TelegramClient, type User } from '@mtcute/node';
 import { TelegramTestExecution, type TelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
 import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
-import { telegramTestTimeouts, telegramTestDeadlineRemaining, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { telegramTestDeadlineRemaining, telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { combineTelegramErrors } from './errors.js';
 
 let execution = new TelegramTestExecution();
@@ -50,7 +50,10 @@ export class TelegramTestUser {
   }
   async call<T extends tl.RpcMethod>(request: T, signal: AbortSignal = this.signal, timeoutMs: number = telegramTestTimeouts.request): Promise<tl.RpcCallReturn[T['_']]> {
     const failures: unknown[] = [];
-    const budget = Math.min(timeoutMs, telegramTestDeadlineRemaining(signal));
+    // Provisioning owns a longer deadline so an explicit FLOOD_WAIT can fit
+    // without extending that operation or replaying an ambiguous request.
+    const remaining = telegramTestDeadlineRemaining(signal);
+    const budget = Number.isFinite(remaining) ? remaining : telegramTestTimeouts.request;
     const deadline = performance.now() + budget;
     try {
       // Explicit cleanup signals must survive fixture cancellation until rollback ends.
