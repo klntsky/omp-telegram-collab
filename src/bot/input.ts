@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import { HttpError, type Bot, type Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -63,13 +64,13 @@ install(): void {
       } finally {
         this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
-          await ctx.answerCallbackQuery().catch(error => console.warn('Could not acknowledge Telegram callback.', error));
+          await ctx.answerCallbackQuery().catch(error => logEvent('warn', 'could-not-acknowledge-telegram-callback', {botId: this.deps.botId(), chatId: ctx.chat?.id, message: 'Could not acknowledge Telegram callback.', error}));
       }
     });
 }
 
   private async reportError(ctx: Context, error: unknown): Promise<void> {
-    console.error('Telegram operation failed.', error);
+    logEvent('error', 'telegram-operation-failed', {botId: this.deps.botId(), chatId: ctx.chat?.id, message: 'Telegram operation failed.', error});
     const intent = this.inputIntents.get(ctx);
     if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
       const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
@@ -87,7 +88,7 @@ install(): void {
     const details = error instanceof Error ? error.message : String(error);
     await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
-    }).catch(deliveryError => console.error('Could not deliver Telegram operation error notice.', deliveryError));
+    }).catch(deliveryError => logEvent('error', 'could-not-deliver-telegram-operation-error-notice', {botId: this.deps.botId(), chatId: ctx.chat?.id, message: 'Could not deliver Telegram operation error notice.', error: deliveryError}));
   }
 
   private collectAlbum(ctx: Context): boolean {
@@ -161,6 +162,6 @@ install(): void {
     await this.deps.delivery.run(ctx.chat.id,
       () => this.deps.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.deps.stopped() && findInstance(this.deps.config,this.deps.botId(),ctx.chat!.id)?.instance.id === assigned.instance.id)
-      .catch(error => console.warn('Could not show message receipt reaction.', error));
+      .catch(error => logEvent('warn', 'could-not-show-message-receipt-reaction', {botId: this.deps.botId(), chatId: ctx.chat?.id, message: 'Could not show message receipt reaction.', error}));
   }
 }

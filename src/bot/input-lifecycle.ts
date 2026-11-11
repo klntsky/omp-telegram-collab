@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -127,7 +128,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           void metadata.name.observe(edited.name);
           void deps.applySessionTitle(session).catch((error) => {
             if (deps.stopped || deps.config.terminated || !deps.sessionAssigned(session)) return;
-            console.warn(`Could not synchronize session title (${session.id}).`, error);
+            logEvent('warn', 'could-not-synchronize-session-title', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not synchronize session title (${session.id}).`, error});
             deps.sessionObservation(session.id).failure = {
               operation: 'Topic title synchronization',
               at: Date.now(),
@@ -158,7 +159,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
                   deps.metadataOwners.get(session.id)?.metadata === metadata &&
                   deps.sessionAssigned(session) &&
                   deps.store.getSessionGeneration(session.id) === metadata.generation) {
-                console.warn(`Could not synchronize topic icon (${session.id}).`, error);
+                logEvent('warn', 'could-not-synchronize-topic-icon', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not synchronize topic icon (${session.id}).`, error});
                 deps.sessionObservation(session.id).failure = {
                   operation: 'Topic icon synchronization',
                   at: Date.now(),
@@ -183,10 +184,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             () => !deps.stopped && deps.sessionAssigned(session),
           )
           .catch((error) => {
-            console.warn(
-              `Could not delete topic edit notice (${session.id}, ${message.message_id}).`,
-              error,
-            );
+            logEvent('warn', 'could-not-delete-topic-edit-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, messageId: message.message_id, message: `Could not delete topic edit notice (${session.id}, ${message.message_id}).`, error});
           });
       }
       return true;

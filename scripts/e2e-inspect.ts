@@ -84,18 +84,18 @@ const lines = source.split('\n');
 if (lines.at(-1) === '') lines.pop();
 const events = lines.map((line, index) => parseEvent(line, `${tracePath}:${index + 1}`));
 const artifacts = await findArtifacts(directory);
-console.log(`Artifacts: ${directory}`);
-console.log(`Trace: ${tracePath}`);
-console.log('Terminal/history artifacts (paths only):');
-for (const path of artifacts) console.log(`  ${relative(directory, path)}`);
-if (!artifacts.length) console.log('  (none found)');
-console.log('Timeline:');
+process.stdout.write(String(`Artifacts: ${directory}`) + '\n');
+process.stdout.write(String(`Trace: ${tracePath}`) + '\n');
+process.stdout.write(String('Terminal/history artifacts (paths only):') + '\n');
+for (const path of artifacts) process.stdout.write(String(`  ${relative(directory, path)}`) + '\n');
+if (!artifacts.length) process.stdout.write(String('  (none found)') + '\n');
+process.stdout.write(String('Timeline:') + '\n');
 for (const entry of events) {
   if (values.event !== undefined && !entry.event.includes(values.event)) continue;
-  console.log(`#${entry.sequence} +${entry.elapsedMs}ms ${entry.event}`);
+  process.stdout.write(String(`#${entry.sequence} +${entry.elapsedMs}ms ${entry.event}`) + '\n');
   if (values.full || /error|fail|exception/i.test(entry.event) || hasDiagnostics(entry.data)) {
-    console.log(JSON.stringify(entry.data, null, 2));
+    process.stdout.write(String(JSON.stringify(entry.data, null, 2)) + '\n');
   } else {
-    console.log(`  ${summarize(entry.data)}`);
+    process.stdout.write(String(`  ${summarize(entry.data)}`) + '\n');
   }
 }

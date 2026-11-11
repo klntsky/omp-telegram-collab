@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PendingPromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -127,7 +128,7 @@ export class TopicCreation {
           await this.dependencies.preparePrompt(ctx, session, extensions, authority);
         } catch (error) {
           await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
-            console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
+            logEvent('error', 'could-not-deliver-the-created-topic-link-after-prompt-preparation-failed', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: 'Could not deliver the created topic link after prompt preparation failed.', error: deliveryError});
           });
           throw error;
         }

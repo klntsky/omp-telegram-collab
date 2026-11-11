@@ -245,9 +245,8 @@ export async function waitForBackgroundCompletion(app: {
     for (let index = lines.length - 1; index >= 0; index--) {
       const entry = JSON.parse(lines[index]!);
       if (Date.parse(entry.time) < since) break;
-      const value = entry.data?.[0];
-      if (entry.event !== 'application.console.log' || typeof value !== 'string' || !value.startsWith('{"event":"bot-background",')) continue;
-      if (JSON.parse(value).phase === phase) return true;
+      if (entry.event !== 'application.log' || entry.data?.event !== 'bot-background') continue;
+      if (entry.data.phase === phase) return true;
     }
     return false;
   });

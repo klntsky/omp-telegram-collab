@@ -5,6 +5,7 @@ import { TelegramTestExecution, type TelegramTestSession } from '../../../script
 import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { combineTelegramErrors } from './errors.js';
+import { logEvent } from '../../../src/logging.js';
 
 let execution = new TelegramTestExecution();
 after(() => execution.close(), { timeout: 30000 });
@@ -66,7 +67,7 @@ export class TelegramTestUser {
             // Like TDLib's NetQueryDelayer::delay, honor the server's seconds and total budget;
             // only this explicit rejection is safe to repeat, not an ambiguous transport failure.
             // https://github.com/tdlib/td/blob/master/td/telegram/net/NetQueryDelayer.cpp
-            console.warn(`Telegram ${request._} account=${this.account.id} FLOOD_WAIT delay=${error.seconds}s`, error);
+            logEvent('warn', 'telegram.request.flood-wait', { operation: request._, accountId: this.account.id, delaySeconds: error.seconds, error });
             const wait = error.seconds * 1000;
             if (wait >= deadline - performance.now()) {
               throw new Error(`Telegram ${request._} account=${this.account.id}: required ${error.seconds}s delay exceeds remaining request budget`);

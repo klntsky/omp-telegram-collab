@@ -10,6 +10,7 @@ import { sendTo } from './telegram-destination.js';
 import { installTelegramRetry } from './telegram-retry.js';
 import type { SessionFeedHandlers, SessionFeedSubscription } from './session-feed.js';
 import { createBotComponents, type BotComponents } from './bot/composition.js';
+import { logEvent } from './logging.js';
 
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: Omp; bot?: Bot<Context>; configWritable?: () => boolean; topicActivityEmojis?: { running: string; finished: string } }
 
@@ -161,7 +162,7 @@ async start(onReady?: () => void): Promise<void> {
           if (controller.signal.aborted) break;
           const temporary = error instanceof GrammyError && (error.error_code === 429 || error.error_code >= 500);
           if (!temporary && !(error instanceof HttpError)) throw error;
-          console.warn('Telegram polling failed; retrying.', error);
+          logEvent('warn', 'telegram-polling-retry', { botId: this.id, message: 'Telegram polling failed; retrying.', error });
           const seconds = error instanceof GrammyError ? error.parameters.retry_after ?? 5 : 5;
           await retryDelay(Math.max(0, seconds) * 1000, controller.signal);
         }

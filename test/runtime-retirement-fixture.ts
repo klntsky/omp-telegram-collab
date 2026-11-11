@@ -88,8 +88,8 @@ if (process.argv[2] !== 'collab') {
   });
 } else if (process.argv[3] === 'link') {
   if (state.failLink) { process.stderr.write('Original reconnect registry failure\\n'); process.exit(23); }
-  console.log(JSON.stringify({version:1,instanceId:state.host.instanceId,generation:state.host.generation,access:'control',url:${JSON.stringify(url)}}));
-} else console.log(JSON.stringify({version:1,hosts:state.host?[state.host]:[]}));
+  process.stdout.write(JSON.stringify({version:1,instanceId:state.host.instanceId,generation:state.host.generation,access:'control',url:${JSON.stringify(url)}}) + '\\n');
+} else process.stdout.write(JSON.stringify({version:1,hosts:state.host?[state.host]:[]}) + '\\n');
 `);
   await chmod(executable, 0o700);
   const history = join(sessionDir, 'history.jsonl');

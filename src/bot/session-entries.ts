@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -28,12 +29,12 @@ export class SessionEntries {
       } catch (error) {
         if (!(error instanceof GrammyError)) throw error;
         if (error.description === 'Bad Request: message to edit not found') {
-          console.warn(`Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`,error);
+          logEvent('warn', 'pinned-session-entry-no-longer-exists', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, messageId: entry.messageId, message: `Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`, error});
           this.dependencies.options.store.clearSessionEntry(session.id);
           continue;
         }
         if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
-        console.warn(`Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`,error);
+        logEvent('warn', 'pinned-session-entry-already-has-the-desired-markup', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, messageId: entry.messageId, message: `Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`, error});
       }
       this.dependencies.options.store.setSessionEntry(session.id,entry.messageId,markup);
     }

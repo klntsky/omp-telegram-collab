@@ -101,7 +101,7 @@ try {
     clearTimeout(titleTimer);
   }
   guest.close();
-  console.log('PASS actual OMP denies a forged write capability despite a valid encryption key; the genuine capability still receives the snapshot and live title updates.');
+  process.stdout.write(String('PASS actual OMP denies a forged write capability despite a valid encryption key; the genuine capability still receives the snapshot and live title updates.') + '\n');
   const attached = await runtime.attach(first.instanceId, selectedFolder);
   assert.equal(attached.sessionId, first.sessionId);
   runtime.markPrompt(session.id);
@@ -175,7 +175,7 @@ try {
     await runtime.close();
     reopenedStore.close();
   }
-  console.log('PASS current database/config reopen preserves actual OMP history bytes, topic identity, pending task, and live host binding.');
+  process.stdout.write(String('PASS current database/config reopen preserves actual OMP history bytes, topic identity, pending task, and live host binding.') + '\n');
   const worktreeRepository = join(dir, 'worktree-repository');
   await mkdir(worktreeRepository);
   execFileSync('git', ['init', '--quiet', worktreeRepository]);
@@ -217,14 +217,14 @@ try {
     assert.equal(resumed.sessionId, binding.sessionId);
     await runtime.kill(worktreeSession);
     execFileSync('git', ['-C', worktreeRepository, 'worktree', 'remove', '--force', worktreePath]);
-    console.log('PASS native /worktree carries dirty tracked/untracked bytes, retains session identity, and resumes relocated history after runtime restart.');
+    process.stdout.write(String('PASS native /worktree carries dirty tracked/untracked bytes, retains session identity, and resumes relocated history after runtime restart.') + '\n');
   } finally {
     await runtime.close();
   }
   await verifyBusyHostRetirement(await mkdtemp(join(dir,'guard-')),config.omp.executable,relay.url);
   await verifyRuntimeKill(await mkdtemp(join(dir,'kill-')),config.omp.executable,relay.url);
-  console.log('PASS actual OMP PTY startup, encrypted guest welcome, multiple instance paths, wrong-path attachment denial, capacity rejection, exact-history restart, and session mismatch denial.');
-  console.log('No model prompt or live Telegram API request was sent.');
+  process.stdout.write(String('PASS actual OMP PTY startup, encrypted guest welcome, multiple instance paths, wrong-path attachment denial, capacity rejection, exact-history restart, and session mismatch denial.') + '\n');
+  process.stdout.write(String('No model prompt or live Telegram API request was sent.') + '\n');
 } finally {
   await runtime.close();
   await relay.close();

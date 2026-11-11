@@ -1,7 +1,15 @@
+import { channel } from 'node:diagnostics_channel';
 import { Bot } from 'grammy';
 import type { Update } from 'grammy/types';
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
 import type { Omp } from '../../../src/omp.js';
+
+export function observeApplicationLogs(log: (event: string, data: unknown) => void): () => void {
+  const logs = channel('omp-telegram.log');
+  const observe = (record: unknown) => { log('application.log', JSON.parse(String(record))); };
+  logs.subscribe(observe);
+  return () => { logs.unsubscribe(observe); };
+}
 
 // Observation owns no application lifecycle; the fixture supplies its wake-up barrier.
 export function createCollaborationObserver(options: {

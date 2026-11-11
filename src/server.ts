@@ -14,6 +14,7 @@ import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 import type { SessionFeedSubscription } from './session-feed.js';
 import { CollabTransportError } from './collab.js';
+import { logEvent } from './logging.js';
 
 export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'subscribeSessionFeed' | 'onSessionInvalidated'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: Omp; staticDir?: string }
@@ -331,7 +332,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           flushOutgoing();
         },
         onClose: reason => {
-          if (!closed) console.warn(`Mini App host disconnected (${identity.botId}, ${identity.sessionId}).`, reason);
+          if (!closed) logEvent('warn', 'mini-app-host-disconnected', { botId: identity.botId, sessionId: identity.sessionId, reason });
           fail(1011,reason);
         },
       });

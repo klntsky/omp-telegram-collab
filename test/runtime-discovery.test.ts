@@ -26,7 +26,7 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
       if (failure !== 'missing executable') {
         const host = { instanceId: 'fixture', sessionId: 'session', generation: 1, pid: process.pid,
           cwd: directory, access: 'control', relayConnected: true };
-        await writeFile(executable, `#!${process.execPath}\nif (process.argv[3] === ${JSON.stringify(failure)}) {\n  process.stderr.write('Registry 🚫 unavailable: <socket> & permission denied\\nOriginal diagnostic line two\\n');\n  process.exit(23);\n}\nconsole.log(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))});\n`);
+        await writeFile(executable, `#!${process.execPath}\nif (process.argv[3] === ${JSON.stringify(failure)}) {\n  process.stderr.write('Registry 🚫 unavailable: <socket> & permission denied\\nOriginal diagnostic line two\\n');\n  process.exit(23);\n}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))} + '\\n');\n`);
         await chmod(executable, 0o700);
       }
       const args = failure === 'link' ? ['collab', 'link', 'fixture', '--json'] : ['collab', 'list', '--json'];
@@ -77,7 +77,7 @@ if (process.argv[2] !== 'collab') {
     if (mode === 'deadline' && JSON.parse(fs.readFileSync(attemptsPath, 'utf8')).length > 0 && !fs.existsSync(attemptsPath + '.deadline')) {
       fs.writeFileSync(attemptsPath + '.deadline', '');
       setInterval(() => {}, 1000);
-    } else console.log(JSON.stringify({version:1,hosts:host?[host]:[]}));
+    } else process.stdout.write(JSON.stringify({version:1,hosts:host?[host]:[]}) + '\\n');
   } else {
     const attempts = JSON.parse(fs.readFileSync(attemptsPath, 'utf8'));
     attempts.push(Date.now());
@@ -88,7 +88,7 @@ if (process.argv[2] !== 'collab') {
     if (mode === 'fatal') {
       process.stderr.write('error: permission denied for fixture-host\\n'); process.exit(23);
     }
-    console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:mode==='identity'?8:host.generation,access:'control',url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}));
+    process.stdout.write(JSON.stringify({version:1,instanceId:host.instanceId,generation:mode==='identity'?8:host.generation,access:'control',url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}) + '\\n');
   }
 }
 `);

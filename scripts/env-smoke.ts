@@ -51,7 +51,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
     assert.equal(readConfig(configPath).publicUrl, 'https://cli.example');
     const missing = join(cwd, 'missing.yaml');
     await assert.rejects(run('start', '--config', missing));
-    console.log('PASS compiled CLI configuration, stable numeric identities, protected-file reads/write rejection, and atomic refusal.');
+    process.stdout.write(String('PASS compiled CLI configuration, stable numeric identities, protected-file reads/write rejection, and atomic refusal.') + '\n');
   } finally {
     await chmod(configPath, 0o600).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true });

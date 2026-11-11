@@ -14,7 +14,7 @@ for (const name of selected) {
 
 const results: { name: string; code: number | null; signal: NodeJS.Signals | null }[] = [];
 for (const name of selected as Stage[]) {
-  console.log(`START smoke ${name}`);
+  process.stdout.write(String(`START smoke ${name}`) + '\n');
   try {
     const { promise, resolve, reject } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
     const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL(stages[name], import.meta.url))], { stdio: 'inherit' });
@@ -29,9 +29,9 @@ for (const name of selected as Stage[]) {
   }
 }
 
-console.log('\nSmoke results:');
+process.stdout.write(String('\nSmoke results:') + '\n');
 for (const [index, result] of results.entries()) {
   const passed = result.code === 0;
-  console.log(`${index + 1}. ${result.name}: ${passed ? 'PASS' : `FAIL (exit ${result.code}, signal ${result.signal})`}`);
+  process.stdout.write(String(`${index + 1}. ${result.name}: ${passed ? 'PASS' : `FAIL (exit ${result.code}, signal ${result.signal})`}`) + '\n');
   if (!passed) process.exitCode = 1;
 }

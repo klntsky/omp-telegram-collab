@@ -194,7 +194,7 @@ export class GuestClient {
 			this.#welcomed = false;
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#history.pendingSnapshot = null;
-			console.warn("Session connection interrupted:", reason);
+			console.error({ level: "warn", event: "collab.session.connection-interrupted", message: "Session connection interrupted:", reason });
 			this.#commit();
 			return;
 		}
@@ -254,7 +254,7 @@ export class GuestClient {
 		try {
 			this.#applyFrame(frame);
 		} catch (err) {
-			console.warn("collab: failed to apply frame", frame.t, err);
+			console.error({ level: "warn", event: "collab.frame.apply-failed", message: "collab: failed to apply frame", frameType: frame.t, error: err });
 			if (frame.t === "welcome" && !this.#welcomed) {
 				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
 				return;

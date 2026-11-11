@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -133,8 +134,7 @@ export class MirrorRecovery {
     const current = this.deps.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
-      console.warn(JSON.stringify({
-        event: 'omp-mirror-reconnect-exhausted',
+      logEvent('warn', 'omp-mirror-reconnect-exhausted', {
         at: new Date().toISOString(),
         botId: this.deps.id,
         sessionId: session.id,
@@ -142,12 +142,12 @@ export class MirrorRecovery {
         threadId: session.threadId,
         attempts: attempt,
         generation: this.deps.options.store.getSessionGeneration(session.id),
-      }));
+      });
       void sendTo(
         this.deps.bot.api,
         topicDestination(session.chatId, session.threadId),
         'Session mirroring disconnected.',
-      ).catch(error => console.warn(`Could not deliver mirroring disconnected notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-mirroring-disconnected-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver mirroring disconnected notice (${session.id}).`, error}));
       return;
     }
     const generation = this.deps.options.store.getSessionGeneration(session.id);

@@ -17,7 +17,7 @@ childProcess.execFile = new Proxy(originalExec, {
       args[args.length - 1] = (error: childProcess.ExecFileException | null, stdout: string | Buffer, stderr: string | Buffer) => {
         if (!error) {
           const registry = JSON.parse(stdout.toString());
-          console.log(JSON.stringify({ hosts: registry.hosts.map((host: { instanceId: string; relayConnected: boolean }) => ({ instanceId: host.instanceId, relayConnected: host.relayConnected })) }));
+          process.stdout.write(String(JSON.stringify({ hosts: registry.hosts.map((host: { instanceId: string; relayConnected: boolean }) => ({ instanceId: host.instanceId, relayConnected: host.relayConnected })) })) + '\n');
         }
         callback(error, stdout, stderr);
       };
@@ -36,7 +36,7 @@ const start = Date.now();
 try {
   const binding = await runtime.ensure(session);
   assert.ok(binding.sessionId);
-  console.log(`PASS real managed startup in ${Date.now() - start} ms.`);
+  process.stdout.write(String(`PASS real managed startup in ${Date.now() - start} ms.`) + '\n');
 } catch (error) {
   console.error(`FAIL real managed startup in ${Date.now() - start} ms. ${error instanceof Error ? error.message : 'Unknown failure'}`);
   process.exitCode = 1;

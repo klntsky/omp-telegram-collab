@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -94,7 +95,7 @@ export class SessionFork {
         this.dependencies.options.store.detachTopic({botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id});
         if (destination) this.dependencies.dropListener(destination.id);
         await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`).catch(deliveryError => {
-          console.error('Could not deliver the created topic link after fork preparation failed.', deliveryError);
+          logEvent('error', 'could-not-deliver-the-created-topic-link-after-fork-preparation-failed', {botId: source.botId, sessionId: source.id, chatId: source.chatId, threadId: topic?.message_thread_id, message: 'Could not deliver the created topic link after fork preparation failed.', error: deliveryError});
         });
       }
       throw error;

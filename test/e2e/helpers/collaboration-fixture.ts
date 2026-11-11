@@ -15,7 +15,7 @@ import { setupOmpEnvironment } from './omp-environment.js';
 import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
-import { createCollaborationObserver } from './collaboration-observer.js';
+import { createCollaborationObserver, observeApplicationLogs } from './collaboration-observer.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -114,14 +114,13 @@ export async function setupCollaborationTest(
   }, {...options, tools:['write', 'read', 'ask']});
   log = omp.log;
   void omp.provider.failure.catch(fail);
-  for (const method of ['log', 'error'] as const) {
-    const original = console[method];
-    console[method] = (...args: unknown[]) => {
-      omp.log(`application.console.${method}`, args);
-      original.call(console, omp.formatDiagnostic(args));
-    };
-    restoreConsole.push(() => { console[method] = original; });
-  }
+  restoreConsole.push(observeApplicationLogs(omp.log));
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    omp.log('application.console.error', args);
+    originalError.call(console, omp.formatDiagnostic(args));
+  };
+  restoreConsole.push(() => { console.error = originalError; });
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],

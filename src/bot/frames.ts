@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, PromptContent } from '../../shared/contracts.js';
 import type { HostFrame, CollabUiRequest, CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -116,7 +117,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         `⛔️${interruptedBy} interrupted the chat`,
         {},
-      ).catch(error => console.warn(`Could not deliver interruption notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-interruption-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver interruption notice (${session.id}).`, error}));
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
@@ -186,7 +187,7 @@ export class FrameProjection {
           this.deps.bot.api,
           topicDestination(session.chatId, session.threadId),
           `The host is still starting. The initial task was not admitted; send your task again after startup. ${this.deps.promptHelp(session.chatId)}`,
-        ).catch(error => console.warn(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
+        ).catch(error => logEvent('warn', 'could-not-deliver-initial-task-startup-timeout-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver initial task startup timeout notice (${session.id}).`, error}));
       } else {
         initial.timer = setTimeout(() => {
           void this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId)
@@ -211,7 +212,7 @@ export class FrameProjection {
             })
             .catch(error => {
               if (!this.deps.stopped() && error !== this.deps.background.reason)
-                console.warn(`Could not retry initial task submission (${session.id}).`, error);
+                logEvent('warn', 'could-not-retry-initial-task-submission', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not retry initial task submission (${session.id}).`, error});
               clearTimeout(initial.timer);
               if (listener.initial === initial) listener.initial = undefined;
             });
@@ -237,7 +238,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         prefix + frame.message,
         { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
-      ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-omp-error-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver OMP error notice (${session.id}).`, error}));
       return;
     }
     if (frame.t === 'snapshot-chunk') {
@@ -320,7 +321,7 @@ export class FrameProjection {
           });
         }
       })
-      .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
+      .catch(error => logEvent('error', 'could-not-mirror-omp-reply', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not mirror OMP reply (${session.id}).`, error}))
       .finally(() => {
         listener.queued--;
       });
