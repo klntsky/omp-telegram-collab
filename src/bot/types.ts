@@ -1,6 +1,6 @@
 import type { Context } from 'grammy';
 import type { CollabUiRequest } from '@oh-my-pi/pi-wire';
-import type { TopicSession, CollabConnection, PromptContent, TypingMode } from '../../shared/contracts.js';
+import type { TopicSession, CollabConnection, PromptContent, PendingPromptContent, TypingMode } from '../../shared/contracts.js';
 import type { PendingSkillKey } from '../store.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -103,11 +103,11 @@ export interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
-  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
+  command?: {source: Context; content: PendingPromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
 }
 export interface PromptProposal {
   source: Context;
-  content: PromptContent;
+  content: PendingPromptContent;
   instanceId: number;
   sessionId?: string;
   folderFingerprint?: string;
