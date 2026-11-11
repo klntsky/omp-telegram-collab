@@ -16,6 +16,7 @@ import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { createCollaborationObserver } from './collaboration-observer.js';
+import { cleanupLifecycle } from './lifecycle-cleanup.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -210,24 +211,22 @@ export async function setupCollaborationTest(
   }
   async function pauseService(): Promise<void> {
     closing = true;
-    if (service) {
-      try { await operation(service.close()); }
-      catch (error) { pollerStopFailed = true; throw error; }
-      service = undefined;
-    }
-    if (polling) {
-      try { await operation(polling); }
-      catch (error) { pollerStopFailed = true; throw error; }
-      polling = undefined;
-    }
-    if (runtime) {
-      await operation(runtime.close());
-      runtime = undefined;
-    }
-    if (store) {
-      store.close();
-      store = undefined;
-    }
+    const activeService = service;
+    const activePolling = polling;
+    const activeRuntime = runtime;
+    const activeStore = store;
+    await cleanupLifecycle([
+      { name: 'service', async run() {
+        try { await activeService?.close(); service = undefined; }
+        catch (error) { pollerStopFailed = true; throw error; }
+      } },
+      { name: 'polling', async run() {
+        try { await activePolling; polling = undefined; }
+        catch (error) { pollerStopFailed = true; throw error; }
+      } },
+      { name: 'runtime', async run() { await activeRuntime?.close(); runtime = undefined; } },
+      { name: 'store', run() { activeStore?.close(); store = undefined; } },
+    ], message => t.diagnostic(message)).catch(error => { pollerStopFailed = true; throw error; });
   }
   await omp.step('application.start', startService);
   async function waitForCondition(
