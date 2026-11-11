@@ -7,8 +7,9 @@ import { clickPanel, openPanel, sendDocument, waitForPanel } from '../helpers/te
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
+import { withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
-export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation'>): void {
+export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation' | 'documentCancellation' | 'documentAuthorization'>): void {
   it('managed process capacity confirmation', async t => {
     const app = getApp();
     const limit = readConfig(app.config.configPath).omp.maxSessions;
@@ -136,6 +137,88 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       app.omp.provider.assertComplete([tasks.documentPreparation.name]);
     } finally {
       await writeFile(nativeSettingsPath, original);
+    }
+  });
+  it('stop prevents an in-flight initial document from replacing an existing file', async t => {
+    const app = getApp();
+    const filename = 'cancelled-initial-document.txt';
+    const path = join(app.omp.workspace, filename);
+    const original = Buffer.from('Keep this original after cancellation.');
+    await writeFile(path, original);
+    const released = Promise.withResolvers<void>();
+    let held = false;
+    let intercept = true;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      const result = await previous(method, payload, signal);
+      if (intercept && method === 'getFile' && !held) {
+        // Hold a genuine Telegram response, not fabricated metadata or file bytes.
+        held = true;
+        await withTelegramTestDeadline('held document metadata', 30000, t.signal, () => released.promise);
+      }
+      return result;
+    });
+    try {
+      const sent = await sendDocument(app, filename, Buffer.from('Do not overwrite the original.'), {
+        caption: `/new ${tasks.documentCancellation.prompt}`,
+      });
+      await app.waitForCondition(() => held);
+      const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
+      assert.ok(pending);
+      await app.sendAndWait('/stop', pending.threadId);
+      assert.equal(app.store.hasPendingInitialTask(pending.id), false);
+      released.resolve();
+      await app.waitForMessageHandled(sent.id);
+      assert.deepEqual(await readFile(path), original);
+      assert.equal(app.store.getSession(pending.id)!.status, 'open');
+      assert.deepEqual(app.omp.provider.requests.get(tasks.documentCancellation.name), []);
+    } finally {
+      intercept = false;
+      released.resolve();
+    }
+  });
+  it('authorization transport failure does not replay a completed automatic worktree', async () => {
+    const app = getApp();
+    const settings = await openPanel(app, '/settings');
+    await clickPanel(app, settings, 5);
+    await app.waitForCondition(() => readConfig(app.config.configPath).instances[0]!.chats[0]!.create_topic_worktrees === true);
+    await clickPanel(app, settings, -1);
+    const existing = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
+    const diagnostic = new Error('E2E lost authorization lookup response after native worktree completion');
+    let interruptedCwd: string | undefined;
+    let intercept = true;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      const result = await previous(method, payload, signal);
+      if (intercept && method === 'getChatMember' && interruptedCwd === undefined) {
+        const pending = app.store.listSessions(app.telegram.bot.id).find(session => !existing.has(session.id));
+        if (pending) {
+          let binding;
+          try { binding = JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', pending.id, 'binding.json'), 'utf8')); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          if (binding?.cwd && binding.cwd !== app.omp.workspace) {
+            interruptedCwd = binding.cwd;
+            app.omp.log('document.authorization.lost-response', {sessionId:pending.id, result, diagnostic});
+            throw diagnostic;
+          }
+        }
+      }
+      return result;
+    });
+    try {
+      const filename = 'authorization-recovery-document.txt';
+      const bytes = Buffer.from('Keep the completed worktree across authorization transport failure.');
+      const sent = await sendDocument(app, filename, bytes, {caption:`/new ${tasks.documentAuthorization.prompt}`});
+      await app.waitForCondition(() => interruptedCwd !== undefined);
+      const pending = app.store.listSessions(app.telegram.bot.id).find(session => !existing.has(session.id))!;
+      await completeWriteTask(app, tasks.documentAuthorization, sent, pending.threadId);
+      const completed = app.store.getSession(pending.id)!;
+      assert.equal(completed.cwd, interruptedCwd);
+      await app.omp.assertWorktree(completed);
+      assert.deepEqual(await readFile(join(completed.cwd, filename)), bytes);
+      assert.equal(app.store.hasPendingInitialTask(completed.id), false);
+      assert.equal(app.store.getInitialDocumentSetup(completed.id), undefined);
+      app.omp.provider.assertComplete([tasks.documentAuthorization.name]);
+    } finally {
+      intercept = false;
     }
   });
 }

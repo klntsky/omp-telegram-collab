@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
 import { readFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, createManagedTopic, openPanel, replyText, sendDocument, sendDocumentAlbum, sendPhoto, waitForPanel } from '../helpers/telegram-actions.js';
@@ -8,7 +9,7 @@ import { completeWriteTask, taskInput, taskReadResult } from '../helpers/model-t
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
-export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'settingsReply' | 'followup' | 'general'>): void {
+export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'documentFinalAuthority' | 'settingsReply' | 'followup' | 'general'>): void {
   it('media, skills, and folders', async t => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
@@ -134,6 +135,41 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.general).text.includes(`/skill:e2e-review\n\n${tasks.general.prompt}`));
     app.omp.provider.assertComplete([tasks.image.name, tasks.explicitImage.name, tasks.document.name, tasks.documentOverwrite.name, tasks.documentOnly.name, tasks.settingsReply.name, tasks.followup.name, tasks.general.name]);
+  });
+  it('existing-session upload rechecks authority before submitting its prompt', async () => {
+    const app = getApp();
+    const session = await createManagedTopic(app);
+    const filename = 'final-authority-document.txt';
+    const path = join(session.cwd, filename);
+    const bytes = Buffer.from('The upload can finish without authorizing the later prompt.');
+    const diagnostic = new Error('E2E lost final prompt authorization lookup response');
+    let acknowledged = false;
+    let interrupted = false;
+    let intercept = true;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      const result = await previous(method, payload, signal);
+      if (intercept) {
+        if (method === 'sendMessage' && existsSync(path)) acknowledged = true;
+        if (method === 'getChatMember' && acknowledged && !interrupted) {
+          // Drop a real authorization response only after the real file and acknowledgement exist.
+          interrupted = true;
+          app.omp.log('document.prompt.authorization.lost-response', {sessionId:session.id, result, diagnostic});
+          throw diagnostic;
+        }
+      }
+      return result;
+    });
+    try {
+      const sent = await sendDocument(app, filename, bytes, {
+        threadId:session.threadId, caption:tasks.documentFinalAuthority.prompt,
+      });
+      await app.waitForMessageHandled(sent.id);
+      assert.equal(interrupted, true);
+      assert.deepEqual(await readFile(path), bytes);
+      assert.deepEqual(app.omp.provider.requests.get(tasks.documentFinalAuthority.name), []);
+    } finally {
+      intercept = false;
+    }
   });
   it('document albums submit all files in one explicit prompt', async () => {
     const app = getApp();

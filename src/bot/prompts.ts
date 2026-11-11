@@ -88,6 +88,16 @@ export class PromptReceipts {
       throw error;
     }
   }
+  private async authorizePendingInitial(session: TopicSession, userId: number, authorityUserId: number): Promise<void> {
+    // /stop cancels pending intent without retiring the native host generation.
+    const check = () => {
+      if (!this.deps.options.store.hasPendingInitialTask(session.id))
+        throw new Error('The initial task was cancelled before document preparation.');
+    };
+    check();
+    await this.authorizeInitial(session, userId, authorityUserId);
+    check();
+  }
   sendInitial(session: TopicSession): Promise<void> {
     const existing = this.preparing.get(session.id);
     if (existing) return existing;
@@ -102,7 +112,7 @@ export class PromptReceipts {
     const approvingUser = this.deps.options.store.getInitialAuthority(session.id);
     if (submittingUser && approvingUser) {
       try {
-        await this.deps.prepareInitialDocuments(session, () => this.authorizeInitial(session, submittingUser, approvingUser));
+        await this.deps.prepareInitialDocuments(session, () => this.authorizePendingInitial(session, submittingUser, approvingUser));
       } catch (error) {
         if (error instanceof SessionCapacityError) {
           try { await this.deps.requestCapacity(session, error.limit); }
@@ -127,7 +137,7 @@ export class PromptReceipts {
     if (!pending) return;
     if (pending.documents?.length) {
       const task = await this.deps.uploadDocuments(session, pending,
-        () => this.authorizeInitial(session, userId, authorityUserId),
+        () => this.authorizePendingInitial(session, userId, authorityUserId),
         topicDestination(session.chatId, session.threadId),
         remaining => this.deps.options.store.replacePendingInitialTask(session.id, remaining));
       this.deps.options.store.replacePendingInitialTask(session.id, task);

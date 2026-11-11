@@ -157,7 +157,8 @@ export class PromptPreparation {
   async createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void> {
     this.deps.requireSessionAssignment(session);
     await this.deps.options.runtime.worktree(session, `t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`, beforeMutation);
-    await beforeMutation?.();
+    // Native worktree already guarded its mutations; checkpoint its completed effect
+    // before another permission lookup can fail and cause recovery to replay it.
     this.deps.options.store.setSessionCwd(session.id, session.cwd);
   }
 }

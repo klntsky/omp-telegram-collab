@@ -269,6 +269,11 @@ export class PromptAdmission {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
     }, contextDestination(ctx));
+    if (content.documents?.length) {
+      // Upload acknowledgements await Telegram; prompt submission is a separate mutation.
+      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
+      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
+    }
     const messageId = ctx.message!.message_id;
     const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
       if (selected.names.length) {
