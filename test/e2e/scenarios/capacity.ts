@@ -3,7 +3,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, openPanel, sendDocument, waitForPanel } from '../helpers/telegram-actions.js';
+import { clickPanel, openPanel, sendDocument, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
@@ -145,6 +145,10 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     const path = join(app.omp.workspace, filename);
     const original = Buffer.from('Keep this original after cancellation.');
     await writeFile(path, original);
+    const nativeSettings = await readFile(app.omp.agentConfigPath, 'utf8');
+    const invalid = JSON.parse(nativeSettings);
+    invalid.modelPresets['e2e-alternate'].modelRoles.default = 'e2e/missing-model';
+    await writeFile(app.omp.agentConfigPath, JSON.stringify(invalid));
     const released = Promise.withResolvers<void>();
     let held = false;
     let intercept = true;
@@ -159,21 +163,28 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     });
     try {
       const sent = await sendDocument(app, filename, Buffer.from('Do not overwrite the original.'), {
-        caption: `/new ${tasks.documentCancellation.prompt}`,
+        caption: `/new /model_preset e2e-alternate ${tasks.documentCancellation.prompt}`,
       });
-      await app.waitForCondition(() => held);
+      await app.waitForMessageHandled(sent.id);
       const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
       assert.ok(pending);
+      // Foreground input is serialized. Resume an unsent task through background
+      // recovery so Telegram /stop can run concurrently with the held download.
+      await app.runtime.kill(pending);
+      await writeFile(app.omp.agentConfigPath, nativeSettings);
+      await app.waitForCondition(() => held);
       await app.sendAndWait('/stop', pending.threadId);
       assert.equal(app.store.hasPendingInitialTask(pending.id), false);
+      const completed = waitForBackgroundCompletion(app, `initial-recovery:${pending.id}`);
       released.resolve();
-      await app.waitForMessageHandled(sent.id);
+      await completed;
       assert.deepEqual(await readFile(path), original);
       assert.equal(app.store.getSession(pending.id)!.status, 'open');
       assert.deepEqual(app.omp.provider.requests.get(tasks.documentCancellation.name), []);
     } finally {
       intercept = false;
       released.resolve();
+      await writeFile(app.omp.agentConfigPath, nativeSettings);
     }
   });
   it('authorization transport failure does not replay a completed automatic worktree', async () => {
