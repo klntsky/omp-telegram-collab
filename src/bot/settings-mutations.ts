@@ -103,7 +103,7 @@ export class SettingsMutations {
               : 'Use host default'
             : String(setting);
         if (page === 'prompts')
-          return setting === false ? 'Commands and replies only' : 'All messages';
+          return setting === false ? 'Commands, mentions, and replies only' : 'All messages';
         if (page === 'proposals')
           return setting === true ? 'Members with admin approval' : 'Admins only';
         return setting === true ? 'Enabled' : 'Disabled';

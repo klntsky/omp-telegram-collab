@@ -151,10 +151,10 @@ export function sendDocument(app: TelegramWorkflow, fileName: string, bytes: Buf
   ));
 }
 
-export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string, files: readonly {name:string;bytes:Buffer}[]) {
+export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string | readonly string[], files: readonly {name:string;bytes:Buffer}[]) {
   const media = files.map((file, index) => ({
     ...InputMedia.document(file.bytes, {fileName:file.name, fileMime:'text/plain'}),
-    ...(index === 0 ? {caption} : {}),
+    ...(typeof caption === 'string' ? index === 0 ? {caption} : {} : {caption:caption[index]}),
   }));
   return app.omp.step('telegram.user.send-document-album', () =>
     app.telegram.user.client.sendMediaGroup(app.telegram.forum.chat, media, {threadId}));

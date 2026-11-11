@@ -23,11 +23,14 @@ export interface InputContext {
   endedQuestion: boolean;
 }
 
-function richText(text: RichText, bot?: {id:number;username:string}): string {
+function richText(text: RichText, bot?: {id:number;username:string;mentioned?:boolean}): string {
   if (typeof text === 'string') return text;
   if (Array.isArray(text)) return text.map(part => richText(part,bot)).join('');
   if (bot && ((text.type === 'mention' && text.username.toLowerCase() === bot.username.toLowerCase()) ||
-      (text.type === 'text_mention' && text.user.id === bot.id))) return '';
+      (text.type === 'text_mention' && text.user.id === bot.id))) {
+    bot.mentioned = true;
+    return '';
+  }
   if ('text' in text) {
     const label = richText(text.text,bot);
     return text.type === 'url' && label !== text.url ? `${label} (${text.url})` : label;
@@ -38,7 +41,7 @@ function richText(text: RichText, bot?: {id:number;username:string}): string {
   return '';
 }
 
-function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:number;username:string}, documents: NonNullable<TelegramContent['documents']> = []): string {
+function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:number;username:string;mentioned?:boolean}, documents: NonNullable<TelegramContent['documents']> = []): string {
   return blocks.map(block => {
     const parts: string[] = [];
     if (block.type === 'blockquote' || block.type === 'expandable_blockquote' || block.type === 'pullquote') {
@@ -75,9 +78,19 @@ function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:numb
   }).filter(Boolean).join('\n\n');
 }
 
-function messageText(message: Message, bot?: {id:number;username:string}, images: TelegramImage[] = [], documents: NonNullable<TelegramContent['documents']> = []): string | undefined {
+function messageText(message: Message, bot?: {id:number;username:string;mentioned?:boolean}, images: TelegramImage[] = [], documents: NonNullable<TelegramContent['documents']> = []): string | undefined {
   if (message.rich_message) return richBlocks(message.rich_message.blocks,images,bot,documents);
-  return 'text' in message ? message.text : 'caption' in message ? message.caption : undefined;
+  let text = 'text' in message ? message.text : 'caption' in message ? message.caption : undefined;
+  if (!bot || text === undefined) return text;
+  const entities = 'entities' in message ? message.entities ?? [] : message.caption_entities ?? [];
+  for (const entity of [...entities].reverse()) {
+    if ((entity.type === 'mention' && text.slice(entity.offset,entity.offset+entity.length).toLowerCase() === `@${bot.username.toLowerCase()}`) ||
+        (entity.type === 'text_mention' && entity.user.id === bot.id)) {
+      bot.mentioned = true;
+      text = text.slice(0,entity.offset) + text.slice(entity.offset+entity.length);
+    }
+  }
+  return text;
 }
 
 export function normalizeMessage(messages: NonNullable<Context['message']>[]): TelegramContent {
@@ -94,7 +107,7 @@ export function normalizeMessage(messages: NonNullable<Context['message']>[]): T
   return {text:texts.join('\n\n'),images,...(documents.length ? {documents} : {})};
 }
 
-export function classifyMessage(message: NonNullable<Context['message']>, content: TelegramContent, context: InputContext): InputIntent {
+export function classifyMessage(message: NonNullable<Context['message']>, content: TelegramContent, context: InputContext, messages: readonly NonNullable<Context['message']>[] = [message]): InputIntent {
   const lifecycle = 'forum_topic_created' in message || 'forum_topic_edited' in message || 'forum_topic_closed' in message || 'forum_topic_reopened' in message;
   if ('forward_origin' in message || 'forward_date' in message || (message.from?.is_bot && !lifecycle)) return {kind:'ignore'};
   if (lifecycle) return {kind:'event'};
@@ -131,14 +144,13 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
   if (context.question) return {kind:'question-answer',token:context.question,text:content.text};
   if (context.endedQuestion) return {kind:'ended-question'};
   const directed = reply?.from?.id === context.botId && !('forum_topic_created' in reply) && reply.message_id !== message.message_thread_id;
-  if (!context.allMessagesArePrompts && !directed) return {kind:'ignore'};
-  if (directed) return {kind:'session-prompt',content:withContext(content.text)};
-  let text = message.rich_message ? messageText(message,{id:context.botId,username:context.username})! : content.text;
-  const entities = 'entities' in message ? message.entities ?? [] : message.caption_entities ?? [];
-  for (const entity of [...entities].reverse()) {
-    if ((entity.type === 'mention' && text.slice(entity.offset,entity.offset+entity.length).toLowerCase() === `@${context.username.toLowerCase()}`) ||
-        (entity.type === 'text_mention' && entity.user.id === context.botId)) text = text.slice(0,entity.offset) + text.slice(entity.offset+entity.length);
-  }
+  const bot = {id:context.botId,username:context.username,mentioned:false};
+  // Client::get_input_media stores entities per album member, so strip before joining captions.
+  // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
+  let text = messages.map(part => messageText(part,bot)).filter(Boolean).join('\n\n');
+  if (directed) return {kind:'session-prompt',content:withContext(bot.mentioned ? text.trim() : content.text)};
+  if (!context.allMessagesArePrompts && !bot.mentioned) return {kind:'ignore'};
   text = text.trim();
-  return text || content.images.length || content.documents?.length ? {kind:'session-prompt',content:{...content,text}} : {kind:'ignore'};
+  if (!text && !content.images.length && !content.documents?.length) return {kind:'ignore'};
+  return {kind:'session-prompt',content:bot.mentioned ? withContext(text) : {...content,text}};
 }
