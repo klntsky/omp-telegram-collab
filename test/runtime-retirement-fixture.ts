@@ -174,6 +174,7 @@ if (process.argv[2] !== 'collab') {
   return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
     async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
     async removeHost() { state.host = undefined; await persistRegistry(); },
+    async rotateConnection() { host.generation++; await persistRegistry(); },
     waitForStartup() { return startup.promise; },
     async publishStartup() { assert.ok(startupControl); startupControl.end('publish\n'); },
     async release() { delayed.resolve(); await Promise.all(handled); assert.deepEqual(failures, []); },

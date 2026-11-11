@@ -7,7 +7,7 @@ import { clickPanel, openPanel, sendDocument, waitForBackgroundCompletion, waitF
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
-import { withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
 export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation' | 'documentCancellation' | 'documentAuthorization'>): void {
   it('managed process capacity confirmation', async t => {
@@ -187,7 +187,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await writeFile(app.omp.agentConfigPath, nativeSettings);
     }
   });
-  it('authorization transport failure does not replay a completed automatic worktree', async () => {
+  it('authorization transport failure does not replay a completed automatic worktree', async t => {
     const app = getApp();
     const settings = await openPanel(app, '/settings');
     await clickPanel(app, settings, 5);
@@ -220,6 +220,10 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       const sent = await sendDocument(app, filename, bytes, {caption:`/new ${tasks.documentAuthorization.prompt}`});
       await app.waitForCondition(() => interruptedCwd !== undefined);
       const pending = app.store.listSessions(app.telegram.bot.id).find(session => !existing.has(session.id))!;
+      // Wait for recovery admission separately; its maintenance retry consumes
+      // startup time before the normal model-output/delivery expectation begins.
+      await withTelegramTestDeadline('document authorization recovery', telegramTestTimeouts.readiness, t.signal,
+        signal => app.omp.provider.waitForRequest(tasks.documentAuthorization.name, signal));
       await completeWriteTask(app, tasks.documentAuthorization, sent, pending.threadId);
       const completed = app.store.getSession(pending.id)!;
       assert.equal(completed.cwd, interruptedCwd);
