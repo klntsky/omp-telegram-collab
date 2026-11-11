@@ -102,7 +102,7 @@ export async function inputCommandAccess(deps: InputCommandAccessDependencies, i
         await replyTo(
           ctx,
           contextDestination(ctx),
-          'This topic is now conversation-only. Session links, prompts, and mirroring are disabled. Host history is preserved; the host was not killed.',
+          'This topic is now conversation-only. Agent session is no longer attached',
         );
         return true;
       }
