@@ -8,6 +8,8 @@ Consumer installation requires the latest Node.js LTS selected through nvm, pnpm
 
 Starting without configured bots stops before startup timing output and reports `No bots configured yet. Create one using omp-telegram-collab bot add`. For a custom configuration path, the command includes `--config` so registration updates the same configuration.
 
+When OMP skill discovery reports that no default model is available, the bot informs each affected, enrolled chat: "OMP is present, but no providers are set up. Log in to one of the inference providers OMP supports in the terminal". The original diagnostic remains in service logs. Repeated refresh failures do not repeat a successfully delivered notice until discovery recovers; failed deliveries remain logged and can be retried.
+
 Every CLI command and nested subcommand accepts `--help` and `-h`. Top-level `help` also lists commands. Help describes command arguments and options without reading configuration, contacting Telegram, or starting the service.
 
 First-time enrollment needs no separate instance-creation step: `omp-telegram-collab approve --path PATH` registers a new instance with that existing default directory. `--instance ID` selects an existing instance instead. `omp-telegram-collab create PATH [--id ID]` remains available for explicit registration outside enrollment. Instance-management and chat-assignment commands select instances by ID, not directory.
