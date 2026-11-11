@@ -1,8 +1,20 @@
-export const help = '/setup — request or enroll this forum, then open settings\n/settings — forum defaults and live session count limit (group admin)\n/new task — new topic and session\n/worktree [branch] — 🌳 move this session into an OMP worktree; General creates a topic first\n/attach instanceId [name] — attach local host (group admin)\n/detach — make this topic conversation-only (group admin)\n/model_preset [name] — browse presets, use one, or make it the forum default; a name switches this idle session (group admin)\n/session — open this session\n/status — host, mirroring, task admission, recovery and skill diagnostics\n/usage — provider plan usage, remaining quotas and resets\n/stop — interrupt the current turn (session topic only)\n/kill — force-kill the host process (session topic only)\n/terminate — terminate all agents and suspend the service (group admin)';
-export const settingsHelp = '/settings — forum defaults and live session count limit (group admin)';
-export const adminHelp = '/list_admins — list current human group owner and administrators. Manage administrator roles in Telegram.';
+export function help(options: { promptHelp: string; miniApp: boolean; admin: boolean }): string {
+  return [
+    'Send a coding task here. The agent works on the project connected to this group. Each new task starts in its own Telegram topic.',
+    'Start a task\n/new Find why the login tests fail\nInclude your task in the command. Open the new topic to read the agent’s replies and continue working.',
+    `Continue in that topic\n/p Check whether the same bug affects signup\n${options.promptHelp}`,
+    'Group settings (group admin)\n/settings\nChange group defaults, prompt permissions, runtime folders, and the session limit.',
+    'Stop work (inside a session topic)\n/stop\nInterrupt the current task without killing the agent process.\n\n/kill\nForce-stop this topic’s agent process if it is stuck. In-flight work may be lost.',
+    'Other tools\n/skills\nChoose extra instructions for your next task. Use /skills clear to clear your selection.\n/skill_<name> <task>\nSelect a skill and submit a task immediately.\n\n/usage\nCheck model-provider quotas and reset times.\n\n/status\nInspect connection problems and session diagnostics.',
+    ...(options.miniApp ? ['/session\nOpen this topic’s live transcript and tool details in the read-only Mini App.'] : []),
+    'Administrator tools\n/setup\nConnect this group to a project, then open settings.\n\n/model_preset [name]\nChoose a model preset for an idle session or change the group default.\n\n/worktree [branch]\nMove this topic’s session into a separate Git working directory. In General, create a new topic first. The optional branch is a name, not a task.\n\n/fork\nStart a new topic with a copy of this conversation. Reply to an earlier agent answer to copy only through that point.\n\n/attach instanceId [name]\nCreate a topic connected to an agent already running on the bot’s computer.\n\n/detach\nPermanently make this topic conversation-only.',
+    ...(options.admin ? ['/cli\nGet a terminal command for joining this topic’s running agent.'] : []),
+    '/terminate\nStop all agents across the service and suspend further work. Resuming requires changing the service configuration on the bot’s computer.',
+    'Find an administrator\n/list_admins\nList this group’s owner and administrators.',
+  ].join('\n\n');
+}
 export const cliCommand = {command:'cli',description:'Copy a local terminal session join command (group admin)'};
-export const cliHelp = '/cli — copy a local terminal session join command (group admin)';
+
 export const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 export const groupCommands = [
   { command: 'new', description: 'Start a new session' },

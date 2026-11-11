@@ -5,13 +5,12 @@ import type { PromptExtension } from '../telegram-commands.js';
 import type { BotOptions } from '../bot.js';
 import type { CommandRouteInput } from './input-router.js';
 
-import { settingsHelp, adminHelp, cliHelp } from './commands.js';
 
 export interface InputCommandSessionsDependencies {
   assignedCwd(chatId: number): string;
   assignedId(chatId: number): number;
   authorize(chatId: number, userId: number, statusOnly?: boolean): Promise<void>;
-  commandHelp(): string;
+  commandHelp(chatId: number, admin: boolean): string;
   currentAdmin(ctx: Context): Promise<boolean>;
   dropListener(id: string, reason?: string): void;
   forkSession(ctx: Context, source: TopicSession): Promise<void>;
@@ -20,7 +19,6 @@ export interface InputCommandSessionsDependencies {
   config: BotOptions['config'];
   runtime: BotOptions['runtime'];
   store: BotOptions['store'];
-  promptHelp(chatId: number): string;
   requireSessionAssignment(session: TopicSession): void;
   routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkill?: string; }, cwd?: string): Promise<void>;
   sessionMarkup(session: TopicSession): { inline_keyboard: { text: string; url: string; }[][]; };
@@ -97,7 +95,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         await replyTo(
           ctx,
           contextDestination(ctx),
-          `${deps.commandHelp()}\n${settingsHelp}\n${adminHelp}${(await deps.currentAdmin(ctx)) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${deps.promptHelp(ctx.chat.id)}`,
+          deps.commandHelp(ctx.chat.id, await deps.currentAdmin(ctx)),
         );
         return true;
       }

@@ -123,9 +123,8 @@ promptHelp(chatId: number): string {
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
 
-commandHelp(): string {
-    const commands = `${help}\n/fork — fork this session at its tip, or reply to select a persisted message (group admin)`;
-    return this.deps.config.publicUrl ? commands : commands.split('\n').filter(line => !line.startsWith('/session ')).join('\n');
+commandHelp(chatId: number, admin: boolean): string {
+    return help({ promptHelp: this.promptHelp(chatId), miniApp: Boolean(this.deps.config.publicUrl), admin });
   }
 
 async currentAdmin(ctx: Context): Promise<boolean> {
