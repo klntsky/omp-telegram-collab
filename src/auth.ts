@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import type { GuestFrame } from '@oh-my-pi/pi-wire';
+import type { BrowserFrame } from '../shared/contracts.js';
 
 export class AuthorizationUnavailableError extends Error {
   constructor(cause: unknown) {
@@ -43,17 +43,16 @@ export function isAdministrator(member: unknown): boolean {
   const value = member as { status?: string; user?: { is_bot?: boolean } };
   return value.user?.is_bot === false && (value.status === 'creator' || value.status === 'administrator');
 }
-const text = z.string().min(1).max(65536);
-const image = z.object({ type: z.literal('image'), data: z.string().min(1).max(1400000).regex(/^[A-Za-z0-9+/]*={0,2}$/), mimeType: z.enum(['image/png','image/jpeg','image/gif','image/webp']) }).strict();
 const guestSchema = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('prompt'), text, images: z.array(image).max(4).optional() }).strict(),
-  z.object({ t: z.literal('abort') }).strict(),
-  z.object({ t: z.literal('agent-cmd'), cmd: z.enum(['chat','kill','revive']), agentId: z.string().min(1).max(256), text: text.optional() }).strict(),
   z.object({ t: z.literal('fetch-transcript'), reqId: z.number().int().nonnegative().safe(), agentId: z.string().min(1).max(256), fromByte: z.number().int().nonnegative().safe() }).strict(),
-  z.object({ t: z.literal('ui-response'), reqId: z.number().int().nonnegative().safe(), value: z.string().max(65536).optional() }).strict(),
-]).refine(value => value.t !== 'agent-cmd' || value.cmd !== 'chat' || value.text !== undefined);
-export function validateGuestFrame(value: unknown): Exclude<GuestFrame, {t:'hello'}> {
-  return guestSchema.parse(value) as Exclude<GuestFrame, {t:'hello'}>;
+  z.object({
+    t: z.literal('history-page'),
+    reqId: z.number().int().nonnegative().safe(),
+    cursor: z.object({ epoch: z.string().min(1).max(128), before: z.number().int().nonnegative().safe() }).strict(),
+  }).strict(),
+]);
+export function validateGuestFrame(value: unknown): BrowserFrame {
+  return guestSchema.parse(value);
 }
 export interface TicketIdentity { botId: number; sessionId: string; generation: number; userId: number; username?: string; displayName: string; authDate: number }
 const credentialSchema = z.object({

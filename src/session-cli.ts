@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { readConfig } from './config.js';
+import { terminalOmp } from './runtime.js';
 
 export async function joinSession(coordinates: { chat: number; topic: number }, configPath: string): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Joining a session requires an interactive terminal.');
@@ -59,7 +60,7 @@ export async function joinSession(coordinates: { chat: number; topic: number }, 
     const connection = await result.promise;
     clearTimeout(timer);
     if (connectionError) throw connectionError;
-    child = spawn(connection.executable, ['join', connection.url], { stdio: 'inherit', shell: false });
+    child = terminalOmp.joinTerminal(connection.executable, connection.url);
     process.on('SIGINT', interrupt);
     process.on('SIGTERM', terminate);
     const exited = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();

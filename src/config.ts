@@ -52,7 +52,9 @@ const configSchema = z.object({
     token: z.string().regex(tokenPattern),
     miniAppShortName: z.string().regex(/^[A-Za-z0-9_]+$/).optional(),
   }).strict().refine(bot => Number(bot.token.split(':')[0]) === bot.id)),
-  instances: z.record(absolutePath, z.object({
+  instances: z.array(z.object({
+    id: positiveInteger,
+    defaultDir: absolutePath,
     chats: z.array(z.object({
       botId: positiveInteger,
       chatId: z.number().int().safe().refine(value => value !== 0),
@@ -86,6 +88,18 @@ function failure(path: string, keys: string[], detail: string): ConfigError {
   return new ConfigError(keys, `${detail} Configuration file: ${path}`);
 }
 
+function operationFailure(path: string, error: unknown, detail: string): ConfigError {
+  if (error instanceof ConfigError) return error;
+  return Object.assign(failure(path, ['config'], `${detail} ${error instanceof Error ? error.message : String(error)}`), { cause: error });
+}
+
+function cleanupFailure(primary: ConfigError | undefined, error: unknown, diagnostic: ConfigError): ConfigError {
+  const result = primary ?? diagnostic;
+  if (primary) primary.message += ` ${diagnostic.message}`;
+  const previous = (result as ConfigError & { cleanupErrors?: unknown[] }).cleanupErrors ?? [];
+  return Object.assign(result, { cleanupErrors: [...previous, error] });
+}
+
 function validate(value: unknown, configPath: string): AppConfig {
   const result = configSchema.safeParse(value);
   if (!result.success) {
@@ -102,7 +116,16 @@ function validate(value: unknown, configPath: string): AppConfig {
     tokens.add(bot.token);
   }
   const assignments = new Set<string>();
-  for (const instance of Object.values(config.instances)) {
+  const instanceIds = new Set<number>();
+  for (const instance of config.instances) {
+    if (instanceIds.has(instance.id)) throw failure(configPath, ['instances'], 'Every instance must have a distinct ID.');
+    instanceIds.add(instance.id);
+    try {
+      const canonical = canonicalPath(instance.defaultDir);
+      if (canonical !== instance.defaultDir) throw new Error(`Directory resolves to ${canonical}.`);
+    } catch (error) {
+      throw failure(configPath, ['instances'], `Instance ${instance.id} defaultDir must be an existing canonical directory: ${error instanceof Error ? error.message : String(error)}`);
+    }
     for (const chat of instance.chats) {
       const key = `${chat.botId}:${chat.chatId}`;
       if (!ids.has(chat.botId)) throw failure(configPath, ['instances'], 'Every chat assignment must refer to a configured bot.');
@@ -120,15 +143,15 @@ export function defaultConfigPath(): string {
 export function canonicalPath(input: string): string {
   try {
     const path = realpathSync(resolve(input));
-    if (!statSync(path).isDirectory()) throw new Error();
+    if (!statSync(path).isDirectory()) throw new Error(`Not a directory: ${path}`);
     return path;
-  } catch { throw new ConfigError(['path'], 'Choose an existing accessible directory.'); }
+  } catch (error) { throw new ConfigError(['path'], `Choose an existing accessible directory. ${error instanceof Error ? error.message : String(error)}`); }
 }
 
 export function emptyConfig(configPath: string): AppConfig {
   const path = resolve(configPath);
   return {
-    bots: [], instances: {}, publicUrl: '', host: '127.0.0.1', port: 3000,
+    bots: [], instances: [], publicUrl: '', host: '127.0.0.1', port: 3000,
     dataDir: join(dirname(path), 'data'), configPath: path,
     omp: { executable: 'omp', args: [], maxSessions: 8, startupTimeoutMs: 60000 },
   };
@@ -138,17 +161,24 @@ export function readConfig(input: string): AppConfig {
   const path = resolve(input);
   try {
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    let source: string;
+    let source: string = '';
+    let primary: ConfigError | undefined;
     try {
       if (!fstatSync(fd).isFile()) throw new Error();
       source = readFileSync(fd, 'utf8');
-    } finally { closeSync(fd); }
+    } catch (error) {
+      primary = operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
+    } finally {
+      try { closeSync(fd); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close configuration file.'));
+      }
+    }
+    if (primary) throw primary;
     const document = parseDocument(source, { uniqueKeys: true });
     if (document.errors.length) throw failure(path, ['config'], 'Invalid YAML (including duplicate mapping keys).');
     return validate(document.toJS({ maxAliasCount: 100 }), path);
   } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    throw failure(path, ['config'], 'Cannot read a regular, non-symlink YAML configuration file.');
+    throw operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
   }
 }
 
@@ -213,15 +243,9 @@ export function writeConfig(config: AppConfig): void {
   const { configPath: _checkedPath, ...document } = checked;
   let temporary: string | undefined;
   let fd: number | undefined;
+  let primary: ConfigError | undefined;
   try {
     const initial = writableState(path);
-    const registered = initial.file ? readConfig(path).instances : {};
-    for (const directory of Object.keys(checked.instances)) {
-      if (Object.hasOwn(registered, directory)) continue;
-      try {
-        if (canonicalPath(directory) !== directory) throw new Error();
-      } catch { throw failure(path, ['instances'], 'New instance paths must be existing canonical directories.'); }
-    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const before = writableState(path);
     if (!sameFile(initial.file, before.file)) throw new Error();
@@ -235,8 +259,9 @@ export function writeConfig(config: AppConfig): void {
       fchmodSync(fd, before.file.mode & 0o7777);
     }
     fsyncSync(fd);
-    closeSync(fd);
+    const written = fd;
     fd = undefined;
+    closeSync(written);
     const after = writableState(path);
     if (!sameFile(before.file, after.file) || before.parent.dev !== after.parent.dev || before.parent.ino !== after.parent.ino || parentPath !== realpathSync(dirname(path))) throw new Error();
     if (!before.file) {
@@ -245,16 +270,28 @@ export function writeConfig(config: AppConfig): void {
     } else renameSync(temporary, path);
     temporary = undefined;
     const directory = openSync(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
-    try { fsyncSync(directory); } finally { closeSync(directory); }
+    try { fsyncSync(directory); } catch (error) {
+      primary = operationFailure(path, error, 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
+    } finally {
+      try { closeSync(directory); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close configuration directory.'));
+      }
+    }
   } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    throw failure(path, ['config'], 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
+    primary = operationFailure(path, error, 'Cannot write configuration; the file and parent directory must both be writable and unchanged.');
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot close temporary configuration file.'));
+      }
+    }
     if (temporary !== undefined) {
-      try { unlinkSync(temporary); } catch (error) { if (!errno(error, 'ENOENT')) throw failure(path, ['config'], 'Cannot remove temporary configuration file.'); }
+      try { unlinkSync(temporary); } catch (error) {
+        if (!errno(error, 'ENOENT')) primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot remove temporary configuration file.'));
+      }
     }
   }
+  if (primary) throw primary;
 }
 
 export function validateStart(config: AppConfig): void {
@@ -263,9 +300,9 @@ export function validateStart(config: AppConfig): void {
   if (!checked.bots.length) throw failure(configPath, ['bots'], 'Configure at least one bot before starting.');
 }
 
-export function findInstance(config: AppConfig, botId: number, chatId: number): { path: string; instance: InstanceConfig } | undefined {
-  for (const [path, instance] of Object.entries(config.instances)) {
-    if (instance.chats.some(chat => chat.botId === botId && chat.chatId === chatId)) return { path, instance };
+export function findInstance(config: AppConfig, botId: number, chatId: number): { instance: InstanceConfig } | undefined {
+  for (const instance of config.instances) {
+    if (instance.chats.some(chat => chat.botId === botId && chat.chatId === chatId)) return { instance };
   }
   return undefined;
 }

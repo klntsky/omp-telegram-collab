@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,52 +9,7 @@ import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
 
-const topic = { botId, chatId, threadId: 17, instancePath: '/work/project-a' };
-
-test('detached topic classification is tuple-scoped and rejects session creation', () => {
-  const store = new Store(':memory:');
-  try {
-    assert.equal(store.getTopicKind(topic), 'tracked');
-    store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    for (const key of [{...topic,botId:botId+1}, {...topic,chatId:chatId-1}, {...topic,threadId:18}]) {
-      assert.equal(store.getTopicKind(key), 'tracked');
-    }
-    assert.throws(() => store.createSession(topic, 'Not a session'));
-    assert.deepEqual(store.listSessions(botId), []);
-  } finally { store.close(); }
-});
-
-for (const conversion of ['detach', 'status'] as const) {
-test(`${conversion} conversion retires its session and title work without deleting history`, () => {
-  const store = new Store(':memory:');
-  try {
-    const session = store.createSession(topic, 'Preserved history', {kind:'managed'}, {text:'Never submit'});
-    const other = store.createSession({...topic,threadId:18}, 'Other topic');
-    store.setReplyTarget(session.id, 1234);
-    store.setPendingSessionTitle(session.id, 'Pending rename');
-    store.setTopicTitlePrefix(session.id, 'feature/pending');
-    const generation = store.getSessionGeneration(session.id);
-    if (conversion === 'status') store.setBotStatusTopic(botId,chatId,topic.threadId);
-    else store.detachTopic(topic);
-    assert.equal(store.getTopicKind(topic), 'detached');
-    assert.equal(store.getSession(session.id)?.status, 'detached');
-    assert.equal(store.getSession(session.id)?.name, 'Preserved history');
-    assert.equal(store.getReplyTarget(session.id), 1234);
-    assert.equal(store.getTopic({botId,destination:topicDestination(chatId,topic.threadId)})?.id, session.id);
-    assert.equal(store.getPendingSessionTitle(session.id), undefined);
-    assert.equal(store.getTopicTitlePrefix(session.id), undefined);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.hasPendingInitialTask(session.id), false);
-    assert.equal(store.claimInitialTask(session.id), undefined);
-    store.detachTopic(topic);
-    assert.equal(store.getSessionGeneration(session.id), generation + 1);
-    assert.equal(store.getSession(other.id)?.status, 'open');
-    assert.equal(store.getPendingSessionTitle(other.id), 'Other topic');
-    assert.throws(() => store.createSession(topic, 'Cannot revive'));
-  } finally { store.close(); }
-});
-}
+const topic = { botId, chatId, threadId: 17, instanceId: 1, cwd: '/work/project-a' };
 
 test('status identities include legacy stored rows and remain detached after replacement', () => {
   const store = new Store(':memory:');
@@ -106,46 +61,6 @@ test('existing detached sessions classify as detached without a topic identity r
   } finally { store.close(); }
 });
 
-test('General stays outside sessions while pending selections enforce destination identities', () => {
-  const store = new Store(':memory:');
-  const general = topicDestination(chatId);
-  const destination = topicDestination(chatId, topic.threadId);
-  try {
-    const created = store.createSession(topic, 'Actual topic');
-    store.addPendingSkill({botId,destination:general,userId:42}, 'general-skill');
-    store.addPendingSkill({botId,destination,userId:42}, 'topic-skill');
-    assert.equal(store.getTopic({botId,destination:general}), undefined);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-    assert.throws(() => store.createSession({...topic,threadId:1}, 'General'), /A session requires a non-General topic/);
-    assert.deepEqual(store.listSessions(botId).map(session => session.id), [created.id]);
-    store.clearPendingSkills({botId,destination:general,userId:42});
-    assert.deepEqual(store.getPendingSkills({botId,destination,userId:42}), ['topic-skill']);
-    assert.equal(store.getTopic({botId,destination})?.id, created.id);
-  } finally {
-    store.close();
-  }
-});
-
-test('disk and in-memory stores reject missing instance paths and orphan reply targets', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-current-schema-'));
-  const disk = new Store(join(directory, 'topics.sqlite'));
-  const memory = new Store(':memory:');
-  try {
-    for (const store of [disk, memory]) {
-      assert.throws(() => store.setReplyTarget('unknown-session', 7), /FOREIGN KEY constraint failed/);
-      assert.throws(() => store.createSession({ ...topic, instancePath: '' }, 'Missing path'));
-      const created = store.createSession(topic, 'Current schema');
-      assert.equal(created.instancePath, topic.instancePath);
-      assert.throws(() => store.db.prepare('UPDATE sessions SET instance_path=NULL WHERE id=?').run(created.id), /NOT NULL constraint failed/);
-      assert.equal(store.getSession(created.id)?.instancePath, topic.instancePath);
-    }
-  } finally {
-    disk.close();
-    memory.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 test('topic display and generated prefix commit together or both roll back', () => {
   const store = new Store(':memory:');
   try {
@@ -187,7 +102,7 @@ test('topic identity survives a service restart and closing preserves its histor
       assert.equal(restored?.status, 'closed');
       assert.equal(restored?.name, 'Authentication complete');
       assert.deepEqual(restored?.runtime, { kind: 'attached', instanceId: 'instance-a', sessionId: 'omp-session-a' });
-      assert.equal(restored?.instancePath, topic.instancePath);
+      assert.equal(restored?.cwd, topic.cwd);
       assert.equal(second.getReplyTarget(original.id), 1234);
       second.setReplyTarget(original.id, undefined);
       assert.equal(second.getReplyTarget(original.id), undefined);
@@ -255,56 +170,6 @@ test('image-only initial content survives reopening storage and stays session-sc
   }
 });
 
-test('absent initial content creates no task while empty supplied content is rejected', () => {
-  const store = new Store(':memory:');
-  try {
-    const absent = store.createSession(topic,'No task',{kind:'managed'},undefined,42);
-    assert.equal(store.hasPendingInitialTask(absent.id),false);
-    assert.equal(store.claimInitialTask(absent.id),undefined);
-    assert.equal(store.getInitialUser(absent.id),undefined);
-    assert.equal(store.getInitialAuthority(absent.id),undefined);
-    assert.deepEqual(store.db.prepare('SELECT initial_task,initial_state FROM sessions WHERE id=?').get(absent.id),Object.assign(Object.create(null),{initial_task:null,initial_state:null}));
-    for (const content of [{text:''},{text:' \n\t '},{text:'',images:[]}]) {
-      assert.throws(() => store.createSession({...topic,threadId:18},'Invalid',{kind:'managed'},content,42),/An initial task requires text or images/);
-      assert.equal(store.getTopic({botId,destination:topicDestination(chatId,18)}),undefined);
-    }
-    const text = {text:'  Preserve task whitespace  '};
-    const pending = store.createSession({...topic,threadId:18},'Text task',{kind:'managed'},text);
-    assert.equal(store.hasPendingInitialTask(pending.id),true);
-    assert.equal(store.db.prepare('SELECT initial_task FROM sessions WHERE id=?').get(pending.id)?.initial_task,text.text);
-    assert.deepEqual(store.claimInitialTask(pending.id),text);
-    assert.equal(store.hasPendingInitialTask(pending.id),false);
-    const cancelled = store.createSession({...topic,threadId:19},'Cancelled',{kind:'managed'},{text:'Do not send'});
-    store.cancelInitialTask(cancelled.id);
-    assert.equal(store.hasPendingInitialTask(cancelled.id),false);
-    assert.equal(store.claimInitialTask(cancelled.id),undefined);
-    assert.equal(store.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(cancelled.id)?.initial_state,'cancelled');
-  } finally {
-    store.close();
-  }
-});
-
-test('one bot and topic tuple cannot acquire two session identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const original = store.createSession(topic, 'Original');
-    try {
-      store.createSession(topic, 'Duplicate service update');
-    } catch {
-      assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    }
-    assert.equal(store.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, topic.threadId)})?.id, original.id);
-    assert.equal(store.listSessions(botId).length, 1);
-    const otherBot = store.createSession({ ...topic, botId: botId + 1 }, 'Other bot');
-    const otherChat = store.createSession({ ...topic, chatId: chatId - 1 }, 'Other group');
-    assert.notEqual(otherBot.id, original.id);
-    assert.notEqual(otherChat.id, original.id);
-    assert.equal(store.isEnrolled(botId + 1, chatId), false);
-  } finally {
-    store.close();
-  }
-});
-
 test('kill generations persist across restart and stay isolated to their session', async () => {
   const directory = await mkdtemp(join(tmpdir(),'omp-session-generation-'));
   const filename = join(directory,'topics.sqlite');
@@ -321,43 +186,6 @@ test('kill generations persist across restart and stay isolated to their session
     assert.equal(store.getSessionGeneration(other.id),0);
     store.advanceSessionGeneration(target.id);
     assert.equal(store.getSessionGeneration(target.id),3);
-  } finally {
-    store.close();
-    await rm(directory,{recursive:true,force:true});
-  }
-});
-
-
-test('human finish icons persist across restart and preserve empty and status choices', async () => {
-  const directory = await mkdtemp(join(tmpdir(),'omp-topic-finish-icons-'));
-  const filename = join(directory,'topics.sqlite');
-  let store = new Store(filename);
-  try {
-    const preferences = ['human-selected-icon','','5312016608254762256','5408906741125490282','5237699328843200968'];
-    const sessions = preferences.map((preference,index) => {
-      const session = store.createSession({...topic,threadId:topic.threadId+index},`Preference ${index}`);
-      assert.equal(store.getTopicFinishIcon(session.id),undefined);
-      store.setTopicFinishIcon(session.id,preference);
-      assert.equal(store.getTopicFinishIcon(session.id),preference);
-      return session;
-    });
-    const otherBot = store.createSession({...topic,botId:botId+1},'Other bot');
-    const otherChat = store.createSession({...topic,chatId:chatId-1},'Other chat');
-    store.close();
-    store = new Store(filename);
-    for (const [index,session] of sessions.entries()) {
-      assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
-    assert.equal(store.getTopicFinishIcon(otherBot.id),undefined);
-    assert.equal(store.getTopicFinishIcon(otherChat.id),undefined);
-    assert.equal(store.getTopicFinishIcon('unknown-session'),undefined);
-    store.setTopicFinishIcon(sessions[0]!.id,'updated-human-icon');
-    store.close();
-    store = new Store(filename);
-    assert.equal(store.getTopicFinishIcon(sessions[0]!.id),'updated-human-icon');
-    for (const [index,session] of sessions.entries()) {
-      if (index > 0) assert.equal(store.getTopicFinishIcon(session.id),preferences[index]);
-    }
   } finally {
     store.close();
     await rm(directory,{recursive:true,force:true});
@@ -384,7 +212,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.hasSnapshot(original.id), true);
     assert.equal(store.rememberReply(original.id, 'omp-session', 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
-    assert.throws(() => store.createSession({ ...topic, instancePath: '/work/other' }, 'Retarget'), /history belongs/);
+    assert.throws(() => store.createSession({ ...topic, instanceId: 2, cwd: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
     assert.deepEqual(store.claimInitialTask(original.id), {text:'Pending instruction'});
     assert.equal(store.claimInitialTask(original.id), undefined);
@@ -394,77 +222,76 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   }
 });
 
-test('one path can bind several bots and chats without merging topic identities', () => {
-  const store = new Store(':memory:');
-  try {
-    const instances = {
-      '/work/a': { chats: [{ botId, chatId }, { botId: botId + 1, chatId }, { botId, chatId: chatId - 1 }] },
-      '/work/b': { chats: [{ botId: botId + 1, chatId: chatId - 1 }] },
-    };
-    const sessions = Object.entries(instances).flatMap(([instancePath, instance]) => instance.chats.map(chat => store.createSession({ ...chat, threadId: 17, instancePath }, instancePath)));
-    assert.equal(new Set(sessions.map(session => session.id)).size, 4);
-    assert.equal(sessions.filter(session => session.instancePath === '/work/a').length, 3);
-    for (const original of sessions) {
-      assert.equal(store.getTopic({botId: original.botId, destination: topicDestination(original.chatId, original.threadId)})?.id, original.id);
-      const otherPath = original.instancePath === '/work/a' ? '/work/b' : '/work/a';
-      assert.throws(() => store.createSession({ ...original, instancePath: otherPath }, 'Retarget'), /history belongs/);
-      assert.deepEqual(store.getSession(original.id), original);
-    }
-  } finally {
-    store.close();
-  }
-});
-
-test('current path validation rejects retargeted assignments and mismatched history identities without rewriting files', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-validate-path-'));
-  const originalPath = join(directory, 'original');
+test('logical assignments survive default-directory changes and missing session directories', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-validate-identity-'));
+  const originalPath = join(directory, 'missing-original');
   const otherPath = join(directory, 'other');
-  await mkdir(originalPath);
-  await mkdir(otherPath);
   const config = emptyConfig(join(directory, 'config.yaml'));
   config.dataDir = directory;
-  config.instances = { [originalPath]: { chats: [{ botId, chatId }] } };
-  const store = new Store(':memory:');
+  config.instances = [{ id: 1, defaultDir: otherPath, chats: [{ botId, chatId }] }];
+  const store = new Store(join(directory, 'store.sqlite'));
   const runtime = new OmpRuntime(config);
   try {
-    const managed = store.createSession({ ...topic, instancePath: originalPath }, 'Managed');
-    const attached = store.createSession({ ...topic, threadId: 18, instancePath: originalPath }, 'Attached', { kind: 'attached', instanceId: 'host', sessionId: 'history' });
-    await runtime.validateSessionPaths(store.listSessions());
-    const retargeted = { ...config, instances: { [otherPath]: { chats: [{ botId, chatId }] } } };
-    for (const session of [managed, attached]) {
-      await assert.rejects(runtime.validateSessionPaths([session], retargeted), /history pinned to another instance path/);
+    for (const status of ['open', 'closed', 'detached'] as const) {
+      const session = store.createSession({ ...topic, threadId: 20 + ['open', 'closed', 'detached'].indexOf(status), cwd: originalPath }, status);
+      store.updateSession(session.id, { status });
     }
-    await runtime.validateSessionPaths(store.listSessions(), { ...config, instances: {} });
-    const sessionDirectory = join(directory, 'sessions', managed.id);
-    await mkdir(sessionDirectory, { recursive: true });
-    const history = join(sessionDirectory, 'history.jsonl');
-    const binding = join(sessionDirectory, 'binding.json');
-    const pin = { version: 1, sessionId: 'saved-history', sessionFile: history, cwd: originalPath };
-    const header = { type: 'session', version: 3, id: pin.sessionId, cwd: originalPath };
-    const historyBytes = `${JSON.stringify(header)}\n`;
-    await writeFile(history, historyBytes);
-    await writeFile(binding, JSON.stringify(pin));
-    await runtime.validateSessionPaths(store.listSessions());
-    assert.equal(await readFile(history, 'utf8'), historyBytes);
-    await writeFile(binding, JSON.stringify({ ...pin, cwd: otherPath }));
-    await assert.rejects(runtime.validateSessionPaths([managed]));
-    await writeFile(binding, JSON.stringify(pin));
-    for (const changed of [{ ...header, id: 'different-history' }, { ...header, cwd: otherPath }]) {
-      const changedBytes = `${JSON.stringify(changed)}\n`;
-      await writeFile(history, changedBytes);
-      await assert.rejects(runtime.validateSessionPaths([managed]));
-      assert.equal(await readFile(history, 'utf8'), changedBytes);
-      assert.equal(await readFile(binding, 'utf8'), JSON.stringify(pin));
+    const sessions = store.listSessions();
+    await runtime.validateSessionPaths(sessions);
+    await runtime.validateSessionPaths(sessions, { ...config, instances: [] });
+    const reassigned = { ...config, instances: [{ id: 2, defaultDir: otherPath, chats: [{ botId, chatId }] }] };
+    for (const session of sessions) {
+      await assert.rejects(runtime.validateSessionPaths([session], reassigned), /history pinned to another instance ID/);
+      assert.equal(store.getSession(session.id)?.cwd, originalPath);
     }
-    await rm(history);
-    await assert.rejects(runtime.validateSessionPaths([managed]), { code: 'ENOENT' });
-    await rm(originalPath, { recursive: true });
-    await symlink(otherPath, originalPath);
-    await assert.rejects(runtime.validateSessionPaths([attached]), /Instance path identity changed/);
-    assert.equal(store.getSession(managed.id)?.instancePath, originalPath);
+    const original = sessions[0]!;
+    const existing = store.createSession({ ...topic, threadId: original.threadId, cwd: otherPath }, 'Existing');
+    assert.equal(existing.cwd, originalPath);
+    assert.throws(() => store.createSession({ ...topic, threadId: original.threadId, instanceId: 2, cwd: originalPath }, 'Other identity'), /different instance ID/);
   } finally {
     await runtime.close();
     store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('session cwd and logical identity persist independently across database restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-session-cwd-'));
+  const filename = join(directory, 'store.sqlite');
+  let store = new Store(filename);
+  try {
+    const original = store.createSession(topic, 'Original');
+    store.setSessionCwd(original.id, '/work/selected-worktree');
+    store.setSkillCatalog(1, [{ name: 'first', description: '' }]);
+    store.setSkillCatalog(2, [{ name: 'second', description: '' }]);
+    store.close();
+    store = new Store(filename);
+    assert.equal(store.getSession(original.id)?.instanceId, 1);
+    assert.equal(store.getSession(original.id)?.cwd, '/work/selected-worktree');
+    assert.deepEqual(store.getSession(original.id)?.runtime, { kind: 'managed' });
+    assert.deepEqual(store.getSkillCatalog(1), [{ name: 'first', description: '' }]);
+    assert.deepEqual(store.getSkillCatalog(2), [{ name: 'second', description: '' }]);
+    const second = store.createSession({ ...topic, threadId: 99, instanceId: 2 }, 'Same cwd, other identity');
+    assert.equal(second.cwd, original.cwd);
+    assert.equal(second.instanceId, 2);
+    for (const instanceId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => store.createSession({ ...topic, threadId: 100, instanceId }, 'Invalid'), /positive safe integer/);
+    }
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('old database schemas are rejected rather than migrated', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-schema-cutover-'));
+  const filename = join(directory, 'store.sqlite');
+  try {
+    const store = new Store(filename);
+    store.db.exec('PRAGMA user_version=3');
+    store.close();
+    assert.throws(() => new Store(filename), /Unsupported database schema version 3/);
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

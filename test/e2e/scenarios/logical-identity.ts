@@ -1,0 +1,56 @@
+import assert from 'node:assert/strict';
+import { mkdir, readFile, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { readConfig, writeConfig } from '../../../src/config.js';
+import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
+import { completeWriteTask, readSessionHistory } from '../helpers/model-tasks.js';
+import { it } from 'node:test';
+import type { WorkflowTasks } from './workflow-tasks.js';
+
+export function registerLogicalIdentity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'identitySeed' | 'identityOld' | 'identityNew' | 'identityOldRestarted' | 'identityNewRestarted'>): void {
+  it('logical identity', async () => {
+    const app = getApp();
+    const seed = await app.sendAndWait(`/new ${tasks.identitySeed.prompt}`);
+    const seedReply = await completeWriteTask(app, tasks.identitySeed, seed);
+    let separateSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === seedReply.replyToMessage?.threadId)!;
+    await app.omp.git(app.omp.workspace, 'add', '--all');
+    await app.omp.git(app.omp.workspace, 'commit', '-m', 'Preserve identity seed evidence');
+    await app.sendAndWait('/worktree identity-branch', separateSession.threadId);
+    separateSession = app.store.getSession(separateSession.id)!;
+    await app.omp.assertWorktree(separateSession, 'identity-branch');
+    const oldCwd = separateSession.cwd;
+    const identityDirectory = join(app.omp.workspace, 'identity-default');
+    await mkdir(identityDirectory, {recursive:true});
+    const identityConfig = readConfig(app.config.configPath);
+    const logicalInstance = identityConfig.instances.find(instance => instance.id === separateSession.instanceId)!;
+    logicalInstance.defaultDir = identityDirectory;
+    identityConfig.instances = [{id: 2, defaultDir: identityDirectory, chats: []}, logicalInstance];
+    writeConfig(identityConfig);
+    const identityHistory = await readSessionHistory(app.omp.dataDir, separateSession.id);
+    const oldFollowup = await app.sendAndWait(`/p ${tasks.identityOld.prompt}`, separateSession.threadId);
+    await completeWriteTask(app, tasks.identityOld, oldFollowup, separateSession.threadId);
+    assert.equal(app.store.getSession(separateSession.id)?.cwd, oldCwd);
+    assert.ok((await readSessionHistory(app.omp.dataDir, separateSession.id)).startsWith(identityHistory));
+    assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityOld.name)![0]!.messages).includes(tasks.identitySeed.evidence.nonce));
+    const identityNew = await app.sendAndWait(`/new ${tasks.identityNew.prompt}`);
+    const identityReply = await completeWriteTask(app, tasks.identityNew, identityNew);
+    const identitySession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === identityReply.replyToMessage?.threadId)!;
+    assert.equal(identitySession.instanceId, separateSession.instanceId);
+    assert.equal(identitySession.cwd, identityDirectory);
+    assert.equal(await readFile(join(identityDirectory,tasks.identityNew.path),'utf8'), JSON.stringify(tasks.identityNew.evidence));
+    await assert.rejects(stat(join(oldCwd,tasks.identityNew.path)), {code:'ENOENT'});
+    const newIdentityHistory = await readSessionHistory(app.omp.dataDir, identitySession.id);
+    await app.restart();
+    assert.equal(app.store.getSession(separateSession.id)?.cwd, oldCwd);
+    assert.equal(app.store.getSession(identitySession.id)?.cwd, identityDirectory);
+    assert.equal(app.store.getSession(identitySession.id)?.instanceId, separateSession.instanceId);
+    const oldRestarted = await app.sendAndWait(`/p ${tasks.identityOldRestarted.prompt}`, separateSession.threadId);
+    await completeWriteTask(app,tasks.identityOldRestarted,oldRestarted,separateSession.threadId);
+    const newRestarted = await app.sendAndWait(`/p ${tasks.identityNewRestarted.prompt}`,identitySession.threadId);
+    await completeWriteTask(app,tasks.identityNewRestarted,newRestarted,identitySession.threadId);
+    assert.ok((await readSessionHistory(app.omp.dataDir,identitySession.id)).startsWith(newIdentityHistory));
+    assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityOldRestarted.name)![0]!.messages).includes(tasks.identityOld.evidence.nonce));
+    assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.identityNewRestarted.name)![0]!.messages).includes(tasks.identityNew.evidence.nonce));
+    app.omp.provider.assertComplete([tasks.identitySeed.name, tasks.identityOld.name, tasks.identityNew.name, tasks.identityOldRestarted.name, tasks.identityNewRestarted.name]);
+  });
+}

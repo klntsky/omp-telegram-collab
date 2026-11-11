@@ -19,7 +19,6 @@ export interface HeaderBarProps {
 	header: SessionHeader | null;
 	state: SessionState | null;
 	phase: ConnectionPhase;
-	readOnly: boolean;
 	subCount: number;
 	railOpen: boolean;
 	onToggleRail(): void;
@@ -31,7 +30,6 @@ export const HeaderBar = memo(function HeaderBar({
 	header,
 	state,
 	phase,
-	readOnly,
 	subCount,
 	railOpen,
 	onToggleRail,
@@ -69,11 +67,9 @@ export const HeaderBar = memo(function HeaderBar({
 					<span className={`sh-dot sh-dot-${phase}`} />
 					{PHASE_LABEL[phase]}
 				</span>
-				{readOnly && (
-					<span className="sh-chip" title="this session is read-only — watching only">
-						read-only
-					</span>
-				)}
+				<span className="sh-chip" title="The Mini App is read-only. Use Telegram to interact.">
+					read-only
+				</span>
 				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
 				{state?.thinkingLevel && <span className="sh-chip sh-chip-meta">{state.thinkingLevel}</span>}
 				{pct != null && (

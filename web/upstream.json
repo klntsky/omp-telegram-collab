@@ -13,11 +13,12 @@
     "packages/utils/src/math-delimiters.ts"
   ],
   "modifications": [
-    "Replace the direct-link connect screen with Telegram Mini App authentication and automatic fresh-ticket reconnection while retaining the current transcript and draft.",
+    "Replace the direct-link connect screen with Telegram Mini App authentication and automatic fresh-ticket reconnection while retaining the current transcript.",
     "Replace encrypted browser relay transport with the same-origin authenticated JSON WebSocket gateway; hello and room capabilities stay server-side.",
-    "Integrate Telegram readiness, expansion, theme, and viewport events while retaining the upstream renderer, composer, and agent panels.",
+    "Integrate Telegram readiness, expansion, theme, and viewport events while retaining the upstream renderer and read-only agent panels.",
     "Use standard timer types and an ES2023-compatible transcript promise.",
     "Collapse recognized transcript metadata and displayed custom notices with the shared Collab web disclosure renderer.",
+    "Make the Mini App read-only for every role by removing the composer, ask responses, agent commands, topic reopening, and their client APIs and styles; keep authentication, navigation, presentation controls, and transcript fetching.",
     "Provide a minimal analytics-free HTML entry and local Vite build configuration."
   ]
 }

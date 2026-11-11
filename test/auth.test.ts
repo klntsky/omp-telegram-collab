@@ -41,21 +41,40 @@ test('only current group members receive session access', () => {
   assert.equal(isActiveMember({ status: 'member', user: { is_bot: true } }), false);
 });
 
-test('gateway validates domain actions without admitting supplied identities', () => {
+test('gateway accepts only strictly bounded history and transcript reads without supplied identities', () => {
   for (const value of [
     { t: 'hello', proto: 3, name: 'forged', writeToken: 'secret' },
     { t: 'exec', command: 'pwd' },
+    { t: 'prompt', text: 'Valid text must still be rejected' },
+    { t: 'prompt', text: 'Image prompt', images: [{type:'image',data:'aA==',mimeType:'image/png'}] },
+    { t: 'abort' },
+    { t: 'agent-cmd', cmd: 'chat', agentId: 'a', text: 'Hello' },
+    { t: 'agent-cmd', cmd: 'kill', agentId: 'a' },
+    { t: 'agent-cmd', cmd: 'revive', agentId: 'a' },
+    { t: 'ui-response', reqId: 1, value: 'approve' },
+    { t: 'ui-response', reqId: 1 },
+    { t: 'fetch-transcript', reqId: 1, agentId: 'a', fromByte: 0, writeToken: 'secret' },
     { t: 'prompt', text: '' },
     { t: 'prompt', text: 'x'.repeat(100_001) },
     { t: 'fetch-transcript', reqId: 1, agentId: 'a', fromByte: -1 },
     { t: 'agent-cmd', cmd: 'shell', agentId: 'a' },
+    { t: 'history-page', reqId: -1, cursor: {epoch: 'epoch', before: 0} },
+    { t: 'history-page', reqId: Number.MAX_SAFE_INTEGER + 1, cursor: {epoch: 'epoch', before: 0} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: '', before: 0} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'x'.repeat(129), before: 0} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'epoch', before: -1} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'epoch', before: 1.5} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'epoch', before: Number.MAX_SAFE_INTEGER + 1} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'epoch', before: 0, extra: true} },
+    { t: 'history-page', reqId: 1, cursor: {epoch: 'epoch', before: 0}, writeToken: 'secret' },
   ]) {
     assert.throws(() => validateGuestFrame(value));
   }
-  assert.deepEqual(validateGuestFrame({ t: 'prompt', text: 'Fix the login redirect.' }), { t: 'prompt', text: 'Fix the login redirect.' });
   assert.deepEqual(validateGuestFrame({ t: 'fetch-transcript', reqId: 2, agentId: 'worker', fromByte: 4096 }), {
     t: 'fetch-transcript', reqId: 2, agentId: 'worker', fromByte: 4096,
   });
+  const history = { t: 'history-page', reqId: 0, cursor: {epoch: 'current-epoch', before: Number.MAX_SAFE_INTEGER} };
+  assert.deepEqual(validateGuestFrame(history), history);
 });
 
 test('WebSocket tickets are single-use and expire at their boundary', () => {

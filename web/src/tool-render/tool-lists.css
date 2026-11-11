@@ -1,0 +1,81 @@
+/* ---- generic row lists ---- */
+
+.tv-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	font-size: 11.5px;
+}
+
+.tv-row {
+	display: flex;
+	gap: 7px;
+	min-width: 0;
+}
+
+.tv-row-key {
+	flex: none;
+	color: var(--tv-faint);
+}
+
+.tv-row-val {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+/* ---- todo ---- */
+
+.tv-todo {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 11.5px;
+}
+
+.tv-todo-phase {
+	margin-top: 4px;
+	color: var(--tv-muted);
+	font-weight: 600;
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.tv-todo-phase:first-child {
+	margin-top: 0;
+}
+
+.tv-task {
+	display: flex;
+	gap: 7px;
+	color: var(--tv-fg);
+}
+
+.tv-task-icon {
+	flex: none;
+	width: 12px;
+	text-align: center;
+	color: var(--tv-faint);
+}
+
+.tv-task--completed {
+	color: var(--tv-faint);
+}
+
+.tv-task--completed .tv-task-icon {
+	color: var(--tv-ok);
+}
+
+.tv-task--in_progress .tv-task-icon {
+	color: var(--tv-accent);
+}
+
+.tv-task--in_progress {
+	color: var(--tv-fg);
+}
+
+.tv-task--abandoned {
+	color: var(--tv-faint);
+	text-decoration: line-through;
+}
+

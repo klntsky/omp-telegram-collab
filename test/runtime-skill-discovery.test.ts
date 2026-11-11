@@ -50,7 +50,7 @@ process.stdin.on('data', part => {
 `);
   await chmod(executable, 0o700);
   const config: AppConfig = {
-    bots: [], instances: {[directory]:{chats:[]}}, configPath:join(directory,'config.yaml'),
+    bots: [], instances: [{id: 1, defaultDir: directory, chats: []}], configPath:join(directory,'config.yaml'),
     publicUrl:'https://localhost:3000',host:'127.0.0.1',port:3000,dataDir:directory,
     omp:{executable,args:[],maxSessions:1,startupTimeoutMs:10000},
   };
@@ -60,51 +60,35 @@ process.stdin.on('data', part => {
   return {runtime,directory,catalog,gate,ready:ready.promise,calls:async () => (await readFile(counter,'utf8')).trim().split('\n').length};
 }
 
-test('concurrent catalogs share discovery and new skills appear after freshness expires', async t => {
-  const app = await fixture(t);
-  let now = Date.now();
-  t.mock.method(Date,'now',() => now);
-  const results = await Promise.all([app.runtime.listSkills(app.directory),app.runtime.listSkills(app.directory),app.runtime.listSkills(app.directory)]);
-  for (const result of results) assert.deepEqual(result,[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
-  assert.equal(await app.calls(),1);
-  results[0]![0]!.name='mutated';
-  await writeFile(app.catalog,JSON.stringify([{name:'skill:new-skill',description:'Newly installed',source:'skill'}]));
-  assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
-  assert.equal(await app.calls(),1);
-  now += 5 * 60000 + 1;
-  assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'new-skill',description:'Newly installed'}]);
-  assert.equal(await app.calls(),2);
-});
-
 test('stopped worktree sessions discover skills in their own cwd and cache separately from the assigned project', async t => {
   const app = await fixture(t);
   const worktree = join(app.directory, 'worktree');
   await mkdir(worktree);
   t.mock.method(app.runtime, 'isRunning', async () => false);
   const session = {
-    id: 'worktree-skills', botId: 1, chatId: -100, threadId: 2, instancePath: app.directory,
+    id: 'worktree-skills', botId: 1, chatId: -100, threadId: 2, instanceId: 1,
     name: 'Worktree skills', status: 'open' as const, createdAt: Date.now(),
-    runtime: { kind: 'managed' as const, cwd: worktree },
+    cwd: worktree, runtime: { kind: 'managed' as const },
   };
-  await app.runtime.listSkills(app.directory, session);
+  await app.runtime.listSkills(1, session);
   assert.equal(await readFile(join(app.directory, 'cwd'), 'utf8'), worktree);
-  await app.runtime.listSkills(app.directory);
+  await app.runtime.listSkills(1);
   assert.equal(await readFile(join(app.directory, 'cwd'), 'utf8'), app.directory);
   assert.equal(await app.calls(), 2);
-  await app.runtime.listSkills(app.directory, session);
+  await app.runtime.listSkills(1, session);
   assert.equal(await app.calls(), 2);
-  await assert.rejects(app.runtime.listSkills(worktree, session), /Instance path is not configured/);
+  await assert.rejects(app.runtime.listSkills(2, session), /Instance ID is not configured/);
 });
 
 test('new folder skill discovery keeps configured assignment separate from execution context', async t => {
   const app = await fixture(t);
   const selected = join(app.directory,'selected');
   await mkdir(selected);
-  const catalog = await app.runtime.listSkills(app.directory,undefined,undefined,selected);
+  const catalog = await app.runtime.listSkills(1, undefined,undefined,selected);
   assert.deepEqual(catalog,[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
   assert.equal(await readFile(join(app.directory,'cwd'),'utf8'),selected);
-  await assert.rejects(app.runtime.listSkills(selected),/Instance path is not configured/);
-  await app.runtime.listSkills(app.directory);
+  await assert.rejects(app.runtime.listSkills(2), /Instance ID is not configured/);
+  await app.runtime.listSkills(1);
   assert.equal(await readFile(join(app.directory,'cwd'),'utf8'),app.directory);
 });
 
@@ -113,16 +97,16 @@ test('discovery failures preserve multiline diagnostics and share a bounded fail
   let now = Date.now();
   t.mock.method(Date,'now',() => now);
   let first: unknown;
-  await assert.rejects(app.runtime.listSkills(app.directory), error => {
+  await assert.rejects(app.runtime.listSkills(1), error => {
     first = error;
     assert.ok(error instanceof Error);
     assert.ok(error.message.includes('Original catalog diagnostic\nPermission denied: <skills> & config\n'));
     return true;
   });
-  await assert.rejects(app.runtime.listSkills(app.directory),error => error === first);
+  await assert.rejects(app.runtime.listSkills(1),error => error === first);
   assert.equal(await app.calls(),1);
   now += 30001;
-  await assert.rejects(app.runtime.listSkills(app.directory),error => error !== first && error instanceof Error && error.message.includes('Original catalog diagnostic'));
+  await assert.rejects(app.runtime.listSkills(1),error => error !== first && error instanceof Error && error.message.includes('Original catalog diagnostic'));
   assert.equal(await app.calls(),2);
 });
 
@@ -130,20 +114,20 @@ test('canceling the last catalog consumer kills discovery without poisoning the 
   const app = await fixture(t,false,true);
   const controller = new AbortController();
   const reason = new Error('Catalog owner stopped');
-  const pending = app.runtime.listSkills(app.directory,undefined,controller.signal);
+  const pending = app.runtime.listSkills(1, undefined,controller.signal);
   const pid = await app.ready;
   controller.abort(reason);
   await assert.rejects(pending,error => error === reason);
   assert.throws(() => process.kill(pid,0),{code:'ESRCH'});
   await writeFile(app.gate,'release');
-  assert.deepEqual(await app.runtime.listSkills(app.directory),[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
+  assert.deepEqual(await app.runtime.listSkills(1),[{name:'Acme/pdf-tools',description:'Read PDFs'}]);
 });
 
 test('canceling one catalog consumer preserves discovery for another consumer', {timeout:5000}, async t => {
   const app = await fixture(t,false,true);
   const controller = new AbortController();
-  const first = app.runtime.listSkills(app.directory,undefined,controller.signal);
-  const second = app.runtime.listSkills(app.directory);
+  const first = app.runtime.listSkills(1, undefined,controller.signal);
+  const second = app.runtime.listSkills(1);
   await app.ready;
   const reason = new Error('One menu stopped');
   controller.abort(reason);

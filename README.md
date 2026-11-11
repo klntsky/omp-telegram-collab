@@ -5,7 +5,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 ![OMP Telegram Collab conversations organized into Telegram forum topics](assets/telegram-topics.jpg)
 
 - Give each topic its own conversation and saved history.
-- Send prompts and answer agent questions in Telegram or the Mini App.
+- Send prompts and answer agent questions in Telegram. Open the read-only Mini App at the latest messages, load earlier history on demand, and follow live output and tool details.
 - Attach existing local OMP sessions.
 - Share project directories across groups with configurable prompt approval.
 - Edit the included Collab Web client without an iframe.
@@ -22,16 +22,17 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ✅ | Resume saved session history (`/resume`) | Send a prompt in an existing managed topic to resume its history. |
 | ✅ | Rename a session (`/rename`) | Rename the Telegram topic to update its managed OMP session title. Attached hosts must be renamed in their terminal. |
 | ❌ | Move a session or manage workspace directories (`/move`, `/add-dir`, `/remove-dir`, `/dirs`) | No dedicated workspace controls. |
-| ❌ | Branch, rewind, fork, or switch history branches (`/branch`, `/rewind`, `/fork`, `/tree`) | No history mutation controls. |
+| ✅ | Fork a conversation (`/fork`) | `/fork` creates a separate topic. Reply to a request or agent answer to select the fork point. The new topic follows the forum's automatic-worktree setting. |
+| ❌ | Branch, rewind, or switch history branches (`/branch`, `/rewind`, `/tree`) | No in-place history mutation controls. |
 | ❌ | Reset context, delete a session, refresh provider state, or retry a failed turn (`/clear`, `/delete`, `/fresh`, `/retry`) | No equivalent controls. |
 | ✅ | Move a session into a worktree (`/wt`, `/worktree`) | `/worktree [branch]` invokes OMP's native operation, keeping the topic's conversation and carrying changes according to OMP's settings. In General, it creates a topic first. |
 | ✅ | Share a running session through Collab (`/collab`, `omp collab`) | `/attach INSTANCE_ID` creates a topic connected to an existing local host. |
 | 📱 | Leave or join a shared Collab session (`/leave`, `/join`) | Open `/session`, then use Leave or Rejoin for that topic's connection. This does not terminate the host. |
 | ❌ | Create arbitrary Collab share links or join arbitrary rooms (`/collab`, `/join`, `omp collab`, `omp join`) | No remote link-creation or arbitrary-room interface. |
-| ✅ | Submit text prompts | `/p <prompt>`, ordinary messages when enabled, or the Mini App composer. Mini App prompts also appear in the topic. |
-| ✅ | Submit image prompts | Send photos or supported image documents in Telegram, with `/p` when required by prompt policy. The Mini App composer has no upload control. |
-| ✅ | Answer agent questions | Use Telegram option buttons, Other, or Cancel; the Mini App also offers option buttons, a text editor, and Cancel. Mini App answers require control permission. |
-| ✅ | Interrupt the current turn | `/stop` or the Mini App Stop button. This does not freeze all agents. |
+| ✅ | Submit text prompts | `/p <prompt>` or ordinary Telegram messages when enabled. |
+| ✅ | Submit image prompts | Send photos or supported image documents in Telegram, with `/p` when required by prompt policy. |
+| ✅ | Answer agent questions | Use Telegram option buttons, Other, or Cancel. |
+| ✅ | Interrupt the current turn | `/stop`. This does not freeze all agents. |
 | ✅ | Force-kill a session host | `/kill` preserves managed history; a later prompt can resume it. |
 | ❌ | Orderly exit or same-flags restart (`/exit`, `/quit`, `/q`, `/restart`) | `/kill` is forceful termination, not these lifecycle operations. |
 | ✅ | Read agent replies | Replies are mirrored into the topic and streamed in the Mini App. |
@@ -39,9 +40,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | 📱 | Inspect thinking and message metadata | Expand disclosures in the Mini App transcript. |
 | 📱 | Inspect subagent roster and activity (`/hub`, `/subagents`) | Open the Mini App agent rail to see status, current tool or intent, and last activity. |
 | 📱 | Read a subagent's transcript (`/hub`, `/subagents`) | Select an agent to open its drawer. Transcript access requires an available session file. Viewers can read it too. |
-| 📱 | Chat with a subagent (`/hub`, `/subagents`) | Send a message from its Mini App drawer. Requires control permission and a live connection. |
-| 📱 | Kill a running subagent (`/hub`, `/subagents`) | Use Kill in its Mini App drawer. Requires control permission. |
-| 📱 | Revive a parked or aborted subagent (`/hub`, `/subagents`) | Use Revive in its Mini App drawer. Requires control permission. |
+| ❌ | Chat with a subagent (`/hub`, `/subagents`) | Ask the main agent through Telegram to direct its subagents. |
+| ❌ | Kill a running subagent (`/hub`, `/subagents`) | No direct subagent controls. Ask the main agent through Telegram. |
+| ❌ | Revive a parked or aborted subagent (`/hub`, `/subagents`) | No direct subagent controls. Ask the main agent through Telegram. |
 | 📱 | Inspect subagent model and usage (`/hub`, `/subagents`) | The agent rail and drawer show model, tokens, cost, tool count, and duration when the host supplies them. |
 | ❌ | Configure per-agent models, prewalk, or advisor (`/agents`) | No corresponding Mini App or bot controls. |
 | ✅ | List, save, switch, and delete model presets (`/modelpreset`) | `/model_preset` browses preset models and roles with buttons to use one in the idle topic or make it the forum default. `/model_preset <name>` switches directly; `/settings` also selects the forum default. To edit presets, ask the agent. |
@@ -51,7 +52,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Browse detailed context contents (`/context`) | No context inspector. The transcript is not a view of the complete model context. |
 | 📱 | View compaction and branch-summary markers | The Mini App transcript displays summaries and changes already made by the host. |
 | ❌ | Manually compact or reduce context (`/compact`, `/shake`, `/handoff`) | No controls to initiate these operations. |
-| 📱 | Inspect the prompt queue count | The Mini App composer shows the host-reported queued-message count while busy. |
+| ❌ | Inspect the prompt queue count | No dedicated queue display. |
 | ❌ | Explicitly queue prompts and edit or remove pending messages (`/queue`, terminal queue controls) | No queue-management controls. Ordinary prompt delivery still follows the host's queue behavior. |
 | 📱 | Read todo and background-job tool output | Inspect tool cards in the Mini App transcript. These are emitted results, not the live `/todo` or `/jobs` inspectors. |
 | ❌ | Inspect or edit the live todo list (`/todo`) | No dedicated todo inspector or editor. |
@@ -64,7 +65,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ✅ | Select loaded skills for a prompt (`/skill:<name>`) | `/skills` opens the picker; `/skills clear` clears the selection. |
 | ❌ | Search, install, or update registry skills (`/skills`, `omp skill`) | The Telegram `/skills` picker selects loaded skills, not registry management operations. |
 | ❌ | Toggle the system-prompt skill listing (`/skillful`) | No toggle. |
-| ❌ | Run other built-in, file, template, or extension commands (including `/init`) | No OMP command browser or general slash-command dispatch. The Mini App composer sends prompts, not terminal commands. |
+| ❌ | Run other built-in, file, template, or extension commands (including `/init`) | No OMP command browser or general slash-command dispatch. |
 | ❌ | Configure OMP or provider authentication (`/settings`, `/setup`, `/providers`, `/login`, `/logout`) | Telegram `/settings` manages forum policy and defaults, not OMP settings or credentials. `/setup` enrolls a forum. |
 | ❌ | Manage extensions or MCP (`/extensions`, `/status`, `/marketplace`, `/plugins`, `/plugin`, `/reload-plugins`, `/mcp`) | Telegram `/status` reports service diagnostics, not OMP's extension dashboard. |
 | ✅ | Inspect provider quotas (`/usage`) | `/usage` reports provider plan usage, remaining quotas, and reset times. Displayed subagent costs are separate. |
@@ -78,7 +79,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Voice and recording (`/live`, `/record`) | No realtime voice or terminal-recording controls. |
 | ❌ | Changelog and shortcuts (`/changelog`, `/hotkeys`) | No corresponding OMP viewers. |
 | ❌ | List or clear worktrees (`omp worktree`) | No CLI list or clear interface. |
-| ❌ | Browse the complete model catalog or manage agent definitions (`omp models`, `omp agents`) | Telegram preset listing and Mini App live-subagent controls do not expose these CLI interfaces. |
+| ❌ | Browse the complete model catalog or manage agent definitions (`omp models`, `omp agents`) | Telegram preset listing and Mini App live-subagent views do not expose these CLI interfaces. |
 | ❌ | CLI protocols, credentials, and onboarding (`omp acp`, `omp auth`, `omp auth-broker`, `omp auth-gateway`, `omp login`, `omp token`, `omp setup`) | Run locally. Telegram `/setup` is unrelated to OMP onboarding. |
 | ❌ | CLI configuration and installation (`omp config`, `omp install`, `omp plugin`, `omp ssh`, `omp tiny-models`, `omp update`, `omp completions`) | Run locally. |
 | ❌ | CLI session transfer, storage, and processes (`omp session`, `omp share`, `omp anonymize`, `omp gc`, `omp ps`, `omp shell`) | No equivalent transfer, sharing, storage, process-manager, or shell interfaces. |
@@ -91,7 +92,7 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 
 Connect a Telegram group to a project on your computer. The agent runs on that computer while you send tasks and read replies in Telegram. This guide calls it the **agent's computer** to distinguish it from your Telegram device.
 
-You can use the bot entirely through group messages. The optional **Mini App** lets you open a live transcript, inspect tool calls, and manage subagents inside Telegram. It needs a public HTTPS address and an extra registration with BotFather.
+You can use the bot entirely through group messages. The optional **Mini App** lets you read a live transcript, inspect tool calls, and view subagent activity inside Telegram. It is read-only for all users. It needs a public HTTPS address and an extra registration with BotFather.
 
 1. **Agent's computer:** Install the latest Node.js LTS with [nvm](https://github.com/nvm-sh/nvm), pnpm, and [OMP](https://github.com/can1357/oh-my-pi). The minimum supported runtime is Node.js 26.13.0. Older versions are unsupported. Configure OMP's model provider credentials for the account that will run the bot, following the [official provider setup guide](https://omp.sh/docs/providers#get-one-route-working).
 
@@ -158,7 +159,7 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```text
    $ omp-telegram-collab setup
-   The optional Mini App provides a live transcript, tool details, and subagent controls. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
+   The optional Mini App provides a live transcript, tool details, and subagent activity. It is read-only. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
    Enable Mini App? [y/N]: n
    Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
    Next on the agent's computer: run omp-telegram-collab bot add, then omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
@@ -260,7 +261,7 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```text
    Setup requested. On the agent's computer, approve within 10 minutes:
-   omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
+   omp-telegram-collab approve r_EXAMPLE_CODE --path '/srv/projects/backend'
    The project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.
    ```
 
@@ -278,14 +279,14 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    Paths and identifiers below are filler values.
 
    ```text
-   $ omp-telegram-collab approve EXAMPLE_CODE --path '/srv/projects/backend'
+   $ omp-telegram-collab approve r_EXAMPLE_CODE --path '/srv/projects/backend'
    Verified bot @example_omp_bot (123456789)
    Verified forum Example project (-1001234567890)
    Verified requester 42, current group administrator.
    Project directory where OMP will run: /srv/projects/backend
    The agent will have the service account's filesystem and credential access on the agent's computer.
    Connect this forum to /srv/projects/backend? [y/N] yes
-   Approved EXAMPLE_CODE: /srv/projects/backend
+   Approved r_EXAMPLE_CODE: /srv/projects/backend
    ```
 
    New forums treat ordinary messages as prompts and do not allow non-admin prompt proposals. Change these policies through `/settings`.
@@ -295,6 +296,46 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 10. **Telegram:** Review `/settings` for prompt permissions, the session limit, runtime folders, and forum defaults. Send `/new <task>` and confirm that the agent replies in the new topic.
 
    If you enabled the Mini App, use mobile data to open the topic's **OPEN AGENT** button and confirm that its transcript loads. Keep it open while sending another prompt from a second Telegram client; confirm that the new reply appears live. This checks WebSocket forwarding.
+
+## Configure instances
+
+`instances` is a list of logical projects. Each instance has a stable numeric ID and a default directory for new sessions. Multiple instances can share a directory.
+
+```yaml
+instances:
+  - id: 1
+    defaultDir: /srv/projects/backend
+    chats:
+      - botId: 123456789
+        chatId: -1001234567890
+  - id: 2
+    defaultDir: /srv/projects/backend
+    chats: []
+```
+
+This is a configuration excerpt with filler paths and Telegram IDs. Keep the other service settings generated by `setup`.
+
+IDs must be unique positive safe integers. Creation commands choose 1 initially, then an ID above every configured or stored session's instance ID. Use `create PATH --id ID` to choose one explicitly. Keep IDs unchanged when sorting the list or editing directories.
+
+<details>
+<summary>Example instances sharing a directory</summary>
+
+Example with a new configuration and an existing filler directory. Other service setup is omitted.
+
+```text
+$ omp-telegram-collab create /srv/projects/backend
+Created instance 1: /srv/projects/backend
+$ omp-telegram-collab create /srv/projects/backend
+Created instance 2: /srv/projects/backend
+```
+
+</details>
+
+Change `defaultDir` to use another existing canonical absolute directory for future sessions. Existing sessions keep their own working directories, history, and host bindings after reload or restart. Relative `folder_options` use the new default only for new sessions. Moving or deleting an old session's directory can make that session unavailable, but does not prevent the service from starting.
+
+Select an existing instance during enrollment with `approve REQUEST_CODE --instance ID`. Use `--path PATH` to register a new instance. Instance-management commands use IDs so instances sharing a directory remain distinguishable. A forum with stored sessions cannot be reassigned to another instance ID.
+
+The old directory-keyed configuration and older database schemas are not supported. Back up existing configuration and runtime data before replacing them; the service does not convert them automatically.
 
 ## Choose a session folder
 
@@ -327,7 +368,7 @@ The only folder setting is `folder_options`, defaulting to `[]`. An empty list b
 
 `/new` from any topic and `/p` in General follow this cardinality rule. `/p` in an existing session keeps its directory. The chosen folder survives restarts. Worktree preparation starts there and then uses OMP's resulting worktree directory.
 
-All folder entries resolve relative to the forum's configured project directory (`instancePath`), never the bot process's working directory. `.` means that configured directory; `..` and paths such as `../sibling` are explicitly allowed. Operating-system user permissions are the security boundary, not containment within the project directory. The bot checks that the resolved path is an accessible directory. Missing folders require explicit creation confirmation, even when there is only one effective folder; that folder is validated before creating a topic or preparing a worktree. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
+All folder entries resolve relative to the forum instance's `defaultDir`, never the bot process's working directory. `.` means that default directory; `..` and paths such as `../sibling` are explicitly allowed. Operating-system user permissions are the security boundary, not containment within the project directory. The bot checks that the resolved path is an accessible directory. Missing folders require explicit creation confirmation, even when there is only one effective folder; that folder is validated before creating a topic or preparing a worktree. Permission failures retain the original operating-system diagnostic and never fall back to another folder. Folder access uses the bot service account, not your Telegram device.
 
 Failed choices retain the task for **Retry**, and offer **Choose another folder** only when multiple effective options exist. Expired requests and pending requests discarded by a service restart explain why the old controls no longer work; they never replay the task. After an expiry or restart-discard notice, send the task again. While selection remains active, use its controls instead of submitting a duplicate task.
 

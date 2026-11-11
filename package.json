@@ -25,12 +25,15 @@
     "check": "pnpm generate:commands && tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p tsconfig.verification.json",
     "test": "tsx --test --test-concurrency=5 test/*.test.ts",
     "test:one": "tsx --test --test-concurrency=5",
+    "test:e2e": "node --env-file-if-exists=.env --import tsx --test --test-concurrency=5 test/e2e/*.test.ts",
+    "test:native": "node --import tsx --test --test-concurrency=5 test/native/*.test.ts",
+    "telegram:test:login": "node --env-file-if-exists=.env --import tsx scripts/telegram-test-login.ts",
+    "telegram:test:bots": "node --env-file-if-exists=.env --import tsx scripts/telegram-test-bots.ts",
+    "e2e:inspect": "tsx scripts/e2e-inspect.ts",
     "test:integration": "pnpm build && pnpm smoke",
-    "verify": "pnpm check && pnpm test && pnpm test:integration",
+    "verify": "pnpm test:e2e && pnpm test:native && pnpm check && pnpm test && pnpm test:integration",
     "smoke": "tsx scripts/smoke.ts",
     "smoke:cli": "tsx scripts/smoke.ts cli",
-    "smoke:telegram": "tsx scripts/smoke.ts telegram",
-    "smoke:gateway": "tsx scripts/smoke.ts gateway",
     "smoke:runtime": "tsx scripts/smoke.ts runtime"
   },
   "dependencies": {
@@ -50,6 +53,7 @@
   },
   "devDependencies": {
     "@lezer/generator": "^1.8.1",
+    "@mtcute/node": "0.32.7",
     "@types/katex": "^0.16.7",
     "@types/node": "^26.6.6",
     "@types/react": "^19.0.0",

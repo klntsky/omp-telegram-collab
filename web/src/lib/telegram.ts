@@ -29,7 +29,6 @@ interface SessionAuthorization {
 	credential: string;
 	generation: number;
 	displayName: string;
-	canReopen: boolean;
 }
 
 export interface ClosedAuthorizedSession extends SessionAuthorization {
@@ -91,13 +90,13 @@ export function readTelegramLaunch(): TelegramLaunch {
 	return { botId, sessionId: startParam.slice(2), initData: app.initData };
 }
 
-export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number, reopen = false): Promise<AuthorizedSession> {
+export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number): Promise<AuthorizedSession> {
 	const response = await fetch("/api/session", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		credentials: "same-origin",
 		cache: "no-store",
-		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation, reopen }),
+		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation }),
 		signal,
 	});
 	if (!response.ok) {
@@ -109,6 +108,10 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 				message = error.error;
 			}
 		} catch {}
+		// Invalid access or a stale session generation requires explicit rejoin,
+		// so automatic recovery cannot undo /kill. See src/server.ts /api/session.
+		// Other statuses retain the existing retry path, including temporary
+		// authorization outages reported by the gateway as 503.
 		if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409) {
 			throw new SessionAccessError(message, response.status);
 		}
@@ -123,8 +126,7 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		!("status" in data.session) || (data.session.status !== "open" && data.session.status !== "closed") ||
 		!("credential" in data) || typeof data.credential !== "string" || !data.credential ||
 		!("generation" in data) || typeof data.generation !== "number" || !Number.isSafeInteger(data.generation) || data.generation < 0 ||
-		!("displayName" in data) || typeof data.displayName !== "string" || !data.displayName ||
-		!("canReopen" in data) || typeof data.canReopen !== "boolean"
+		!("displayName" in data) || typeof data.displayName !== "string" || !data.displayName
 	) {
 		throw new Error("Invalid session response. Retry in a moment.");
 	}
@@ -132,7 +134,6 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		credential: data.credential,
 		generation: data.generation,
 		displayName: data.displayName,
-		canReopen: data.canReopen,
 	};
 	let result: AuthorizedSession;
 	if (data.session.status === "closed") {

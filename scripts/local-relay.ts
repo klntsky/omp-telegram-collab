@@ -9,6 +9,7 @@ interface Room {
 
 export async function startLocalRelay() {
   const rooms = new Map<string, Room>();
+  let interruptNextGuest = false;
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 16 * 1024 * 1024 });
   server.on('connection', (socket, request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -29,6 +30,12 @@ export async function startLocalRelay() {
       const room = rooms.get(roomId);
       if (!room) {
         socket.close(4004, 'No such room');
+        return;
+      }
+      if (interruptNextGuest) {
+        interruptNextGuest = false;
+        socket.send(JSON.stringify({t: 'room-closed'}));
+        socket.close(4001, 'Room closed');
         return;
       }
       peer = room.nextPeer++;
@@ -71,6 +78,7 @@ export async function startLocalRelay() {
   if (!address || typeof address === 'string') throw new Error('Relay has no TCP address');
   return {
     url: `ws://localhost:${address.port}`,
+    interruptNextGuest() { interruptNextGuest = true; },
     async close() {
       for (const socket of server.clients) socket.terminate();
       const { promise, resolve, reject } = Promise.withResolvers<void>();

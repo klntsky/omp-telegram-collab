@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '../shared/contracts.js';
 import { topicDestination } from '../shared/topic-destination.js';
-import { OmpRuntime, SessionCapacityError } from '../src/runtime.js';
-import { connectCollab } from '../src/collab.js';
+import { OmpRuntime } from '../src/runtime.js';
+import { SessionCapacityError } from '../src/runtime/types.js';
 import { startLocalRelay } from './local-relay.js';
 import { formatCollabLink, parseCollabLink } from '../src/vendor/link.js';
 import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
@@ -20,7 +20,7 @@ const selectedFolder = join(dir, 'selected folder');
 await mkdir(selectedFolder);
 const config: AppConfig = {
   bots: [{ id: 123, token: '123:smoke-token-never-sent-to-telegram', miniAppShortName: 'app' }],
-  instances: { [dir]: { chats: [{ botId: 123, chatId: -100123 }] } },
+  instances: [{ id: 1, defaultDir: dir, chats: [{ botId: 123, chatId: -100123 }] }],
   configPath: join(dir, 'config.yaml'),
   publicUrl: 'https://smoke.example', host: '127.0.0.1', port: 3000, dataDir: dir,
   omp: {
@@ -33,8 +33,8 @@ writeConfig(config);
 const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(
-  { botId: 123, chatId: -100123, threadId: 7, instancePath: dir },
-  'Local smoke', { kind: 'managed', cwd: selectedFolder }, {text:'Preserved pending instruction'},
+  { botId: 123, chatId: -100123, threadId: 7, instanceId: 1, cwd: selectedFolder },
+  'Local smoke', { kind: 'managed' }, {text:'Preserved pending instruction'},
 );
 initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();
@@ -73,7 +73,7 @@ try {
     url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
   };
   await assert.rejects(async () => {
-    const unauthorized = await connectCollab(forgedBinding, 'Forged capability verifier', {
+    const unauthorized = await runtime.connectCollab(forgedBinding, 'Forged capability verifier', {
       onFrame(frame) {
         assert.notEqual(frame.t, 'welcome', 'a rejected control welcome must not reach the consumer');
         assert.notEqual(frame.t, 'snapshot-chunk', 'a rejected control snapshot must not reach the consumer');
@@ -83,7 +83,7 @@ try {
     unauthorized.close();
     assert.fail('a valid room key with a forged write token must not obtain a control connection');
   }, /Collab host refused control access/);
-  const guest = await connectCollab(first, 'Smoke verifier', {
+  const guest = await runtime.connectCollab(first, 'Smoke verifier', {
     onFrame(frame) {
       frames.push(frame.t);
       if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Telegram title → actual OMP');
@@ -117,7 +117,7 @@ try {
   assert.equal(resumed.sessionId,first.sessionId,'idle retirement preserves the exact OMP conversation');
   assert.notEqual(resumed.instanceId,first.instanceId,'a retired conversation resumes in a fresh process');
   await assertProcessCwd(session.id, selectedFolder);
-  const resumedGuest = await connectCollab(resumed, 'Resume verifier', {
+  const resumedGuest = await runtime.connectCollab(resumed, 'Resume verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.id, first.sessionId);
       if (frame.t === 'welcome') assert.equal(frame.state.sessionName, 'Live Telegram rename', 'native title persists across a fresh host process');
@@ -125,18 +125,18 @@ try {
     onClose() {},
   });
   resumedGuest.close();
-  await assert.rejects(connectCollab({ ...resumed, sessionId: 'different-conversation' }, 'Identity verifier', {
+  await assert.rejects(runtime.connectCollab({ ...resumed, sessionId: 'different-conversation' }, 'Identity verifier', {
     onFrame() { assert.fail('mismatched session data must not reach a consumer'); },
     onClose() {},
   }));
   const secondPath = join(dir, 'second checkout');
   await mkdir(secondPath);
-  config.instances[secondPath] = { chats: [{ botId: session.botId, chatId: session.chatId - 1 }] };
+  config.instances.push({ id: 2, defaultDir: secondPath, chats: [{ botId: session.botId, chatId: session.chatId - 1 }] });
   runtime.setSessionLimit(2);
-  const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instancePath: secondPath, runtime: { kind: 'managed' as const } };
+  const secondSession = { ...session, id: 'second-instance-session', chatId: session.chatId - 1, instanceId: 2, cwd: secondPath, runtime: { kind: 'managed' as const } };
   const secondBinding = await runtime.ensure(secondSession);
   assert.notEqual(secondBinding.sessionId, resumed.sessionId);
-  const secondGuest = await connectCollab(secondBinding, 'Instance path verifier', {
+  const secondGuest = await runtime.connectCollab(secondBinding, 'Instance path verifier', {
     onFrame(frame) {
       if (frame.t === 'welcome') assert.equal(frame.header.cwd, secondPath);
     },
@@ -144,7 +144,7 @@ try {
   });
   secondGuest.close();
   await assert.rejects(runtime.attach(secondBinding.instanceId, dir), /instance path/);
-  await assert.rejects(runtime.ensure({ ...session, instancePath: secondPath, runtime: { kind: 'managed', cwd: secondPath } }), /incompatible/);
+  await assert.rejects(runtime.ensure({ ...session, cwd: secondPath, runtime: { kind: 'managed' } }), /incompatible/);
   assert.equal(await runtime.isRunning(session), true, 'a path mismatch must leave the original host alive');
   assert.equal(await runtime.isRunning(secondSession), true);
   runtime.markPrompt(session.id);
@@ -184,22 +184,22 @@ try {
   execFileSync('git', ['-C', worktreeRepository, '-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '--quiet', '-m', 'Smoke root']);
   await writeFile(join(worktreeRepository, 'tracked'), 'dirty tracked\n');
   await writeFile(join(worktreeRepository, 'untracked'), 'dirty untracked\n');
-  reopenedConfig.instances[dir]!.chats.push({ botId: session.botId, chatId: session.chatId - 2 });
+  reopenedConfig.instances.find(instance => instance.id === 1)!.chats.push({ botId: session.botId, chatId: session.chatId - 2 });
   runtime = new OmpRuntime(reopenedConfig);
   const worktreeSession = {
-    ...session, id: 'worktree-smoke-session', instancePath: dir, chatId: session.chatId - 2,
-    runtime: { kind: 'managed' as const, cwd: worktreeRepository },
+    ...session, id: 'worktree-smoke-session', chatId: session.chatId - 2, cwd: worktreeRepository,
+    runtime: { kind: 'managed' as const },
   };
   try {
     const binding = await runtime.ensure(worktreeSession);
     await runtime.worktree(worktreeSession, `telegram-smoke-${Date.now()}`);
-    const worktreePath = worktreeSession.runtime.cwd!;
+    const worktreePath = worktreeSession.cwd;
     assert.ok(worktreePath);
     assert.equal(await readFile(join(worktreePath, 'tracked'), 'utf8'), 'dirty tracked\n');
     assert.equal(await readFile(join(worktreePath, 'untracked'), 'utf8'), 'dirty untracked\n');
     const moved = await runtime.ensure(worktreeSession);
     assert.equal(moved.sessionId, binding.sessionId);
-    const guest = await connectCollab(moved, 'Worktree verifier', {
+    const guest = await runtime.connectCollab(moved, 'Worktree verifier', {
       onFrame(frame) {
         if (frame.t === 'welcome') assert.equal(frame.header.cwd, worktreePath);
       },
