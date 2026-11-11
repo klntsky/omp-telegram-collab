@@ -1,6 +1,6 @@
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Context } from 'grammy';
-import type { TopicSession, PromptContent } from '../../shared/contracts.js';
+import type { TopicSession, PendingPromptContent } from '../../shared/contracts.js';
 import type { ImageContent, CollabUiRequest } from '@oh-my-pi/pi-wire';
 import type { InputIntent, TelegramImage } from '../telegram-input.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -19,7 +19,7 @@ export interface InputPromptsDependencies {
   store: BotOptions['store'];
   promptImages(attachments: TelegramImage[]): Promise<ImageContent[]>;
   requestKind(token: string): CollabUiRequest['kind'] | undefined;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PendingPromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
   skills: SkillPicker;
   submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void;
   usersCanProposePrompts(chatId: number): boolean;
@@ -80,7 +80,7 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
         return true;
       }
       if (!deps.usersCanProposePrompts(ctx.chat.id) && !(await deps.currentAdmin(ctx))) return true;
-      if (!intent.content.text.trim() && !intent.content.images.length &&
+      if (!intent.content.text.trim() && !intent.content.images.length && !intent.content.documents?.length &&
           !intent.extensions?.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
         if (intent.kind === 'session-prompt' && destination.kind !== 'general')
           await replyTo(ctx, destination, 'Usage: /p <prompt>');
@@ -99,7 +99,7 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
         throw new Error('The session or group assignment changed while downloading the image');
       await deps.routePrompt(
         ctx,
-        { text: intent.content.text, ...(images.length ? { images } : {}) },
+        { text: intent.content.text, ...(images.length ? { images } : {}), ...(intent.content.documents?.length ? {documents:intent.content.documents} : {}) },
         intent.kind === 'new-task' ? undefined : session,
         intent.extensions,
       );

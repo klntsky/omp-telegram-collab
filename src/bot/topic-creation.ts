@@ -1,5 +1,5 @@
 import type { Context, Bot } from 'grammy';
-import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
+import type { TopicSession, PendingPromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
@@ -38,7 +38,7 @@ export class TopicCreation {
   constructor(private readonly dependencies: TopicCreationDependencies) {}
   async newSession(
     ctx: Context,
-    task?: PromptContent,
+    task?: PendingPromptContent,
     attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string },
     name?: string,
     accepted?: () => void,
@@ -102,27 +102,28 @@ export class TopicCreation {
       attached
         ? { kind: 'attached', instanceId: attached.hostId, sessionId: attached.sessionId }
         : { kind: 'managed' },
-      attached || worktree || automaticWorktree || extensions.length ? undefined : task,
+      worktree || ((attached || automaticWorktree || extensions.length) && !task?.documents?.length) ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
     );
     this.dependencies.options.store.beginInitialTaskPreparation(session.id);
+    const durableDocumentSetup = Boolean(task?.documents?.length && !worktree && (automaticWorktree || extensions.length));
+    if (durableDocumentSetup) this.dependencies.options.store.setInitialDocumentSetup(session.id, {automaticWorktree, extensions:[...extensions]});
     try {
       reservation?.bind(session.id);
-      if (automaticWorktree) {
+      if (automaticWorktree && !durableDocumentSetup) {
         await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.dependencies.currentAdmin(authority)))
           throw new Error('Administrator access changed before worktree creation.');
         await this.dependencies.createTopicWorktree(session);
-        if (task !== undefined && !extensions.length) {
+        if (task !== undefined && !extensions.length && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority)))
-            throw new Error('Administrator access changed before initial task submission.');
+          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
           this.dependencies.requireSessionAssignment(session);
           this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
         }
       }
-      if (extensions.length) {
+      if (extensions.length && !durableDocumentSetup) {
         try {
           await this.dependencies.preparePrompt(ctx, session, extensions, authority);
         } catch (error) {
@@ -131,7 +132,7 @@ export class TopicCreation {
           });
           throw error;
         }
-        if (task !== undefined) {
+        if (task !== undefined && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
           if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
           this.dependencies.requireSessionAssignment(session);
@@ -201,7 +202,7 @@ export class TopicCreation {
           this.dependencies.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
         }
       await this.dependencies.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
-      await this.dependencies.listen(session);
+      if (!durableDocumentSetup) await this.dependencies.listen(session);
     } finally {
       this.dependencies.options.store.finishInitialTaskPreparation(session.id);
     }

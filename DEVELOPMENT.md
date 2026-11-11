@@ -27,7 +27,7 @@ Configure model credentials for the development account through OMP. Do not reus
 
 Keep the current schema and its transactional upgrade path in `src/migrations.ts`. Update fixtures and callers together.
 
-Store startup initializes new databases and applies supported upgrades atomically. Unsupported versions are rejected. Migration failures preserve the original SQLite diagnostic and roll back the schema, data, and version.
+Store startup initializes new databases and applies supported upgrades atomically, preserving saved settings, skill selections, and pending document uploads. Unsupported versions are rejected. Migration failures preserve the original SQLite diagnostic and roll back the schema, data, and version.
 
 ## Modify the Mini App
 

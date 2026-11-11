@@ -27,6 +27,10 @@ export interface PromptContent {
   images?: ImageContent[];
 }
 
+export interface PendingPromptContent extends PromptContent {
+  documents?: { fileId: string; fileName: string }[];
+}
+
 export interface BotConfig {
   id: number;
   token: string;

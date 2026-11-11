@@ -54,10 +54,11 @@ test('schema 5 upgrades on disk without losing settings, sessions, tasks, or exa
     store.db.prepare('INSERT INTO settings_panels VALUES (?,?,?)').run(1, panel.token, JSON.stringify(panel));
     restoreSchemaFive(store.db);
     const before = preservedRows(store.db);
+    store.db.exec('DROP TABLE initial_documents; DROP TABLE initial_document_setups;');
     store.close();
 
     store = new Store(filename);
-    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 6);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 7);
     assert.deepEqual(preservedRows(store.db), before);
     assert.deepEqual(store.getSession(source.id), source);
     assert.deepEqual(store.getNewTopicSkills(source.id), ['team:Review']);
@@ -101,9 +102,35 @@ test('a failed upgrade rolls back its schema, data, and version with the origina
 
     store.db.exec('DROP TRIGGER reject_panel_upgrade');
     initializeDatabase(store.db);
-    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 6);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 7);
     assert.deepEqual(store.getNewTopicSkills(source.id), ['team:Review']);
     assert.deepEqual(JSON.parse(String(store.db.prepare('SELECT panel FROM settings_panels WHERE token=?').get(panel.token)!.panel)), { ...panel, revision: 8 });
+  } finally {
+    store.close();
+  }
+});
+
+test('schema 6 retains pending document uploads while converting default skills', () => {
+  const store = new Store(':memory:');
+  try {
+    const session = store.createSession(topic, 'Pending document');
+    store.setNewTopicSkills(session.id, ['Review']);
+    const documents = JSON.stringify([{fileId: 'saved-file-id', fileName: 'notes.txt'}]);
+    const setup = JSON.stringify({automaticWorktree: true, extensions: []});
+    store.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(session.id, documents);
+    store.db.prepare('INSERT INTO initial_document_setups VALUES (?,?)').run(session.id, setup);
+    restoreSchemaFive(store.db);
+    store.db.exec('PRAGMA user_version=6');
+    const before = preservedRows(store.db);
+
+    initializeDatabase(store.db);
+
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 7);
+    assert.deepEqual(preservedRows(store.db), before);
+    assert.deepEqual(store.getNewTopicSkills(session.id), ['Review']);
+    initializeDatabase(store.db);
+    assert.deepEqual(preservedRows(store.db), before);
+    assert.deepEqual(store.getNewTopicSkills(session.id), ['Review']);
   } finally {
     store.close();
   }

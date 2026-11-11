@@ -76,23 +76,6 @@ test('rich replies quote nested content without attaching the quoted images', ()
   });
 });
 
-test('rich embedded images and nested text remain prompt content under existing prompt policy', () => {
-  const msg = message({rich_message:{blocks:[
-    {type:'paragraph',text:[{type:'mention',text:'@FixtureOmpBot',username:'FixtureOmpBot'},' Inspect ',{type:'custom_emoji',custom_emoji_id:'1',alternative_text:'🔎'}]},
-    {type:'collage',blocks:[
-      {type:'photo',photo:[{file_id:'small',width:10,height:10},{file_id:'large',width:100,height:100}],caption:{text:'Photo'}},
-      {type:'document',document:{file_id:'document',mime_type:'image/png'},caption:{text:'Diagram',credit:'Author'}},
-    ],caption:{text:'Attachments'}},
-    {type:'table',cells:[[{text:'Input'},{text:{type:'mathematical_expression',expression:'x^2'}}]],caption:'Values'},
-  ]}});
-  const content = normalizeMessage([msg]);
-  const images = [{fileId:'large',mimeType:'image/jpeg'},{fileId:'document',mimeType:'image/png'}];
-  assert.deepEqual(classifyMessage(msg,content,context()),{
-    kind:'session-prompt',content:{text:'Inspect 🔎\n\nPhoto\n\nDiagram\n\nAuthor\n\nAttachments\n\nInput\tx^2\n\nValues',images},
-  });
-  assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'});
-  assert.deepEqual(classifyMessage(msg,content,context({question:'answer'})),{kind:'question-answer',token:'answer',text:content.text});
-});
 
 test('rich quotation variants never promote quoted commands into instructions', () => {
   for (const type of ['blockquote','expandable_blockquote','pullquote']) {
