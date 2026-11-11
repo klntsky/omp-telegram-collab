@@ -151,7 +151,7 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    ```
 
    For the Mini App, use the public HTTPS origin of your proxy or tunnel, such as `https://omp.example.com`. The Mini App short name must match the name you register with BotFather. Keep `omp-telegram-collab start` running in this terminal.
-   Setup continues directly to bot registration when no bot is configured. Only the data directory and optional Mini App origin need configuration. OMP and listen settings use defaults, preserving existing settings on subsequent runs. Use explicit setup flags to change advanced settings. To register another bot later, run `omp-telegram-collab bot add`.
+   Setup continues directly to bot registration when no bot is configured. Only optional Mini App configuration needs questions. Storage, OMP, and listen settings use defaults, preserving existing settings on subsequent runs. Use explicit setup flags to change advanced settings. To register another bot later, run `omp-telegram-collab bot add`.
 
    <details>
    <summary>Example CLI commands and output</summary>

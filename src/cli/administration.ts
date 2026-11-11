@@ -249,7 +249,7 @@ export class Administration {
     }
     if (options.has('host')) config.host = one(options, 'host')!;
     if (options.has('port')) config.port = integer(one(options, 'port')!, 'Port', 0, 65535);
-    config.dataDir = resolve(await value('data-dir', 'Data directory', config.dataDir));
+    if (options.has('data-dir')) config.dataDir = resolve(one(options, 'data-dir')!);
     if (options.has('omp-executable')) {
       const executable = one(options, 'omp-executable')!;
       config.omp.executable = executable.includes('/') ? resolve(executable) : executable;

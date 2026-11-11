@@ -297,7 +297,10 @@ export function writeConfig(config: AppConfig): void {
 export function validateStart(config: AppConfig): void {
   const { configPath, ...value } = config;
   const checked = validate(value, configPath);
-  if (!checked.bots.length) throw failure(configPath, ['bots'], 'Configure at least one bot before starting.');
+  if (!checked.bots.length) {
+    const configOption = configPath === defaultConfigPath() ? '' : ` --config '${configPath.replaceAll("'", "'\\''")}'`;
+    throw new Error(`No bots configured yet. Create one using omp-telegram-collab${configOption} bot add`);
+  }
 }
 
 export function findInstance(config: AppConfig, botId: number, chatId: number): { instance: InstanceConfig } | undefined {

@@ -96,12 +96,12 @@ test('changing Mini App mode preserves registered names and fills only missing n
   assert.equal(readConfig(f.configPath).bots[1]!.miniAppShortName, 'app');
 });
 
-test('interactive setup preserves OMP settings while updating the data directory', async t => {
+test('interactive setup preserves explicit storage and OMP settings', async t => {
   const f = fixture(t);
   f.seed();
-  await f.run(['setup', '--max-sessions', '37', '--omp-executable', 'custom-omp', '--omp-arg=--model', '--omp-arg', 'selected model', '--startup-timeout-ms', '23456', '--relay-url', 'wss://relay.example']);
-  const dataDir = join(f.root, 'interactive data');
-  const answers = ['no', dataDir];
+  const dataDir = join(f.root, 'custom data');
+  await f.run(['setup', '--data-dir', dataDir, '--max-sessions', '37', '--omp-executable', 'custom-omp', '--omp-arg=--model', '--omp-arg', 'selected model', '--startup-timeout-ms', '23456', '--relay-url', 'wss://relay.example']);
+  const answers = ['no'];
   await f.run(['setup'], {
     interactive: true,
     question: async () => {
@@ -125,7 +125,7 @@ test('interactive setup preserves OMP settings while updating the data directory
 test('first interactive setup saves defaults and enters bot registration immediately', async t => {
   const f = fixture(t);
   const defaults = emptyConfig(f.configPath);
-  const answers = ['no', join(f.root, 'data'), 'invalid-token'];
+  const answers = ['no', 'invalid-token'];
   await assert.rejects(f.run(['setup'], {
     interactive: true,
     question: async () => {
@@ -136,7 +136,7 @@ test('first interactive setup saves defaults and enters bot registration immedia
   }), {message: 'Invalid Telegram bot token.'});
   assert.deepEqual(answers, []);
   const config = readConfig(f.configPath);
-  assert.equal(config.dataDir, join(f.root, 'data'));
+  assert.equal(config.dataDir, defaults.dataDir);
   assert.deepEqual(config.omp, defaults.omp);
   assert.equal(config.host, defaults.host);
   assert.equal(config.port, defaults.port);
