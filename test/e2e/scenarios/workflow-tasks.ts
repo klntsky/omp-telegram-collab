@@ -49,6 +49,10 @@ export function createWorkflowTasks() {
     capacityFirst: createWriteTask('capacity-first'),
     capacitySecond: createWriteTask('capacity-second'),
     capacityPending: createWriteTask('capacity-pending'),
+    compositeSeed: createWriteTask('composite-seed'),
+    compositeSelected: createWriteTask('composite-selected'),
+    compositeRecovered: createWriteTask('composite-recovered'),
+    compositeNew: createWriteTask('composite-new'),
   };
   const interrupted = { name: 'interrupted', prompt: `Wait for a stop command ${tasks.initial.evidence.nonce}` };
   const cancelledQuestion = { name: 'cancelled-question', prompt: `Ask before the next task ${tasks.initial.evidence.nonce}` };

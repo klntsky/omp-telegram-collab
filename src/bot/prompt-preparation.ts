@@ -9,7 +9,7 @@ import { realpathSync } from 'node:fs';
 import { saveDocument } from './document-file.js';
 import { basename, join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
-import type { TopicDestination } from '../../shared/topic-destination.js';
+import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
 import type { InitialDocumentSetup } from '../store/initial-documents.js';
 
 export interface PromptPreparationDependencies {
@@ -22,6 +22,7 @@ export interface PromptPreparationDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   dropListener(sessionId: string): void;
+  replyPresetText(ctx: Context, text: string): Promise<void>;
 }
 
 export class PromptPreparation {
@@ -80,7 +81,7 @@ export class PromptPreparation {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
-    });
+    }, text => this.deps.replyPresetText(ctx, text));
   }
   async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
     const setup = this.deps.options.store.getInitialDocumentSetup(session.id);
@@ -91,10 +92,13 @@ export class PromptPreparation {
       setup.automaticWorktree = false;
       this.deps.options.store.setInitialDocumentSetup(session.id, setup);
     }
-    if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(session, setup.extensions, authorize, setup);
+    if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(
+      session, setup.extensions, authorize,
+      text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text), setup,
+    );
     this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
   }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, setup?: InitialDocumentSetup): Promise<void> {
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, setup?: InitialDocumentSetup): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -112,7 +116,8 @@ export class PromptPreparation {
         await this.deps.options.runtime.ensure(session);
         await authorize();
         checkSession();
-        await this.deps.options.runtime.modelPresets(session, name);
+        const text = await this.deps.options.runtime.modelPresets(session, name);
+        await report(text);
       } finally { release(); }
     };
     let selectedPreset = setup?.preset;
@@ -126,19 +131,21 @@ export class PromptPreparation {
       await authorize();
       checkSession();
       if (extension.kind === 'worktree') {
+        let text: string;
         try {
-          await this.deps.options.runtime.worktree(session, undefined, authorize);
+          text = await this.deps.options.runtime.worktree(session, undefined, authorize);
           checkSession();
           this.deps.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.deps.dropListener(session.id);
         }
-        // A later preset failure must not replay the completed native worktree switch.
+        // A later preset or delivery failure must not replay the completed native worktree switch.
         if (setup) {
           setup.extensions = extensions.slice(index + 1);
           setup.preset = selectedPreset;
           this.deps.options.store.setInitialDocumentSetup(session.id, setup);
         }
+        await report(`🌳 ${text}`);
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');

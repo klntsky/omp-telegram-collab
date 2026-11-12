@@ -262,6 +262,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     currentAdmin: authorization.currentAdmin.bind(authorization),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     dropListener: connections.dropListener.bind(connections),
+    replyPresetText: presets.replyPresetText.bind(presets),
   });
   const capacity: CapacityAdmission = new CapacityAdmission({
     options: options,
