@@ -88,6 +88,8 @@ The stored topic lifecycle gates bot execution, mirroring, and gateway host admi
 
 The store atomically records pending close-icon work at the close transition and cancels it on reopening or detachment. The adapter completes that work only after a current-generation finish-icon request succeeds. Recovery retries unfinished work without reconstructing icon writes for the entire closed-topic archive.
 
+The bot's worktree-cleanup owner handles close-event offers and message-bound, one-use administrator confirmations. It checks current authorization, topic generation, assignment, and stored-session sharing before requesting removal. Pending confirmations are process-local and are not recovered after restart.
+
 The bot adapter owns two-way session-title reconciliation between Telegram topic updates and OMP's published session state. It separates the readable session title from the generated topic prefix. The runtime owns Git metadata discovery for the session's working directory; the adapter projects and restores that prefix without renaming the underlying OMP session. The store preserves pending readable Telegram renames and commits display names with their matching prefixes atomically. A coalescing native-title worker owns serialization without accumulating a callback for every observation. Published host state acknowledges pending intent; Telegram delivery does not. The runtime performs the mutation without submitting agent prompts.
 
 ## OMP execution and lifecycle
@@ -97,6 +99,8 @@ The runtime manager owns host discovery, startup, attachment, capacity, activity
 `Omp` is the single application-facing TypeScript contract for OMP communication. Bot adapters and the gateway depend on that contract, not on transport implementations. `OmpRuntime` implements host lifecycle, native CLI and RPC operations, lifecycle sockets, Collab connections and activity reads, and managed-history watcher acquisition. Returned connections and watchers retain their own protocol and resource lifetimes.
 
 The runtime coordinator retains the shared host ledger, admission reservations, operation fences, and shutdown ordering. Dedicated owners execute complete startup, retirement, termination, fork, and worktree transactions against that ledger through narrow capabilities. Registry and path owners validate process, binding, and history identity; native settings, controls, and skill discovery retain their own subprocess and cache lifetimes. Activity and admission consume the same ledger, so separating operations cannot independently count capacity or bypass a retirement fence.
+
+The `OmpRuntime` coordinator and `createBotComponents` composition root exceed the default 400-line limit to retain one shared operation ledger and one dependency-wiring point. Splitting their wiring would obscure which owners share admission fences and live lifecycle state. Worktree creation and removal share the existing worktree owner.
 
 The terminal join client uses the `joinTerminal` portion of the same contract through `terminalOmp`. It does not construct a service runtime or acquire service-owned lifecycle resources. The local control service still authorizes and resolves the host before the terminal launches OMP.
 
@@ -115,6 +119,10 @@ The adapter owns expiry and restart-discard feedback and retirement of inert con
 The store preserves each session's canonical absolute execution directory separately from its logical instance assignment and relative folder entries. The runtime enforces that execution identity when launching, recovering, discovering skills, or controlling a host. Changing an instance's default directory affects new session admission, not existing session identity or execution. Configuration reload and service readiness enforce assignment identity without requiring every historical execution directory to remain available. The runtime validates a session's directory at its operation boundary, isolating filesystem failures to that session.
 
 OMP owns worktree creation, change transfer, and live session relocation. The runtime requests OMP's native worktree operation from the session's current execution directory and persists the resulting managed working-directory identity. Managed sessions retain their configured instance as the authorization and forum-assignment identity while their execution directory supplies history, model settings, and skill-discovery context. Recovery and force termination verify that execution identity rather than treating every session assigned to a repository as the same host. Worktrees remain independent durable filesystem state; host retirement and session shutdown do not remove them.
+
+The existing worktree owner verifies the managed binding, canonical linked worktree, and exact Git registration before removal. It reuses managed-host retirement and the runtime's operation fence rather than inspecting retirement processes independently. The bot refreshes authority at mutation boundaries, and Git owns non-forced removal and its original failure diagnostics.
+
+The durable binding owns intentional removal of the execution directory. Path validation and host admission distinguish that state from an unexpected missing-directory error while preserving access to the independently verified history. Binding persistence cannot roll back an already completed Git removal.
 
 The runtime boundary owns skill-catalog discovery from OMP for the project and, when applicable, its session host. Bot adapters consume catalog names and descriptions through that boundary rather than inspecting OMP resources themselves.
 

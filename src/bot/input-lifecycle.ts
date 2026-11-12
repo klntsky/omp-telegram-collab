@@ -33,6 +33,7 @@ export interface InputLifecycleDependencies {
   metadataOwners: Map<string, SessionMetadataOwner>;
   config: BotOptions['config'];
   store: BotOptions['store'];
+  offerWorktreeCleanup(session: TopicSession, generation: number): Promise<void>;
   projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void>;
   refreshTopicStatus(session: TopicSession): Promise<void>;
   runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal?: AbortSignal): Promise<void>;
@@ -200,7 +201,11 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
       deps.store.cancelInitialTask(session.id);
       deps.invalidateSession(session.id, 'This topic is closed. Reopen it explicitly to connect.');
       deps.dropListener(session.id);
-      void deps.runBackground(`close:${session.id}`, () => deps.windDownClosedSession(session));
+      const generation = deps.store.getSessionGeneration(session.id);
+      void deps.runBackground(`close:${session.id}`, async () => {
+        await deps.windDownClosedSession(session);
+        await deps.offerWorktreeCleanup(session, generation);
+      });
       return true;
     }
     if (session && 'forum_topic_reopened' in message) {

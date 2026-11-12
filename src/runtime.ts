@@ -121,6 +121,8 @@ export class OmpRuntime implements Omp {
       shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
+      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      stop: (session) => runtime.stop(session),
       skillProcesses: this.#skillProcesses,
     });
     this.#paths = createPaths({
@@ -235,6 +237,8 @@ export class OmpRuntime implements Omp {
     this.fork = this.#fork.fork;
     this.worktree = this.#worktree.worktree;
     this.topicTitleStatus = this.#worktree.topicTitleStatus;
+    this.inspectWorktree = this.#worktree.inspectWorktree;
+    this.deleteWorktree = this.#worktree.deleteWorktree;
     this.validateSessionPaths = this.#paths.validateSessionPaths;
     this.attach = this.#registry.attach;
     this.providerUsage = this.#settings.providerUsage;
@@ -296,6 +300,8 @@ export class OmpRuntime implements Omp {
   fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
   existingBinding: (session: TopicSession) => Promise<{sessionId: string} | undefined>;
   worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
+  inspectWorktree: Omp['inspectWorktree'];
+  deleteWorktree: Omp['deleteWorktree'];
   #instanceDirectory(instanceId: number): string {
     const instance = this.#config.instances.find(instance => instance.id === instanceId);
     if (!instance) throw new Error('Instance ID is not configured');

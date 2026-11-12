@@ -27,6 +27,7 @@ import type { BotCommandMenus } from './command-menus.js';
 import type { SessionFork } from './session-fork.js';
 import type { TopicCreation } from './topic-creation.js';
 import type { PromptReceipts } from './prompts.js';
+import type { WorktreeCleanup } from './worktree-cleanup.js';
 
 interface RouterComponents {
  options: BotOptions; bot: Bot<Context>; lifecycle: LifecycleDependencies; skills: SkillPicker;
@@ -53,10 +54,11 @@ interface RouterComponents {
  fork: SessionFork;
  creation: TopicCreation;
  receipts: PromptReceipts;
+ cleanup: WorktreeCleanup;
 }
 
 /** Composes the ordered input pipeline without giving operations a service-wide context. */
-export function composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts }: RouterComponents) {
+export function composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup }: RouterComponents) {
   const router: InputRouter = new InputRouter(
   {
     answerQuestion: questions.answerQuestion.bind(questions),
@@ -68,6 +70,7 @@ export function composeInputRouter({ options, bot, lifecycle, skills, questions,
     confirmCapacity: capacity.confirmCapacity.bind(capacity),
     currentAdmin: authorization.currentAdmin.bind(authorization),
     folderCallback: folders.folderCallback.bind(folders),
+    worktreeCleanupCallback: cleanup.callback.bind(cleanup),
     get id() { return lifecycle.id(); },
     openSettings: settings.open.bind(settings),
     config: options.config,
@@ -101,6 +104,7 @@ export function composeInputRouter({ options, bot, lifecycle, skills, questions,
     getIconIds: owners.getIconIds.bind(owners),
     get id() { return lifecycle.id(); },
     metadataOwners: owners.metadataOwners,
+    offerWorktreeCleanup: cleanup.offer.bind(cleanup),
     config: options.config,
     store: options.store,
     projectTopicTitle: titles.projectTopicTitle.bind(titles),

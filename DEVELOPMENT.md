@@ -93,6 +93,8 @@ pnpm telegram:test:login
 
 Enter the test-network phone number, verification code, and two-step verification password if requested. Code and password input are hidden. Login verifies the test network and retains the authorization in `TELEGRAM_TEST_SESSIONS`, a JSON array in the shared `.env` with permissions `0600`. Existing sessions are retained without printing them, logging out, or revoking them.
 
+Retain sessions for at least two distinct real test-network users. Run login again with another registered test-network account to add its authorization. Additional sessions for the same user do not supply a second identity.
+
 ### Set up reusable bots
 
 Import an existing test-network bot token:

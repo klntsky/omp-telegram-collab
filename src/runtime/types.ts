@@ -37,6 +37,7 @@ export interface DurableBinding {
   sessionId: string;
   sessionFile: string;
   cwd: string;
+  removedWorktree?: true;
 }
 
 export interface ManagedHost {

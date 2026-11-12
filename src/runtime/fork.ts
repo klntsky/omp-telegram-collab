@@ -52,6 +52,7 @@ export function createFork(deps: ForkDependencies): RuntimeFork {
       await deps.acquire();
       assertSessions();
       const pin = await deps.readManagedBinding(source);
+      if (pin?.removedWorktree) throw new Error(`This session's worktree was deleted: ${pin.cwd}`);
       if (target && (!pin || target.ompSessionId !== pin.sessionId)) throw new Error('Fork anchor belongs to a different OMP conversation');
       if (!pin) {
         try {
