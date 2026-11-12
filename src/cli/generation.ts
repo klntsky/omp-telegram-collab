@@ -56,11 +56,11 @@ interface Generation {
 }
 
 export async function launch(config: AppConfig, onPollingFailure: () => void, initialLaunch = false): Promise<Generation> {
+  validateStart(config);
   const startupAt = Date.now();
   const launchAt = performance.now();
   if (initialLaunch) stdout.write(`Service timing process-start-to-launch bootstrap/dependencies/config: ${launchAt.toFixed(1)} ms\n`);
   const restartMarker = join(config.dataDir, 'restart-timing.json');
-  validateStart(config);
   const runtime = new OmpRuntime(config);
   let store: Store | undefined;
   const bots: BotService[] = [];
