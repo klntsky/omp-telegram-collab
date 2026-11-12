@@ -27,6 +27,10 @@ export interface PromptContent {
   images?: ImageContent[];
 }
 
+export interface PendingPromptContent extends PromptContent {
+  documents?: { fileId: string; fileName: string }[];
+}
+
 export interface BotConfig {
   id: number;
   token: string;
@@ -38,7 +42,7 @@ export type TypingMode = 'disabled' | 'streaming' | 'inference';
 export interface InstanceConfig {
   id: number;
   defaultDir: string;
-  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; folder_options?: string[]; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skill?: string }[];
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; folder_options?: string[]; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skills?: string[] }[];
 }
 
 export interface AppConfig {

@@ -6,6 +6,9 @@ import type { Listener, SessionObservation, TaskObservation } from './types.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { isAdministrator } from '../auth.js';
 import { AuthorizationDeniedError } from './types.js';
+import type { PromptPreparation } from './prompt-preparation.js';
+import { topicDestination } from '../../shared/topic-destination.js';
+import { SessionCapacityError } from '../runtime/types.js';
 
 export interface PromptReceiptsDependencies {
   authorize: (chatId: number, userId: number) => Promise<void>;
@@ -14,6 +17,9 @@ export interface PromptReceiptsDependencies {
   delivery: TelegramDelivery;
   getListener: (id: string) => Listener | undefined;
   listen: (session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean) => Promise<CollabConnection>;
+  uploadDocuments: PromptPreparation['uploadDocuments'];
+  prepareInitialDocuments: PromptPreparation['prepareInitialDocuments'];
+  requestCapacity(session: TopicSession, limit: number): Promise<void>;
   requireSessionAssignment: (session: TopicSession) => void;
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
@@ -22,6 +28,7 @@ export interface PromptReceiptsDependencies {
 }
 
 export class PromptReceipts {
+  private readonly preparing = new Map<string, Promise<void>>();
   constructor(private readonly deps: PromptReceiptsDependencies) {}
   sendPrompt(
     listener: Listener,
@@ -81,8 +88,39 @@ export class PromptReceipts {
       throw error;
     }
   }
-  async sendInitial(session: TopicSession): Promise<void> {
+  private async authorizePendingInitial(session: TopicSession, userId: number, authorityUserId: number): Promise<void> {
+    // /stop cancels pending intent without retiring the native host generation.
+    const check = () => {
+      if (!this.deps.options.store.hasPendingInitialTask(session.id))
+        throw new Error('The initial task was cancelled before document preparation.');
+    };
+    check();
+    await this.authorizeInitial(session, userId, authorityUserId);
+    check();
+  }
+  sendInitial(session: TopicSession): Promise<void> {
+    const existing = this.preparing.get(session.id);
+    if (existing) return existing;
+    const pending = this.prepareInitial(session).finally(() => { this.preparing.delete(session.id); });
+    this.preparing.set(session.id, pending);
+    return pending;
+  }
+  private async prepareInitial(session: TopicSession): Promise<void> {
     this.deps.requireSessionAssignment(session);
+    if (!this.deps.options.store.getPendingInitialTask(session.id)) return;
+    const submittingUser = this.deps.options.store.getInitialUser(session.id);
+    const approvingUser = this.deps.options.store.getInitialAuthority(session.id);
+    if (submittingUser && approvingUser) {
+      try {
+        await this.deps.prepareInitialDocuments(session, () => this.authorizePendingInitial(session, submittingUser, approvingUser));
+      } catch (error) {
+        if (error instanceof SessionCapacityError) {
+          try { await this.deps.requestCapacity(session, error.limit); }
+          catch (deliveryError) { console.error('Could not deliver initial document preparation capacity request.', deliveryError); }
+        }
+        throw error;
+      }
+    }
     await this.deps.listen(session);
     const listener = this.deps.getListener(session.id);
     if (!listener) throw new Error('Session closed');
@@ -95,6 +133,16 @@ export class PromptReceipts {
       throw new Error('Initial task has no authorizing administrator. Submit the task again.');
     }
     await this.authorizeInitial(session, userId, authorityUserId);
+    const pending = this.deps.options.store.getPendingInitialTask(session.id);
+    if (!pending) return;
+    if (pending.documents?.length) {
+      const task = await this.deps.uploadDocuments(session, pending,
+        () => this.authorizePendingInitial(session, userId, authorityUserId),
+        topicDestination(session.chatId, session.threadId),
+        remaining => this.deps.options.store.replacePendingInitialTask(session.id, remaining));
+      this.deps.options.store.replacePendingInitialTask(session.id, task);
+      await this.authorizeInitial(session, userId, authorityUserId);
+    }
     if (this.deps.getListener(session.id) !== listener ||
         listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     this.deps.options.runtime.markPrompt(session.id);

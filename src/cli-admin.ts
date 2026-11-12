@@ -27,9 +27,9 @@ export function registerAdminCommands(program: Command, configPath: () => string
   const question = dependencies.question ?? (async (prompt: string, hidden = false): Promise<string> => {
     if (!(dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY))) throw new Error('This operation requires an interactive terminal.');
     input ??= createInterface({ input: process.stdin, output: new Writable({ write(chunk, _encoding, callback) { if (!muted) process.stdout.write(chunk); callback(); } }), terminal: true });
-    process.stdout.write(prompt);
+    if (hidden) process.stdout.write(prompt);
     muted = hidden;
-    try { return await input.question(''); }
+    try { return await input.question(hidden ? '' : prompt); }
     finally { muted = false; if (hidden) process.stdout.write('\n'); }
   });
   const admin = (): Administration => new Administration(resolve(configPath()), dependencies, question);

@@ -38,7 +38,7 @@ export async function renderSettings(
       const index = choices.push(action) - 1;
       rows.push([
         {
-          text: current ? `${text.slice(0, 90)} (current)` : text.slice(0, 100),
+          text: current ? `✅ ${text.slice(0, 97)}` : text.slice(0, 100),
           callback_data: `settings:${panel.token}:${revision}:${index}`,
         },
       ]);
@@ -46,7 +46,7 @@ export async function renderSettings(
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
       button(
-        `Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`,
+        `💬 Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`,
         {
           kind: 'set',
           field: 'all_messages_are_prompts',
@@ -54,22 +54,22 @@ export async function renderSettings(
         },
       );
       button(
-        `Who can send requests: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
+        `👥 Who can send prompts: ${chat.users_can_propose_prompts === true ? 'Members with admin approval' : 'Admins only'}`,
         {
           kind: 'set',
           field: 'users_can_propose_prompts',
           value: chat.users_can_propose_prompts !== true,
         },
       );
-      button(`Default skill: ${chat.default_new_topic_skill ?? 'No default skill'}`, {
+      button(`🧩 Default skills: ${chat.default_new_topic_skills?.join(', ') || 'No default skills'}`, {
         kind: 'page',
         page: 'skills',
       });
-      button(`Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {
+      button(`🤖 Default model preset: ${chat.default_model_preset ?? 'Use host default'}`, {
         kind: 'page',
         page: 'presets',
       });
-      button(`Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {
+      button(`⚡ Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {
         kind: 'page',
         page: 'capacity',
       });
@@ -78,22 +78,22 @@ export async function renderSettings(
         field: 'create_topic_worktrees',
         value: chat.create_topic_worktrees !== true,
       });
-      button(`Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {
+      button(`⌨️ Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {
         kind: 'page',
         page: 'typing',
       });
-      button('Runtime folders', {kind:'page',page:'folders'});
+      button('📁 Runtime folders', {kind:'page',page:'folders'});
     } else if (page === 'folders') {
       const folders = chat.folder_options ?? [];
       const sole = folders[0] ?? '.';
       const summary = folders.length > 1 ? 'Ask when starting a session.' : `Uses ${sole === '.' ? '<Default>' : sole}.`;
       text = `Runtime folders\n${summary}\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${folders.slice(offset,offset+8).map(path => path === '.' ? '<Default>' : path.slice(0,250)).join('\n') || '(no explicit folders)'}`;
       folders.slice(offset,offset+8).forEach((path,index) => button(`Remove ${path === '.' ? '<Default>' : path}`,{kind:'folders',remove:offset+index}));
-      if (offset > 0) button('Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
-      if (offset+8 < (chat.folder_options ?? []).length) button('Next folders',{kind:'page',page:'folders',offset:offset+8});
-      button('Clear folders',{kind:'folders',clear:true});
-      button('Add folder',{kind:'folders',input:'append'});
-      button('Replace folders',{kind:'folders',input:'replace'});
+      if (offset > 0) button('⬅️ Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
+      if (offset+8 < (chat.folder_options ?? []).length) button('➡️ Next folders',{kind:'page',page:'folders',offset:offset+8});
+      button('🗑️ Clear folders',{kind:'folders',clear:true});
+      button('➕ Add folder',{kind:'folders',input:'append'});
+      button('✏️ Replace folders',{kind:'folders',input:'replace'});
     } else if (page === 'typing') {
       text =
         'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';
@@ -113,22 +113,27 @@ export async function renderSettings(
         : await deps.runtime.availableModelPresets(panel.instanceId);
       if (deps.assignedId(panel.chatId) !== panel.instanceId)
         throw new Error('The group instance assignment changed');
-      const field = skill ? 'default_new_topic_skill' : 'default_model_preset';
-      text = `${skill ? 'Default skill' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${chat[field] ?? (skill ? 'No default skill' : 'Use host default')}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'New topics use this skill. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
-      for (const name of names.slice(offset, offset + 8))
-        button(name, { kind: 'default', field, value: name }, chat[field] === name);
+      const selectedSkills = chat.default_new_topic_skills ?? [];
+      const selection = skill ? selectedSkills.join(', ') || 'No default skills' : chat.default_model_preset ?? 'Use host default';
+      text = `${skill ? 'Default skills' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${selection}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'Toggle each skill independently. New topics use these skills. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;
+      for (const name of names.slice(offset, offset + 8)) {
+        if (skill)
+          button(`${selectedSkills.includes(name) ? '✅ ' : ''}${name}`, { kind: 'default', field: 'default_new_topic_skills', value: name });
+        else
+          button(name, { kind: 'default', field: 'default_model_preset', value: name }, chat.default_model_preset === name);
+      }
       button(
-        skill ? 'No default skill' : 'Use host default',
-        { kind: 'default', field },
-        chat[field] === undefined,
+        skill ? '🗑️ No default skills' : 'Use host default',
+        { kind: 'default', field: skill ? 'default_new_topic_skills' : 'default_model_preset' },
+        !skill && chat.default_model_preset === undefined,
       );
-      if (offset > 0) button('Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
-      if (offset + 8 < names.length) button('Next', { kind: 'page', page, offset: offset + 8 });
+      if (offset > 0) button('⬅️ Previous', { kind: 'page', page, offset: Math.max(0, offset - 8) });
+      if (offset + 8 < names.length) button('➡️ Next', { kind: 'page', page, offset: offset + 8 });
     } else {
       text = `Maximum live sessions: ${deps.runtime.getSessionLimit()}\nService-wide.\nReply to this message with a positive whole number to save the limit immediately.`;
     }
     if (page !== 'root')
-      button(page === 'capacity' ? '⬅️ Back' : 'Back to settings', {
+      button(page === 'capacity' ? '⬅️ Back' : '⚙️ Back to settings', {
         kind: 'page',
         page: 'root',
       });

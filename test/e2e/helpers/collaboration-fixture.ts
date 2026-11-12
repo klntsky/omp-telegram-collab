@@ -16,6 +16,7 @@ import { setupTelegramTest } from './telegram-fixture.js';
 import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { createCollaborationObserver } from './collaboration-observer.js';
+import { cleanupLifecycle } from './lifecycle-cleanup.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -111,7 +112,7 @@ export async function setupCollaborationTest(
     signal: t.signal,
     diagnostic: t.diagnostic.bind(t),
     after: ((run: Cleanup) => { ompCleanup.push(run); }) as TestContext['after'],
-  }, options);
+  }, {...options, tools:['write', 'read', 'ask']});
   log = omp.log;
   void omp.provider.failure.catch(fail);
   for (const method of ['log', 'error'] as const) {
@@ -210,29 +211,31 @@ export async function setupCollaborationTest(
   }
   async function pauseService(): Promise<void> {
     closing = true;
-    if (service) {
-      try { await operation(service.close()); }
-      catch (error) { pollerStopFailed = true; throw error; }
-      service = undefined;
-    }
-    if (polling) {
-      try { await operation(polling); }
-      catch (error) { pollerStopFailed = true; throw error; }
-      polling = undefined;
-    }
-    if (runtime) {
-      await operation(runtime.close());
-      runtime = undefined;
-    }
-    if (store) {
-      store.close();
-      store = undefined;
-    }
+    const activeService = service;
+    const activePolling = polling;
+    const activeRuntime = runtime;
+    const activeStore = store;
+    await cleanupLifecycle([
+      { name: 'service', async run() {
+        try { await activeService?.close(); service = undefined; }
+        catch (error) { pollerStopFailed = true; throw error; }
+      } },
+      { name: 'polling', async run() {
+        try { await activePolling; polling = undefined; }
+        catch (error) { pollerStopFailed = true; throw error; }
+      } },
+      { name: 'runtime', async run() { await activeRuntime?.close(); runtime = undefined; } },
+      { name: 'store', run() { activeStore?.close(); store = undefined; } },
+    ], message => t.diagnostic(message)).catch(error => { pollerStopFailed = true; throw error; });
   }
   await omp.step('application.start', startService);
-  async function waitForCondition(predicate: () => boolean): Promise<void> {
-    await omp.step('workflow.expectation', () => withTelegramTestDeadline(
-      'expectation', telegramTestTimeouts.expectation, AbortSignal.any([t.signal, failed.signal]), async signal => {
+  async function waitForCondition(
+    predicate: () => boolean,
+    phase = 'expectation',
+    timeoutMs: number = telegramTestTimeouts.expectation,
+  ): Promise<void> {
+    await omp.step(`workflow.${phase}`, () => withTelegramTestDeadline(
+      phase, timeoutMs, AbortSignal.any([t.signal, failed.signal]), async signal => {
         const recheck = setInterval(() => {
           const notification = changed;
           changed = Promise.withResolvers<void>();
@@ -274,6 +277,13 @@ export async function setupCollaborationTest(
     });
   }
 
+  function waitForMessageHandled(messageId: number): Promise<void> {
+    // /new and /fork handlers can provision an OMP host before returning.
+    // Their completion barrier must honor the application's startup contract,
+    // rather than consuming the shorter post-startup assertion deadline.
+    return waitForCondition(() => handledMessages.has(messageId), 'message handling', config.omp.startupTimeoutMs);
+  }
+
   return {
     telegram, omp, config, hostFrames, guestFrames, apiCalls, updates, topicActivityEmojis,
     get runtime() { return runtime!; },
@@ -306,11 +316,16 @@ export async function setupCollaborationTest(
     send,
     async sendAndWait(text: string, threadId?: number): Promise<Message> {
       const sent = await send(text, threadId);
-      await waitForCondition(() => handledMessages.has(sent.id));
+      await waitForMessageHandled(sent.id);
       return sent;
     },
-    waitForMessageHandled(messageId: number): Promise<void> {
-      return waitForCondition(() => handledMessages.has(messageId));
+    waitForMessageHandled,
+    async waitForTaskStarted(name: string): Promise<void> {
+      // Initial-task recovery can still be starting OMP after its update handler returns.
+      await omp.step('workflow.task startup', () => withTelegramTestDeadline(
+        'task startup', config.omp.startupTimeoutMs, AbortSignal.any([t.signal, failed.signal]),
+        signal => omp.provider.waitForRequest(name, signal),
+      ));
     },
     waitForCondition,
     waitForMessage,
@@ -345,6 +360,7 @@ export interface CollaborationTest {
     workspace: string;
     dataDir: string;
     executable: string;
+    agentConfigPath: string;
     args: string[];
     relayUrl: string;
     interruptNextGuest(): void;
@@ -374,6 +390,7 @@ export interface CollaborationTest {
   send(text: string, threadId?: number): Promise<Message>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
+  waitForTaskStarted(name: string): Promise<void>;
   waitForCondition(predicate: () => boolean): Promise<void>;
   waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;

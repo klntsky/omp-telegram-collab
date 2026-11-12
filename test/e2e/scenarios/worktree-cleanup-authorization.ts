@@ -31,7 +31,7 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
     let start = app.apiCalls.length;
     await setTopicClosed(app, session, true);
     const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:offer:', start, session.threadId);
-    await bounded(clickPanel(app, offer, 0, participant), signal);
+    await bounded(clickPanel(app, offer, 0, true, participant), signal);
     assert.equal(existsSync(target.path), true, 'a non-admin cannot delete the worktree');
     const [unchangedOffer] = await owner.getMessages(app.telegram.forum.chat, [offer.messageId]);
     assert.equal(unchangedOffer?.raw._ === 'message' ? unchangedOffer.raw.replyMarkup?._ : undefined, 'replyInlineMarkup');
@@ -46,7 +46,7 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
     };
     await setAdministrator(true);
     start = app.apiCalls.length;
-    await bounded(clickPanel(app, offer, 0, participant), signal);
+    await bounded(clickPanel(app, offer, 0, true, participant), signal);
     const confirmation = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:confirm:', start, session.threadId);
 
     assert.equal((await app.telegram.api.getChatMember(app.telegram.forum.chatId, app.telegram.user.account.id)).status, 'creator');
@@ -54,13 +54,13 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
     assert.equal(existsSync(target.path), true, 'a different current administrator cannot confirm');
 
     await setAdministrator(false);
-    await bounded(clickPanel(app, confirmation, 0, participant), signal);
+    await bounded(clickPanel(app, confirmation, 0, true, participant), signal);
     assert.equal(existsSync(target.path), true, 'revocation between offer and confirmation prevents deletion');
 
     // Denied attempts must not consume the original administrator's confirmation.
     await setAdministrator(true);
     start = app.apiCalls.length;
-    await bounded(clickPanel(app, confirmation, 0, participant), signal);
+    await bounded(clickPanel(app, confirmation, 0, true, participant), signal);
     await waitForPanelRetired(app, confirmation, start);
     assert.equal(existsSync(target.path), false);
     assert.ok(app.store.getSession(session.id), 'authorization checks preserve the topic session');

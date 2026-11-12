@@ -92,6 +92,19 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
         deps.managed.set(session.id,{sessionId:pin!.sessionId,cwd:pin!.cwd,binding,exited:false,retiring:false,
           ...(identity ? { identity: { pid: host.pid, start: identity.start } } : {})});
         deps.hostActivity(session.id).busy = host.busy !== false;
+      } else if (owned.binding?.instanceId === binding.instanceId && owned.binding.sessionId === binding.sessionId &&
+          owned.binding.generation !== binding.generation && owned.identity?.pid === host.pid) {
+        const previous = owned.binding;
+        const previousIdentity = owned.identity;
+        const identity = await procIdentity(host.pid);
+        deps.assertActive();
+        if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+        // Passive reconnect must refresh retirement's room identity without
+        // granting ownership of a replacement process or overwriting a newer lookup.
+        if (identity && identity.start === previousIdentity.start && identity.state !== 'Z' && identity.state !== 'X' &&
+            deps.managed.get(session.id) === owned && owned.binding === previous && owned.identity === previousIdentity && !owned.exited) {
+          owned.binding = binding;
+        }
       }
     }
     return binding;

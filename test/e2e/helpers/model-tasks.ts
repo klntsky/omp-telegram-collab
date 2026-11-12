@@ -18,6 +18,7 @@ interface TaskWorkflow {
   omp: { provider: FakeLlmProvider };
   store: Pick<Store, 'getTopic'>;
   telegram: { bot: { id: number }; forum: { chatId: number } };
+  waitForTaskStarted(name: string): Promise<void>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }
 const requestMessages = z.array(z.object({
@@ -44,18 +45,19 @@ export function writeScenario(task: WriteTask): FakeLlmScenario {
   ] };
 }
 
-export function writeReadScenario(task: WriteTask): FakeLlmScenario {
+export function writeReadScenario(task: WriteTask, readPath = task.path): FakeLlmScenario {
   const scenario = writeScenario(task);
   return { ...scenario, steps: [
     scenario.steps[0]!,
     { type: 'tool', id: `call_read_${task.name}`, name: 'read', arguments: {
-      i: 'Reading E2E evidence', path: task.path,
+      i: 'Reading E2E evidence', path: readPath,
     } },
     ...scenario.steps.slice(1),
   ] };
 }
 
 export async function completeWriteTask(app: TaskWorkflow, task: WriteTask, sent: Message, threadId?: number): Promise<Message> {
+  await app.waitForTaskStarted(task.name);
   const reply = await app.waitForReply({ replyToMessageId: sent.id, threadId });
   assert.equal(reply.chat.id, app.telegram.forum.chatId);
   assert.equal(reply.sender.id, app.telegram.bot.id);
@@ -87,17 +89,26 @@ export function taskInput(provider: FakeLlmProvider, task: WriteTask) {
   };
 }
 
+export function taskReadResult(provider: FakeLlmProvider, task: WriteTask): unknown {
+  const requests = provider.requests.get(task.name)!;
+  const messages = requestMessages.parse(requests.at(-1)!.messages);
+  const result = messages.find(message => message.role === 'tool' && message.tool_call_id === `call_read_${task.name}`);
+  assert.ok(result);
+  return result.content;
+}
+
 export async function readSessionHistory(dataDir: string, sessionId: string): Promise<string> {
   const binding = z.object({ sessionFile: z.string() }).parse(JSON.parse(
     await readFile(join(dataDir, 'sessions', sessionId, 'binding.json'), 'utf8')));
   return readFile(binding.sessionFile, 'utf8');
 }
 
-export function questionStep(name: string) {
-  return { type: 'tool' as const, id: `call_ask_${name}`, name: 'ask', arguments: { questions: [{
-    id: name, question: 'Choose the test destination',
-    options: [{ label: 'Local' }, { label: 'Remote' }], recommended: 0,
-  }] } };
+export function questionStep(name: string, options = ['Local', 'Remote']) {
+  // Native ask walks radio fields through select/input on Collab hosts without formDialog:
+  // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/tools/ask.ts (askChoice).
+  return { type: 'tool' as const, id: `call_ask_${name}`, name: 'ask', arguments: {
+    html: `<form><fieldset><legend>Choose the test destination</legend>${options.map((value, index) => `<label><input type="radio" name="${name}" value="${value}"${index === 0 ? ' checked' : ''}>${value}</label>`).join('')}</fieldset></form>`,
+  } };
 }
 
 export function questionScenario(task: WriteTask): FakeLlmScenario {

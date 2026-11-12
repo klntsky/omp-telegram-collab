@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { InputMedia, type Message } from '@mtcute/node';
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Store } from '../../../src/store.js';
 import type { OmpRuntime } from '../../../src/runtime.js';
 import type { TopicSession } from '../../../shared/contracts.js';
@@ -18,7 +20,7 @@ export interface TelegramWorkflow {
   waitForMessageHandled(messageId: number): Promise<void>;
 }
 export interface TelegramPanel {
-  kind: '/settings' | '/skills' | 'question' | 'folder' | 'worktree-cleanup';
+  kind: '/settings' | '/skills' | '/model_preset' | 'question' | 'folder' | 'worktree-cleanup';
   messageId: number;
   buttons: string[];
 }
@@ -83,10 +85,10 @@ export async function createManagedTopic(
   return created[0]!;
 }
 
-export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills', threadId?: number): Promise<TelegramPanel> {
+export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills' | '/model_preset', threadId?: number): Promise<TelegramPanel> {
   const start = app.apiCalls.length;
   await app.sendAndWait(command, threadId);
-  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : 'settings:', start, threadId);
+  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : command === '/model_preset' ? 'preset:' : 'settings:', start, threadId);
 }
 
 export function deliveredPanels(calls: TelegramWorkflow['apiCalls'], kind: TelegramPanel['kind'], prefix: string, threadId?: number): TelegramPanel[] {
@@ -125,7 +127,7 @@ export async function waitForPanelRetired(app: TelegramWorkflow, panel: Telegram
   }));
 }
 
-export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, client = app.telegram.user.client): Promise<void> {
+export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, waitForEdit = true, client = app.telegram.user.client): Promise<void> {
   const start = app.apiCalls.length;
   const [message] = await client.getMessages(app.telegram.forum.chatId, [panel.messageId]);
   const markup = message?.raw._ === 'message' ? message.raw.replyMarkup : undefined;
@@ -135,7 +137,7 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
   const data = buttons.at(index)!;
   assert.ok(data, `Telegram message ${panel.messageId} has no callback at index ${index}`);
   await submitCallback(app, panel, data, client);
-  if (panel.kind !== '/settings' || index === -1) return;
+  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/model_preset') || index === -1) return;
   const editedPanel = z.object({ message_id: z.literal(panel.messageId), reply_markup: replyMarkup });
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {
@@ -150,11 +152,29 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
   });
 }
 
-export function sendImageDocument(app: TelegramWorkflow, threadId: number, caption: string, base64: string) {
-  const image = InputMedia.document(Buffer.from(base64, 'base64'), { fileName: 'e2e.png', fileMime: 'image/png' });
-  return app.omp.step('telegram.user.send-image', () => app.telegram.user.client.sendMedia(
+export function sendPhoto(app: TelegramWorkflow, threadId: number, caption: string, base64: string) {
+  const image = InputMedia.photo(Buffer.from(base64, 'base64'));
+  return app.omp.step('telegram.user.send-photo', () => app.telegram.user.client.sendMedia(
     app.telegram.forum.chat, image, { threadId, caption },
   ));
+}
+
+export function sendDocument(app: TelegramWorkflow, fileName: string, bytes: Buffer, options: {
+  threadId?: number; caption?: string; mimeType?: string;
+} = {}) {
+  const document = InputMedia.document(bytes, { fileName, fileMime: options.mimeType ?? 'application/octet-stream' });
+  return app.omp.step('telegram.user.send-document', () => app.telegram.user.client.sendMedia(
+    app.telegram.forum.chat, document, { threadId: options.threadId, caption: options.caption },
+  ));
+}
+
+export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string, files: readonly {name:string;bytes:Buffer}[]) {
+  const media = files.map((file, index) => ({
+    ...InputMedia.document(file.bytes, {fileName:file.name, fileMime:'text/plain'}),
+    ...(index === 0 ? {caption} : {}),
+  }));
+  return app.omp.step('telegram.user.send-document-album', () =>
+    app.telegram.user.client.sendMediaGroup(app.telegram.forum.chat, media, {threadId}));
 }
 
 export async function replyText(app: TelegramWorkflow, messageId: number, threadId: number, text: string): Promise<Message> {
@@ -220,4 +240,21 @@ export async function setTopicClosed(app: LifecycleWorkflow, session: TopicSessi
   await app.waitForCondition(() => app.store.getSession(session.id)?.status === (closed ? 'closed' : 'open') &&
     (!closed || !app.store.hasPendingCloseIcon(session.id)));
   assert.equal(await app.runtime.isRunning(session), false);
+}
+
+export async function waitForBackgroundCompletion(app: {
+  omp: {logDirectory:string}; waitForCondition: TelegramWorkflow['waitForCondition'];
+}, phase: string): Promise<void> {
+  const since = Date.now();
+  await app.waitForCondition(() => {
+    const lines = readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').trimEnd().split('\n');
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const entry = JSON.parse(lines[index]!);
+      if (Date.parse(entry.time) < since) break;
+      const value = entry.data?.[0];
+      if (entry.event !== 'application.console.log' || typeof value !== 'string' || !value.startsWith('{"event":"bot-background",')) continue;
+      if (JSON.parse(value).phase === phase) return true;
+    }
+    return false;
+  });
 }

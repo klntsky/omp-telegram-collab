@@ -62,12 +62,12 @@ export class SettingsMutations {
     };
       if (action.kind === 'default' && action.value !== undefined) {
         const names =
-          action.field === 'default_new_topic_skill'
+          action.field === 'default_new_topic_skills'
             ? (await this.deps.runtime.listSkills(panel.instanceId)).map((entry) => entry.name)
             : await this.deps.runtime.availableModelPresets(panel.instanceId);
         if (!names.includes(action.value))
           throw new Error(
-            `Unknown ${action.field === 'default_new_topic_skill' ? 'skill' : 'model preset'}: ${action.value}`,
+            `Unknown ${action.field === 'default_new_topic_skills' ? 'skill' : 'model preset'}: ${action.value}`,
           );
       }
       const current = await this.deps.panels.access(ctx, panel, true);
@@ -78,7 +78,7 @@ export class SettingsMutations {
         action.kind === 'typing'
           ? 'typing'
           : action.kind === 'default'
-            ? action.field === 'default_new_topic_skill'
+            ? action.field === 'default_new_topic_skills'
               ? 'skills'
               : 'presets'
             : action.field === 'all_messages_are_prompts'
@@ -88,20 +88,18 @@ export class SettingsMutations {
                 : 'worktrees';
       const labels = {
         prompts: 'Message handling',
-        proposals: 'Who can send requests',
-        skills: 'Default skill',
+        proposals: 'Who can send prompts',
+        skills: 'Default skills',
         presets: 'Default model preset',
         worktrees: '🌳 Worktrees',
         typing: 'Typing indicators',
       };
-      const value = (setting: boolean | string | undefined): string => {
+      const value = (setting: boolean | string | string[] | undefined): string => {
         if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
         if (action.kind === 'default')
-          return setting === undefined
-            ? page === 'skills'
-              ? 'No default skill'
-              : 'Use host default'
-            : String(setting);
+          return page === 'skills'
+            ? (setting as string[] | undefined)?.join(', ') || 'No default skills'
+            : setting === undefined ? 'Use host default' : String(setting);
         if (page === 'prompts')
           return setting === false ? 'Commands and replies only' : 'All messages';
         if (page === 'proposals')
@@ -111,8 +109,15 @@ export class SettingsMutations {
       const before = value(chat[action.field]);
       if (action.kind === 'typing') chat.typing_indicators = action.value;
       else if (action.kind === 'set') chat[action.field] = action.value;
-      else if (action.value === undefined) delete chat[action.field];
-      else chat[action.field] = action.value;
+      else if (action.field === 'default_new_topic_skills') {
+        const selected = chat.default_new_topic_skills ?? [];
+        const next = action.value === undefined ? [] : selected.includes(action.value)
+          ? selected.filter(name => name !== action.value)
+          : [...selected, action.value];
+        if (next.length) chat.default_new_topic_skills = next;
+        else delete chat.default_new_topic_skills;
+      } else if (action.value === undefined) delete chat.default_model_preset;
+      else chat.default_model_preset = action.value;
       writeConfig(current);
       recordChange(page, labels[page], before, value(chat[action.field]));
       this.deps.panels.save(panel);
@@ -122,7 +127,7 @@ export class SettingsMutations {
         )!,
         chat,
       );
-      if (action.kind === 'default' && action.value === undefined)
+      if (action.kind === 'default' && chat[action.field] === undefined)
         delete findInstance(this.deps.config, this.deps.id(), panel.chatId)!.instance.chats.find(
           (chat) => chat.botId === this.deps.id() && chat.chatId === panel.chatId,
         )![action.field];
@@ -135,7 +140,7 @@ export class SettingsMutations {
           ? 'typing'
           : action.kind === 'set'
             ? 'root'
-            : action.field === 'default_new_topic_skill'
+            : action.field === 'default_new_topic_skills'
               ? 'skills'
               : 'presets',
         offset,

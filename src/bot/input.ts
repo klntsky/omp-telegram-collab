@@ -95,7 +95,7 @@ install(): void {
     if (!message || !('media_group_id' in message) || !message.media_group_id ||
         !ctx.chat || ctx.chat.type !== 'supergroup' || !ctx.from || ctx.from.is_bot ||
         'forward_origin' in message || 'forward_date' in message ||
-        !(message.photo || message.document?.mime_type?.startsWith('image/'))) return false;
+        !(message.photo || message.document)) return false;
     const key = `${JSON.stringify(contextDestination(ctx))}:${ctx.from.id}:${message.media_group_id}`;
     let album = this.albums.get(key);
     if (!album) {
