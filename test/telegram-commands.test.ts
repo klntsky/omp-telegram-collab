@@ -25,7 +25,7 @@ test('skill aliases and canonical names are exact and deduplicated', () => {
 });
 
 test('unknown roots and wrong bot roots are ignored after full tokenization', () => {
-  for (const text of ['/unknown /new x', '/constructor task', '/__proto__ task', '/p@OtherBot x', '/bad-command x']) assert.deepEqual(parse(text), { kind: 'ignore' });
+  for (const text of ['/unknown /new x', '/session', '/session@ExampleBot', '/constructor task', '/__proto__ task', '/p@OtherBot x', '/bad-command x']) assert.deepEqual(parse(text), { kind: 'ignore' });
   assert.deepEqual(parse('/p@eXAMPLEbOT hello'), { kind: 'prompt', action: 'p', text: 'hello', extensions: [] });
 });
 
@@ -46,7 +46,7 @@ test('bare presets compose interactively and repeated extensions start literal t
 });
 
 test('all standalone command groups enforce their arities', () => {
-  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'cli']) {
+  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'agent', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'cli']) {
     assert.deepEqual(parse(`/${action}`), { kind: 'command', action, argument: '' });
     for (const argument of ['extra', '/worktree', '/home/work/error.ts:27', '/unknown /kill']) {
       assert.equal(parse(`/${action} ${argument}`).kind, 'invalid');
@@ -78,7 +78,7 @@ test('standalone start accepts deep-link payloads without becoming composable', 
 
 
 test('non-extension slash tokens start literal prompts without executing commands', () => {
-  for (const action of ['new', 'p', 'skills', 'settings', 'setup', 'list_admins', 'attach', 'detach', 'session', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli', 'unknown', 'worktree@OtherBot']) {
+  for (const action of ['new', 'p', 'skills', 'settings', 'setup', 'list_admins', 'attach', 'detach', 'agent', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'start', 'cli', 'unknown', 'worktree@OtherBot']) {
     assert.deepEqual(parse(`/new /${action} text`), {kind:'prompt',action:'new',text:`/${action} text`,extensions:[]});
   }
 });

@@ -21,9 +21,9 @@ const output = new Writable({
 });
 const input = createInterface({ input: process.stdin, output, terminal: true });
 const ask = async (prompt: string, hidden = false): Promise<string> => {
-  process.stdout.write(prompt);
+  if (hidden) process.stdout.write(prompt);
   muted = hidden;
-  try { return await input.question('', { signal }); }
+  try { return await input.question(hidden ? '' : prompt, { signal }); }
   finally { muted = false; if (hidden) process.stdout.write('\n'); }
 };
 input.on('SIGINT', interrupt);

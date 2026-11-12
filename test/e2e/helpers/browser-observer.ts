@@ -22,6 +22,7 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     bots: app.config.bots.map(bot => ({ ...bot, miniAppShortName: 'e2e' })),
   };
   let interruptSetup = options.interruptSetup;
+  const recovery = {phases: new Set<ConnectionPhase>(), interruptedSetupFailure: undefined as unknown};
   const service = app.service;
   const server = createServer({ config, bots: [{
     id: service.id, token: service.token,
@@ -33,7 +34,12 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
       const interrupt = interruptSetup;
       interruptSetup = undefined;
       interrupt?.();
-      return service.ensureMirroring(...args);
+      try {
+        return await service.ensureMirroring(...args);
+      } catch (error) {
+        if (interrupt) recovery.interruptedSetupFailure = error;
+        throw error;
+      }
     },
   }], store: app.store, runtime: app.runtime });
   const sockets = new Set<WebSocket>();
@@ -83,13 +89,11 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     return connection;
   }
   const frames: BrowserHostFrame[] = [];
-  const recovery = {phases: new Set<ConnectionPhase>(), authorizationRefreshes: 0};
   const {ticket} = await authenticate();
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   Object.defineProperty(globalThis, 'window', {configurable: true, value: {location: {href: origin}}});
   const transport = new GatewaySocket(ticket, async requestSignal => {
     const refreshed = await authenticate(AbortSignal.any([signal, requestSignal]));
-    recovery.authorizationRefreshes++;
     return refreshed.ticket;
   });
   const client = new GuestClient(transport, String(account.id));

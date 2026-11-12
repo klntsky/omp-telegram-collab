@@ -1,4 +1,4 @@
-import { createWriteTask, questionScenario, questionStep, writeScenario } from '../helpers/model-tasks.js';
+import { createWriteTask, questionScenario, questionStep, writeReadScenario, writeScenario } from '../helpers/model-tasks.js';
 
 export function createWorkflowTasks() {
   const tasks = {
@@ -17,6 +17,14 @@ export function createWorkflowTasks() {
     settingsReply: createWriteTask('settings-reply'),
     image: createWriteTask('image'),
     explicitImage: createWriteTask('explicit-image'),
+    document: createWriteTask('document'),
+    documentOverwrite: createWriteTask('document-overwrite'),
+    documentOnly: { ...createWriteTask('document-only'), prompt: 'e2e-file-only-attachment.txt' },
+    documentAlbum: createWriteTask('document-album'),
+    documentPreparation: createWriteTask('document-preparation'),
+    documentCancellation: createWriteTask('document-cancellation'),
+    documentAuthorization: createWriteTask('document-authorization'),
+    documentFinalAuthority: createWriteTask('document-final-authority'),
     followup: createWriteTask('followup', '\nPreserve this second line.'),
     general: createWriteTask('general'),
     resumed: createWriteTask('resumed'),
@@ -54,7 +62,8 @@ export function createWorkflowTasks() {
   const scenarios = Object.values(tasks).map(task =>
     task === tasks.defaultsBusy || task === tasks.capacityFirst || task === tasks.capacitySecond
       ? { name: task.name, prompt: task.prompt, steps: [{ type: 'await-abort' as const }] }
-      : task === tasks.question || task === tasks.customAnswer ? questionScenario(task) : writeScenario(task));
+      : task === tasks.question || task === tasks.customAnswer ? questionScenario(task)
+      : task === tasks.documentOnly ? writeReadScenario(task, task.prompt) : writeScenario(task));
   return { tasks, scenarios, interrupted, cancelledQuestion, questionControls };
 }
 

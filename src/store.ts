@@ -2,9 +2,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
-import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
+import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
+import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -38,10 +39,12 @@ import { PromptLedger } from './store/prompt-ledger.js';
 export class Store {
   readonly db: DatabaseSync;
   private readonly prompts: PromptLedger;
+  private readonly initialDocuments: InitialDocuments;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     this.prompts = new PromptLedger(this.db, id => this.getSession(id));
+    this.initialDocuments = new InitialDocuments(this.db);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
@@ -131,11 +134,11 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PromptContent, initialUserId?: number, authorityUserId = initialUserId, preparation?: 'fork'): TopicSession {
+  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PendingPromptContent, initialUserId?: number, authorityUserId = initialUserId, preparation?: 'fork'): TopicSession {
     if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new Error('A session requires a positive safe integer instance ID');
     if (!isAbsolute(key.cwd)) throw new Error('A session requires an absolute working directory');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
-    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length) throw new Error('An initial task requires text or images');
+    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length && !initialTask.documents?.length) throw new Error('An initial task requires text, images, or documents');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.getTopicKind(key) === 'detached') throw new Error('A detached topic cannot have a session');
@@ -144,6 +147,7 @@ export class Store {
       if (created.instanceId !== key.instanceId) throw new Error('This topic history belongs to a different instance ID');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
       if (Number(result.changes) && initialTask?.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(initialTask.images));
+      if (Number(result.changes) && initialTask?.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(created.id,JSON.stringify(initialTask.documents));
       if (Number(result.changes) && initialTask !== undefined && initialUserId !== undefined) {
         this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
         if (authorityUserId !== undefined) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
@@ -216,14 +220,14 @@ export class Store {
   advanceSessionGeneration(id: string): void {
     this.db.prepare('INSERT INTO session_generations VALUES (?,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1').run(id);
   }
-  setNewTopicSkill(sessionId: string, name: string): void {
-    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name').run(sessionId, name);
+  setNewTopicSkills(sessionId: string, names: string[]): void {
+    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET names=excluded.names').run(sessionId, JSON.stringify([...new Set(names)]));
   }
-  getNewTopicSkill(sessionId: string): string | undefined {
-    const row = this.db.prepare('SELECT name FROM new_topic_skills WHERE session_id=?').get(sessionId);
-    return row ? String(row.name) : undefined;
+  getNewTopicSkills(sessionId: string): string[] {
+    const row = this.db.prepare('SELECT names FROM new_topic_skills WHERE session_id=?').get(sessionId);
+    return row ? JSON.parse(String(row.names)) as string[] : [];
   }
-  clearNewTopicSkill(sessionId: string): void {
+  clearNewTopicSkills(sessionId: string): void {
     this.db.prepare('DELETE FROM new_topic_skills WHERE session_id=?').run(sessionId);
   }
   hasPendingInitialTask(id: string): boolean {
@@ -249,13 +253,14 @@ export class Store {
       throw error;
     }
   }
-  setInitialTask(id: string, task: PromptContent, userId: number, authorityUserId = userId): void {
-    if (!task.text.trim() && !task.images?.length) throw new Error('An initial task requires text or images');
+  setInitialTask(id: string, task: PendingPromptContent, userId: number, authorityUserId = userId): void {
+    if (!task.text.trim() && !task.images?.length && !task.documents?.length) throw new Error('An initial task requires text, images, or documents');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db.prepare("UPDATE sessions SET initial_task=?,initial_state='pending' WHERE id=? AND initial_state IS NULL AND status='open'").run(task.text,id);
       if (!Number(result.changes)) throw new Error('Session cannot accept an initial task');
       if (task.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(id,JSON.stringify(task.images));
+      if (task.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(id,JSON.stringify(task.documents));
       this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(id,userId);
       this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(id,authorityUserId);
       this.db.exec('COMMIT');
@@ -264,10 +269,22 @@ export class Store {
       throw error;
     }
   }
+  getInitialDocumentSetup(id: string): InitialDocumentSetup | undefined {
+    return this.initialDocuments.getSetup(id);
+  }
+  setInitialDocumentSetup(id: string, setup: InitialDocumentSetup | undefined): void {
+    this.initialDocuments.setSetup(id, setup);
+  }
+  getPendingInitialTask(id: string): PendingPromptContent | undefined {
+    return this.initialDocuments.getPendingTask(id);
+  }
+  replacePendingInitialTask(id: string, task: PendingPromptContent): void {
+    this.initialDocuments.replacePendingTask(id, task);
+  }
   claimInitialTask(id: string): PromptContent | undefined {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' AND NOT EXISTS (SELECT 1 FROM initial_task_preparations WHERE session_id=sessions.id) RETURNING initial_task").get(id) as Row | undefined;
+      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' AND NOT EXISTS (SELECT 1 FROM initial_task_preparations WHERE session_id=sessions.id) AND NOT EXISTS (SELECT 1 FROM initial_documents WHERE session_id=sessions.id) RETURNING initial_task").get(id) as Row | undefined;
       let content: PromptContent | undefined;
       if (row) {
         const imageRow = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);

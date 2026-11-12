@@ -24,7 +24,7 @@ export interface CapacityDependencies {
   folderSettings(chatId: number): {instanceId: number; defaultDir: string; options: string[]};
   listen(session: TopicSession): Promise<void>;
   sendInitial(session: TopicSession): Promise<void>;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, skills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, skills?: {names:string[];topicSkills:string[]}, cwd?: string): Promise<void>;
 }
 
 export class CapacityAdmission {
@@ -79,6 +79,9 @@ export class CapacityAdmission {
     }
     await this.deps.authorize(request.chatId,ctx.from!.id);
     if (this.capacityRequests.get(token) !== request) return;
+    // Native startup/worktree setup can outlive the callback query.
+    // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp (Client::process_answer_callback_query_query)
+    await ctx.answerCallbackQuery();
     this.capacityRequests.delete(token);
     if (action === 'cancel') {
       await replyTo(ctx, contextDestination(ctx), 'Capacity increase cancelled. The session limit is unchanged.');
@@ -136,7 +139,7 @@ export class CapacityAdmission {
     this.deps.options.runtime.increaseSessionLimit(request.limit);
     await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`)
       .catch(error => console.warn(`Could not deliver session capacity increase notice (${session.id}).`, error));
-    await this.deps.listen(session);
-    await this.deps.sendInitial(session);
+    if (this.deps.options.store.hasPendingInitialTask(session.id)) await this.deps.sendInitial(session);
+    else await this.deps.listen(session);
   }
 }

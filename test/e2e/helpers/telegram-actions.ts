@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { InputMedia, type Message } from '@mtcute/node';
 import { z } from 'zod';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Store } from '../../../src/store.js';
 import type { OmpRuntime } from '../../../src/runtime.js';
 import type { TopicSession } from '../../../shared/contracts.js';
@@ -133,11 +135,29 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
   });
 }
 
-export function sendImageDocument(app: TelegramWorkflow, threadId: number, caption: string, base64: string) {
-  const image = InputMedia.document(Buffer.from(base64, 'base64'), { fileName: 'e2e.png', fileMime: 'image/png' });
-  return app.omp.step('telegram.user.send-image', () => app.telegram.user.client.sendMedia(
+export function sendPhoto(app: TelegramWorkflow, threadId: number, caption: string, base64: string) {
+  const image = InputMedia.photo(Buffer.from(base64, 'base64'));
+  return app.omp.step('telegram.user.send-photo', () => app.telegram.user.client.sendMedia(
     app.telegram.forum.chat, image, { threadId, caption },
   ));
+}
+
+export function sendDocument(app: TelegramWorkflow, fileName: string, bytes: Buffer, options: {
+  threadId?: number; caption?: string; mimeType?: string;
+} = {}) {
+  const document = InputMedia.document(bytes, { fileName, fileMime: options.mimeType ?? 'application/octet-stream' });
+  return app.omp.step('telegram.user.send-document', () => app.telegram.user.client.sendMedia(
+    app.telegram.forum.chat, document, { threadId: options.threadId, caption: options.caption },
+  ));
+}
+
+export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string, files: readonly {name:string;bytes:Buffer}[]) {
+  const media = files.map((file, index) => ({
+    ...InputMedia.document(file.bytes, {fileName:file.name, fileMime:'text/plain'}),
+    ...(index === 0 ? {caption} : {}),
+  }));
+  return app.omp.step('telegram.user.send-document-album', () =>
+    app.telegram.user.client.sendMediaGroup(app.telegram.forum.chat, media, {threadId}));
 }
 
 export async function replyText(app: TelegramWorkflow, messageId: number, threadId: number, text: string): Promise<Message> {
@@ -203,4 +223,21 @@ export async function setTopicClosed(app: LifecycleWorkflow, session: TopicSessi
   await app.waitForCondition(() => app.store.getSession(session.id)?.status === (closed ? 'closed' : 'open') &&
     (!closed || !app.store.hasPendingCloseIcon(session.id)));
   assert.equal(await app.runtime.isRunning(session), false);
+}
+
+export async function waitForBackgroundCompletion(app: {
+  omp: {logDirectory:string}; waitForCondition: TelegramWorkflow['waitForCondition'];
+}, phase: string): Promise<void> {
+  const since = Date.now();
+  await app.waitForCondition(() => {
+    const lines = readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').trimEnd().split('\n');
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const entry = JSON.parse(lines[index]!);
+      if (Date.parse(entry.time) < since) break;
+      const value = entry.data?.[0];
+      if (entry.event !== 'application.console.log' || typeof value !== 'string' || !value.startsWith('{"event":"bot-background",')) continue;
+      if (JSON.parse(value).phase === phase) return true;
+    }
+    return false;
+  });
 }
