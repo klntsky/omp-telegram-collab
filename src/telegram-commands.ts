@@ -100,7 +100,7 @@ export function parseTelegramCommand(
           break;
       }
       if (request.name === 'Skills' && argument && argument !== 'clear') throw new SyntaxError('Expected clear or no argument');
-      if (root.action === 'model_preset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new SyntaxError('Invalid model preset name');
+      if (root.action === 'modelpreset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new SyntaxError('Invalid model preset name');
       return { kind: 'command', action: root.action!, argument };
     }
     const extensions: PromptExtension[] = [];
@@ -119,7 +119,7 @@ export function parseTelegramCommand(
       } else if (token.kind === 'command' && token.action === 'worktree' && !worktree) {
         worktree = true;
         extensions.push({ kind: 'worktree' });
-      } else if (token.kind === 'command' && token.action === 'model_preset' && !preset
+      } else if (token.kind === 'command' && token.action === 'modelpreset' && !preset
         && (!tokens[index + 1] || tokens[index + 1]!.kind === 'command' || tokens[index + 1]!.kind === 'skill'
           || (tokens[index + 1]!.kind === 'text' && /^[A-Za-z][\w-]*$/.test(tokens[index + 1]!.image)))) {
         preset = true;

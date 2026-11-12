@@ -1,7 +1,7 @@
 // One message produces one request. A prompt request selects one target session
 // and submits at most one task; the other request groups run standalone.
 //
-// Example: /new /worktree /model_preset openai Fix login
+// Example: /new /worktree /modelpreset openai Fix login
 //          target -> worktree -> preset argument -> literal task
 @top Request {
   Prompt | SkillPrompt | Inspection | Configuration | Lifecycle | Guidance |
@@ -20,12 +20,12 @@ Configuration { (command_settings | command_setup) Any* }
 Lifecycle { (command_stop | command_kill | command_detach | command_terminate | command_fork) Any* }
 Guidance { command_help Any* }
 Start { command_start Any* }
-OptionalArgument { (command_worktree | command_model_preset) Any* }
+OptionalArgument { (command_worktree | command_modelpreset) Any* }
 Attach { command_attach Any* }
 Skills { command_skills Any* }
 
 Any {
-  TextToken | command_new | command_p | command_worktree | command_model_preset |
+  TextToken | command_new | command_p | command_worktree | command_modelpreset |
   command_skills | command_attach | command_settings | command_setup |
   command_list_admins | command_detach | command_agent | command_status |
   command_usage | command_stop | command_kill | command_terminate | command_fork |
@@ -33,13 +33,13 @@ Any {
 }
 
 // The external tokenizer reads the original message, preserving source offsets.
-// command_new means "/new", command_model_preset means "/model_preset", etc.
+// command_new means "/new", command_modelpreset means "/modelpreset", etc.
 // Command matching ignores case and accepts an optional @ThisBot suffix.
 // SkillToken covers registered /skill_* shortcuts and exact /skill:name names.
 // TextToken is one non-slash word; UnknownToken is an unrecognized slash word.
 @context commandContext from "./telegram-command-tokens.js"
 @external tokens commandTokenizer from "./telegram-command-tokens.js" {
-  command_new, command_p, command_worktree, command_model_preset,
+  command_new, command_p, command_worktree, command_modelpreset,
   command_skills, command_attach, command_settings, command_setup,
   command_list_admins, command_detach, command_agent, command_status,
   command_usage, command_stop, command_kill, command_terminate, command_fork,

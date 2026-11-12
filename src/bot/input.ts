@@ -159,7 +159,7 @@ install(): void {
 
   private async receiveMessage(ctx: Context, intent: InputIntent): Promise<void> {
     if (intent.kind !== 'new-task' && intent.kind !== 'session-prompt' && intent.kind !== 'question-answer' &&
-        !(intent.kind === 'command' && ['stop','kill','worktree','model_preset'].includes(intent.action))) return;
+        !(intent.kind === 'command' && ['stop','kill','worktree','modelpreset'].includes(intent.action))) return;
     const message = ctx.message;
     if (this.deps.config.terminated || this.deps.stopped() || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.deps.config,this.deps.botId(),ctx.chat.id);

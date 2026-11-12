@@ -41,7 +41,7 @@ syncCommandMenus(): Promise<void> {
       const skills = this.deps.store.getSkillCatalog(instanceId) ?? [];
       if (this.deps.stopped()) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - baseCommands.length));
-      const instanceCommands = baseCommands.map(command => command.command === 'model_preset' ? {...command, description:this.deps.presetDescription(instanceId)} : command);
+      const instanceCommands = baseCommands.map(command => command.command === 'modelpreset' ? {...command, description:this.deps.presetDescription(instanceId)} : command);
       const commands = [...instanceCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];

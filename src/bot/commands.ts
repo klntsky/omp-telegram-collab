@@ -70,7 +70,7 @@ Open this topic’s live transcript and tool details in the read-only Mini App.`
 <code>/setup</code>
 Connect this group to the agent’s computer, then open settings.
 
-<code>/model_preset [name]</code>
+<code>/modelpreset [name]</code>
 Choose a model preset for an idle topic or change the group default.
 
 <code>/worktree [branch]</code>
@@ -117,7 +117,7 @@ export const groupCommands = [
   { command: 'stop', description: 'Interrupt the current task in this topic' },
   { command: 'kill', description: 'Force-stop this topic’s agent; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
-  { command: 'model_preset', description: 'Choose a model preset for an idle topic or set the group default' },
+  { command: 'modelpreset', description: 'Choose a model preset for an idle topic or set the group default' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];
