@@ -342,6 +342,8 @@ The Mini App automatically rejoins after transient Collab room or transport clos
 
 Telegram mirroring retries an unexpected Collab disconnect up to five times with backoff. Recovery delivers unseen assistant entries, not prompts. If it fails, the bot posts only “Session mirroring disconnected.”; a later authorized prompt can reconnect. Telegram polling retries network failures, rate limits, and server errors. Invalid credentials and polling conflicts stop the service.
 
+At startup and during operation, a fatal Telegram polling failure logs the affected bot identity and original diagnostic. A polling conflict (409) is not retried: the log explains that independent service processes cannot share a bot token, even under different OS users or in different groups, and directs the operator to stop the duplicate instance or use separate bot tokens. The entire service stops.
+
 If a Telegram listener closes while an authorized operation is still establishing its connection, the bot immediately reacquires the host and reconnects once before continuing. Recovery requires the same session generation, an open topic, and an unchanged assignment; termination, detachment, and kill invalidation cannot reopen the session. No prompt is replayed, and a second connection failure retains its original diagnostic.
 
 Failure to acquire or reconnect to an existing managed host does not retire it. The original connection diagnostic is preserved, and a later attempt can reconnect to the same host.
