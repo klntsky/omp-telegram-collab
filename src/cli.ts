@@ -8,6 +8,7 @@ import { registerAdminCommands } from './cli-admin.js';
 import { notifyReload } from './cli/reload.js';
 import { joinSession } from './session-cli.js';
 import { startService } from './cli/service.js';
+import { pollingFailureReported } from './cli/polling-failure.js';
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const program = new Command()
@@ -69,7 +70,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   void main().catch(error => {
-    stderr.write(`${error instanceof Error ? error.message : 'Command failed'}\n`);
+    if (!pollingFailureReported(error)) stderr.write(`${error instanceof Error ? error.message : 'Command failed'}\n`);
     process.exitCode = 1;
   });
 }
