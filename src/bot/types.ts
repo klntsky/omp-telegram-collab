@@ -1,6 +1,6 @@
 import type { Context } from 'grammy';
 import type { CollabUiRequest } from '@oh-my-pi/pi-wire';
-import type { TopicSession, CollabConnection, PromptContent, TypingMode } from '../../shared/contracts.js';
+import type { TopicSession, CollabConnection, PromptContent, PendingPromptContent, TypingMode } from '../../shared/contracts.js';
 import type { PendingSkillKey } from '../store.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -103,11 +103,11 @@ export interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
-  command?: {source: Context; content: PromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
+  command?: {source: Context; content: PendingPromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkills:string[]}; cwd?:string; folderFingerprint?:string};
 }
 export interface PromptProposal {
   source: Context;
-  content: PromptContent;
+  content: PendingPromptContent;
   instanceId: number;
   sessionId?: string;
   folderFingerprint?: string;
@@ -116,7 +116,7 @@ export interface PromptProposal {
   allMessagesArePrompts: boolean;
   messageId: number;
   expires: number;
-  skills?: {key:PendingSkillKey;names:string[];topicSkill?:string};
+  skills?: {key:PendingSkillKey;names:string[];topicSkills:string[]};
 }
 export type SettingsKey =
   | 'prompts'
@@ -135,7 +135,7 @@ export type SettingsAction =
       field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
       value: boolean;
     }
-  | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
+  | { kind: 'default'; field: 'default_new_topic_skills' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
   | { kind: 'folders'; remove?: number; clear?: boolean; input?: 'append' | 'replace' }
   | { kind: 'close' };

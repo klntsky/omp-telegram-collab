@@ -7,7 +7,7 @@ import type { BotOptions } from '../bot.js';
 import { findInstance, readConfig, writeConfig, refreshTermination } from '../config.js';
 import { isAdministrator } from '../auth.js';
 
-import { settingsHelp, adminHelp, cliHelp, terminationMessage } from './commands.js';
+import { terminationMessage } from './commands.js';
 
 export interface InputEntryDependencies {
   answerQuestion(ctx: Context, token: string, choice: string): Promise<void>;
@@ -15,7 +15,7 @@ export interface InputEntryDependencies {
   approvePrompt(ctx: Context, token: string): Promise<void>;
   assignedId(chatId: number): number;
   bot: Bot<Context>;
-  commandHelp(): string;
+  commandHelp(chatId: number, admin: boolean): string;
   confirmCapacity(ctx: Context, action: string, token: string): Promise<void>;
   currentAdmin(ctx: Context): Promise<boolean>;
   folderCallback(ctx: Context, data: string): Promise<void>;
@@ -24,7 +24,6 @@ export interface InputEntryDependencies {
   config: BotOptions['config'];
   store: BotOptions['store'];
   presetCallback(ctx: Context, data: string): Promise<void>;
-  promptHelp(chatId: number): string;
   saveSettingsReply(ctx: Context, panel: SettingsPanel): Promise<void>;
   settingsCallback(ctx: Context, data: string): Promise<void>;
   settingsReplyPanel(ctx: Context): SettingsPanel | undefined;
@@ -195,7 +194,8 @@ export async function routeEntry(deps: InputEntryDependencies, ctx: Context, int
         await replyTo(
           ctx,
           contextDestination(ctx),
-          `${deps.commandHelp()}\n${settingsHelp}\n${adminHelp}${(await deps.currentAdmin(ctx)) ? `\n${cliHelp}` : ''}\n${deps.promptHelp(ctx.chat.id)}`,
+          deps.commandHelp(ctx.chat.id, await deps.currentAdmin(ctx)),
+          { parse_mode: 'HTML' },
         );
       }
       return undefined;

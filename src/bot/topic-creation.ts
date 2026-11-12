@@ -1,5 +1,5 @@
 import type { Context, Bot } from 'grammy';
-import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
+import type { TopicSession, PendingPromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
@@ -26,7 +26,7 @@ export interface TopicCreationDependencies {
   requireSessionAssignment(session: TopicSession): void;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority: Context): Promise<void>;
   skillKey(ctx: Context): PendingSkillKey;
-  defaultNewTopicSkill(chatId: number): string | undefined;
+  defaultNewTopicSkills(chatId: number): string[];
   albumContexts(ctx: Context): readonly Context[];
   announce(session: TopicSession): Promise<void>;
   setTopicStatus(session: TopicSession, activity: TopicActivity): Promise<void>;
@@ -38,7 +38,7 @@ export class TopicCreation {
   constructor(private readonly dependencies: TopicCreationDependencies) {}
   async newSession(
     ctx: Context,
-    task?: PromptContent,
+    task?: PendingPromptContent,
     attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string },
     name?: string,
     accepted?: () => void,
@@ -47,9 +47,10 @@ export class TopicCreation {
     extensions: readonly PromptExtension[] = [],
     reservation?: {bind(id: string): void},
     cwd?: string,
-    proposedSkills?: {names:string[];topicSkill?:string},
+    proposedSkills?: {names:string[];topicSkills:string[]},
   ): Promise<void> {
     await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
+    proposedSkills ??= {names: [], topicSkills: this.dependencies.defaultNewTopicSkills(ctx.chat!.id)};
     const folderFingerprint = JSON.stringify(this.dependencies.folderSettings(ctx.chat!.id));
     const epoch = this.dependencies.admissionEpoch;
     const instanceId = this.dependencies.assignedId(ctx.chat!.id);
@@ -60,8 +61,8 @@ export class TopicCreation {
       throw new Error('The group instance assignment changed');
     if (!attached && cwd === undefined && await this.dependencies.chooseFolder(ctx,authority,selected =>
       this.newSession(ctx,task,attached,name,accepted,worktree,authority,extensions,undefined,selected,proposedSkills))) return;
-    if (!attached && !worktree && proposedSkills) {
-      const names = [...new Set([...proposedSkills.names,...(proposedSkills.topicSkill ? [proposedSkills.topicSkill] : [])])];
+    if (!attached && !worktree && task !== undefined && proposedSkills) {
+      const names = [...new Set([...proposedSkills.names,...proposedSkills.topicSkills])];
       if (names.length) {
         const available = await this.dependencies.options.runtime.listSkills(instanceId, undefined, undefined, cwd);
         const missing = names.filter(name => !available.some(skill => skill.name === name));
@@ -101,27 +102,28 @@ export class TopicCreation {
       attached
         ? { kind: 'attached', instanceId: attached.hostId, sessionId: attached.sessionId }
         : { kind: 'managed' },
-      attached || worktree || automaticWorktree || extensions.length ? undefined : task,
+      worktree || ((attached || automaticWorktree || extensions.length) && !task?.documents?.length) ? undefined : task,
       ctx.from!.id,
       authority.from!.id,
     );
     this.dependencies.options.store.beginInitialTaskPreparation(session.id);
+    const durableDocumentSetup = Boolean(task?.documents?.length && !worktree && (automaticWorktree || extensions.length));
+    if (durableDocumentSetup) this.dependencies.options.store.setInitialDocumentSetup(session.id, {automaticWorktree, extensions:[...extensions]});
     try {
       reservation?.bind(session.id);
-      if (automaticWorktree) {
+      if (automaticWorktree && !durableDocumentSetup) {
         await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.dependencies.currentAdmin(authority)))
           throw new Error('Administrator access changed before worktree creation.');
         await this.dependencies.createTopicWorktree(session);
-        if (task !== undefined && !extensions.length) {
+        if (task !== undefined && !extensions.length && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority)))
-            throw new Error('Administrator access changed before initial task submission.');
+          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
           this.dependencies.requireSessionAssignment(session);
           this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
         }
       }
-      if (extensions.length) {
+      if (extensions.length && !durableDocumentSetup) {
         try {
           await this.dependencies.preparePrompt(ctx, session, extensions, authority);
         } catch (error) {
@@ -130,7 +132,7 @@ export class TopicCreation {
           });
           throw error;
         }
-        if (task !== undefined) {
+        if (task !== undefined && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
           if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
           this.dependencies.requireSessionAssignment(session);
@@ -152,9 +154,9 @@ export class TopicCreation {
         for (const skill of this.dependencies.options.store.getPendingSkills(sourceKey))
           this.dependencies.options.store.addPendingSkill(destinationKey, skill);
         this.dependencies.options.store.clearPendingSkills(sourceKey);
-        const defaultSkill = this.dependencies.defaultNewTopicSkill(ctx.chat!.id);
-        if (defaultSkill) this.dependencies.options.store.setNewTopicSkill(session.id, defaultSkill);
       }
+      if (!attached && task === undefined && proposedSkills.topicSkills.length)
+        this.dependencies.options.store.setNewTopicSkills(session.id, proposedSkills.topicSkills);
       accepted?.();
       if (task !== undefined && ctx.message)
         this.dependencies.options.store.setInitialMessage(session.id, ctx.message.message_id);
@@ -176,12 +178,16 @@ export class TopicCreation {
       );
       await this.dependencies.announce(session);
       const source = ctx.message;
-      if (task !== undefined && source?.reply_to_message) {
+      const reply = source?.reply_to_message;
+      // Topic-creation replies are routing metadata, not forwardable context.
+      // TDLib rejects service content in MessageContent.cpp::can_forward_message_content:
+      // https://github.com/tdlib/td/blob/master/td/telegram/MessageContent.cpp
+      if (task !== undefined && reply && !reply.forum_topic_created && reply.message_id !== source?.message_thread_id) {
         await forwardTo(
           this.dependencies.bot.api,
           topicDestination(session.chatId, session.threadId),
           ctx.chat!.id,
-          source.reply_to_message.message_id,
+          reply.message_id,
         );
       }
       if (task !== undefined)
@@ -196,7 +202,7 @@ export class TopicCreation {
           this.dependencies.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
         }
       await this.dependencies.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
-      await this.dependencies.listen(session);
+      if (!durableDocumentSetup) await this.dependencies.listen(session);
     } finally {
       this.dependencies.options.store.finishInitialTaskPreparation(session.id);
     }

@@ -18,14 +18,14 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
       kind: 'topic' as const, chatId: session.chatId, threadId: session.threadId,
     }, userId: app.telegram.user.account.id };
     app.store.addPendingSkill(skillKey, 'e2e-missing-pending');
-    app.store.setNewTopicSkill(session.id, 'e2e-missing-topic');
+    app.store.setNewTopicSkills(session.id, ['e2e-missing-topic']);
     t.after(() => {
       app.store.clearPendingSkills(skillKey);
-      app.store.clearNewTopicSkill(session.id);
+      app.store.clearNewTopicSkills(session.id);
     });
     const assertSkillsIntact = () => {
       assert.deepEqual(app.store.getPendingSkills(skillKey), ['e2e-missing-pending']);
-      assert.equal(app.store.getNewTopicSkill(session.id), 'e2e-missing-topic');
+      assert.deepEqual(app.store.getNewTopicSkills(session.id), ['e2e-missing-topic']);
     };
     const prepare = async (command: string, threadId?: number) => {
       const frameStart = app.guestFrames.length;
@@ -59,7 +59,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     await assertModel(session.id, 'e2e-alternate');
     assert.equal(app.store.hasPendingInitialTask(session.id), false);
     app.store.clearPendingSkills(skillKey);
-    app.store.clearNewTopicSkill(session.id);
+    app.store.clearNewTopicSkills(session.id);
     await run(tasks.compositeSelected, 'e2e-alternate', session.threadId);
 
     // A reader lease allows preset control but blocks host replacement by /worktree.
