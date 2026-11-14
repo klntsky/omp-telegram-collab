@@ -3,13 +3,6 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 
 export function formatUsage(result: unknown, now = new Date()): { heading: string; table: string }[] {
   if (!record(result) || !Array.isArray(result.reports)) throw new Error('Invalid OMP usage response');
-  const providers: Record<string, string> = {
-    'openai-codex': 'OpenAI Codex', anthropic: 'Anthropic', cursor: 'Cursor', 'google-antigravity': 'Antigravity',
-  };
-  const labels: Record<string, string> = {
-    'Claude 5 Hour': 'Claude 5h', 'Claude 7 Day': 'Claude 7d', 'Cursor Models': 'Models',
-    'Other Models': 'Other', 'On-Demand Usage': 'On-demand', 'Claude & GPT (shared)': 'Claude/GPT (shared)', 'Gemini (Argon)': 'Gemini Argon',
-  };
   const date = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' });
   const sections: { heading: string; table: string }[] = [];
@@ -23,7 +16,7 @@ export function formatUsage(result: unknown, now = new Date()): { heading: strin
       const window = record(limit.window) ? limit.window : {};
       const originalLabel = String(limit.label ?? window.label ?? 'Quota');
       const windowLabel = typeof window.label === 'string' ? window.label : '';
-      const label = (labels[originalLabel] ?? originalLabel)
+      const label = originalLabel
         + (windowLabel && !originalLabel.toLowerCase().includes(windowLabel.toLowerCase()) ? ` (${windowLabel})` : '');
       const scope = record(limit.scope) ? limit.scope : {};
       const shared = scope.shared === true && typeof scope.sharedGroup === 'string';
@@ -46,7 +39,7 @@ export function formatUsage(result: unknown, now = new Date()): { heading: strin
     }
     if (!report.limits.length) lines.push('  No quota data available.');
     if (typeof report.error === 'string') lines.push(report.error);
-    sections.push({ heading: providers[report.provider] ?? report.provider, table: lines.join('\n') });
+    sections.push({ heading: report.provider, table: lines.join('\n') });
   }
   return sections.length ? sections : [{ heading: '', table: 'No provider usage data available.' }];
 }
