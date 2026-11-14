@@ -46,9 +46,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Revive a parked or aborted subagent (`/hub`, `/subagents`) | No direct subagent controls. Ask the main agent through Telegram. |
 | 📱 | Inspect subagent model and usage (`/hub`, `/subagents`) | The agent rail and drawer show model, tokens, cost, tool count, and duration when the host supplies them. |
 | ❌ | Configure per-agent models, prewalk, or advisor (`/agents`) | No corresponding Mini App or bot controls. |
-| ✅ | List, save, switch, and delete model presets (`/modelpreset`) | `/model_preset` browses preset models and roles with buttons to use one in the idle topic or make it the forum default. `/model_preset <name>` switches directly; `/settings` also selects the forum default. To edit presets, ask the agent. |
+| ✅ | List, save, switch, and delete model presets (`/modelpreset`) | `/modelpreset` browses preset models and roles with buttons to use one in the idle topic or make it the forum default. `/modelpreset <name>` switches directly; `/settings` also selects the forum default. To edit presets, ask the agent. |
 | 📱 | Inspect the current model and reasoning level | Read the Mini App header and model/thinking-change markers in the transcript. |
-| ❌ | Select model and reasoning level independently (`/model`, `/models`, `/switch`, `/effort`) | No independent selectors. `/model_preset` applies predefined combinations instead. |
+| ❌ | Select model and reasoning level independently (`/model`, `/models`, `/switch`, `/effort`) | No independent selectors. `/modelpreset` applies predefined combinations instead. |
 | 📱 | Inspect context-use percentage (`/context`) | Read the Mini App header's context gauge. |
 | ❌ | Browse detailed context contents (`/context`) | No context inspector. The transcript is not a view of the complete model context. |
 | 📱 | View compaction and branch-summary markers | The Mini App transcript displays summaries and changes already made by the host. |
@@ -147,11 +147,11 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 
    ```sh
    omp-telegram-collab setup
-   omp-telegram-collab bot add
    omp-telegram-collab start
    ```
 
    For the Mini App, use the public HTTPS origin of your proxy or tunnel, such as `https://omp.example.com`. The Mini App short name must match the name you register with BotFather. Keep `omp-telegram-collab start` running in this terminal.
+   Setup continues directly to bot registration when no bot is configured. Only optional Mini App configuration needs questions. Storage, OMP, and listen settings use defaults, preserving existing settings on subsequent runs. Use explicit setup flags to change advanced settings. To register another bot later, run `omp-telegram-collab bot add`.
 
    <details>
    <summary>Example CLI commands and output</summary>
@@ -163,11 +163,9 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    The optional Mini App provides a live transcript, tool details, and subagent activity. It is read-only. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.
    Enable Mini App? [y/N]: n
    Service configuration saved to /home/operator/.config/omp-telegram/config.yaml.
-   Next on the agent's computer: run omp-telegram-collab bot add, then omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
-
-   $ omp-telegram-collab bot add
    Bot token (hidden):
    Added @example_omp_bot (123456789).
+   Run omp-telegram-collab start. Leave it running. In Telegram, add the bot to your forum and send /setup.
    ```
 
    Mini App example, with other prompts and output omitted:
@@ -176,10 +174,6 @@ You can use the bot entirely through group messages. The optional **Mini App** l
    $ omp-telegram-collab setup
    Enable Mini App? [y/N]: y
    Public HTTPS origin []: https://omp.example.com
-   Listen host [127.0.0.1]:
-   Listen port [3000]:
-
-   $ omp-telegram-collab bot add
    Bot token (hidden):
    BotFather Mini App short name [app]:
    Added @example_omp_bot (123456789), Mini App app.
@@ -297,43 +291,3 @@ You can use the bot entirely through group messages. The optional **Mini App** l
 10. **Telegram:** Review `/settings` for prompt permissions, the session limit, runtime folders, and forum defaults. Send `/new <task>` and confirm that the agent replies in the new topic.
 
    If you enabled the Mini App, use mobile data to open the topic's **OPEN AGENT** button and confirm that its transcript loads. Keep it open while sending another prompt from a second Telegram client; confirm that the new reply appears live. This checks WebSocket forwarding.
-
-## Configure instances
-
-`instances` is a list of logical projects. Each instance has a stable numeric ID and a default directory for new sessions. Multiple instances can share a directory.
-
-```yaml
-instances:
-  - id: 1
-    defaultDir: /srv/projects/backend
-    chats:
-      - botId: 123456789
-        chatId: -1001234567890
-  - id: 2
-    defaultDir: /srv/projects/backend
-    chats: []
-```
-
-This is a configuration excerpt with filler paths and Telegram IDs. Keep the other service settings generated by `setup`.
-
-IDs must be unique positive safe integers. Creation commands choose 1 initially, then an ID above every configured or stored session's instance ID. Use `create PATH --id ID` to choose one explicitly. Keep IDs unchanged when sorting the list or editing directories.
-
-<details>
-<summary>Example instances sharing a directory</summary>
-
-Example with a new configuration and an existing filler directory. Other service setup is omitted.
-
-```text
-$ omp-telegram-collab create /srv/projects/backend
-Created instance 1: /srv/projects/backend
-$ omp-telegram-collab create /srv/projects/backend
-Created instance 2: /srv/projects/backend
-```
-
-</details>
-
-Change `defaultDir` to use another existing canonical absolute directory for future sessions. Existing sessions keep their own working directories, history, and host bindings after reload or restart. Relative `folder_options` use the new default only for new sessions. Moving or deleting an old session's directory can make that session unavailable, but does not prevent the service from starting.
-
-Select an existing instance during enrollment with `approve REQUEST_CODE --instance ID`. Use `--path PATH` to register a new instance. Instance-management commands use IDs so instances sharing a directory remain distinguishable. A forum with stored sessions cannot be reassigned to another instance ID.
-
-Only the current configuration and database schema are supported; startup never converts older formats. Back up existing configuration and runtime data before replacing them.

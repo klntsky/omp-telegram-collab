@@ -1,4 +1,4 @@
-import { stdout, stderr } from 'node:process';
+import { stdout } from 'node:process';
 import { join } from 'node:path';
 import { writeFileSync, writeSync } from 'node:fs';
 import { unlink, readFile, writeFile } from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { Store } from '../store.js';
 import { BotService } from '../bot.js';
 import { createServer, type GatewayServer } from '../server.js';
 import { OmpRuntime } from '../runtime.js';
+import { reportPollingFailure } from './polling-failure.js';
 
 let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
@@ -56,11 +57,11 @@ interface Generation {
 }
 
 export async function launch(config: AppConfig, onPollingFailure: () => void, initialLaunch = false): Promise<Generation> {
+  validateStart(config);
   const startupAt = Date.now();
   const launchAt = performance.now();
   if (initialLaunch) stdout.write(`Service timing process-start-to-launch bootstrap/dependencies/config: ${launchAt.toFixed(1)} ms\n`);
   const restartMarker = join(config.dataDir, 'restart-timing.json');
-  validateStart(config);
   const runtime = new OmpRuntime(config);
   let store: Store | undefined;
   const bots: BotService[] = [];
@@ -158,9 +159,8 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
       void bot.start(() => { timing(`bot ${bot.id} first poll`, pollAt); resolve(); }).then(() => {
         if (!started) reject(new Error('Telegram polling stopped during startup'));
       }, error => {
+        reportPollingFailure({ id: bot.id, username: bot.bot.botInfo.username }, error);
         if (!started) { reject(error); return; }
-        stderr.write('Telegram polling stopped. Check bot credentials, network access, and that no other poller is running.\n');
-        console.error('Telegram polling failure:', error);
         process.exitCode = 1;
         onPollingFailure();
       });

@@ -3,7 +3,7 @@ export const
   command_new = 18,
   command_p = 19,
   command_worktree = 20,
-  command_model_preset = 21,
+  command_modelpreset = 21,
   command_skills = 22,
   command_attach = 23,
   command_settings = 24,

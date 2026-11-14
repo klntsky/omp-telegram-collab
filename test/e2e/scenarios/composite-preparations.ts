@@ -52,9 +52,9 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
       assert.ok(app.omp.provider.requests.get(task.name)!.every(request => request.model === model));
     };
 
-    await prepare('/p /model_preset e2e-alternate', session.threadId);
+    await prepare('/p /modelpreset e2e-alternate', session.threadId);
     assertSkillsIntact();
-    await prepare('/p /model_preset openia', session.threadId);
+    await prepare('/p /modelpreset openia', session.threadId);
     assertSkillsIntact();
     await assertModel(session.id, 'e2e-alternate');
     assert.equal(app.store.hasPendingInitialTask(session.id), false);
@@ -65,7 +65,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     // A reader lease allows preset control but blocks host replacement by /worktree.
     const release = app.runtime.retain(session.id);
     try {
-      await prepare('/p /model_preset e2e-primary /worktree', session.threadId);
+      await prepare('/p /modelpreset e2e-primary /worktree', session.threadId);
     } finally {
       release();
     }
@@ -76,7 +76,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     await app.sendAndWait('/kill', session.threadId);
 
     const previousIds = new Set(app.store.listSessions(app.telegram.bot.id).map(value => value.id));
-    await prepare('/new /worktree /model_preset e2e-alternate');
+    await prepare('/new /worktree /modelpreset e2e-alternate');
     const created = app.store.listSessions(app.telegram.bot.id).filter(value => !previousIds.has(value.id));
     assert.equal(created.length, 1);
     const fresh = created[0]!;
