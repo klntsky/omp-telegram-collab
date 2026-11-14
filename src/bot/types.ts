@@ -144,6 +144,7 @@ export interface SettingsPanel {
   chatId: number;
   destination: TopicDestination;
   messageId: number;
+  retiredMessageIds?: number[];
   instanceId: number;
   revision: number;
   offset: number;
