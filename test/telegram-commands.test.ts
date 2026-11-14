@@ -6,7 +6,7 @@ const aliases = new Map([['skill_review', { name: 'Review.Exact' }]]);
 const parse = (text: string) => parseTelegramCommand(text, 'ExampleBot', aliases);
 
 test('composed prompt grammar preserves the complete literal tail', () => {
-  assert.deepEqual(parse('/new@ExampleBot /model_preset fast /worktree /skill:Case.Sensitive /skill_review explain\n  /stop /unknown'), {
+  assert.deepEqual(parse('/new@ExampleBot /modelpreset fast /worktree /skill:Case.Sensitive /skill_review explain\n  /stop /unknown'), {
     kind: 'prompt', action: 'new', text: 'explain\n  /stop /unknown', extensions: [
       { kind: 'model-preset', name: 'fast' }, { kind: 'worktree' },
       { kind: 'skill', name: 'Case.Sensitive' }, { kind: 'skill', name: 'Review.Exact' },
@@ -30,12 +30,12 @@ test('unknown roots and wrong bot roots are ignored after full tokenization', ()
 });
 
 test('bare presets compose interactively and repeated extensions start literal text', () => {
-  assert.deepEqual(parse('/p /model_preset'), {kind:'prompt',action:'p',text:'',extensions:[{kind:'model-preset'}]});
-  assert.deepEqual(parse('/p /model_preset /worktree text'), {
+  assert.deepEqual(parse('/p /modelpreset'), {kind:'prompt',action:'p',text:'',extensions:[{kind:'model-preset'}]});
+  assert.deepEqual(parse('/p /modelpreset /worktree text'), {
     kind:'prompt',action:'p',text:'text',extensions:[{kind:'model-preset'},{kind:'worktree'}],
   });
-  assert.deepEqual(parse('/p /model_preset a /model_preset b text'), {
-    kind:'prompt',action:'p',text:'/model_preset b text',extensions:[{kind:'model-preset',name:'a'}],
+  assert.deepEqual(parse('/p /modelpreset a /modelpreset b text'), {
+    kind:'prompt',action:'p',text:'/modelpreset b text',extensions:[{kind:'model-preset',name:'a'}],
   });
   assert.deepEqual(parse('/new /worktree /worktree text'), {
     kind:'prompt',action:'new',text:'/worktree text',extensions:[{kind:'worktree'}],
@@ -52,7 +52,7 @@ test('all standalone command groups enforce their arities', () => {
       assert.equal(parse(`/${action} ${argument}`).kind, 'invalid');
     }
   }
-  for (const action of ['worktree', 'model_preset']) {
+  for (const action of ['worktree', 'modelpreset']) {
     for (const argument of ['', 'named']) assert.deepEqual(parse(`/${action}${argument ? ` ${argument}` : ''}`), { kind: 'command', action, argument });
     assert.equal(parse(`/${action} one two`).kind, 'invalid');
     assert.equal(parse(`/${action} /stop`).kind, 'invalid');
@@ -85,10 +85,10 @@ test('non-extension slash tokens start literal prompts without executing command
 
 test('malformed preset names are literal in prompts and validated in standalone commands', () => {
   for (const name of ['123', 'name.dot', 'bad!', '-name', '😀']) {
-    assert.equal(parse(`/model_preset ${name}`).kind, 'invalid');
-    assert.deepEqual(parse(`/new /model_preset ${name} prompt`), {kind:'prompt',action:'new',text:`/model_preset ${name} prompt`,extensions:[]});
+    assert.equal(parse(`/modelpreset ${name}`).kind, 'invalid');
+    assert.deepEqual(parse(`/new /modelpreset ${name} prompt`), {kind:'prompt',action:'new',text:`/modelpreset ${name} prompt`,extensions:[]});
   }
-  assert.deepEqual(parse('/model_preset Good_name-2'), { kind: 'command', action: 'model_preset', argument: 'Good_name-2' });
+  assert.deepEqual(parse('/modelpreset Good_name-2'), { kind: 'command', action: 'modelpreset', argument: 'Good_name-2' });
 });
 
 
@@ -100,17 +100,17 @@ test('pasted absolute paths and multiline diagnostics are literal prompt data', 
       extensions:root === '/skill_review' ? [{kind:'skill',name:'Review.Exact'}] : [],
     });
   }
-  assert.deepEqual(parse(`/p /worktree /model_preset Fast ${text}`), {
+  assert.deepEqual(parse(`/p /worktree /modelpreset Fast ${text}`), {
     kind:'prompt',action:'p',text,extensions:[{kind:'worktree'},{kind:'model-preset',name:'Fast'}],
   });
 });
 
 test('interactive presets retain following skill selection and literal slash task boundaries', () => {
-  assert.deepEqual(parse('/new /model_preset /skill_review /home/work/error.ts:27\n/stop'), {
+  assert.deepEqual(parse('/new /modelpreset /skill_review /home/work/error.ts:27\n/stop'), {
     kind:'prompt',action:'new',text:'/home/work/error.ts:27\n/stop',
     extensions:[{kind:'model-preset'},{kind:'skill',name:'Review.Exact'}],
   });
-  assert.deepEqual(parse('/p /model_preset /stop'), {
+  assert.deepEqual(parse('/p /modelpreset /stop'), {
     kind:'prompt',action:'p',text:'/stop',extensions:[{kind:'model-preset'}],
   });
 });
