@@ -134,7 +134,7 @@ export class PromptAdmission {
         }
       }
     }
-    const mentionedSkills = worktree ? [] : [...new Set([...topicSkills, ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
+    const mentionedSkills = !hasTask || worktree ? [] : [...new Set([...topicSkills, ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
       if (admin || session) {
         const available = await this.deps.options.runtime.listSkills(instanceId, session, undefined, cwd);

@@ -16,6 +16,7 @@ import { registerLogicalIdentity } from './scenarios/logical-identity.js';
 import { registerTermination } from './scenarios/termination.js';
 import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
+import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -65,6 +66,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     );
   });
   registerForumDefaults(() => app, tasks);
+  registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);
   registerWorktreesAndForks(() => app, tasks, () => previousIds);
   registerQuestions(() => app, tasks, controls);

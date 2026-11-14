@@ -51,7 +51,11 @@ export interface BotComponents {
   input: BotInput;
 }
 
-/** Each owner receives only its operational dependencies; closures preserve live lifecycle state. */
+/**
+ * This composition root intentionally exceeds the default line budget to keep
+ * lifecycle-sharing dependencies visible as one graph instead of scattered wiring.
+ * Owners receive only operational dependencies; closures preserve live state.
+ */
 export function createBotComponents(options: BotOptions, bot: Bot<Context>, lifecycle: LifecycleDependencies): BotComponents {
   const maintenance: BotMaintenance = new BotMaintenance({
     bot: bot,
@@ -262,6 +266,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     currentAdmin: authorization.currentAdmin.bind(authorization),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     dropListener: connections.dropListener.bind(connections),
+    replyPresetText: presets.replyPresetText.bind(presets),
   });
   const capacity: CapacityAdmission = new CapacityAdmission({
     options: options,
