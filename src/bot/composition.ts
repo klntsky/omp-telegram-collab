@@ -380,6 +380,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     // Admission is constructed before input routing; do not bind an uninitialized owner.
     albumContexts: ctx => input.albumContexts(ctx),
     sendPrompt: receipts.sendPrompt.bind(receipts),
+    prepareContent: receipts.prepareContent.bind(receipts),
   });
   const status: BotStatus = new BotStatus({
     config: options.config,

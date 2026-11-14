@@ -88,6 +88,9 @@ New session topics get a quietly pinned OPEN AGENT message before the initial pr
 
 Background recovery waits for in-progress topic preparation and task forwarding before admitting the initial prompt. A service restart can recover an interrupted preparation without replaying a task already submitted or reviving a cancelled task.
 
+The first Telegram prompt in an agent conversation starts with a `<preamble>` explaining the Telegram-to-OMP bridge, naming the Telegram chat, and linking to its session topic. The user's complete prompt follows after a blank line, with images unchanged. Later prompts and resumed conversations do not repeat the preamble. Startup retries preserve the prepared first prompt.
+Forked topics receive their own preamble on their first new Telegram prompt, with the new topic link rather than the source topic's link.
+
 `/worktree` delegates worktree creation, uncommitted-change transfer, and session relocation to OMP's own command. In a session topic it keeps the same topic and conversation history. The session retains its configured project assignment and authorization while its execution directory changes. Worktree location, branch defaults, change transfer, and source-checkout cleanup follow OMP's settings. Worktrees are not automatically removed when sessions stop or the service restarts.
 
 A current supergroup owner or administrator can invoke `/worktree` in an active managed topic. The host must be idle. Attached hosts remain terminal-owned; run `/worktree` in their local OMP terminal. General creates a new empty topic before invoking the native command, with the same administrator or proposal-approval rules as new-topic creation. Branch arguments are not submitted as prompts and do not consume pending skills. Native failures retain OMP's original diagnostics.

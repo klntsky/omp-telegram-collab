@@ -18,6 +18,13 @@ function promptFingerprint(content: PromptContent): string {
 // Store alone owns connection initialization and closure.
 export class PromptLedger {
   constructor(private readonly db: DatabaseSync, private readonly getSession: (id: string) => TopicSession | undefined) {}
+  hasPromptHistory(sessionId: string): boolean {
+    // Pending or uncertain delivery may already have reached OMP. Only anchored
+    // receipts belong to this topic's submissions; forked history is uncorrelated.
+    return Boolean(this.db.prepare(
+      'SELECT 1 FROM prompt_submissions WHERE session_id=? UNION ALL SELECT 1 FROM prompt_receipts WHERE session_id=? AND message_id IS NOT NULL LIMIT 1',
+    ).get(sessionId, sessionId));
+  }
   recordPromptSubmission(
     sessionId: string,
     ompSessionId: string,
