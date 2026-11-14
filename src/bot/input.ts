@@ -69,8 +69,19 @@ install(): void {
 }
 
   private async reportError(ctx: Context, error: unknown): Promise<void> {
-    console.error('Telegram operation failed.', error);
     const intent = this.inputIntents.get(ctx);
+    const context = {
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+      botId: this.deps.botId(),
+      updateId: ctx.update.update_id,
+      chatId: ctx.chat?.id,
+      threadId: ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id,
+      messageId: ctx.message?.message_id ?? ctx.callbackQuery?.message?.message_id,
+      inputKind: intent?.kind,
+      action: intent?.kind === 'command' ? intent.action : undefined,
+    };
+    console.error('Telegram operation failed.', error, context);
     if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
       const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
       if (session && this.deps.sessionAssigned(session)) this.deps.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
@@ -87,7 +98,9 @@ install(): void {
     const details = error instanceof Error ? error.message : String(error);
     await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
-    }).catch(deliveryError => console.error('Could not deliver Telegram operation error notice.', deliveryError));
+    }).catch(deliveryError => {
+      console.error('Could not deliver Telegram operation error notice.', deliveryError, context);
+    });
   }
 
   private collectAlbum(ctx: Context): boolean {
@@ -146,7 +159,7 @@ install(): void {
 
   private async receiveMessage(ctx: Context, intent: InputIntent): Promise<void> {
     if (intent.kind !== 'new-task' && intent.kind !== 'session-prompt' && intent.kind !== 'question-answer' &&
-        !(intent.kind === 'command' && ['stop','kill','worktree','model_preset'].includes(intent.action))) return;
+        !(intent.kind === 'command' && ['stop','kill','worktree','modelpreset'].includes(intent.action))) return;
     const message = ctx.message;
     if (this.deps.config.terminated || this.deps.stopped() || !message || !ctx.chat || ctx.chat.type !== 'supergroup') return;
     const assigned = findInstance(this.deps.config,this.deps.botId(),ctx.chat.id);

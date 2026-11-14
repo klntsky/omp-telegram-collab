@@ -30,7 +30,7 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
     const { session, target } = await createCleanupWorktree(app);
     let start = app.apiCalls.length;
     await setTopicClosed(app, session, true);
-    const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:offer:', start, session.threadId);
+    const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
     await bounded(clickPanel(app, offer, 0, true, participant), signal);
     assert.equal(existsSync(target.path), true, 'a non-admin cannot delete the worktree');
     const [unchangedOffer] = await owner.getMessages(app.telegram.forum.chat, [offer.messageId]);
@@ -47,7 +47,7 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
     await setAdministrator(true);
     start = app.apiCalls.length;
     await bounded(clickPanel(app, offer, 0, true, participant), signal);
-    const confirmation = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:confirm:', start, session.threadId);
+    const confirmation = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:c:', start, session.threadId);
 
     assert.equal((await app.telegram.api.getChatMember(app.telegram.forum.chatId, app.telegram.user.account.id)).status, 'creator');
     await clickPanel(app, confirmation, 0);

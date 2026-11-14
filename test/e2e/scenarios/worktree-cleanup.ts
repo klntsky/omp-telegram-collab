@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { it } from 'node:test';
 import { z } from 'zod';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, createManagedTopic, deliveredPanels, setTopicClosed, submitCallback, waitForPanelRetired } from '../helpers/telegram-actions.js';
+import { clickPanel, createManagedTopic, deliveredPanels, setTopicClosed, submitCallback, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
 import { applicationErrors, closeForConfirmation, createCleanupWorktree } from '../helpers/worktree-cleanup.js';
 import { readSessionHistory } from '../helpers/model-tasks.js';
 
@@ -41,7 +41,7 @@ export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
     assert.ok(existsSync(target.path));
     let start = app.apiCalls.length;
     await clickPanel(app, cancelled, 1);
-    await waitForPanelRetired(app, cancelled, start);
+    await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
     assert.ok(existsSync(target.path));
 
     await setTopicClosed(app, session, false);
@@ -63,11 +63,9 @@ export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
       values.some(value => z.object({ message: z.literal(diagnostic) }).safeParse(value).success)));
     assert.equal(await readFile(dirtyFile, 'utf8'), 'retain uncommitted changes\n');
     await unlink(dirtyFile);
-    await setTopicClosed(app, session, false);
-    const confirmed = await closeForConfirmation(app, session);
     start = app.apiCalls.length;
-    await clickPanel(app, confirmed, 0);
-    await waitForPanelRetired(app, confirmed, start);
+    await clickPanel(app, dirty, 0);
+    await waitForPanelRetired(app, dirty, start);
     assert.equal(existsSync(target.path), false);
     const worktrees = await app.omp.git(app.omp.workspace, 'worktree', 'list', '--porcelain');
     assert.ok(!worktrees.split('\n').includes(`worktree ${target.path}`));

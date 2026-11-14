@@ -20,6 +20,7 @@ import { registerWorktreeCleanup } from './scenarios/worktree-cleanup.js';
 import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-cleanup-authorization.js';
 import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
 import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
+import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -74,6 +75,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
   registerForumDefaults(() => app, tasks);
+  registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);
   registerWorktreesAndForks(() => app, tasks, () => previousIds);
   registerQuestions(() => app, tasks, controls);

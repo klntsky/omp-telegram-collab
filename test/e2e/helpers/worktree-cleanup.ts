@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { TopicSession } from '../../../shared/contracts.js';
 import type { CollaborationTest } from './collaboration-fixture.js';
-import { clickPanel, createManagedTopic, setTopicClosed, waitForPanel } from './telegram-actions.js';
+import { clickPanel, createManagedTopic, setTopicClosed, waitForPanel, type TelegramPanel } from './telegram-actions.js';
 
 export async function createCleanupWorktree(app: CollaborationTest) {
   const created = await createManagedTopic(app);
@@ -17,12 +17,16 @@ export async function createCleanupWorktree(app: CollaborationTest) {
 }
 
 export async function closeForConfirmation(app: CollaborationTest, session: TopicSession) {
-  let start = app.apiCalls.length;
+  const start = app.apiCalls.length;
   await setTopicClosed(app, session, true);
-  const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:offer:', start, session.threadId);
-  start = app.apiCalls.length;
+  const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
+  return requestCleanupConfirmation(app, session, offer);
+}
+
+export async function requestCleanupConfirmation(app: CollaborationTest, session: TopicSession, offer: TelegramPanel) {
+  const start = app.apiCalls.length;
   await clickPanel(app, offer, 0);
-  return waitForPanel(app, 'worktree-cleanup', 'wtcleanup:confirm:', start, session.threadId);
+  return waitForPanel(app, 'worktree-cleanup', 'wtcleanup:c:', start, session.threadId);
 }
 
 export function applicationErrors(app: CollaborationTest): unknown[][] {
