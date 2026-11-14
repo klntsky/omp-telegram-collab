@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { accessSync, constants, mkdirSync, opendirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, normalize, resolve } from 'node:path';
 import type { Context } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
-import { findInstance, readConfig, refreshTermination } from '../config.js';
+import { findInstance, readConfig, refreshTermination, writeConfig } from '../config.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 
@@ -17,16 +17,19 @@ export interface FolderSelectionDependencies {
   stopped(): boolean;
 }
 
+interface FolderRequest {
+  state: {kind:'choose';offset:number} | {kind:'entry'} | {kind:'create';path:string} | {kind:'failed';path:string;create:boolean};
+  source: Context; authority?: Context; messageId: number; expires: number;
+  entryToken?: string;
+  epoch: number; instanceId: number; defaultDir: string; fingerprint: string; options: string[];
+  resume: (cwd: string, authority: Context) => Promise<void>;
+  active?: () => boolean;
+}
+
 export class FolderSelection {
   constructor(private readonly dependencies: FolderSelectionDependencies) {}
 
-  private readonly folderRequests = new Map<string, {
-    state: {kind:'choose';offset:number} | {kind:'create';path:string} | {kind:'failed';path:string;create:boolean};
-    source: Context; authority?: Context; messageId: number; expires: number;
-    epoch: number; instanceId: number; defaultDir: string; fingerprint: string; options: string[];
-    resume: (cwd: string, authority: Context) => Promise<void>;
-    active?: () => boolean;
-  }>();
+  private readonly folderRequests = new Map<string, FolderRequest>();
   folderSettings(chatId: number) {
     const assigned = findInstance(readConfig(this.dependencies.config.configPath), this.dependencies.botId(), chatId);
     if (!assigned || assigned.instance.id !== this.dependencies.assignedId(chatId)) throw new Error('The group instance assignment changed');
@@ -37,6 +40,7 @@ export class FolderSelection {
     const rows = options.slice(offset,offset+8).map((path,index) => [{text:path === '.' ? '<Default>' : path.slice(0,100),callback_data:`folder:${token}:${offset+index}`}]);
     if (offset > 0) rows.push([{text:'Previous folders',callback_data:`folder:${token}:page${Math.max(0,offset-8)}`}]);
     if (offset+8 < options.length) rows.push([{text:'Next folders',callback_data:`folder:${token}:page${offset+8}`}]);
+    rows.push([{text:'Add folder and use it',callback_data:`folder:${token}:add`}]);
     rows.push([{text:'Cancel',callback_data:`folder:${token}:cancel`}]);
     return rows;
   }
@@ -83,9 +87,61 @@ export class FolderSelection {
         if (active === request) { this.folderRequests.delete(activeToken); pending = true; }
       }
       if (!pending) return;
-      void source.api.editMessageText(source.chat!.id,message.message_id,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}})
+      void source.api.editMessageText(source.chat!.id,request.messageId,this.folderText(request,'This folder request expired. Send the original task again.'),{reply_markup:{inline_keyboard:[]}})
         .catch(error => console.error('Could not retire expired folder controls.',error));
     },300000).unref();
+    return true;
+  }
+  async folderReply(ctx: Context): Promise<boolean> {
+    const reply = ctx.message?.reply_to_message;
+    const match = reply && 'text' in reply ? /^Folder entry \[([A-Za-z0-9_-]{22})\]\n/.exec(reply.text ?? '') : null;
+    if (!match || reply?.from?.id !== this.dependencies.botId() ||
+        'forward_origin' in reply || 'forward_date' in reply) return false;
+    // The bot-authored marker survives request retirement and restarts, so old replies
+    // are consumed even after the in-memory continuation no longer exists.
+    const token = match[1]!;
+    const request = this.folderRequests.get(token);
+    if (!request || !ctx.chat || !ctx.from || ctx.from.is_bot || ctx.message?.sender_chat ||
+        request.state.kind !== 'entry' || reply.message_id !== request.messageId ||
+        ctx.chat.id !== request.source.chat!.id || ctx.from.id !== request.authority?.from?.id ||
+        !sameTopicDestination(contextDestination(ctx),contextDestination(request.source))) return true;
+    await this.dependencies.authorize(ctx.chat.id,ctx.from.id);
+    await this.dependencies.authorize(ctx.chat.id,request.source.from!.id);
+    if (!(await this.dependencies.currentAdmin(ctx))) throw new Error('Administrator access changed before adding a folder.');
+    if (this.folderRequests.get(token) !== request) return true;
+    if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.dependencies.admissionEpoch() ||
+        this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
+        JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint) {
+      this.folderRequests.delete(token);
+      await replyTo(ctx,contextDestination(ctx),'This folder request is no longer active. Send the original task again.');
+      return true;
+    }
+    const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
+    if (!input || /[\r\n\0]/.test(input) || isAbsolute(input)) {
+      await replyTo(ctx,contextDestination(ctx),'Reply with one relative folder path.');
+      return true;
+    }
+    const option = normalize(input).replace(/\/+$/, '') || '.';
+    const config = readConfig(this.dependencies.config.configPath);
+    const assigned = findInstance(config,this.dependencies.botId(),ctx.chat.id)!;
+    const chat = assigned.instance.chats.find(chat => chat.botId === this.dependencies.botId() && chat.chatId === ctx.chat!.id)!;
+    chat.folder_options = [...new Set([...request.options,option])];
+    // No await between the fresh authorization/settings checks and this synchronous
+    // append. Advance only this continuation's fingerprint, not other pending requests.
+    writeConfig(config);
+    const liveChat = findInstance(this.dependencies.config,this.dependencies.botId(),ctx.chat.id)!.instance.chats
+      .find(chat => chat.botId === this.dependencies.botId() && chat.chatId === ctx.chat!.id)!;
+    liveChat.folder_options = chat.folder_options;
+    const settings = this.folderSettings(ctx.chat.id);
+    request.options = settings.options;
+    request.fingerprint = JSON.stringify(settings);
+    this.folderRequests.delete(token);
+    const nextToken = randomBytes(16).toString('base64url');
+    const restore = async (text: string, rows: {text:string;callback_data:string}[][]) => {
+      await ctx.api.editMessageText(ctx.chat!.id,request.messageId,this.folderText(request,text),{reply_markup:{inline_keyboard:rows}});
+      if (request.expires > Date.now()) this.folderRequests.set(nextToken,request);
+    };
+    await this.useFolder(ctx,request,nextToken,resolve(request.defaultDir,option),false,restore);
     return true;
   }
   async folderCallback(ctx: Context, data: string): Promise<void> {
@@ -125,17 +181,22 @@ export class FolderSelection {
       await ctx.answerCallbackQuery('Ask a current group administrator to choose or add a folder for this pending task.');
       return;
     }
+    if (this.folderRequests.get(token) !== request) {
+      await ctx.answerCallbackQuery('This selection is outdated. Use the current folder buttons.');
+      return;
+    }
     if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() ||
         refreshTermination(this.dependencies.config) || JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint) {
       this.folderRequests.delete(token);
       await ctx.answerCallbackQuery('This request expired or its settings changed. Send the task again.');
-      await ctx.editMessageText('This folder request is no longer active. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+      await ctx.editMessageText(this.folderText(request,'This folder request is no longer active. Send the original task again.'),{reply_markup:{inline_keyboard:[]}});
       return;
     }
     const state = request.state;
     if (action !== 'cancel' && !(
-      (state.kind === 'choose' && (action.startsWith('page') ||
+      (state.kind === 'choose' && (action === 'add' || action.startsWith('page') ||
         (/^\d+$/.test(action) && Number(action) >= state.offset && Number(action) < state.offset+8 && request.options[Number(action)] !== undefined))) ||
+      (state.kind === 'entry' && action === 'other') ||
       (state.kind === 'create' && (action === 'create' || (action === 'other' && request.options.length > 1))) ||
       (state.kind === 'failed' && (action === 'retry' || (action === 'other' && request.options.length > 1))))) {
       await ctx.answerCallbackQuery('This selection is outdated. Use the current folder buttons.');
@@ -144,18 +205,42 @@ export class FolderSelection {
     this.folderRequests.delete(token);
     await ctx.answerCallbackQuery();
     if (action === 'cancel') {
-      await ctx.editMessageText('Folder selection cancelled.',{reply_markup:{inline_keyboard:[]}});
+      await ctx.editMessageText(this.folderText(request,'Folder selection cancelled.'),{reply_markup:{inline_keyboard:[]}});
       return;
     }
     token = randomBytes(16).toString('base64url');
     const restore = async (text: string, rows: {text:string;callback_data:string}[][]) => {
-      await ctx.editMessageText(text,{reply_markup:{inline_keyboard:rows}});
+      await ctx.editMessageText(this.folderText(request,text),{reply_markup:{inline_keyboard:rows}});
       if (request.expires <= Date.now()) {
-        await ctx.editMessageText('This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
+        await ctx.editMessageText(this.folderText(request,'This folder request expired. Send the original task again.'),{reply_markup:{inline_keyboard:[]}});
         return;
       }
       this.folderRequests.set(token,request);
     };
+    if (action === 'add') {
+      request.authority = ctx;
+      request.entryToken = token;
+      request.state = {kind:'entry'};
+      await ctx.editMessageText(this.folderText(request,'Continue with the folder entry below.'),{reply_markup:{inline_keyboard:[]}});
+      // A new prompt opens native reply entry while retaining cancellation controls.
+      // Client::get_reply_markup accepts force_reply with inline_keyboard:
+      // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp#L11049-L11064
+      const markup = {force_reply:true,inline_keyboard:[[
+        {text:'Choose another folder',callback_data:`folder:${token}:other`},
+        {text:'Cancel',callback_data:`folder:${token}:cancel`}]]};
+      const prompt = await replyTo(ctx,contextDestination(request.source),
+        this.folderText(request,'Reply with one relative folder path.'),{reply_markup:markup});
+      request.messageId = prompt.message_id;
+      if (request.expires <= Date.now() || request.active?.() === false ||
+          request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() ||
+          refreshTermination(this.dependencies.config) || JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint) {
+        await ctx.api.editMessageText(ctx.chat.id,request.messageId,
+          this.folderText(request,'This folder request is no longer active. Send the original task again.'),{reply_markup:{inline_keyboard:[]}});
+        return;
+      }
+      this.folderRequests.set(token,request);
+      return;
+    }
     if (action === 'other' || action.startsWith('page')) {
       const offset = action === 'other' ? 0 : Number(action.slice(4));
       if (!Number.isSafeInteger(offset) || offset < 0 || offset >= request.options.length || offset % 8 !== 0) return;
@@ -167,6 +252,19 @@ export class FolderSelection {
     const path = state.kind === 'create' || state.kind === 'failed' ? state.path :
       resolve(request.defaultDir,request.options[Number(action)]!);
     const create = state.kind === 'create' || (state.kind === 'failed' && state.create);
+    await this.useFolder(ctx,request,token,path,create,restore);
+  }
+  private async useFolder(ctx: Context, request: FolderRequest, token: string,
+    path: string, create: boolean, restore: (text: string, rows: {text:string;callback_data:string}[][]) => Promise<void>): Promise<void> {
+    if (create) {
+      await this.dependencies.authorize(ctx.chat!.id,ctx.from!.id);
+      await this.dependencies.authorize(ctx.chat!.id,request.source.from!.id);
+      if (!(await this.dependencies.currentAdmin(ctx))) throw new Error('Administrator access changed before folder creation.');
+      if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.dependencies.admissionEpoch() ||
+          this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
+          JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
+        throw new Error('This folder request is stale. Send the command again.');
+    }
     let cwd: string;
     try {
       const resolved = this.resolveFolder(path,create);
@@ -188,11 +286,15 @@ export class FolderSelection {
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
       return;
     }
-    await ctx.editMessageText(`Runtime folder: ${cwd}`,{reply_markup:{inline_keyboard:[]}});
-    if (request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
-        JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint)
+    await ctx.api.editMessageText(ctx.chat!.id,request.messageId,this.folderText(request,`Runtime folder: ${cwd}`),{reply_markup:{inline_keyboard:[]}});
+    if (request.active?.() === false || request.expires <= Date.now() || request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
+        JSON.stringify(this.folderSettings(ctx.chat!.id)) !== request.fingerprint)
       throw new Error('This folder request is stale. Send the command again.');
-    await request.resume(cwd,ctx);
+    await request.resume(cwd,request.authority ?? ctx);
+  }
+  private folderText(request: FolderRequest, text: string): string {
+    // Keep the entry marker on retired messages so replies cannot become new tasks.
+    return request.entryToken ? `Folder entry [${request.entryToken}]\n${text}` : text;
   }
   private resolveFolder(path: string, create: boolean): string | undefined {
     if (create) mkdirSync(path,{recursive:true});
