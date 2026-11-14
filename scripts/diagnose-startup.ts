@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { readConfig, defaultConfigPath } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
 import type { TopicSession } from '../shared/contracts.js';
+import { logEvent } from '../src/logging.js';
 
 const originalExec = childProcess.execFile;
 childProcess.execFile = new Proxy(originalExec, {
@@ -17,7 +18,7 @@ childProcess.execFile = new Proxy(originalExec, {
       args[args.length - 1] = (error: childProcess.ExecFileException | null, stdout: string | Buffer, stderr: string | Buffer) => {
         if (!error) {
           const registry = JSON.parse(stdout.toString());
-          process.stdout.write(String(JSON.stringify({ hosts: registry.hosts.map((host: { instanceId: string; relayConnected: boolean }) => ({ instanceId: host.instanceId, relayConnected: host.relayConnected })) })) + '\n');
+          logEvent('info', 'startup-registry-observed', { hosts: registry.hosts.map((host: { instanceId: string; relayConnected: boolean }) => ({ instanceId: host.instanceId, relayConnected: host.relayConnected })) });
         }
         callback(error, stdout, stderr);
       };
@@ -36,9 +37,9 @@ const start = Date.now();
 try {
   const binding = await runtime.ensure(session);
   assert.ok(binding.sessionId);
-  process.stdout.write(String(`PASS real managed startup in ${Date.now() - start} ms.`) + '\n');
+  logEvent('info', 'managed-startup-verified', { sessionId: session.id, instanceId: instance.id, durationMs: Date.now() - start });
 } catch (error) {
-  console.error(`FAIL real managed startup in ${Date.now() - start} ms. ${error instanceof Error ? error.message : 'Unknown failure'}`);
+  logEvent('error', 'managed-startup-failed', { sessionId: session.id, instanceId: instance.id, durationMs: Date.now() - start, error });
   process.exitCode = 1;
 } finally {
   await runtime.close();

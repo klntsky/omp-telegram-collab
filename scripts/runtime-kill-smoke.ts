@@ -12,6 +12,7 @@ import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { startLocalRelay } from './local-relay.js';
 import { writeConfig } from '../src/config.js';
+import { logEvent } from '../src/logging.js';
 
 const execute = promisify(execFile);
 
@@ -179,7 +180,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     await runtime.kill(managed);
     await retiring;
     assert.equal(await alive(resumedLifecycle.pid), false, 'kill must safely supersede concurrent graceful retirement');
-    process.stdout.write(String('PASS actual OMP recovered graceful stop, forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.') + '\n');
+    logEvent('info', 'runtime-kill-verified', { directory, checks: ['recovered-stop', 'attached-kill', 'managed-kill', 'history-resume', 'identity-refusal', 'host-isolation', 'startup-cancellation', 'concurrent-retirement'] });
   } finally {
     if (attached && !terminalExited) await runtime.kill(attached).catch(() => {});
     if (terminal && !terminalExited) {
@@ -198,7 +199,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const relay = await startLocalRelay();
   try {
     await verifyRuntimeKill(directory, process.env.OMP_EXECUTABLE ?? 'omp', relay.url);
-    process.stdout.write(String('No model prompt or live Telegram API request was sent.') + '\n');
+    logEvent('info', 'runtime-kill-smoke-completed', { modelRequests: 0, telegramRequests: 0 });
   } finally {
     await relay.close();
     await rm(directory, { recursive: true, force: true });
