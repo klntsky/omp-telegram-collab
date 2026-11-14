@@ -19,8 +19,14 @@ function promptFingerprint(content: PromptContent): string {
 export class PromptLedger {
   constructor(private readonly db: DatabaseSync, private readonly getSession: (id: string) => TopicSession | undefined) {}
   hasPromptHistory(sessionId: string): boolean {
-    // Pending or uncertain delivery may already have reached OMP. Only anchored
-    // receipts belong to this topic's submissions; forked history is uncorrelated.
+    // Decide whether to omit the first-prompt preamble from existing durable
+    // Telegram submissions, without maintaining a separate "preamble sent" flag.
+    // Pending or uncertain delivery may already have reached OMP; acceptance
+    // replaces the submission with a receipt, which survives host/service restarts.
+    // Only anchored receipts count: inherited fork history has no submission in
+    // the new topic, whose first Telegram prompt needs its own topic link.
+    // initial_state tracks task claiming before delivery, not submission history,
+    // and ordinary prompts in manually created topics do not use that state.
     return Boolean(this.db.prepare(
       'SELECT 1 FROM prompt_submissions WHERE session_id=? UNION ALL SELECT 1 FROM prompt_receipts WHERE session_id=? AND message_id IS NOT NULL LIMIT 1',
     ).get(sessionId, sessionId));
