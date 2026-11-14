@@ -115,7 +115,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       const filename = 'prepared-document.txt';
       const bytes = Buffer.from('Keep the completed worktree when later preparation fails.');
       const sent = await sendDocument(app, filename, bytes, {
-        caption: `/new /worktree /model_preset e2e-alternate ${tasks.documentPreparation.prompt}`,
+        caption: `/new /worktree /modelpreset e2e-alternate ${tasks.documentPreparation.prompt}`,
       });
       await app.waitForCondition(() => app.store.listSessions(app.telegram.bot.id).some(session => !previous.has(session.id)));
       const pending = app.store.listSessions(app.telegram.bot.id).find(session => !previous.has(session.id))!;
@@ -163,7 +163,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     });
     try {
       const sent = await sendDocument(app, filename, Buffer.from('Do not overwrite the original.'), {
-        caption: `/new /model_preset e2e-alternate ${tasks.documentCancellation.prompt}`,
+        caption: `/new /modelpreset e2e-alternate ${tasks.documentCancellation.prompt}`,
       });
       await app.waitForMessageHandled(sent.id);
       const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
