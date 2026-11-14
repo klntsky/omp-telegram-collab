@@ -123,9 +123,18 @@ promptHelp(chatId: number): string {
       : 'Only group administrators can send prompts. Other members’ messages are ignored.'}`;
   }
 
-commandHelp(): string {
-    const commands = `${help}\n/fork — fork this session at its tip, or reply to select a persisted message (group admin)`;
-    return this.deps.config.publicUrl ? commands : commands.split('\n').filter(line => !line.startsWith('/session ')).join('\n');
+commandHelp(chatId: number, admin: boolean): string {
+    if (!findInstance(this.deps.config, this.deps.botId(), chatId) || !this.deps.store.isEnrolled(this.deps.botId(), chatId)) {
+      return help({ access: admin ? 'setup-admin' : 'setup-member' });
+    }
+    const proposals = this.usersCanProposePrompts(chatId);
+    return help({
+      access: admin ? 'admin' : 'member',
+      proposals,
+      allMessages: this.allMessagesArePrompts(chatId),
+      miniApp: Boolean(this.deps.config.publicUrl),
+      topicWorktrees: this.createsTopicWorktrees(chatId),
+    });
   }
 
 async currentAdmin(ctx: Context): Promise<boolean> {

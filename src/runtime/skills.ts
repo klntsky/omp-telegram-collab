@@ -7,6 +7,7 @@ import type { AppConfig } from '../../shared/contracts.js';
 import { withCancellation } from '../cancellation.js';
 import { ompArguments } from './arguments.js';
 import { privateFile } from './files.js';
+import { OmpProviderSetupError } from './provider-setup-error.js';
 import { record, errno } from './values.js';
 interface SkillsDependencies {
   assertActive(): void;
@@ -139,7 +140,16 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
         };
         const timer = setTimeout(() => finish(new Error('OMP skill discovery timed out')), deps.config.omp.startupTimeoutMs);
         processHandle.once('error', error => finish(error));
-        processHandle.once('close', (code, signal) => finish(new Error(`OMP skill discovery exited before responding (code ${code}, signal ${signal})`)));
+        processHandle.once('close', (code, signal) => {
+          const message = `OMP skill discovery exited before responding (code ${code}, signal ${signal})`;
+          // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/sdk.ts
+          // createAgentSession supplies this fallback; main in
+          // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/main.ts
+          // exits before runRpcMode when no model was selected.
+          const missingProvider = code !== null && code !== 0 && signal === null
+            && stderr.includes('No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.');
+          finish(Object.assign(missingProvider ? new OmpProviderSetupError(message) : new Error(message), { code, signal }));
+        });
         processHandle.stderr!.setEncoding('utf8');
         processHandle.stderr!.on('data', (part: string) => {
           if (settled) return;

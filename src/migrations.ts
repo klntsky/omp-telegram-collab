@@ -19,7 +19,7 @@ const schema = `
       CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),name TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),names TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
       CREATE TABLE IF NOT EXISTS skill_catalogs (instance_id INTEGER PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
@@ -36,12 +36,12 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 6) throw new Error(`Unsupported database schema version ${version}; create a fresh database`);
+    if (version !== 0 && version !== 7) throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
-      if (existing) throw new Error('Unsupported existing database; create a fresh database');
+      if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=6');
+      db.exec('PRAGMA user_version=7');
     }
     db.exec('COMMIT');
   } catch (error) {

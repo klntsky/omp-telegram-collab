@@ -149,9 +149,12 @@ export class SettingsPanels {
       return;
     }
     if (action.kind === 'page') {
+      // Catalog discovery can launch OMP, so acknowledge before waiting for it.
+      await ctx.answerCallbackQuery();
       await this.render(panel, config, action.page, action.offset);
       return;
     }
+    await ctx.answerCallbackQuery();
     await this.mutations.apply(ctx, panel, action);
   }
 }
