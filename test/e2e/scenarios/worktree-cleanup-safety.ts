@@ -150,6 +150,7 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
       await assert.rejects(app.runtime.deleteWorktree({ ...session, status: 'closed' }, target, async () => {}), /host is busy/);
       // A fresh runtime has neither observed this turn nor retained its prompt lease.
       // It must consult native activity rather than interrupting the unknown turn.
+      await app.pause();
       const unobserved = new OmpRuntime(app.config);
       try {
         await assert.rejects(
@@ -158,6 +159,7 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
         );
       } finally {
         await unobserved.close();
+        await app.restart();
       }
       await retained(false);
       assert.equal(await app.runtime.isRunning(session), true);

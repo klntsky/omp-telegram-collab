@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { it } from 'node:test';
+import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { combineTelegramErrors } from '../helpers/errors.js';
 import { clickPanel, setTopicClosed, submitCallback, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
@@ -29,8 +30,13 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     const start = app.apiCalls.length;
     const cancel = submitCallback(app, confirmation, confirmation.buttons[1]!);
     let queuedConfirm: Promise<void> | undefined;
+    const requestAbort = new TelegramAbortController();
+    const abortRequest = () => requestAbort.abort();
+    t.signal.addEventListener('abort', abortRequest, { once: true });
     t.after(async () => {
       releaseEdit.resolve();
+      requestAbort.abort();
+      t.signal.removeEventListener('abort', abortRequest);
       await queuedConfirm;
     }, { timeout: 30000 });
     try {
@@ -46,7 +52,7 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
       const queued = await app.bot.api.getUpdates({
         offset: cancelUpdate.update_id + 1, timeout: 30,
         allowed_updates: ['message', 'callback_query', 'my_chat_member', 'inline_query'],
-      }, t.signal);
+      }, requestAbort.signal);
       const callback = queued.find(update =>
         update.callback_query?.data === confirmation.buttons[0])?.callback_query;
       assert.ok(callback?.message && 'reply_markup' in callback.message);
@@ -63,8 +69,8 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.notEqual(fresh.buttons[0], confirmation.buttons[0]);
     await app.restart();
     await app.runtime.stop(app.store.getSession(session.id)!);
-    await submitCallback(app, confirmation, confirmation.buttons[0]!);
-    await submitCallback(app, confirmation, confirmation.buttons[1]!);
+    const cancelledToken = confirmation.buttons[0]!.split(':').at(-1)!;
+    assert.equal(app.store.worktreeConfirmations.get(session.id, confirmation.messageId, cancelledToken), undefined);
     assert.ok(existsSync(target.path));
     const removalStart = app.apiCalls.length;
     await submitCallback(app, fresh, fresh.buttons[0]!);
