@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
@@ -51,7 +52,7 @@ test('receipt replay respects its submission boundary, sender, entry identity an
   }
 });
 
-test('image provenance supports partial receipts and refuses ambiguous interrupted duplicates', () => {
+test('image provenance matches persisted blob identities and refuses ambiguous interrupted duplicates', () => {
   const { store, id } = fixture();
   const image = {
     text: '',
@@ -61,29 +62,33 @@ test('image provenance supports partial receipts and refuses ambiguous interrupt
     text: '',
     images: [{ type: 'image' as const, mimeType: 'image/png', data: 'BBBB' }],
   };
+  const persisted = (content: typeof image) => ({
+    ...content,
+    images: content.images.map(part => ({
+      ...part,
+      data: `blob:sha256:${createHash('sha256').update(Buffer.from(part.data, 'base64')).digest('hex')}`,
+    })),
+  });
   try {
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 200);
     store.recordPromptSubmission(id, 'omp-fixture', sender, otherImage, 201);
-    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'full-image',parentEntryId:null}, sender, otherImage).messageId, 201);
-    assert.equal(
-      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'partial-image',parentEntryId:null}, sender, { text: '' }).messageId,
-      200,
-    );
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'full-image',parentEntryId:null}, sender, persisted(otherImage)).messageId, 201);
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'persisted-image',parentEntryId:null}, sender, persisted(image)).messageId, 200);
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 202);
     store.beginPromptReceiptSnapshot(id, 'omp-fixture');
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 203);
-    const first = store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, image);
+    const first = store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, persisted(image));
     assert.equal(first.messageId, undefined);
     assert.equal(first.submissionId, undefined);
     assert.deepEqual(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, image), {
       fresh: false,
     });
     assert.equal(
-      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-two',parentEntryId:null}, sender, image).messageId,
+      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-two',parentEntryId:null}, sender, persisted(image)).messageId,
       undefined,
     );
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 204);
-    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'unambiguous-again',parentEntryId:null}, sender, image).messageId, 204);
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'unambiguous-again',parentEntryId:null}, sender, persisted(image)).messageId, 204);
   } finally {
     store.close();
   }
