@@ -24,16 +24,17 @@ export function isDeadTelegramTestSession(error: unknown): boolean {
     || tl.RpcError.is(error, 'USER_DEACTIVATED_BAN');
 }
 
-export async function forkTelegramTestSession(signal: AbortSignal, excludeUserId?: number): Promise<TelegramTestSession> {
+export async function forkTelegramTestSession(signal: AbortSignal, seedSessions?: readonly string[]): Promise<TelegramTestSession> {
   let prepared: TelegramTestSession | undefined;
   try {
     return await withTelegramTestLock('authorization', signal, async () => withTelegramTestSessionStorage(await resolveTelegramTestEnvFile(), async storage => {
     const credentials = readTelegramApplicationCredentials(storage.env);
     const failures: unknown[] = [];
     let busy = 0;
-    for (const session of [...storage.sessions]) {
+    const seeds = seedSessions === undefined ? [...storage.sessions]
+      : storage.sessions.filter(session => seedSessions.includes(session));
+    for (const session of seeds) {
       signal.throwIfAborted();
-      if (excludeUserId !== undefined && readStringSession(session).self?.userId === excludeUserId) continue;
       const releaseSeed = await acquireTelegramTestLock(telegramTestSessionLockName(session), signal, true);
       if (!releaseSeed) { busy++; continue; }
       const seed = createTelegramTestBaseClient(credentials);
@@ -41,8 +42,7 @@ export async function forkTelegramTestSession(signal: AbortSignal, excludeUserId
       let usable = false;
       try {
         await seed.importSession(session);
-        const identities = await seed.call({ _: 'users.getUsers', id: [{ _: 'inputUserSelf' }] }, { abortSignal: signal, timeout: 30000 });
-        if (excludeUserId !== undefined && identities.some(user => user._ === 'user' && user.id === excludeUserId)) continue;
+        await seed.call({ _: 'users.getUsers', id: [{ _: 'inputUserSelf' }] }, { abortSignal: signal, timeout: 30000 });
         usable = true;
         const base = createTelegramTestBaseClient(credentials, readStringSession(session).primaryDcs);
         const client = new TelegramClient({ client: base, skipConversationUpdates: false });
@@ -124,7 +124,7 @@ export async function forkTelegramTestSession(signal: AbortSignal, excludeUserId
         if (cleanupErrors.length) throw combineTelegramErrors(...(originalFailure === undefined ? cleanupErrors : [originalFailure, ...cleanupErrors]));
       }
     }
-    const context = `No available Telegram test seed session${excludeUserId === undefined ? '' : ` for a different user than ${excludeUserId}`} (${busy} active; ${failures.length} failed). Run pnpm telegram:test:login if none remain.`;
+    const context = `No available Telegram test seed session (${busy} active; ${failures.length} failed). Run pnpm telegram:test:login if none remain.`;
     throw new AggregateError(failures, [context, ...failures.map(error => error instanceof Error ? error.message : String(error))].join('\n'), { cause: failures[0] });
     }, true));
   } catch (error) {

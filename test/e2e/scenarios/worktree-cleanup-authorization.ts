@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { it } from 'node:test';
+import { readStringSession } from '@mtcute/node/utils.js';
 import { forkTelegramTestSession } from '../../../scripts/lib/telegram-test-sessions.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { bounded } from '../helpers/async.js';
+import { resolveTelegramTestEnvFile, withTelegramTestSessionStorage } from '../helpers/telegram-env.js';
 import { clickPanel, setTopicClosed, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
 import { createCleanupWorktree } from '../helpers/worktree-cleanup.js';
 
@@ -12,8 +14,14 @@ export function registerWorktreeCleanupAuthorization(getApp: () => Collaboration
   it('cleanup requires current administrator access and binds confirmation to its requesting administrator', async t => {
     const app = getApp();
     const signal = t.signal;
+    const seeds = await withTelegramTestSessionStorage(await resolveTelegramTestEnvFile(), async storage =>
+      storage.sessions.filter(session => {
+        const userId = readStringSession(session).self?.userId;
+        return userId !== undefined && userId !== app.telegram.user.account.id;
+      }));
+    if (!seeds.length) throw new Error('Cleanup authorization test requires a second real Telegram test-network user. Run pnpm telegram:test:login with another registered account.');
     const sessionOwner = await withTelegramTestDeadline('secondary user authorization',
-      telegramTestTimeouts.authorization, signal, scope => forkTelegramTestSession(scope, app.telegram.user.account.id));
+      telegramTestTimeouts.authorization, signal, scope => forkTelegramTestSession(scope, seeds));
     t.after(() => sessionOwner.close());
     const participant = sessionOwner.client;
     const identity = await bounded(participant.getMe(), signal);
