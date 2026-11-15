@@ -137,7 +137,7 @@ export async function renderSettings(
         kind: 'page',
         page: 'root',
       });
-    if (page !== 'capacity') button('⬅️ Back', { kind: 'close' });
+    if (page !== 'capacity') button('✅ Save & exit', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
     const extra = { reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {

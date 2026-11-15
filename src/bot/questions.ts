@@ -214,7 +214,7 @@ export class BotQuestions {
       }
       if (request.kind === 'editor' && active()) {
         const message = await this.dependencies.delivery.run(session.chatId,
-          () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
+          () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),'Reply here with your answer.',{
             
             reply_markup:{force_reply:true,input_field_placeholder:'Type your custom answer'},
           }), active);

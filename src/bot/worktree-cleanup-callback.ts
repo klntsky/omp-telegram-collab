@@ -1,25 +1,20 @@
-import { z } from 'zod';
+export type WorktreeCleanupCallback =
+  | { action: 'offer'; sessionId: string }
+  | { action: 'confirm' | 'cancel'; sessionId: string; adminIdBase36: string; mac: string };
 
-const sessionId = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
-const administratorId = z.string().regex(/^[0-9a-z]{1,11}$/);
-const mac = z.string().regex(/^[A-Za-z0-9_-]{16}$/);
-
-// These are Telegram callback_data fields, not slash commands. Compact action tags
-// keep the session ID, base-36 administrator ID, and 96-bit MAC below 64 bytes.
-const offer = z.tuple([z.literal('wtcleanup'), z.literal('o'), sessionId])
-  .transform(([, , sessionId]) => ({ action: 'offer' as const, sessionId }));
-const approval = z.tuple([z.literal('wtcleanup'), z.enum(['c', 'x']), sessionId, administratorId, mac])
-  .transform(([, action, sessionId, adminIdBase36, mac]) => ({
-    action: action === 'c' ? 'confirm' as const : 'cancel' as const,
-    sessionId, adminIdBase36, mac,
-  }));
-const callback = z.union([offer, approval]);
-
-export type WorktreeCleanupCallback = z.infer<typeof callback>;
-
+// Telegram callback_data, not slash commands:
+// wtcleanup:o:<sessionId> or wtcleanup:<c|x>:<sessionId>:<adminIdBase36>:<mac>.
+// Compact tags keep a 52-bit administrator ID and 96-bit MAC below 64 bytes.
 export function decodeWorktreeCleanupCallback(data: string): WorktreeCleanupCallback | undefined {
-  const parsed = callback.safeParse(data.split(':'));
-  return parsed.success ? parsed.data : undefined;
+  const offer = /^wtcleanup:o:([A-Za-z0-9_-]{22})$/.exec(data);
+  if (offer) return { action: 'offer', sessionId: offer[1]! };
+  const approval = /^wtcleanup:(c|x):([A-Za-z0-9_-]{22}):([0-9a-z]{1,11}):([A-Za-z0-9_-]{16})$/.exec(data);
+  if (!approval) return undefined;
+  const [, action, sessionId, adminIdBase36, mac] = approval;
+  return {
+    action: action === 'c' ? 'confirm' : 'cancel',
+    sessionId: sessionId!, adminIdBase36: adminIdBase36!, mac: mac!,
+  };
 }
 
 export function encodeWorktreeCleanupCallback(data: WorktreeCleanupCallback): string {

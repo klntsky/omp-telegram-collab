@@ -21,6 +21,8 @@ import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-clean
 import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
 import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
+import { registerFolderSettings } from './scenarios/folder-settings.js';
+import { registerProviderSetup } from './scenarios/provider-setup.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -74,6 +76,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
   registerWorktreeCleanupAuthorization(() => app);
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
+  registerFolderSettings(() => app);
   registerForumDefaults(() => app, tasks);
   registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);
@@ -87,3 +90,4 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
 
 // Keep independent provisioning last to respect Telegram's forum-creation flood limits.
 registerMiniAppRecovery();
+registerProviderSetup();

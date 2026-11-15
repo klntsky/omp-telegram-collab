@@ -337,6 +337,7 @@ export class Store {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
   }
+  hasPromptHistory(sessionId: string): boolean { return this.prompts.hasPromptHistory(sessionId); }
   recordPromptSubmission(sessionId: string, ompSessionId: string, sender: string, content: PromptContent, messageId?: number): number {
     return this.prompts.recordPromptSubmission(sessionId, ompSessionId, sender, content, messageId);
   }

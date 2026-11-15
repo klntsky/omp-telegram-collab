@@ -54,10 +54,6 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
     if (detached && topicLifecycle) return true;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
-        if (deps.folderSettings(ctx.chat.id).options.length > 1) {
-          await replyTo(ctx,destination,'Use /new with a task to choose a runtime folder before creating a managed session.');
-          return true;
-        }
         const title = message.forum_topic_created.name;
         const defaultSkills = deps.defaultNewTopicSkills(ctx.chat.id);
         const folderFingerprint = JSON.stringify(deps.folderSettings(ctx.chat.id));
