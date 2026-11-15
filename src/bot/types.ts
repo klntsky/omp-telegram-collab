@@ -1,6 +1,6 @@
 import type { Context } from 'grammy';
 import type { CollabUiRequest } from '@oh-my-pi/pi-wire';
-import type { TopicSession, CollabConnection, PromptContent, PendingPromptContent, TypingMode } from '../../shared/contracts.js';
+import type { TopicSession, CollabConnection, PromptContent, PendingPromptContent, TypingMode, NewTopicPolicy } from '../../shared/contracts.js';
 import type { PendingSkillKey } from '../store.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -126,8 +126,9 @@ export type SettingsKey =
   | 'capacity'
   | 'worktrees'
   | 'folders'
+  | 'new-topics'
   | 'typing';
-export type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing' | 'folders';
+export type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing' | 'folders' | 'new-topics';
 export type SettingsAction =
   | { kind: 'page'; page: SettingsPage; offset?: number }
   | {
@@ -137,6 +138,7 @@ export type SettingsAction =
     }
   | { kind: 'default'; field: 'default_new_topic_skills' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
+  | { kind: 'new-topic-policy'; field: 'new_topic_policy'; value: NewTopicPolicy }
   | { kind: 'folders'; remove?: number; clear?: boolean; input?: 'append' | 'replace' }
   | { kind: 'close' };
 export interface SettingsPanel {

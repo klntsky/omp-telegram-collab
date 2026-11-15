@@ -124,6 +124,26 @@ test('new-topic defaults require unique skill arrays and preserve selection orde
   }
 });
 
+test('manual new-topic policy defaults to agent, round-trips all choices, and rejects other values', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _configPath, ...config } = validConfig(path, dir);
+  writeFileSync(path, stringify(config));
+  assert.equal(readConfig(path).instances[0]!.chats[0]!.new_topic_policy, 'agent');
+  for (const new_topic_policy of ['agent', 'chat-only', 'ask'] as const) {
+    const current = readConfig(path);
+    current.instances[0]!.chats[0]!.new_topic_policy = new_topic_policy;
+    writeConfig(current);
+    assert.equal(readConfig(path).instances[0]!.chats[0]!.new_topic_policy, new_topic_policy);
+  }
+  for (const new_topic_policy of ['enabled', '', true, false, 0, null, [], {}]) {
+    writeFileSync(path, stringify({
+      ...config,
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, new_topic_policy }] }],
+    }));
+    assertInvalid(path, () => readConfig(path), 'instances.0.chats.0.new_topic_policy');
+  }
+});
+
 test('YAML defaults forum boolean options independently and rejects nonboolean values', t => {
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);

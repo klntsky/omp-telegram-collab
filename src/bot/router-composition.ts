@@ -1,4 +1,6 @@
 import { InputRouter } from './input-router.js';
+import { ManualTopicPolicy } from './new-topic-policy.js';
+import type { InputLifecycleDependencies } from './input-lifecycle.js';
 import { BotInput } from './input.js';
 import type { Bot, Context } from 'grammy';
 import type { SkillPicker } from '../skill-picker.js';
@@ -57,32 +59,9 @@ interface RouterComponents {
 
 /** Composes the ordered input pipeline without giving operations a service-wide context. */
 export function composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts }: RouterComponents) {
-  const router: InputRouter = new InputRouter(
+  const lifecycleDependencies: InputLifecycleDependencies =
   {
-    answerQuestion: questions.answerQuestion.bind(questions),
-    applyTermination: lifecycle.applyTermination.bind(lifecycle),
-    approvePrompt: admission.approvePrompt.bind(admission),
-    assignedId: authorization.assignedId.bind(authorization),
-    bot: bot,
-    commandHelp: authorization.commandHelp.bind(authorization),
-    confirmCapacity: capacity.confirmCapacity.bind(capacity),
-    currentAdmin: authorization.currentAdmin.bind(authorization),
-    folderCallback: folders.folderCallback.bind(folders),
-    get id() { return lifecycle.id(); },
-    openSettings: settings.open.bind(settings),
-    config: options.config,
-    store: options.store,
-    presetCallback: presets.presetCallback.bind(presets),
-    saveSettingsReply: settings.saveReply.bind(settings),
-    settingsCallback: settings.callback.bind(settings),
-    settingsReplyPanel: panelStore.replyPanel.bind(panelStore),
-    setup: setup.setup.bind(setup),
-    showStatus: status.showStatus.bind(status),
-    skills: skills,
-    get stopped() { return lifecycle.stopped(); },
-    clearTermination: lifecycle.clearTermination.bind(lifecycle),
-  },
-  {
+    manualTopic: ctx => topicPolicy.created(ctx),
     get admissionEpoch() { return admission.epoch; },
     announce: entries.announce.bind(entries),
     applySessionTitle: titles.applySessionTitle.bind(titles),
@@ -115,7 +94,35 @@ export function composeInputRouter({ options, bot, lifecycle, skills, questions,
     topicIconValue: owners.topicIconValue.bind(owners),
     topicMetadata: owners.topicMetadata.bind(owners),
     windDownClosedSession: activity.windDownClosedSession.bind(activity),
+  };
+  const topicPolicy = new ManualTopicPolicy(lifecycleDependencies);
+  const router: InputRouter = new InputRouter(
+  {
+    topicPolicyCallback: topicPolicy.callback.bind(topicPolicy),
+    answerQuestion: questions.answerQuestion.bind(questions),
+    applyTermination: lifecycle.applyTermination.bind(lifecycle),
+    approvePrompt: admission.approvePrompt.bind(admission),
+    assignedId: authorization.assignedId.bind(authorization),
+    bot: bot,
+    commandHelp: authorization.commandHelp.bind(authorization),
+    confirmCapacity: capacity.confirmCapacity.bind(capacity),
+    currentAdmin: authorization.currentAdmin.bind(authorization),
+    folderCallback: folders.folderCallback.bind(folders),
+    get id() { return lifecycle.id(); },
+    openSettings: settings.open.bind(settings),
+    config: options.config,
+    store: options.store,
+    presetCallback: presets.presetCallback.bind(presets),
+    saveSettingsReply: settings.saveReply.bind(settings),
+    settingsCallback: settings.callback.bind(settings),
+    settingsReplyPanel: panelStore.replyPanel.bind(panelStore),
+    setup: setup.setup.bind(setup),
+    showStatus: status.showStatus.bind(status),
+    skills: skills,
+    get stopped() { return lifecycle.stopped(); },
+    clearTermination: lifecycle.clearTermination.bind(lifecycle),
   },
+  lifecycleDependencies,
   {
     assignedId: authorization.assignedId.bind(authorization),
     authorize: authorization.authorize.bind(authorization),

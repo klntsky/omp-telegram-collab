@@ -18,6 +18,7 @@ import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
+import { registerNewTopicPolicy } from './scenarios/new-topic-policy.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -67,6 +68,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     );
   });
   registerFolderSettings(() => app);
+  registerNewTopicPolicy(() => app);
   registerForumDefaults(() => app, tasks);
   registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);

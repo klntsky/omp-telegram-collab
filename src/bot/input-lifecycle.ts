@@ -1,4 +1,3 @@
-import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { InputIntent } from '../telegram-input.js';
@@ -8,11 +7,11 @@ import type { BotOptions } from '../bot.js';
 import type { MessageContext } from './input-router.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import { refreshTermination } from '../config.js';
-import { opendirSync, accessSync, constants, realpathSync } from 'node:fs';
 
 
 
 export interface InputLifecycleDependencies {
+  manualTopic(ctx: MessageContext): Promise<void>;
   readonly admissionEpoch: number;
   announce(session: TopicSession): Promise<void>;
   applySessionTitle(session: TopicSession): Promise<void>;
@@ -50,47 +49,15 @@ export interface InputLifecycleDependencies {
 export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: MessageContext, intent: InputIntent, session: TopicSession | undefined, destination: TopicDestination, detached: boolean): Promise<boolean> {
   const message = ctx.message;
   const topicLifecycle = intent.kind === 'event';
+    if (!session && destination.kind === 'topic' &&
+        ('forum_topic_closed' in message || 'forum_topic_reopened' in message)) {
+      deps.store.db.prepare('UPDATE manual_topic_choices SET closed=? WHERE bot_id=? AND chat_id=? AND thread_id=?')
+        .run('forum_topic_closed' in message ? 1 : 0, deps.id, destination.chatId, destination.threadId);
+      return true;
+    }
     if (detached && topicLifecycle) return true;
     if (message.forum_topic_created && destination.kind === 'topic') {
-      if (!session) {
-        const title = message.forum_topic_created.name;
-        const defaultSkills = deps.defaultNewTopicSkills(ctx.chat.id);
-        const folderFingerprint = JSON.stringify(deps.folderSettings(ctx.chat.id));
-        const epoch = deps.admissionEpoch;
-        await deps.chooseFolder(ctx,undefined,async (cwd,authority) => {
-          await deps.authorize(ctx.chat!.id,ctx.from!.id);
-          if (authority.callbackQuery) {
-            await deps.authorize(ctx.chat!.id,authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before manual session registration.');
-          }
-          if (epoch !== deps.admissionEpoch || deps.stopped || refreshTermination(deps.config) ||
-              folderFingerprint !== JSON.stringify(deps.folderSettings(ctx.chat!.id)))
-            throw new Error('Folder settings or service state changed before manual session registration.');
-          opendirSync(cwd).closeSync();
-          accessSync(cwd,constants.R_OK | constants.X_OK);
-          if (realpathSync(cwd) !== cwd) throw new Error('Managed working directory identity changed');
-          if (deps.store.getTopic({botId:deps.id,destination})) return;
-          const created = deps.store.createSession(
-            {
-              botId: deps.id,
-              chatId: destination.chatId,
-              threadId: destination.threadId,
-              instanceId: deps.assignedId(ctx.chat!.id), cwd,
-            },
-            title,
-            {kind:'managed'},
-          );
-
-          if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
-          if (deps.createsTopicWorktrees(ctx.chat!.id)) {
-            await deps.authorize(ctx.chat!.id, authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
-            await deps.createTopicWorktree(created);
-          }
-          await deps.announce(created);
-          await deps.refreshTopicStatus(created);
-        });
-      }
+      if (!session) await deps.manualTopic(ctx);
       return true;
     }
     if (session && message.forum_topic_edited) {

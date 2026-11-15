@@ -61,6 +61,7 @@ const configSchema = z.object({
       all_messages_are_prompts: z.boolean().default(true),
       users_can_propose_prompts: z.boolean().default(false),
       create_topic_worktrees: z.boolean().default(false),
+      new_topic_policy: z.enum(['agent', 'chat-only', 'ask']).default('agent'),
       folder_options: z.array(relativeFolderPath).default([]).transform(paths => [...new Set(paths)]),
       typing_indicators: z.enum(['disabled', 'streaming', 'inference']).default('disabled'),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),

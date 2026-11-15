@@ -24,6 +24,12 @@ const schema = `
       CREATE TABLE IF NOT EXISTS skill_catalogs (instance_id INTEGER PRIMARY KEY,skills TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
+      CREATE TABLE manual_topic_choices (
+        bot_id INTEGER NOT NULL, token TEXT NOT NULL, chat_id INTEGER NOT NULL,
+        thread_id INTEGER NOT NULL, message_id INTEGER NOT NULL, creator_id INTEGER NOT NULL,
+        title TEXT NOT NULL, instance_id INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+        state TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(bot_id,token), UNIQUE(bot_id,chat_id,thread_id)
+      );
       CREATE TABLE prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
       CREATE TABLE prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,PRIMARY KEY(session_id,omp_session_id,entry_id));
       CREATE TABLE replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
@@ -36,12 +42,12 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 7) throw new Error(`Unsupported database schema version ${version}`);
+    if (version !== 0 && version !== 8) throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=7');
+      db.exec('PRAGMA user_version=8');
     }
     db.exec('COMMIT');
   } catch (error) {

@@ -168,6 +168,7 @@ install(): void {
     const detached = destination.kind === 'topic' && this.deps.store.getTopicKind({botId:this.deps.botId(),chatId:destination.chatId,threadId:destination.threadId}) === 'detached';
     if (detached) return;
     const topic = this.deps.store.getTopic({botId:this.deps.botId(),destination});
+    if (!topic && destination.kind === 'topic' && intent.kind === 'session-prompt') return;
     if (topic && topic.status !== 'open') return;
     if ((intent.kind === 'new-task' || intent.kind === 'session-prompt') &&
         !this.deps.usersCanProposePrompts(ctx.chat.id) && !(await this.deps.currentAdmin(ctx))) return;
