@@ -228,6 +228,8 @@ Each live test worker process owns its Telegram user client, peer cache, updates
 
 Cross-process filesystem locks protect authorization selection and reusable bot ownership. An authorization remains exclusively owned for its worker's lifetime, so another worker cannot use an active key as its seed. Definitively invalid authorizations are removed from the shared private session store; transient failures do not revoke or discard credentials.
 
+The shared credential-storage boundary atomically replaces managed dotenv assignments under the authorization lock, preserving unrelated configuration and only the current credential lists. The runtime's child-environment boundary excludes test-only credentials from native OMP and Git processes without modifying the service environment or provider configuration.
+
 Each checkout can lease only one bot at a time. A checkout-scoped lock serializes its bot-using fixtures, and a bot-scoped lock excludes competing checkouts. Acquisition waits cancellably for available capacity rather than creating another bot. The fixture owns its forum and must finish application polling before releasing its bot lease. Unsafe teardown retains ownership until the poller stops or the owning process exits. Tokens and sessions remain in shared private storage; test teardown neither deletes bots nor logs out retained sessions.
 
 Production application bots communicate directly with Telegram's Bot API; provisioning does not hide rate-limit failures or replay ambiguous mutations. Developer setup belongs in [Development](DEVELOPMENT.md#run-tests-against-telegrams-test-network).

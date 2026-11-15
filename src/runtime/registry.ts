@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { type RegistryHost } from './types.js';
+import { childEnvironment } from './environment.js';
 interface RegistryDependencies {
   readonly config: AppConfig;
   assertActive(): void;
@@ -25,7 +26,7 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     const output = await new Promise<string>((resolve, reject) => {
       execFile(deps.config.omp.executable, args, {
         cwd: deps.config.dataDir,
-        env: process.env,
+        env: childEnvironment(),
         timeout: Math.min(remaining, 5_000),
         killSignal: 'SIGKILL',
         maxBuffer: 2 * 1024 * 1024,

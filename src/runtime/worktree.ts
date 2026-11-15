@@ -7,6 +7,7 @@ import type { WorktreeTarget } from '../omp.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
 import { writeBinding, readHeader } from './files.js';
 import { errno, record } from './values.js';
+import { childEnvironment } from './environment.js';
 interface WorktreeDependencies {
   readonly config: AppConfig;
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{ bind(id: string): void; release(): void }>;
@@ -38,7 +39,7 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
 
   function git(cwd: string, args: string[], missingRepository = false): Promise<string | undefined> {
     const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+    const env = Object.fromEntries(Object.entries(childEnvironment()).filter(([key]) => !key.startsWith('GIT_')));
     execFile('git', args, {
       cwd, env: { ...env, LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
       timeout: deps.config.omp.startupTimeoutMs, killSignal: 'SIGKILL',
@@ -219,7 +220,7 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     const child = spawn(deps.config.omp.executable, [
       ...deps.config.omp.args, '--mode', 'rpc', '--resume', pin.sessionFile,
       '--cwd', pin.cwd, '--config', path.join(dir, 'runtime.yml'), '--no-title',
-    ], { cwd: pin.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    ], { cwd: pin.cwd, env: childEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     deps.skillProcesses.add(child);
     let buffer = '';
     let diagnostics = '';

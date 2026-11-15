@@ -25,11 +25,12 @@ import { createOwnership, type RuntimeOwnership } from './runtime/ownership.js';
 import { createAdmission, type RuntimeAdmission } from './runtime/admission.js';
 import { createSessions, type RuntimeSessions } from './runtime/sessions.js';
 import { createTermination, type RuntimeTermination } from './runtime/termination.js';
+import { childEnvironment } from './runtime/environment.js';
 
 // Terminal joins launch only the native client; they must not acquire service-owned runtime resources.
 export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
   joinTerminal(executable, url) {
-    return spawn(executable, ['join', url], { stdio: 'inherit', shell: false });
+    return spawn(executable, ['join', url], { env: childEnvironment(), stdio: 'inherit', shell: false });
   },
 };
 
