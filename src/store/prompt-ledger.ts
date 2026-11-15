@@ -3,12 +3,19 @@ import { createHash } from 'node:crypto';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { MessageAnchor } from '../store.js';
 
+// OMP's persisted blob identities hash decoded image bytes, not their base64 encoding.
+// https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/blob-store.ts#L342-L360
 function promptFingerprint(content: PromptContent): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
         content.text,
-        (content.images ?? []).map((image) => [image.mimeType, image.data]),
+        (content.images ?? []).map((image) => [
+          image.mimeType,
+          /^blob:sha256:[a-f0-9]{64}$/.test(image.data)
+            ? image.data.slice('blob:sha256:'.length)
+            : createHash('sha256').update(Buffer.from(image.data, 'base64')).digest('hex'),
+        ]),
       ]),
     )
     .digest('hex');
@@ -27,9 +34,9 @@ export class PromptLedger {
   ): number {
     const result = this.db
       .prepare(
-        "INSERT INTO prompt_submissions (session_id,omp_session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,?,'pending')",
+        "INSERT INTO prompt_submissions (session_id,omp_session_id,sender,message_id,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
       )
-      .run(sessionId, ompSessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
+      .run(sessionId, ompSessionId, sender, messageId ?? null, promptFingerprint(content));
     return Number(result.lastInsertRowid);
   }
   rejectPromptSubmission(submissionId: number): void {
@@ -77,18 +84,16 @@ export class PromptLedger {
           ...(previous.message_id === null ? {} : { messageId: Number(previous.message_id) }),
         };
       }
-      const column = content.images === undefined ? 'text' : 'fingerprint';
-      const value = column === 'text' ? content.text : promptFingerprint(content);
-      let condition = `session_id=? AND omp_session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
-      let parameters = [
+      const condition = 'session_id=? AND omp_session_id=? AND sender=? AND fingerprint=? AND (? IS NULL OR id<=?)';
+      const parameters = [
         sessionId,
         anchor.ompSessionId,
         sender ?? '',
-        value,
+        promptFingerprint(content),
         snapshotBoundary ?? null,
         snapshotBoundary ?? null,
       ];
-      let candidates =
+      const candidates =
         sender === undefined
           ? []
           : this.db
@@ -96,28 +101,8 @@ export class PromptLedger {
                 `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
               )
               .all(...parameters);
-      let uncorrelated = false;
-      if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
-        condition = 'session_id=? AND omp_session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
-        parameters = [
-          sessionId,
-          anchor.ompSessionId,
-          sender,
-          content.text,
-          snapshotBoundary ?? null,
-          snapshotBoundary ?? null,
-        ];
-        candidates = this.db
-          .prepare(
-            `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
-          )
-          .all(...parameters);
-        uncorrelated = candidates.length > 0;
-      }
       const pending = candidates[0];
-      const conflicting =
-        uncorrelated ||
-        (candidates.length > 1 && candidates.some((row) => row.state !== 'pending'));
+      const conflicting = candidates.length > 1 && candidates.some((row) => row.state !== 'pending');
       if (conflicting)
         this.db
           .prepare(`UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`)

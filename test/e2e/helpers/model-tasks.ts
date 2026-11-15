@@ -76,9 +76,9 @@ export async function completeWriteTask(app: TaskWorkflow, task: WriteTask, sent
   return reply;
 }
 
-export function taskInput(provider: FakeLlmProvider, task: WriteTask) {
+export function taskInput(provider: FakeLlmProvider, task: WriteTask, requestIndex = 0) {
   const requests = provider.requests.get(task.name)!;
-  const messages = requestMessages.parse(requests[0]!.messages);
+  const messages = requestMessages.parse(requests[requestIndex]!.messages);
   const user = messages.findLast(message => message.role === 'user');
   assert.ok(user);
   const content = userContent.parse(user.content);

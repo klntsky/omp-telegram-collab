@@ -288,9 +288,9 @@ test('old database schemas are rejected rather than migrated', async () => {
   const filename = join(directory, 'store.sqlite');
   try {
     const store = new Store(filename);
-    store.db.exec('PRAGMA user_version=3');
+    store.db.exec('PRAGMA user_version=7');
     store.close();
-    assert.throws(() => new Store(filename), /Unsupported database schema version 3/);
+    assert.throws(() => new Store(filename), /Unsupported database schema version 7/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

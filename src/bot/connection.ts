@@ -181,6 +181,9 @@ export class SessionConnections {
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
         if (session.runtime.kind === 'managed') {
+          listener.promptHistory = await this.deps.options.runtime.historySource(session);
+          if (!listener.promptHistory || listener.promptHistory.sessionId !== binding.sessionId)
+            throw new Error('Managed OMP history source does not match the connected session');
           listener.history = new SessionHistory(listener.feed, {
             sessionId: binding.sessionId,
             source: () => this.deps.options.runtime.historySource(session),

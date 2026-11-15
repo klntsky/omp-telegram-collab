@@ -9,6 +9,7 @@ import { AuthorizationDeniedError } from './types.js';
 import type { PromptPreparation } from './prompt-preparation.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import { SessionCapacityError } from '../runtime/types.js';
+import { readPromptReceipt } from '../prompt-receipt.js';
 
 export interface PromptReceiptsDependencies {
   authorize: (chatId: number, userId: number) => Promise<void>;
@@ -161,6 +162,7 @@ export class PromptReceipts {
     replay: boolean,
     ompSessionId: string,
   ): void {
+    if (listener.promptHistory) entry = readPromptReceipt(listener.promptHistory, entry.id);
     const text =
       typeof entry.content === 'string'
         ? entry.content
