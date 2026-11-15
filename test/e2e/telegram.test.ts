@@ -27,7 +27,9 @@ import { registerProviderSetup } from './scenarios/provider-setup.js';
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
 
-describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite => {
+// Sharing the fixture avoids reprovisioning across the worktree and question workflows.
+// Their combined serial runtime exceeds 15 minutes; individual operations retain deadlines.
+describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite => {
   const controls = createWorkflowTasks();
   const { tasks, scenarios, interrupted, cancelledQuestion, questionControls } = controls;
   let app: CollaborationTest;
