@@ -63,7 +63,8 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
           deps.dropListener(session.id);
         }
         await deps.listen(session);
-        await replyTo(ctx, destination, `🌳 ${text}`);
+        const response = `🌳 ${text}`;
+        await replyTo(ctx, destination, response, { entities: [{ type: 'code', offset: response.length - text.length, length: text.length }] });
         return true;
       }
       if (action === 'attach') {

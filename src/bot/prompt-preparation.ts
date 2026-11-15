@@ -22,7 +22,7 @@ export interface PromptPreparationDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   dropListener(sessionId: string): void;
-  replyPresetText(ctx: Context, text: string): Promise<void>;
+  replyPresetText(ctx: Context, text: string, code?: boolean): Promise<void>;
 }
 
 export class PromptPreparation {
@@ -69,7 +69,11 @@ export class PromptPreparation {
       const overwritten = saveDocument(path, bytes);
       text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
       saved?.({...prompt, text, documents: documents.slice(index + 1)});
-      await sendTo(this.deps.bot.api, destination, `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`);
+      const confirmation = `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`;
+      await sendTo(this.deps.bot.api, destination, confirmation, {entities: [
+        {type:'code',offset:'✅ Uploaded '.length,length:fileName.length},
+        {type:'code',offset:`✅ Uploaded ${fileName} to `.length,length:path.length},
+      ]});
     }
     return {...prompt, text};
   }
@@ -81,7 +85,7 @@ export class PromptPreparation {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
-    }, text => this.deps.replyPresetText(ctx, text));
+    }, (text, code) => this.deps.replyPresetText(ctx, text, code));
   }
   async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
     const setup = this.deps.options.store.getInitialDocumentSetup(session.id);
@@ -94,11 +98,12 @@ export class PromptPreparation {
     }
     if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(
       session, setup.extensions, authorize,
-      text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text), setup,
+      (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text,
+        code ? {entities:[{type:'code',offset:0,length:text.length}]} : undefined), setup,
     );
     this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
   }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, setup?: InitialDocumentSetup): Promise<void> {
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string, code?: boolean) => Promise<unknown>, setup?: InitialDocumentSetup): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -145,7 +150,7 @@ export class PromptPreparation {
           setup.preset = selectedPreset;
           this.deps.options.store.setInitialDocumentSetup(session.id, setup);
         }
-        await report(`🌳 ${text}`);
+        await report(`🌳 ${text}`, true);
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');

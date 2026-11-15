@@ -6,6 +6,7 @@ import type { Store } from '../store.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { refreshTermination } from '../config.js';
 import { decodeWorktreeCleanupCallback, encodeWorktreeCleanupCallback } from './worktree-cleanup-callback.js';
+import { codeEntities } from '../telegram-code.js';
 
 function contains(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
@@ -46,9 +47,10 @@ export class WorktreeCleanup {
     if (!target) return;
     // Manage Topics permits outgoing messages in closed topics. Do not reopen to send.
     // https://github.com/tdlib/td/blob/master/td/telegram/ForumTopicManager.cpp (can_send_message_to_forum_topic)
+    const text = `🌳 This topic used this Git worktree:\n${target.path}\n\nA group administrator can delete it after explicit confirmation. Session history is kept.`;
     await this.deps.delivery.run(session.chatId, () => this.deps.bot.api.sendMessage(session.chatId,
-      `🌳 This topic used this Git worktree:\n${target.path}\n\nA group administrator can delete it after explicit confirmation. Session history is kept.`, {
-        message_thread_id: session.threadId, reply_markup: { inline_keyboard: this.buttons(session) },
+      text, {
+        entities: codeEntities(text,[target.path]), message_thread_id: session.threadId, reply_markup: { inline_keyboard: this.buttons(session) },
       }), () => this.active(session));
   }
 
@@ -108,18 +110,18 @@ export class WorktreeCleanup {
         if (command.action !== 'offer') confirmations.invalidate(session.id, command.token);
         await ctx.answerCallbackQuery({ text: 'The worktree changed. Request a new confirmation.' });
         await this.edit(session, message.message_id,
-          `🌳 The worktree changed. Confirm the current directory before deleting it:\n${target.path}`, this.buttons(session));
+          `🌳 The worktree changed. Confirm the current directory before deleting it:\n${target.path}`, target.path, this.buttons(session));
         return;
       }
       await ctx.answerCallbackQuery();
       if (command.action === 'cancel') {
         confirmations.invalidate(session.id, command.token);
-        await this.edit(session, message.message_id, `🌳 Worktree deletion cancelled.\n${target.path}`, this.buttons(session));
+        await this.edit(session, message.message_id, `🌳 Worktree deletion cancelled.\n${target.path}`, target.path, this.buttons(session));
       } else if (command.action === 'offer') {
         const token = confirmations.issue(session, message.message_id, ctx.from.id, target);
         const nextApproval = { sessionId: session.id, token };
         await this.edit(session, message.message_id,
-          `🌳 Permanently delete this entire Git worktree directory?\n${target.path}\n\nThis deletion is irreversible. Git will refuse dirty or locked worktrees. Session history will remain.`, [
+          `🌳 Permanently delete this entire Git worktree directory?\n${target.path}\n\nThis deletion is irreversible. Git will refuse dirty or locked worktrees. Session history will remain.`, target.path, [
             [{ text: '🌳 Confirm deletion', callback_data: encodeWorktreeCleanupCallback({ action: 'confirm', ...nextApproval }) }],
             [{ text: '❌ Cancel', callback_data: encodeWorktreeCleanupCallback({ action: 'cancel', ...nextApproval }) }],
           ]);
@@ -135,16 +137,16 @@ export class WorktreeCleanup {
         });
         confirmations.invalidate(session.id, command.token);
         await this.edit(session, message.message_id,
-          `🌳 Deleted Git worktree:\n${target.path}\n\nSession history has been kept. Reopening this topic will not recreate the directory.`);
+          `🌳 Deleted Git worktree:\n${target.path}\n\nSession history has been kept. Reopening this topic will not recreate the directory.`, target.path);
       }
     } finally {
       this.busy.delete(session.id);
     }
   }
 
-  private async edit(session: TopicSession, messageId: number, text: string, inline_keyboard: { text: string; callback_data: string }[][] = []): Promise<void> {
+  private async edit(session: TopicSession, messageId: number, text: string, path: string, inline_keyboard: { text: string; callback_data: string }[][] = []): Promise<void> {
     await this.deps.delivery.run(session.chatId, () => this.deps.bot.api.editMessageText(
-      session.chatId, messageId, text, { reply_markup: { inline_keyboard } },
+      session.chatId, messageId, text, { entities: codeEntities(text,[path]), reply_markup: { inline_keyboard } },
     ), () => this.active(session));
   }
 }

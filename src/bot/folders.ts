@@ -6,6 +6,7 @@ import type { AppConfig } from '../../shared/contracts.js';
 import { findInstance, readConfig, refreshTermination } from '../config.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
+import { codeEntities } from '../telegram-code.js';
 
 export interface FolderSelectionDependencies {
   botId(): number;
@@ -70,7 +71,7 @@ export class FolderSelection {
       [[{text:initial.kind === 'create' ? 'Create folder' : 'Retry',callback_data:`folder:${token}:${initial.kind === 'create' ? 'create' : 'retry'}`},
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]];
     const message = await replyTo(source, contextDestination(source), failure ||
-      (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.'), {reply_markup:{inline_keyboard:rows}});
+      (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.'), {entities: codeEntities(failure, initial.kind === 'choose' ? [] : [initial.path]), reply_markup:{inline_keyboard:rows}});
     if (this.dependencies.stopped() || refreshTermination(this.dependencies.config) || epoch !== this.dependencies.admissionEpoch() ||
         JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
       throw new Error('Folder settings or service state changed. Send the command again.');
@@ -149,7 +150,7 @@ export class FolderSelection {
     }
     token = randomBytes(16).toString('base64url');
     const restore = async (text: string, rows: {text:string;callback_data:string}[][]) => {
-      await ctx.editMessageText(text,{reply_markup:{inline_keyboard:rows}});
+      await ctx.editMessageText(text,{entities: codeEntities(text, request.state.kind === 'choose' ? [] : [request.state.path]), reply_markup:{inline_keyboard:rows}});
       if (request.expires <= Date.now()) {
         await ctx.editMessageText('This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
         return;
@@ -188,7 +189,8 @@ export class FolderSelection {
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
       return;
     }
-    await ctx.editMessageText(`Runtime folder: ${cwd}`,{reply_markup:{inline_keyboard:[]}});
+    const confirmation = `Runtime folder: ${cwd}`;
+    await ctx.editMessageText(confirmation,{entities: codeEntities(confirmation,[cwd]), reply_markup:{inline_keyboard:[]}});
     if (request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
         JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint)
       throw new Error('This folder request is stale. Send the command again.');

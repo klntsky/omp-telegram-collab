@@ -143,7 +143,8 @@ export class TopicCreation {
         const text = await this.dependencies.options.runtime.worktree(session, task?.text || undefined);
         this.dependencies.options.store.setSessionCwd(session.id, session.cwd);
         task = undefined;
-        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
+        const response = `🌳 ${text}`;
+        await replyTo(ctx, topicDestination(session.chatId, session.threadId), response, { entities: [{ type: 'code', offset: response.length - text.length, length: text.length }] });
       }
       if (worktree) {
         const sourceKey = this.dependencies.skillKey(ctx);

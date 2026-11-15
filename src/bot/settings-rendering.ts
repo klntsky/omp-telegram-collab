@@ -139,7 +139,19 @@ export async function renderSettings(
       });
     if (page !== 'capacity') button('✅ Save & exit', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
-    const extra = { reply_markup: { inline_keyboard: rows } };
+    const folders = chat.folder_options ?? [];
+    const displayed = folders.slice(offset,offset+8).map(path => path === '.' ? '<Default>' : path.slice(0,250));
+    const entities: NonNullable<NonNullable<Parameters<typeof deps.api.sendMessage>[2]>['entities']> = [];
+    if (page === 'folders') {
+      let position = body.length - (displayed.join('\n') || '(no explicit folders)').length;
+      displayed.forEach((path,index) => {
+        if (folders[offset+index] !== '.') entities.push({type:'code',offset:position,length:path.length});
+        position += path.length + 1;
+      });
+      if (folders.length === 1 && folders[0] !== '.')
+        entities.unshift({type:'code',offset:'Settings\nRuntime folders\nUses '.length,length:folders[0]!.length});
+    }
+    const extra = { entities, reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
       const message = await sendTo(deps.api, panel.destination, body, extra);
       panel.messageId = message.message_id;

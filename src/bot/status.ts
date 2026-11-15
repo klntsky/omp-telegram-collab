@@ -67,6 +67,8 @@ async showStatus(ctx: Context): Promise<void> {
     lines.push(`Skill shortcuts: ${catalog ? `saved catalog (${catalog.length} skills); ${freshness}` : `unavailable; ${freshness}`}`);
     lines.push(`Last successful skill check: ${catalogObservation?.refreshedAt ? new Date(catalogObservation.refreshedAt).toISOString() : 'unknown'} (runtime discovery cache may apply)`);
     if (catalogObservation?.failure) failures.push(catalogObservation.failure);
+    const entities: { type: 'code'; offset: number; length: number }[] = [];
+    let textLength = lines.reduce((length, line) => length + line.length + 1, -1);
     for (const failure of failures) {
       const error = failure.error instanceof HttpError && failure.error.error instanceof Error ? failure.error.error : failure.error;
       const fields = error instanceof Error ? ['code','signal','killed'].flatMap(key => {
@@ -74,7 +76,11 @@ async showStatus(ctx: Context): Promise<void> {
         return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
       }) : [];
       const details = failure.error instanceof Error ? failure.error.message : String(failure.error);
-      lines.push(`Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n${details}${fields.length ? '\n'+fields.join('\n') : ''}`);
+      const prefix = `Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n`;
+      if (details.length) entities.push({ type: 'code', offset: textLength + 1 + prefix.length, length: details.length });
+      const line = `${prefix}${details}${fields.length ? '\n'+fields.join('\n') : ''}`;
+      lines.push(line);
+      textLength += line.length + 1;
     }
     const text = lines.join('\n');
     for (let offset = 0; offset < text.length;) {
@@ -82,7 +88,12 @@ async showStatus(ctx: Context): Promise<void> {
       if (this.deps.assignedId(chatId) !== path) throw new Error('The group instance assignment changed');
       let end = Math.min(offset+3900,text.length);
       if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-      await replyTo(ctx,destination,text.slice(offset,end));
+      const chunkEntities = entities.flatMap(entity => {
+        const start = Math.max(offset, entity.offset);
+        const finish = Math.min(end, entity.offset + entity.length);
+        return start < finish ? [{ ...entity, offset: start - offset, length: finish - start }] : [];
+      });
+      await replyTo(ctx,destination,text.slice(offset,end), { entities: chunkEntities });
       offset = end;
     }
   }

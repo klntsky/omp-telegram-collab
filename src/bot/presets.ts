@@ -223,11 +223,12 @@ export class BotPresets {
     const names = await this.dependencies.runtime.availableModelPresets(instanceId);
     await this.replyPresetText(ctx, `Usage: /modelpreset to list presets, or /modelpreset <name> to switch an idle session.\nAvailable presets:\n${names.length ? names.join('\n') : '(none configured)'}${guidance}`);
   }
-  async replyPresetText(ctx: Context, text: string): Promise<void> {
+  async replyPresetText(ctx: Context, text: string, code = false): Promise<void> {
     for (let offset = 0; offset < text.length;) {
       let end = Math.min(offset+4000,text.length);
       if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-      await replyTo(ctx, contextDestination(ctx), text.slice(offset,end));
+      await replyTo(ctx, contextDestination(ctx), text.slice(offset,end),
+        code ? {entities:[{type:'code',offset:0,length:end-offset}]} : undefined);
       offset = end;
     }
   }
