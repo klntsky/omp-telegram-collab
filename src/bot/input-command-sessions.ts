@@ -1,3 +1,4 @@
+import type { PendingSkillKey } from '../store.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
@@ -15,7 +16,7 @@ export interface InputCommandSessionsDependencies {
   dropListener(id: string, reason?: string): void;
   forkSession(ctx: Context, source: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean): Promise<CollabConnection>;
-  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkills: string[]; }): Promise<void>;
+  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: {key:PendingSkillKey;names:readonly string[]}, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkills: string[]; }): Promise<void>;
   config: BotOptions['config'];
   runtime: BotOptions['runtime'];
   store: BotOptions['store'];

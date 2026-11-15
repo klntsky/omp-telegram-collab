@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 const schema = `
+      CREATE TABLE folder_requests(bot_id INTEGER NOT NULL,token TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL,diagnostic TEXT,PRIMARY KEY(bot_id,token));
+      CREATE TABLE folder_entries(bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,message_id));
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS detached_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id));
@@ -36,12 +38,12 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 7) throw new Error(`Unsupported database schema version ${version}`);
+    if (version !== 0 && version !== 9) throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=7');
+      db.exec('PRAGMA user_version=9');
     }
     db.exec('COMMIT');
   } catch (error) {

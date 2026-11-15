@@ -1,3 +1,4 @@
+import type { FolderContinuation } from './folder-requests.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PendingPromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -19,7 +20,7 @@ export interface TopicCreationDependencies {
   folderSettings(chatId: number): unknown;
   assignedId(chatId: number): number;
   assignedCwd(chatId: number): string;
-  chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>): Promise<boolean>;
+  chooseFolder(source: Context, authority: Context | undefined, continuation: FolderContinuation): Promise<boolean>;
   getIconIds(): Promise<Record<'running' | 'finished', string>>;
   createsTopicWorktrees(chatId: number): boolean;
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
@@ -41,7 +42,7 @@ export class TopicCreation {
     task?: PendingPromptContent,
     attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string },
     name?: string,
-    accepted?: () => void,
+    accepted?: {key:PendingSkillKey;names:readonly string[]},
     worktree = false,
     authority = ctx,
     extensions: readonly PromptExtension[] = [],
@@ -59,8 +60,7 @@ export class TopicCreation {
     if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
     if (this.dependencies.assignedId(ctx.chat!.id) !== instanceId)
       throw new Error('The group instance assignment changed');
-    if (!attached && cwd === undefined && await this.dependencies.chooseFolder(ctx,authority,selected =>
-      this.newSession(ctx,task,attached,name,accepted,worktree,authority,extensions,undefined,selected,proposedSkills))) return;
+    if (!attached && cwd === undefined && await this.dependencies.chooseFolder(ctx,authority,{kind:'topic',task,name,accepted,worktree,extensions,skills:proposedSkills})) return;
     if (!attached && !worktree && task !== undefined && proposedSkills) {
       const names = [...new Set([...proposedSkills.names,...proposedSkills.topicSkills])];
       if (names.length) {
@@ -157,7 +157,12 @@ export class TopicCreation {
       }
       if (!attached && task === undefined && proposedSkills.topicSkills.length)
         this.dependencies.options.store.setNewTopicSkills(session.id, proposedSkills.topicSkills);
-      accepted?.();
+      if (accepted) {
+        const store = this.dependencies.options.store;
+        const remaining = store.getPendingSkills(accepted.key).filter(name => !accepted.names.includes(name));
+        store.clearPendingSkills(accepted.key);
+        for (const name of remaining) store.addPendingSkill(accepted.key,name);
+      }
       if (task !== undefined && ctx.message)
         this.dependencies.options.store.setInitialMessage(session.id, ctx.message.message_id);
       if (task !== undefined && ctx.message)

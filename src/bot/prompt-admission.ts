@@ -1,3 +1,4 @@
+import type { FolderContinuation } from './folder-requests.js';
 import type { Bot, Context } from 'grammy';
 import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -26,14 +27,14 @@ export interface PromptAdmissionDependencies {
   usersCanProposePrompts(chatId: number): boolean;
   allMessagesArePrompts(chatId: number): boolean;
   folderSettings(chatId: number): {instanceId: number; defaultDir: string; options: string[]};
-  chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean>;
+  chooseFolder(source: Context, authority: Context | undefined, continuation: FolderContinuation): Promise<boolean>;
   skillKey(ctx: Context): PendingSkillKey;
   defaultNewTopicSkills(chatId: number): string[];
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
   uploadDocuments: PromptPreparation['uploadDocuments'];
-  newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
+  newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: {key:PendingSkillKey;names:readonly string[]}, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
   listen(session: TopicSession): Promise<void>;
   listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
@@ -77,18 +78,12 @@ export class PromptAdmission {
     const topicSkills = frozenSkills ? frozenSkills.topicSkills : session ? this.deps.options.store.getNewTopicSkills(session.id) : this.deps.defaultNewTopicSkills(ctx.chat!.id);
     const originalContent = structuredClone(content);
     const originalExtensions = structuredClone(extensions);
-    if (admin && !session && cwd === undefined && await this.deps.chooseFolder(ctx,ctx,selected =>
-      this.routePrompt(ctx,originalContent,undefined,originalExtensions,worktree,{names:[...pendingSkills],topicSkills},selected))) return;
+    if (admin && !session && cwd === undefined && await this.deps.chooseFolder(ctx,ctx,
+      {kind:'prompt',content:originalContent,extensions:originalExtensions,worktree,skills:{names:[...pendingSkills],topicSkills}})) return;
     if (!admin && !session && this.deps.folderSettings(ctx.chat!.id).options.length > 1) {
-      const selectedSkills = {key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkills};
-      const proposalMode = this.deps.allMessagesArePrompts(ctx.chat!.id);
-      await this.deps.chooseFolder(ctx,undefined,async (selected,authority) => {
-        if (!this.deps.usersCanProposePrompts(ctx.chat!.id) || this.deps.allMessagesArePrompts(ctx.chat!.id) !== proposalMode)
-          throw new Error('This prompt proposal is no longer active.');
-        const names = worktree ? [] : [...new Set([...topicSkills,...selectedSkills.names])];
-        const approvedContent = names.length ? {...originalContent,text:`${names.map(name => `/skill:${name}`).join(' ')}\n\n${originalContent.text}`} : originalContent;
-        await this.deps.newSession(ctx,approvedContent,undefined,undefined,() => this.consumePendingSkills(skillKey,selectedSkills.names),worktree,authority,[],undefined,selected,selectedSkills);
-      },() => this.deps.usersCanProposePrompts(ctx.chat!.id) && this.deps.allMessagesArePrompts(ctx.chat!.id) === proposalMode);
+      await this.deps.chooseFolder(ctx,undefined,{kind:'proposal',content:originalContent,worktree,
+        skills:{names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkills},
+        proposalMode:this.deps.allMessagesArePrompts(ctx.chat!.id)});
       return;
     }
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
@@ -190,7 +185,7 @@ export class PromptAdmission {
         if (session) {
           await this.deps.preparePrompt(ctx, session, preparations);
           if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkills});
-        } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd, {names: [...pendingSkills], topicSkills});
+        } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? {key:skillKey,names:pendingSkills} : undefined, worktree, ctx, preparations, reservation, cwd, {names: [...pendingSkills], topicSkills});
       } finally { reservation?.release(); }
       return;
     }
@@ -247,7 +242,7 @@ export class PromptAdmission {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
         return;
       }
-    } else await this.deps.newSession(proposal.source,proposal.content,undefined,undefined,proposal.skills ? () => this.consumePendingSkills(proposal.skills!.key,proposal.skills!.names) : undefined,proposal.worktree,ctx,[],undefined,undefined,proposal.skills);
+    } else await this.deps.newSession(proposal.source,proposal.content,undefined,undefined,proposal.skills ? {key:proposal.skills.key,names:proposal.skills.names} : undefined,proposal.worktree,ctx,[],undefined,undefined,proposal.skills);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
   consumePendingSkills(key: PendingSkillKey, names: readonly string[]): void {

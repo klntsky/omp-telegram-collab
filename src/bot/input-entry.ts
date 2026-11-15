@@ -19,6 +19,7 @@ export interface InputEntryDependencies {
   confirmCapacity(ctx: Context, action: string, token: string): Promise<void>;
   currentAdmin(ctx: Context): Promise<boolean>;
   folderCallback(ctx: Context, data: string): Promise<void>;
+  folderReply(ctx: Context): Promise<boolean>;
   readonly id: number;
   openSettings(ctx: Context): Promise<void>;
   config: BotOptions['config'];
@@ -35,7 +36,9 @@ export interface InputEntryDependencies {
 }
 
 export async function routeEntry(deps: InputEntryDependencies, ctx: Context, intent: InputIntent): Promise<ReturnType<typeof findInstance>> {
-    if (deps.stopped || intent.kind === 'ignore') return undefined;
+    if (deps.stopped) return undefined;
+    if (await deps.folderReply(ctx)) return undefined;
+    if (intent.kind === 'ignore') return undefined;
     if (intent.kind === 'command' && intent.action === 'status' && ctx.chat?.type !== 'private') {
       if (intent.argument) {
         await replyTo(ctx, contextDestination(ctx), 'Usage: /status');

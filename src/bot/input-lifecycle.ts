@@ -1,3 +1,4 @@
+import type { FolderContinuation } from './folder-requests.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -8,7 +9,6 @@ import type { BotOptions } from '../bot.js';
 import type { MessageContext } from './input-router.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import { refreshTermination } from '../config.js';
-import { opendirSync, accessSync, constants, realpathSync } from 'node:fs';
 
 
 
@@ -19,7 +19,7 @@ export interface InputLifecycleDependencies {
   assignedId(chatId: number): number;
   authorize(chatId: number, userId: number, statusOnly?: boolean): Promise<void>;
   bot: Bot<Context>;
-  chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean>;
+  chooseFolder(source: Context, authority: Context | undefined, continuation: FolderContinuation): Promise<boolean>;
   closedSessions: Map<string, { generation: number; settled: boolean; pending?: Promise<void>; }>;
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   createsTopicWorktrees(chatId: number): boolean;
@@ -55,41 +55,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
       if (!session) {
         const title = message.forum_topic_created.name;
         const defaultSkills = deps.defaultNewTopicSkills(ctx.chat.id);
-        const folderFingerprint = JSON.stringify(deps.folderSettings(ctx.chat.id));
-        const epoch = deps.admissionEpoch;
-        await deps.chooseFolder(ctx,undefined,async (cwd,authority) => {
-          await deps.authorize(ctx.chat!.id,ctx.from!.id);
-          if (authority.callbackQuery) {
-            await deps.authorize(ctx.chat!.id,authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before manual session registration.');
-          }
-          if (epoch !== deps.admissionEpoch || deps.stopped || refreshTermination(deps.config) ||
-              folderFingerprint !== JSON.stringify(deps.folderSettings(ctx.chat!.id)))
-            throw new Error('Folder settings or service state changed before manual session registration.');
-          opendirSync(cwd).closeSync();
-          accessSync(cwd,constants.R_OK | constants.X_OK);
-          if (realpathSync(cwd) !== cwd) throw new Error('Managed working directory identity changed');
-          if (deps.store.getTopic({botId:deps.id,destination})) return;
-          const created = deps.store.createSession(
-            {
-              botId: deps.id,
-              chatId: destination.chatId,
-              threadId: destination.threadId,
-              instanceId: deps.assignedId(ctx.chat!.id), cwd,
-            },
-            title,
-            {kind:'managed'},
-          );
-
-          if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
-          if (deps.createsTopicWorktrees(ctx.chat!.id)) {
-            await deps.authorize(ctx.chat!.id, authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
-            await deps.createTopicWorktree(created);
-          }
-          await deps.announce(created);
-          await deps.refreshTopicStatus(created);
-        });
+        await deps.chooseFolder(ctx,undefined,{kind:'manual',title,skills:defaultSkills});
       }
       return true;
     }
