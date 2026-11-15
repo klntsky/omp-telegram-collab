@@ -1,8 +1,7 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import type { Bot, Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
-import type { Omp, WorktreeTarget } from '../omp.js';
+import type { Omp } from '../omp.js';
 import type { Store } from '../store.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { refreshTermination } from '../config.js';
@@ -40,15 +39,6 @@ export class WorktreeCleanup {
     return [[{ text: '🌳 Delete worktree', callback_data: encodeWorktreeCleanupCallback({ action: 'offer', sessionId: session.id }) }]];
   }
 
-  private signature(session: TopicSession, target: WorktreeTarget, messageId: number, adminId: number): Buffer {
-    // A stable bot secret makes confirmations restart-independent. The 96-bit MAC
-    // pins the exact directory and message while keeping callback_data below 64 bytes.
-    return createHmac('sha256', this.deps.bot.token).update(JSON.stringify([
-      session.id, session.botId, session.chatId, session.threadId, messageId, adminId,
-      target.path, target.dev, target.ino, target.gitDir, target.commonDir, target.sessionId,
-    ])).digest().subarray(0, 12);
-  }
-
   async offer(source: TopicSession): Promise<void> {
     const session = this.deps.store.getSession(source.id);
     if (!session || session.runtime.kind !== 'managed' || !this.active(session)) return;
@@ -74,14 +64,22 @@ export class WorktreeCleanup {
       await ctx.answerCallbackQuery({ text: 'Close the assigned managed topic before deleting its worktree.' });
       return;
     }
-    // Telegram owns durable button state, including cancellation and completed removal.
-    // The server serializes the current MessageInfo: tdlib/telegram-bot-api Client::JsonCallbackQuery.
+    // Callback messages are enqueue-time snapshots, not live Telegram button state.
+    // Durable confirmation identity below is authoritative after cancellation/restart.
+    // Client::add_update_impl serializes JsonCallbackQuery before queueing:
     // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
-    if (!message.reply_markup?.inline_keyboard.some(row => row.some(button => 'callback_data' in button && button.callback_data === data))) {
+    if (command.action === 'offer' && !message.reply_markup?.inline_keyboard.some(row => row.some(button => 'callback_data' in button && button.callback_data === data))) {
       await ctx.answerCallbackQuery({ text: 'Use the current buttons on this message.' });
       return;
     }
-    if (command.action !== 'offer' && command.adminIdBase36 !== ctx.from.id.toString(36)) {
+    const confirmations = this.deps.store.worktreeConfirmations;
+    const approval = command.action === 'offer' ? undefined
+      : confirmations.get(session.id, message.message_id, command.token);
+    if (command.action !== 'offer' && !approval) {
+      await ctx.answerCallbackQuery({ text: 'Use the current buttons on this message.' });
+      return;
+    }
+    if (approval && approval.adminId !== ctx.from.id) {
       await ctx.answerCallbackQuery({ text: 'Only the administrator who requested confirmation can use it.' });
       return;
     }
@@ -101,8 +99,13 @@ export class WorktreeCleanup {
         await ctx.answerCallbackQuery({ text: 'This topic has no removable managed worktree.' });
         return;
       }
-      const signature = this.signature(session, target, message.message_id, ctx.from.id);
-      if (command.action !== 'offer' && !timingSafeEqual(signature, Buffer.from(command.mac, 'base64url'))) {
+      if (!(await this.deps.authorizeSession(session, ctx.from.id))) {
+        await ctx.answerCallbackQuery({ text: 'A current group administrator is required.' });
+        return;
+      }
+      if (!this.active(session)) throw new Error('Worktree cleanup requires the assigned topic to remain closed.');
+      if (approval && !confirmations.matches(approval, session, target)) {
+        if (command.action !== 'offer') confirmations.invalidate(session.id, command.token);
         await ctx.answerCallbackQuery({ text: 'The worktree changed. Request a new confirmation.' });
         await this.edit(session, message.message_id,
           `🌳 The worktree changed. Confirm the current directory before deleting it:\n${target.path}`, this.buttons(session));
@@ -110,13 +113,15 @@ export class WorktreeCleanup {
       }
       await ctx.answerCallbackQuery();
       if (command.action === 'cancel') {
+        confirmations.invalidate(session.id, command.token);
         await this.edit(session, message.message_id, `🌳 Worktree deletion cancelled.\n${target.path}`, this.buttons(session));
       } else if (command.action === 'offer') {
-        const approval = { sessionId: session.id, adminIdBase36: ctx.from.id.toString(36), mac: signature.toString('base64url') };
+        const token = confirmations.issue(session, message.message_id, ctx.from.id, target);
+        const nextApproval = { sessionId: session.id, token };
         await this.edit(session, message.message_id,
           `🌳 Permanently delete this entire Git worktree directory?\n${target.path}\n\nThis deletion is irreversible. Git will refuse dirty or locked worktrees. Session history will remain.`, [
-            [{ text: '🌳 Confirm deletion', callback_data: encodeWorktreeCleanupCallback({ action: 'confirm', ...approval }) }],
-            [{ text: '❌ Cancel', callback_data: encodeWorktreeCleanupCallback({ action: 'cancel', ...approval }) }],
+            [{ text: '🌳 Confirm deletion', callback_data: encodeWorktreeCleanupCallback({ action: 'confirm', ...nextApproval }) }],
+            [{ text: '❌ Cancel', callback_data: encodeWorktreeCleanupCallback({ action: 'cancel', ...nextApproval }) }],
           ]);
       } else {
         await this.deps.runtime.deleteWorktree(session, target, async () => {
@@ -128,6 +133,7 @@ export class WorktreeCleanup {
             }
           }
         });
+        confirmations.invalidate(session.id, command.token);
         await this.edit(session, message.message_id,
           `🌳 Deleted Git worktree:\n${target.path}\n\nSession history has been kept. Reopening this topic will not recreate the directory.`);
       }

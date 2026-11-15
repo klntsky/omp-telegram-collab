@@ -6,6 +6,7 @@ import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
 import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
+import { WorktreeConfirmations } from './store/worktree-confirmations.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -40,12 +41,14 @@ export class Store {
   readonly db: DatabaseSync;
   private readonly prompts: PromptLedger;
   private readonly initialDocuments: InitialDocuments;
+  readonly worktreeConfirmations: WorktreeConfirmations;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     this.prompts = new PromptLedger(this.db, id => this.getSession(id));
     this.initialDocuments = new InitialDocuments(this.db);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
+    this.worktreeConfirmations = new WorktreeConfirmations(this.db);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
       initializeDatabase(this.db);

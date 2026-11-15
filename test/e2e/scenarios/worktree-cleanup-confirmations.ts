@@ -7,8 +7,71 @@ import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { combineTelegramErrors } from '../helpers/errors.js';
 import { clickPanel, setTopicClosed, submitCallback, waitForPanel, waitForPanelRetired } from '../helpers/telegram-actions.js';
 import { applicationErrors, closeForConfirmation, createCleanupWorktree, requestCleanupConfirmation } from '../helpers/worktree-cleanup.js';
+import { bounded } from '../helpers/async.js';
 
 export function registerWorktreeCleanupConfirmations(getApp: () => CollaborationTest): void {
+  it('worktree cleanup queued Confirm stays revoked after Cancel and fresh confirmation across restart', { timeout: 120000 }, async t => {
+    const app = getApp();
+    const { session, target } = await createCleanupWorktree(app);
+    const confirmation = await closeForConfirmation(app, session);
+    const editEntered = Promise.withResolvers<void>();
+    const releaseEdit = Promise.withResolvers<void>();
+    let hold = true;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      if (hold && method === 'editMessageText' && 'message_id' in payload &&
+          payload.message_id === confirmation.messageId) {
+        hold = false;
+        editEntered.resolve();
+        await releaseEdit.promise;
+      }
+      return previous(method, payload, signal);
+    });
+    const start = app.apiCalls.length;
+    const cancel = submitCallback(app, confirmation, confirmation.buttons[1]!);
+    let queuedConfirm: Promise<void> | undefined;
+    t.after(async () => {
+      releaseEdit.resolve();
+      await queuedConfirm;
+    }, { timeout: 30000 });
+    try {
+      await bounded(Promise.all([editEntered.promise, cancel]), t.signal);
+      assert.equal(app.store.db.prepare('SELECT 1 FROM worktree_confirmations WHERE session_id=?').get(session.id), undefined);
+      queuedConfirm = submitCallback(app, confirmation, confirmation.buttons[0]!);
+      // The application poller is blocked in Cancel's edit. Read (but do not
+      // acknowledge) the subsequent real Telegram update while the old UI is
+      // still published; normal polling will deliver it again after release.
+      const cancelUpdate = app.updates.findLast(update =>
+        update.callback_query?.data === confirmation.buttons[1]);
+      assert.ok(cancelUpdate);
+      const queued = await app.bot.api.getUpdates({
+        offset: cancelUpdate.update_id + 1, timeout: 30,
+        allowed_updates: ['message', 'callback_query', 'my_chat_member', 'inline_query'],
+      }, t.signal);
+      const callback = queued.find(update =>
+        update.callback_query?.data === confirmation.buttons[0])?.callback_query;
+      assert.ok(callback?.message && 'reply_markup' in callback.message);
+      assert.equal(callback.message.message_id, confirmation.messageId);
+      assert.ok(callback.message.reply_markup?.inline_keyboard.flat().some(button =>
+        'callback_data' in button && button.callback_data === confirmation.buttons[1]));
+    } finally {
+      releaseEdit.resolve();
+    }
+    if (queuedConfirm) await bounded(queuedConfirm, t.signal);
+    const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
+    assert.ok(existsSync(target.path));
+    const fresh = await requestCleanupConfirmation(app, session, offer);
+    assert.notEqual(fresh.buttons[0], confirmation.buttons[0]);
+    await app.restart();
+    await app.runtime.stop(app.store.getSession(session.id)!);
+    await submitCallback(app, confirmation, confirmation.buttons[0]!);
+    await submitCallback(app, confirmation, confirmation.buttons[1]!);
+    assert.ok(existsSync(target.path));
+    const removalStart = app.apiCalls.length;
+    await submitCallback(app, fresh, fresh.buttons[0]!);
+    await waitForPanelRetired(app, fresh, removalStart);
+    assert.equal(existsSync(target.path), false);
+  });
+
   it('worktree cleanup offers and confirmations survive restart and reopen while duplicate callbacks delete once', async () => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
