@@ -6,6 +6,7 @@ import { createServer as createControlServer, type Server, type ServerResponse }
 import { readConfig, defaultConfigPath, validateStart, findInstance } from '../config.js';
 import type { AppConfig } from '../../shared/contracts.js';
 import { launch } from './generation.js';
+import { pollingFailureReported } from './polling-failure.js';
 
 function serviceSettings(config: AppConfig): string {
   const { maxSessions: _, ...omp } = config.omp;
@@ -45,7 +46,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         try { generation = await launch(next, pollingFailure.resolve); }
         catch (error) {
           try { generation = await launch(previous, pollingFailure.resolve); }
-          catch (rollbackError) { console.error('Configuration rollback failed:', rollbackError); }
+          catch (rollbackError) { if (!pollingFailureReported(rollbackError)) console.error('Configuration rollback failed:', rollbackError); }
           throw error;
         }
         await bindControl(next.dataDir);
@@ -153,7 +154,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
           response.end(JSON.stringify({ ok: true }));
         }
       })().catch(error => {
-        console.error('Service control request failed.', error);
+        if (!pollingFailureReported(error)) console.error('Service control request failed.', error);
         response.writeHead(409, { 'content-type': 'application/json' });
         const detail = error as { code?: unknown; signal?: unknown } | null;
         response.end(JSON.stringify({
@@ -172,7 +173,9 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
     controls.set(socket, control);
   }
 
-  const changed = () => { void reload().catch(error => stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : 'Reload failed'}\n`)); };
+  const changed = () => { void reload().catch(error => {
+    if (!pollingFailureReported(error)) stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : 'Reload failed'}\n`);
+  }); };
   try { await bindControl(generation.config.dataDir); }
   catch (error) {
     await generation.close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));

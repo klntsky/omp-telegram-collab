@@ -5,24 +5,22 @@ import type { PromptExtension } from '../telegram-commands.js';
 import type { BotOptions } from '../bot.js';
 import type { CommandRouteInput } from './input-router.js';
 
-import { settingsHelp, adminHelp, cliHelp } from './commands.js';
 
 export interface InputCommandSessionsDependencies {
   assignedCwd(chatId: number): string;
   assignedId(chatId: number): number;
   authorize(chatId: number, userId: number, statusOnly?: boolean): Promise<void>;
-  commandHelp(): string;
+  commandHelp(chatId: number, admin: boolean): string;
   currentAdmin(ctx: Context): Promise<boolean>;
   dropListener(id: string, reason?: string): void;
   forkSession(ctx: Context, source: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean): Promise<CollabConnection>;
-  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkill?: string; }): Promise<void>;
+  newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkills: string[]; }): Promise<void>;
   config: BotOptions['config'];
   runtime: BotOptions['runtime'];
   store: BotOptions['store'];
-  promptHelp(chatId: number): string;
   requireSessionAssignment(session: TopicSession): void;
-  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkill?: string; }, cwd?: string): Promise<void>;
+  routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
   sessionMarkup(session: TopicSession): { inline_keyboard: { text: string; url: string; }[][]; };
 }
 
@@ -97,7 +95,8 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         await replyTo(
           ctx,
           contextDestination(ctx),
-          `${deps.commandHelp()}\n${settingsHelp}\n${adminHelp}${(await deps.currentAdmin(ctx)) ? `\n${cliHelp}` : ''}\n/skills — select or clear skills for your next prompt\n/skill_* — select a skill; include task text to submit immediately\n${deps.promptHelp(ctx.chat.id)}`,
+          deps.commandHelp(ctx.chat.id, await deps.currentAdmin(ctx)),
+          { parse_mode: 'HTML' },
         );
         return true;
       }
@@ -122,7 +121,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         });
         return true;
       }
-      if (action === 'session') {
+      if (action === 'agent') {
         if (!deps.config.publicUrl) {
           await replyTo(
             ctx,

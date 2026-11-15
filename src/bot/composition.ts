@@ -29,6 +29,7 @@ import type { BotOptions } from '../bot.js';
 import { SkillPicker } from '../skill-picker.js';
 import { composeInputRouter } from './router-composition.js';
 import type { BotInput } from './input.js';
+import { WorktreeCleanup } from './worktree-cleanup.js';
 
 export interface LifecycleDependencies {
  id(): number; stopped(): boolean; apiAbort: TelegramAbortController;
@@ -51,7 +52,11 @@ export interface BotComponents {
   input: BotInput;
 }
 
-/** Each owner receives only its operational dependencies; closures preserve live lifecycle state. */
+/**
+ * This composition root intentionally exceeds the default line budget to keep
+ * lifecycle-sharing dependencies visible as one graph instead of scattered wiring.
+ * Owners receive only operational dependencies; closures preserve live state.
+ */
 export function createBotComponents(options: BotOptions, bot: Bot<Context>, lifecycle: LifecycleDependencies): BotComponents {
   const maintenance: BotMaintenance = new BotMaintenance({
     bot: bot,
@@ -262,6 +267,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     currentAdmin: authorization.currentAdmin.bind(authorization),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     dropListener: connections.dropListener.bind(connections),
+    replyPresetText: presets.replyPresetText.bind(presets),
   });
   const capacity: CapacityAdmission = new CapacityAdmission({
     options: options,
@@ -305,7 +311,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     preparePrompt: preparation.preparePrompt.bind(preparation),
     skillKey: skills.key.bind(skills),
-    defaultNewTopicSkill: preparation.defaultNewTopicSkill.bind(preparation),
+    defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     // Input routing needs this owner first; resolve album membership only during dispatch.
     albumContexts: ctx => input.albumContexts(ctx),
     announce: entries.announce.bind(entries),
@@ -322,12 +328,13 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     authorize: authorization.authorize.bind(authorization),
     currentAdmin: authorization.currentAdmin.bind(authorization),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
-    defaultNewTopicSkill: preparation.defaultNewTopicSkill.bind(preparation),
+    defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     createsTopicWorktrees: authorization.createsTopicWorktrees.bind(authorization),
     createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
     announce: entries.announce.bind(entries),
     listen: connections.listen.bind(connections),
     dropListener: connections.dropListener.bind(connections),
+    stripTopicStatus: titles.stripTopicStatus.bind(titles),
   });
   const detach: SessionDetach = new SessionDetach({
     options: options,
@@ -369,7 +376,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     folderSettings: folders.folderSettings.bind(folders),
     chooseFolder: folders.chooseFolder.bind(folders),
     skillKey: skills.key.bind(skills),
-    defaultNewTopicSkill: preparation.defaultNewTopicSkill.bind(preparation),
+    defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     renderPresetPanel: presets.renderPresetPanel.bind(presets),
     replyPresetText: presets.replyPresetText.bind(presets),
     preparePrompt: preparation.preparePrompt.bind(preparation),
@@ -380,6 +387,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     // Admission is constructed before input routing; do not bind an uninitialized owner.
     albumContexts: ctx => input.albumContexts(ctx),
     sendPrompt: receipts.sendPrompt.bind(receipts),
+    prepareContent: receipts.prepareContent.bind(receipts),
   });
   const status: BotStatus = new BotStatus({
     config: options.config,
@@ -394,6 +402,12 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     assignedId: authorization.assignedId.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
   });
-  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts });
+  const cleanup = new WorktreeCleanup({
+    bot, config: options.config, store: options.store, runtime: options.runtime, delivery: connections.delivery,
+    botId: lifecycle.id.bind(lifecycle), stopped: lifecycle.stopped.bind(lifecycle),
+    sessionAssigned: authorization.sessionAssigned.bind(authorization),
+    authorizeSession: authorization.authorizeSession.bind(authorization),
+  });
+  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
   return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, input };
 }

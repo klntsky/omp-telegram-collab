@@ -3,6 +3,7 @@ import { readConfig, writeConfig } from '../../src/config.js';
 import type { AppConfig } from '../../shared/contracts.js';
 import { setupCollaborationTest, type CollaborationTest } from './helpers/collaboration-fixture.js';
 import { enrollForum } from './helpers/telegram-actions.js';
+import { cleanupSessions } from './helpers/session-cleanup.js';
 import { questionStep } from './helpers/model-tasks.js';
 import { createWorkflowTasks } from './scenarios/workflow-tasks.js';
 import { registerForumDefaults } from './scenarios/forum-defaults.js';
@@ -15,6 +16,13 @@ import { registerLogicalIdentity } from './scenarios/logical-identity.js';
 import { registerTermination } from './scenarios/termination.js';
 import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
+import { registerWorktreeCleanup } from './scenarios/worktree-cleanup.js';
+import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-cleanup-authorization.js';
+import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
+import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
+import { registerCompositePreparations } from './scenarios/composite-preparations.js';
+import { registerFolderSettings } from './scenarios/folder-settings.js';
+import { registerProviderSetup } from './scenarios/provider-setup.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -41,6 +49,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
       after: cleanup => { cleanups.push(cleanup); },
     }, { scenarios: [
       ...scenarios,
+      ...worktreeCleanupSafetyScenarios,
       { ...interrupted, steps: [{ type: 'await-abort' }] },
       { ...cancelledQuestion, steps: [questionStep(cancelledQuestion.name)] },
       ...questionControls,
@@ -55,19 +64,21 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
     await app.sendAndWait('/skills clear');
     previousIds = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
   });
-  afterEach(async () => {
-    const errors: unknown[] = [];
-    for (const session of app.store.listSessions(app.telegram.bot.id)) {
-      if (previousIds.has(session.id)) continue;
-      if (session.status === 'open' && app.store.hasPendingInitialTask(session.id)) {
-        try { await app.sendAndWait('/kill', session.threadId); } catch (error) { errors.push(error); }
-      }
-      try { await app.runtime.kill(session); } catch (error) { errors.push(error); }
-    }
-    if (errors.length === 1) throw errors[0];
-    if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
+  afterEach(async context => {
+    await cleanupSessions(
+      app.runtime,
+      app.store,
+      app.store.listSessions(app.telegram.bot.id).filter(session => !previousIds.has(session.id)),
+      message => context.diagnostic(message),
+    );
   });
+  registerWorktreeCleanup(() => app);
+  registerWorktreeCleanupAuthorization(() => app);
+  registerWorktreeCleanupSafety(() => app);
+  registerWorktreeCleanupConfirmations(() => app);
+  registerFolderSettings(() => app);
   registerForumDefaults(() => app, tasks);
+  registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);
   registerWorktreesAndForks(() => app, tasks, () => previousIds);
   registerQuestions(() => app, tasks, controls);
@@ -79,3 +90,4 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
 
 // Keep independent provisioning last to respect Telegram's forum-creation flood limits.
 registerMiniAppRecovery();
+registerProviderSetup();

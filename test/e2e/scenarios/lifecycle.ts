@@ -15,9 +15,20 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const seed = await app.sendAndWait(`/new ${tasks.lifecycleSeed.prompt}`);
     const seedReply = await completeWriteTask(app, tasks.lifecycleSeed, seed);
     const session = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === seedReply.replyToMessage?.threadId)!;
+    const chat = await app.telegram.api.getChat(session.chatId);
+    assert.ok(chat.type === 'supergroup');
+    const firstInput = taskInput(app.omp.provider, tasks.lifecycleSeed).text;
+    assert.ok(firstInput.includes(`<preamble>\nThis agent session (a.k.a. conversation) is running via omp-telegram-collab:`));
+    assert.ok(firstInput.includes(`chat titled "${chat.title}"`));
+    assert.ok(firstInput.includes(`https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`));
+    assert.ok(firstInput.includes(`</preamble>\n\n${tasks.lifecycleSeed.prompt}`));
     const created = await createManagedTopic(app);
     const peerTask = await app.sendAndWait(`/p ${tasks.lifecyclePeer.prompt}`, created.threadId);
     await completeWriteTask(app, tasks.lifecyclePeer, peerTask, created.threadId);
+    const manualInput = taskInput(app.omp.provider, tasks.lifecyclePeer).text;
+    assert.ok(manualInput.includes('<preamble>'));
+    assert.ok(manualInput.includes(`https://t.me/c/${String(created.chatId).replace(/^-100/, '')}/${created.threadId}`));
+    assert.ok(manualInput.includes(`</preamble>\n\n${tasks.lifecyclePeer.prompt}`));
     const skillKey = { botId: app.telegram.bot.id, destination: { kind: 'topic' as const, chatId: session.chatId, threadId: session.threadId }, userId: app.telegram.user.account.id };
     const historyBeforeKill = await readSessionHistory(app.omp.dataDir, session.id);
     const kill = await app.sendAndWait('/kill', session.threadId);
@@ -28,6 +39,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     assert.ok((await readSessionHistory(app.omp.dataDir, session.id)).startsWith(historyBeforeKill));
     const resumed = await app.sendAndWait(`/p ${tasks.resumed.prompt}`, session.threadId);
     await completeWriteTask(app, tasks.resumed, resumed, session.threadId);
+    assert.ok(!taskInput(app.omp.provider, tasks.resumed).text.includes('<preamble>'));
     assert.equal(app.store.getSession(session.id)?.id, session.id);
     assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.resumed.name)![0]!.messages).includes(tasks.lifecycleSeed.evidence.nonce));
     await setTopicClosed(app, session, true);
@@ -85,7 +97,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     assert.ok(adminCommands.some(command => command.command === 'cli'));
     for (const scope of [{ type: 'all_group_chats' as const }, { type: 'chat' as const, chat_id: session.chatId }]) {
       const commands = await app.telegram.api.getMyCommands({ scope });
-      assert.ok(!commands.some(command => command.command === 'cli' || command.command === 'session'));
+      assert.ok(!commands.some(command => command.command === 'cli' || command.command === 'agent'));
       assert.ok(commands.some(command => command.command === 'p'));
       if (scope.type === 'chat') assert.ok(commands.some(command => command.command === 'skill_e2e_review'));
     }
@@ -112,6 +124,13 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const separateSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === separateReply.replyToMessage?.threadId)!;
     assert.notEqual(separateSession.id, session.id);
     await app.omp.assertWorktree(separateSession);
+    assert.ok(app.apiCalls.some(call => {
+      if (call.method !== 'forwardMessage') return false;
+      const payload = call.payload as {chat_id: number; message_id: number; message_thread_id: number};
+      const result = call.result as {ok: boolean};
+      return result.ok && payload.chat_id === session.chatId &&
+        payload.message_id === separate.id && payload.message_thread_id === separateSession.threadId;
+    }));
     assert.equal(app.store.getSession(session.id)?.status, 'detached');
     assert.equal(await app.runtime.isRunning(session), true);
     assert.equal(await readSessionHistory(app.omp.dataDir, session.id), detachedHistory);
@@ -136,6 +155,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await app.waitForCondition(() => savedChat().all_messages_are_prompts === true);
     const restarted = await app.sendAndWait(`/p ${tasks.restarted.prompt}`, separateSession.threadId);
     await completeWriteTask(app, tasks.restarted, restarted, separateSession.threadId);
+    assert.ok(!taskInput(app.omp.provider, tasks.restarted).text.includes('<preamble>'));
     assert.deepEqual(app.store.getPendingSkills(persistedSkillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.restarted).text.includes(`/skill:e2e-review\n\n${tasks.restarted.prompt}`));
     assert.ok(JSON.stringify(app.omp.provider.requests.get(tasks.restarted.name)![0]!.messages).includes(tasks.separate.evidence.nonce));
