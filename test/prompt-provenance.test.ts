@@ -105,6 +105,7 @@ test('an uncorrelated shrunk image receipt cannot steal a later text-only destin
       store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'shrunk-image',parentEntryId:null}, sender, shrunk).messageId,
       undefined,
     );
+    assert.equal(store.hasPromptHistory(id), true);
     store.recordPromptSubmission(id, 'omp-fixture', sender, { text: image.text }, 301);
     assert.equal(
       store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'subsequent-text',parentEntryId:null}, sender, { text: image.text }).messageId,

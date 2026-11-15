@@ -18,6 +18,21 @@ function promptFingerprint(content: PromptContent): string {
 // Store alone owns connection initialization and closure.
 export class PromptLedger {
   constructor(private readonly db: DatabaseSync, private readonly getSession: (id: string) => TopicSession | undefined) {}
+  hasPromptHistory(sessionId: string): boolean {
+    // Decide whether to omit the first-prompt preamble from existing durable
+    // Telegram submissions, without maintaining a separate "preamble sent" flag.
+    // Pending or uncertain delivery may already have reached OMP; acceptance
+    // replaces the submission with a receipt, which survives host/service restarts.
+    // Receipt origin is independent of an exact Telegram reply anchor: OMP can
+    // shrink images in replication, making image correlation ambiguous. Inherited
+    // fork history has no local submission and must not suppress its new link.
+    // Upstream: serializeReplicatedEntry in https://github.com/klntsky/oh-my-pi/blob/b5ec5e33a5e4b9217ee8b5210e20de0abbbf4956/packages/coding-agent/src/collab/replication-shrink.ts
+    // initial_state tracks task claiming before delivery, not submission history,
+    // and ordinary prompts in manually created topics do not use that state.
+    return Boolean(this.db.prepare(
+      'SELECT 1 FROM prompt_submissions WHERE session_id=? UNION ALL SELECT 1 FROM prompt_receipts WHERE session_id=? AND submitted_locally=1 LIMIT 1',
+    ).get(sessionId, sessionId));
+  }
   recordPromptSubmission(
     sessionId: string,
     ompSessionId: string,
@@ -125,8 +140,8 @@ export class PromptLedger {
       const ambiguous = conflicting || pending?.state === 'ambiguous';
       const messageId = ambiguous ? undefined : pending?.message_id;
       this.db
-        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?)')
-        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null);
+        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?,?)')
+        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null, pending ? 1 : 0);
       if (typeof messageId === 'number') {
         const session = this.getSession(sessionId)!;
         const aliases = this.db.prepare('SELECT message_id FROM prompt_message_aliases WHERE session_id=? AND source_message_id=?').all(sessionId, messageId);

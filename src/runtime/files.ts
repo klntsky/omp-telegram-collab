@@ -3,7 +3,13 @@ import { lstat, open, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { readHistoryHeader } from '../history-watch.js';
 import { type DurableBinding } from './types.js';
-import { errno } from './values.js';
+import { errno, record } from './values.js';
+
+export function hasRemovedWorktree(binding: unknown): boolean {
+  if (!record(binding) || binding.removedWorktree === undefined) return false;
+  if (binding.removedWorktree !== true) throw new Error('Invalid removed worktree binding metadata');
+  return true;
+}
 export async function privateFile(file: string, contents: string, exclusive = false): Promise<void> {
   const handle = await open(file, exclusive ? 'wx' : 'w', 0o600);
   try {
