@@ -14,6 +14,7 @@
 import type { Root } from "react-dom/client";
 import { createRoot } from "react-dom/client";
 import { ToolView, type ToolViewProps } from "./ToolView";
+import { decodeJson, InvalidJsonError } from "../lib/decode";
 
 type PayloadStore = { get(key: string): ToolViewProps | undefined };
 
@@ -48,10 +49,11 @@ export class OmpToolViewElement extends HTMLElement {
 		const payload = this.getAttribute("payload");
 		if (payload) {
 			try {
-				const parsed: unknown = JSON.parse(payload);
+				const parsed = decodeJson(payload, "Decode omp-tool-view payload attribute");
 				if (parsed && typeof parsed === "object") return parsed as ToolViewProps;
-			} catch {
-				// fall through to null — element renders nothing
+			} catch (error) {
+				if (!(error instanceof InvalidJsonError)) throw error;
+				// Malformed optional payloads render nothing.
 			}
 		}
 		return null;

@@ -1,3 +1,5 @@
+import { BotSessionStateError, BotCommandRejectedError, reportBotError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -29,13 +31,13 @@ export class SessionFork {
     const defaultSkills = this.dependencies.defaultNewTopicSkills(source.chatId);
     const check = async () => {
       await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.dependencies.currentAdmin(ctx))) throw new Error('Forking requires a group administrator.');
+      if (!(await this.dependencies.currentAdmin(ctx))) throw new AuthorizationDeniedError(`Fork session (session=${source.id}, chat=${source.chatId}): Forking requires a group administrator.`);
       if (this.dependencies.stopped || refreshTermination(this.dependencies.options.config) || epoch !== this.dependencies.admissionEpoch)
-        throw new Error('The service changed before the fork completed');
+        throw new BotSessionStateError(`Fork session (session=${source.id}): The service changed before the fork completed`);
       this.dependencies.requireSessionAssignment(source);
       if (source.runtime.kind !== 'managed' || this.dependencies.options.store.getSession(source.id)?.status !== 'open' ||
           this.dependencies.options.store.getSessionGeneration(source.id) !== generation)
-        throw new Error('The source session changed before the fork completed');
+        throw new BotSessionStateError(`Fork session (session=${source.id}): The source session changed before the fork completed`);
     };
     await check();
     let target: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'} | undefined;
@@ -46,7 +48,7 @@ export class SessionFork {
       const binding = await this.dependencies.options.runtime.existingBinding(source);
       target = binding && this.dependencies.options.store.getMessageAnchor(source.id, binding.sessionId, source.chatId, reply.message_id);
       if (!target || reply.message_thread_id !== source.threadId)
-        throw new Error('Reply to a persisted message in the current session to select a fork point.');
+        throw new BotCommandRejectedError(`Select fork point (session=${source.id}, message=${reply.message_id}): Reply to a persisted message in the current session to select a fork point.`);
     }
     const releaseSource = this.dependencies.options.runtime.retain(source.id);
     let reservation: {bind(id:string):void;release():void} | undefined;
@@ -69,7 +71,7 @@ export class SessionFork {
         this.dependencies.requireSessionAssignment(destination!);
         if (this.dependencies.options.store.getSession(destination!.id)?.status !== 'open' ||
             this.dependencies.options.store.getSessionGeneration(destination!.id) !== destinationGeneration)
-          throw new Error('The destination session changed before the fork completed');
+          throw new BotSessionStateError(`Fork session (source=${source.id}, destination=${destination!.id}): The destination session changed before the fork completed`);
       };
       releaseSource();
       await this.dependencies.options.runtime.fork(source, destination, target, beforeMutation);
@@ -94,7 +96,7 @@ export class SessionFork {
         this.dependencies.options.store.detachTopic({botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id});
         if (destination) this.dependencies.dropListener(destination.id);
         await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${topic.message_thread_id}`).catch(deliveryError => {
-          console.error('Could not deliver the created topic link after fork preparation failed.', deliveryError);
+          reportBotError(`Could not deliver the created topic link after fork preparation failed (session=${source.id}).`, deliveryError);
         });
       }
       throw error;

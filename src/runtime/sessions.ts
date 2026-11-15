@@ -1,3 +1,4 @@
+import { OmpProtocolError, systemError, parseJson, OmpConfigurationError, OmpIdentityError, OmpSessionUnavailableError, OmpRuntimeStoppingError } from './errors.js';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
@@ -38,8 +39,8 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     if (runtime.kind === 'attached') return hosts.some(host => host.instanceId === runtime.instanceId && host.sessionId === runtime.sessionId && host.cwd === session.cwd);
     let pin: DurableBinding;
     try {
-      pin = JSON.parse(await readFile(path.join(deps.config.dataDir,'sessions',session.id,'binding.json'),'utf8')) as DurableBinding;
-    } catch (error) {
+      pin = parseJson(await readFile(path.join(deps.config.dataDir,'sessions',session.id,'binding.json'),'utf8'), 'Read runtime metadata', `session ${session.id}`) as DurableBinding;
+    } catch (error) { error = systemError(error, 'sessions OS operation');
       if (errno(error,'ENOENT')) return false;
       throw error;
     }
@@ -48,42 +49,42 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
 
   async function resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new OmpConfigurationError('Instance path is not configured', `Resolve session ${session.id}`);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new OmpConfigurationError('Invalid managed session identifier', `Resolve session ${session.id}`);
     const runtime = session.runtime;
     let pin: DurableBinding | undefined;
     if (runtime.kind === 'managed') {
       pin = await deps.readManagedBinding(session);
       if (!pin) {
         deps.assertActive();
-        if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
         return undefined;
       }
     } else if (!/^[A-Za-z0-9_-]{1,128}$/.test(runtime.instanceId)) {
-      throw new Error('Invalid OMP instance identifier');
+      throw new OmpConfigurationError('Invalid OMP instance identifier', `Resolve session ${session.id}`);
     }
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
     const hosts = await deps.list(deadline);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
     const matches = hosts.filter(host => runtime.kind === 'attached'
       ? host.instanceId === runtime.instanceId
       : host.sessionId === pin!.sessionId);
-    if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
+    if (matches.length > 1) throw new OmpProtocolError('Resolve OMP host', `session ${session.id}`, 'More than one host is serving the OMP session');
     const host = matches[0];
     if (!host) return undefined;
     if (runtime.kind === 'attached') {
-      if (host.sessionId !== runtime.sessionId) throw new Error('Attached OMP session identity changed');
+      if (host.sessionId !== runtime.sessionId) throw new OmpIdentityError('Attached OMP session identity changed', `Resolve session ${session.id}`);
       if (await realpath(session.cwd) !== session.cwd || await realpath(host.cwd) !== session.cwd) {
-        throw new Error('Attached host does not belong to this instance path');
+        throw new OmpIdentityError('Attached host does not belong to this instance path', `Resolve session ${session.id}`);
       }
     } else if (await realpath(host.cwd) !== pin!.cwd) {
-      throw new Error('Managed host working directory changed');
+      throw new OmpIdentityError('Managed host working directory changed', `Resolve session ${session.id}`);
     }
     const binding = await deps.resolve(host, deadline);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
     if (runtime.kind === 'managed') {
       const owned = deps.managed.get(session.id);
       if (!owned || owned.exited) {
@@ -97,7 +98,7 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
         const previousIdentity = owned.identity;
         const identity = await procIdentity(host.pid);
         deps.assertActive();
-        if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
         // Passive reconnect must refresh retirement's room identity without
         // granting ownership of a replacement process or overwriting a newer lookup.
         if (identity && identity.start === previousIdentity.start && identity.state !== 'Z' && identity.state !== 'X' &&
@@ -111,23 +112,23 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
 
   async function historySource(session: TopicSession): Promise<{ sessionId: string; path: string } | undefined> {
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new OmpConfigurationError('Instance path is not configured', `Resolve session ${session.id}`);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new OmpConfigurationError('Invalid managed session identifier', `Resolve session ${session.id}`);
     if (session.runtime.kind === 'attached') return undefined;
     const pin = await deps.readManagedBinding(session);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
     return pin && { sessionId: pin.sessionId, path: pin.sessionFile };
   }
 
   async function existingBinding(session: TopicSession): Promise<{ sessionId: string } | undefined> {
     deps.assertActive();
-    if (deps.closed) throw new Error('OMP runtime is stopping');
-    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot be forked');
-    if (session.status !== 'open') throw new Error('Session closed');
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance ID is not configured');
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    if (deps.closed) throw new OmpRuntimeStoppingError(`Resolve session ${session.id}`);
+    if (session.runtime.kind !== 'managed') throw new OmpSessionUnavailableError('Attached OMP sessions cannot be forked', `Resolve session ${session.id}`);
+    if (session.status !== 'open') throw new OmpSessionUnavailableError('Session closed', `Resolve session ${session.id}`);
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new OmpConfigurationError('Instance ID is not configured', `Resolve session ${session.id}`);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new OmpConfigurationError('Invalid managed session identifier', `Resolve session ${session.id}`);
     const pin = await deps.readManagedBinding(session);
     return pin ? { sessionId: pin.sessionId } : undefined;
   }

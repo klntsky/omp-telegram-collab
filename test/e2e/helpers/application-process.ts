@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { bounded } from './async.js';
+import { combineTelegramErrors } from './errors.js';
 
 type Exit = { code: number | null; signal: NodeJS.Signals | null };
 type Prepared = { sourceId: string; destinationId: string };
@@ -79,7 +80,7 @@ export async function startCollaborationProcess(
     await bounded(ready.promise, AbortSignal.any([t.signal, AbortSignal.timeout(120_000)]));
   } catch (error) {
     try { await kill(); } catch (cleanupError) {
-      if (cleanupError !== error) throw new AggregateError([error, cleanupError], 'Application worker setup failed');
+      if (cleanupError !== error) throw combineTelegramErrors(error, cleanupError);
     }
     throw error;
   }

@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { readConfig, defaultConfigPath } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
 import type { TopicSession } from '../shared/contracts.js';
+import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
+import { ScriptUsageError } from './lib/telegram-test-errors.js';
 
 const originalExec = childProcess.execFile;
 childProcess.execFile = new Proxy(originalExec, {
@@ -29,18 +31,24 @@ syncBuiltinESMExports();
 const directory = await mkdtemp(join(tmpdir(), 'omp-startup-diagnosis-'));
 const config = { ...readConfig(process.argv[2] ?? defaultConfigPath()), dataDir: directory };
 const instance = config.instances[0];
-if (!instance) throw new Error('Configure an instance before diagnosing startup');
+if (!instance) throw new ScriptUsageError(`Diagnose managed startup for config ${config.configPath}: Configure an instance before diagnosing startup`);
 const runtime = new OmpRuntime(config);
 const session: TopicSession = { id: 'startup-diagnosis', instanceId: instance.id, cwd: instance.defaultDir, botId: 0, chatId: 0, threadId: 0, name: 'Startup diagnosis', status: 'open', runtime: { kind: 'managed' }, createdAt: Date.now() };
 const start = Date.now();
+let primaryFailure: unknown;
+let failed = false;
 try {
   const binding = await runtime.ensure(session);
   assert.ok(binding.sessionId);
   console.log(`PASS real managed startup in ${Date.now() - start} ms.`);
 } catch (error) {
-  console.error(`FAIL real managed startup in ${Date.now() - start} ms. ${error instanceof Error ? error.message : 'Unknown failure'}`);
+  primaryFailure = error;
+  failed = true;
+  console.error(`FAIL real managed startup in ${Date.now() - start} ms. ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 } finally {
-  await runtime.close();
-  await rm(directory, { recursive: true, force: true });
+  const cleanupErrors: unknown[] = [];
+  try { await runtime.close(); } catch (error) { cleanupErrors.push(error); }
+  try { await rm(directory, { recursive: true, force: true }); } catch (error) { cleanupErrors.push(error); }
+  if (cleanupErrors.length) throw combineTelegramErrors(...(failed ? [primaryFailure, ...cleanupErrors] : cleanupErrors));
 }

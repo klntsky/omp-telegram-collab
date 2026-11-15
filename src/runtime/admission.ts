@@ -1,3 +1,4 @@
+import { systemError, parseJson, OmpRuntimeStoppingError } from './errors.js';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding } from '../../shared/contracts.js';
@@ -34,15 +35,15 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
     const root = path.join(deps.config.dataDir,'sessions');
     let entries;
     try { entries = await readdir(root,{withFileTypes:true}); }
-    catch (error) {
+    catch (error) { error = systemError(error, 'admission OS operation');
       if (errno(error,'ENOENT')) { discovered = true; return; }
       throw error;
     }
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
       let pin: DurableBinding;
-      try { pin = JSON.parse(await readFile(path.join(root,entry.name,'binding.json'),'utf8')) as DurableBinding; }
-      catch (error) { if (errno(error,'ENOENT')) continue; throw error; }
+      try { pin = parseJson(await readFile(path.join(root,entry.name,'binding.json'),'utf8'), 'Read runtime metadata', `binding ${entry.name}`) as DurableBinding; }
+      catch (error) { error = systemError(error, 'admission OS operation'); if (errno(error,'ENOENT')) continue; throw error; }
       const host = hosts.find(value => value.sessionId === pin.sessionId && value.cwd === pin.cwd);
       if (!host) continue;
       const lifecycle = await deps.lifecycle(entry.name);
@@ -59,7 +60,7 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
     await previous;
     try {
       deps.assertActive();
-      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new OmpRuntimeStoppingError(`Admit session ${id}`);
       await deps.acquire();
       const hosts = await deps.list(Date.now()+deps.config.omp.startupTimeoutMs);
       await discoverManaged(hosts);
@@ -92,13 +93,13 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
       }
       await beforeMutation?.();
       deps.assertActive();
-      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new OmpRuntimeStoppingError(`Admit session ${id}`);
       if (!deps.managed.has(id) && ![...deps.reservations.values()].includes(id)) {
         if (deps.capacityUsed() >= deps.sessionLimit) await deps.retireIdle(0);
         if (deps.capacityUsed() >= deps.sessionLimit) throw new SessionCapacityError(deps.sessionLimit);
       }
       deps.assertActive();
-      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new OmpRuntimeStoppingError(`Admit session ${id}`);
       if (reservation) deps.reservations.set(reservation, id);
       else if (!deps.managed.has(id)) deps.managed.set(id,null);
       if (!reservation) deps.hostActivity(id).lastUsed = Date.now();

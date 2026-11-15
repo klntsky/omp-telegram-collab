@@ -1,7 +1,7 @@
 import { stdout } from 'node:process';
 import { join } from 'node:path';
 import { writeFileSync, writeSync } from 'node:fs';
-import { unlink, readFile, writeFile } from 'node:fs/promises';
+import { rm, readFile, writeFile } from 'node:fs/promises';
 import { inspect } from 'node:util';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { validateStart, findInstance } from '../config.js';
@@ -12,11 +12,18 @@ import { createServer, type GatewayServer } from '../server.js';
 import { OmpRuntime } from '../runtime.js';
 import { reportPollingFailure } from './polling-failure.js';
 
+class MissingRestartMarkerError extends Error {
+  constructor(path: string, cause: Error) {
+    super(`Restart marker is absent at ${path}: ${cause.message}`, { cause });
+    this.name = 'MissingRestartMarkerError';
+  }
+}
+
 let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
   if (pendingExitMarker) {
     try { writeFileSync(pendingExitMarker.path, JSON.stringify({ startedAt: pendingExitMarker.startedAt, predecessorExitedAt: Date.now() }), { mode: 0o600 }); }
-    catch (error) { writeSync(2, `Restart exit marker write failed: ${inspect(error)}\n`); }
+    catch (error) { writeSync(2, `Restart exit marker write failed for ${pendingExitMarker.path}: ${inspect(error)}\n`); }
   }
 });
 
@@ -34,17 +41,20 @@ async function notifyGroups(config: AppConfig, bots: BotService[], store: Store,
       const timeout = setTimeout(abort, 5000);
       try {
         await bot.sendStatusNotice(chatId, text, controller.signal);
+      } catch (error) {
+        if (error instanceof Error) error.message = `Lifecycle notification failed for bot ${bot.id}, chat ${chatId}, configuration ${config.configPath}: ${error.message}`;
+        throw error;
       } finally {
         clearTimeout(timeout);
         signal?.removeEventListener('abort', abort);
       }
     }));
     for (const result of groupResults) {
-      if (result.status === 'rejected' && !signal?.aborted) console.error(`Lifecycle notification failed for bot ${bot.id}:`, result.reason);
+      if (result.status === 'rejected') console.error(`Lifecycle notification failed for bot ${bot.id}, configuration ${config.configPath}:`, result.reason);
     }
   }));
   for (const result of botResults) {
-    if (result.status === 'rejected' && !signal?.aborted) console.error('Lifecycle notification failed:', result.reason);
+    if (result.status === 'rejected') console.error(`Lifecycle notification failed for configuration ${config.configPath}:`, result.reason);
   }
 }
 
@@ -172,15 +182,16 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
     if (initialLaunch) timing('process-start-to-ready', 0);
     for (const bot of bots) bot.startBackground();
     onlineTask = (async () => {
-      const marker = await readFile(restartMarker, 'utf8').then(text => JSON.parse(text) as { startedAt: number; predecessorExitedAt: number | null }).catch(error => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const marker = await readFile(restartMarker, 'utf8').catch(error => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') throw new MissingRestartMarkerError(restartMarker, error);
+        throw error;
+      }).then(text => JSON.parse(text) as { startedAt: number; predecessorExitedAt: number | null }).catch(error => {
+        if (!(error instanceof MissingRestartMarkerError)) throw error;
         return { startedAt: startupAt, predecessorExitedAt: null };
       });
       if (onlineController.signal.aborted) return;
       if (initialLaunch && marker.predecessorExitedAt !== null) stdout.write(`Service timing process replacement gap: ${(performance.timeOrigin - marker.predecessorExitedAt).toFixed(1)} ms\n`);
-      await unlink(restartMarker).catch(error => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      });
+      await rm(restartMarker, { force: true });
       pendingExitMarker = undefined;
       if (onlineController.signal.aborted) return;
       await notifyGroups(config, bots, store!, `OMP bot service is back online (restarting took ${((Date.now() - marker.startedAt) / 1000).toFixed(2)} seconds).`, onlineController.signal);

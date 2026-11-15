@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { createProcessKill } from '../src/runtime/process-kill.js';
 import type { ManagedHost, RegistryHost } from '../src/runtime/types.js';
+import { OmpIdentityError } from '../src/runtime/errors.js';
 
 test('kill refuses a changed registry generation before signalling the native process', { timeout: 10000 }, async t => {
   const cwd = process.cwd();
@@ -35,8 +36,7 @@ test('kill refuses a changed registry generation before signalling the native pr
     forgetActivity() { assert.fail('A refused kill must not discard activity ownership'); },
   });
   await assert.rejects(owner.killSession(session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal(error.message, 'OMP host identity changed before kill');
+    assert.ok(error instanceof OmpIdentityError);
     assert.deepEqual(Reflect.get(error, 'expectedHost'), expected);
     assert.deepEqual(Reflect.get(error, 'observedHost'), observed);
     return true;

@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { MissingResourceError, systemOperation } from '../scripts/lib/system-errors.js';
 
 interface Descriptor { sessionId: string; pid: number; socketPath: string; retiring?: boolean; retirement: number }
 interface Request { type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none' }
@@ -88,8 +89,8 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
   async function waitForFile(filename: string): Promise<string> {
     const deadline = Date.now() + 10000;
     while (true) {
-      try { return await readFile(filename, 'utf8'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      try { return await systemOperation(`Wait for host retirement fixture resource ${filename}`, () => readFile(filename, 'utf8')); }
+      catch (error) { if (!(error instanceof MissingResourceError)) throw error; }
       if (child.exitCode !== null || Date.now() >= deadline) throw new Error(`Host did not publish ${filename}: ${output}`);
       await delay(10);
     }

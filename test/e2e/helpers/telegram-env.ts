@@ -6,6 +6,8 @@ import { parseEnv, promisify } from 'node:util';
 import { readTelegramTestSessions, validateTelegramTestSession } from '../../../scripts/lib/telegram-test-auth.js';
 import { readStringSession } from '@mtcute/node/utils.js';
 import { withTelegramTestLock } from '../../../scripts/lib/telegram-test-lock.js';
+import { TelegramTestConfigurationError, TelegramTestStorageSafetyError } from '../../../scripts/lib/telegram-test-errors.js';
+import { combineTelegramErrors } from './errors.js';
 
 export async function resolveTelegramTestEnvFile(): Promise<string> {
   if (process.env.TELEGRAM_TEST_ENV_FILE) return resolve(process.env.TELEGRAM_TEST_ENV_FILE);
@@ -22,19 +24,19 @@ export async function withTelegramTestSessionStorage<T>(filename: string, callba
   let failure: unknown;
   try {
     const metadata = await file.stat();
-    if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to save Telegram test sessions in a non-regular or hard-linked file');
+    if (!metadata.isFile() || metadata.nlink !== 1) throw new TelegramTestStorageSafetyError(`Save Telegram test sessions in ${filename}: Refusing to save Telegram test sessions in a non-regular or hard-linked file`);
     const env = parseEnv(await file.readFile('utf8'));
     const sessions = env.TELEGRAM_TEST_SESSIONS === undefined || (allowEmpty && env.TELEGRAM_TEST_SESSIONS === '[]') ? [] : readTelegramTestSessions(env);
     return await callback({ env, sessions, async save(next) {
       for (const session of next) validateTelegramTestSession(session);
-      if (new Set(next).size !== next.length) throw new Error('Duplicate Telegram test sessions');
+      if (new Set(next).size !== next.length) throw new TelegramTestConfigurationError(`Save Telegram test sessions in ${filename}: Duplicate Telegram test sessions`);
       await file.chmod(0o600);
       await file.appendFile(`\nTELEGRAM_TEST_SESSIONS='${JSON.stringify(next).replaceAll("'", '\\u0027')}'\n`, 'utf8');
       await file.sync();
     } });
   } catch (error) { failure = error; throw error; } finally {
     try { await file.close(); } catch (error) {
-      if (failure !== undefined) throw new AggregateError([failure, error], 'Telegram session storage and cleanup failed');
+      if (failure !== undefined) throw combineTelegramErrors(failure, error);
       throw error;
     }
   }

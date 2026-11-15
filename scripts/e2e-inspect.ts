@@ -2,15 +2,27 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { z } from 'zod';
+import { ScriptUsageError } from './lib/telegram-test-errors.js';
+
+class TraceRecordError extends Error {}
 
 const usage = 'Usage: pnpm e2e:inspect <log-directory> [--event <substring>] [--full]';
-const { values, positionals } = parseArgs({
-  options: { event: { type: 'string' }, full: { type: 'boolean' } },
-  allowPositionals: true,
-  strict: true,
-});
+const { values, positionals } = (() => {
+  try {
+    return parseArgs({
+      options: { event: { type: 'string' }, full: { type: 'boolean' } },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (error) {
+    if (!(error instanceof TypeError) || !('code' in error) ||
+      (error.code !== 'ERR_PARSE_ARGS_UNKNOWN_OPTION' && error.code !== 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE' &&
+        error.code !== 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL')) throw error;
+    throw new ScriptUsageError(`Parse e2e trace inspection arguments: ${error.message}`, { cause: error });
+  }
+})();
 if (positionals.length !== 1 || !positionals[0] || values.event === '') {
-  throw new Error(usage);
+  throw new ScriptUsageError(usage);
 }
 
 const TraceEvent = z.object({
@@ -26,12 +38,14 @@ function parseEvent(line: string, location: string): z.infer<typeof TraceEvent> 
   try {
     value = JSON.parse(line);
   } catch (cause) {
-    throw new Error(`Cannot parse trace at ${location}`, { cause });
+    if (!(cause instanceof SyntaxError)) throw cause;
+    throw new TraceRecordError(`Cannot parse trace at ${location}: ${cause.message}`, { cause });
   }
   try {
     return TraceEvent.parse(value);
   } catch (cause) {
-    throw new Error(`Invalid trace record at ${location}`, { cause });
+    if (!(cause instanceof z.ZodError)) throw cause;
+    throw new TraceRecordError(`Invalid trace record at ${location}: ${cause.message}`, { cause });
   }
 }
 

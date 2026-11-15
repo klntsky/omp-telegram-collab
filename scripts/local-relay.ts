@@ -1,6 +1,12 @@
 import { once } from 'node:events';
 import { WebSocketServer, WebSocket } from 'ws';
 
+class LocalRelayTransportError extends Error {
+  constructor(operation: string, cause: Error) {
+    super(`${operation}: ${cause.message}`, { cause });
+  }
+}
+
 interface Room {
   host: WebSocket;
   guests: Map<number, WebSocket>;
@@ -11,6 +17,7 @@ export async function startLocalRelay() {
   const rooms = new Map<string, Room>();
   let interruptNextGuest = false;
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 16 * 1024 * 1024 });
+  const failures: Error[] = [];
   server.on('connection', (socket, request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const roomId = /^\/r\/([A-Za-z0-9_-]{10,64})$/.exec(url.pathname)?.[1];
@@ -42,7 +49,12 @@ export async function startLocalRelay() {
       room.guests.set(peer, socket);
       room.host.send(JSON.stringify({ t: 'peer-joined', peer }));
     }
-    socket.on('error', () => socket.close());
+    socket.on('error', cause => {
+      const error = new LocalRelayTransportError(`Relay ${role} socket, room ${roomId}, peer ${peer}`, cause);
+      failures.push(error);
+      console.error(error);
+      socket.close();
+    });
     socket.on('message', (data, binary) => {
       if (!binary) return;
       const room = rooms.get(roomId);
@@ -84,6 +96,8 @@ export async function startLocalRelay() {
       const { promise, resolve, reject } = Promise.withResolvers<void>();
       server.close(error => error ? reject(error) : resolve());
       await promise;
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'), { cause: failures[0] });
     },
   };
 }

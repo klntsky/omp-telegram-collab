@@ -1,3 +1,5 @@
+import { TelegramTestTimeoutError } from './telegram-test-errors.js';
+
 export const telegramTestTimeouts = {
   lease: 10_000,
   request: 30_000,
@@ -30,7 +32,7 @@ export async function withTelegramTestDeadline<T>(
   };
   const onAbort = () => abort(parent.reason);
   parent.addEventListener('abort', onAbort, { once: true });
-  const timeoutError = new Error(`Telegram test ${name} timed out after ${timeoutMs}ms`);
+  const timeoutError = new TelegramTestTimeoutError(name, timeoutMs);
   const timer = setTimeout(() => abort(timeoutError), Math.min(timeoutMs, telegramTestDeadlineRemaining(parent)));
   const operation = Promise.resolve().then(() => {
     controller.signal.throwIfAborted();

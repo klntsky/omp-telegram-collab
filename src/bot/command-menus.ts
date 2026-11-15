@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -21,7 +22,10 @@ export class BotCommandMenus {
 
 syncCommandMenus(): Promise<void> {
     const operation = this.menuTail.then(() => this.publishCommandMenus());
-    this.menuTail = operation.catch(() => {});
+    // The returned operation retains the failure for its caller; the queue must remain usable.
+    this.menuTail = operation.catch(error => {
+      reportBotError(`Telegram command menu publication failed (bot=${this.deps.botId()}).`, error);
+    });
     return operation;
   }
 

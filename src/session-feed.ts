@@ -6,6 +6,8 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { HostFrame, SessionEntry, SubagentLifecyclePayload, SubagentProgressPayload } from '@oh-my-pi/pi-wire';
 import type { BrowserFrame, BrowserHostFrame, HistoryCursor, HistoryPage } from '../shared/contracts.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
+import { HistoryStateError } from './history-errors.js';
+import { reportFeedFailure } from './session-feed-errors.js';
 
 const PAGE_ENTRIES = 100;
 const PAGE_BYTES = 256 * 1024;
@@ -78,8 +80,8 @@ class HistoryIndex {
       this.db.exec('COMMIT');
     } catch (error) {
       try { this.db.exec('ROLLBACK'); }
-      catch (rollbackError) { console.warn('Could not roll back session history index', rollbackError); }
-      throw error;
+      catch (rollbackError) { reportFeedFailure(`Roll back session history index ${this.directory}`, rollbackError); }
+      throw reportFeedFailure(`Write session history snapshot ${this.directory}`, error);
     }
     if (final) this.ready = true;
   }
@@ -106,9 +108,9 @@ class HistoryIndex {
     if (this.closed) return;
     this.closed = true;
     try { this.db?.close(); }
-    catch (error) { console.warn('Could not close session history index', error); }
+    catch (error) { reportFeedFailure(`Close session history index ${this.directory}`, error); }
     try { rmSync(this.directory, {recursive: true, force: true}); }
-    catch (error) { console.warn('Could not remove session history index', error); }
+    catch (error) { reportFeedFailure(`Remove session history index ${this.directory}`, error); }
   }
 }
 
@@ -141,7 +143,7 @@ export class SessionFeed {
 
   constructor(private readonly sendUpstream: (frame: Extract<BrowserFrame, {t: 'fetch-transcript'}>) => void) {
     try { this.index = new HistoryIndex(); }
-    catch (error) { this.close(error instanceof Error ? error.message : String(error)); }
+    catch (error) { this.close(reportFeedFailure('Create session history index', error).message); }
   }
 
   accept(frame: HostFrame): void {
@@ -168,7 +170,7 @@ export class SessionFeed {
         const refresh = this.refresh;
         if (refresh?.welcome && refresh.error === undefined) {
           try { refresh.index.add(frame.entry); }
-          catch (error) { refresh.error = error; }
+          catch (error) { refresh.error = reportFeedFailure(`Append refreshed history entry ${frame.entry.id}, session ${this.welcome?.header.id}`, error); }
         }
         if (!this.index.add(frame.entry)) {
           this.retain(frame);
@@ -178,14 +180,14 @@ export class SessionFeed {
       this.retain(frame);
       if (this.ready) for (const viewer of this.viewers) viewer.handlers.onFrame(frame);
     } catch (error) {
-      this.close(error instanceof Error ? error.message : String(error));
+      this.close(reportFeedFailure(`Accept ${frame.t} for session feed ${this.welcome?.header.id}`, error).message);
     }
   }
 
   private page(before = this.index.nextOrdinal): HistoryPage {
     try { return this.index.page(before); }
     catch (error) {
-      this.close(error instanceof Error ? error.message : String(error));
+      this.close(reportFeedFailure(`Read history page for session ${this.welcome?.header.id}`, error).message);
       throw error;
     }
   }
@@ -203,8 +205,8 @@ export class SessionFeed {
   }
 
   beginHistoryRefresh(): (frame: Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>) => void {
-    if (this.ended !== undefined) throw new Error(this.ended);
-    if (this.refresh) throw new Error('Session history refresh is already in progress');
+    if (this.ended !== undefined) throw new HistoryStateError(`Refresh session feed ${this.welcome?.header.id}: ${this.ended}`);
+    if (this.refresh) throw new HistoryStateError(`Session history refresh is already in progress for ${this.welcome?.header.id}`);
     this.invalidateHistory();
     const refresh = {index: new HistoryIndex()} as NonNullable<SessionFeed['refresh']>;
     this.refresh = refresh;
@@ -223,7 +225,7 @@ export class SessionFeed {
 
   finishHistoryRefresh(): void {
     const refresh = this.refresh;
-    if (!refresh?.welcome || !refresh.index.ready) throw new Error('Collab refresh snapshot is not ready');
+    if (!refresh?.welcome || !refresh.index.ready) throw new HistoryStateError(`Finish history refresh for session ${this.welcome?.header.id}: Collab refresh snapshot is not ready`);
     if (refresh.error !== undefined) throw refresh.error;
     const page = refresh.index.page();
     const previous = this.index;
@@ -243,9 +245,9 @@ export class SessionFeed {
   }
 
   subscribe(handlers: SessionFeedHandlers): SessionFeedSubscription {
-    if (this.ended !== undefined) throw new Error(this.ended);
-    if (!this.ready || !this.welcome) throw new Error('Collab snapshot is not ready');
-    if (this.dirty) throw new Error('Session history is refreshing');
+    if (this.ended !== undefined) throw new HistoryStateError(`Subscribe to session feed ${this.welcome?.header.id}: ${this.ended}`);
+    if (!this.ready || !this.welcome) throw new HistoryStateError('Subscribe to session feed: Collab snapshot is not ready');
+    if (this.dirty) throw new HistoryStateError(`Subscribe to session feed ${this.welcome.header.id}: Session history is refreshing`);
     const page = this.page();
     const retained = [this.state, this.agents, this.working, this.stream,
       ...Array.from(this.tools.values()).flatMap(tool => [tool.start, tool.update]), ...this.bus.values()]
@@ -263,7 +265,7 @@ export class SessionFeed {
     this.viewers.add(viewer);
     return {
       send: frame => {
-        if (!this.viewers.has(viewer)) throw new Error(this.ended ?? 'Session not connected');
+        if (!this.viewers.has(viewer)) throw new HistoryStateError(`Send to session feed ${this.welcome?.header.id}: ${this.ended ?? 'Session not connected'}`);
         if (frame.t === 'history-page') {
           if (this.dirty) { handlers.onFrame({t: 'history-invalidated'}); return; }
           if (frame.cursor.epoch !== this.epoch) {
@@ -274,7 +276,7 @@ export class SessionFeed {
           handlers.onFrame({t: 'history-page', reqId: frame.reqId, cursor: frame.cursor, page: this.page(frame.cursor.before)});
           return;
         }
-        if (!Number.isSafeInteger(this.nextRequest)) throw new Error('Transcript request IDs exhausted');
+        if (!Number.isSafeInteger(this.nextRequest)) throw new HistoryStateError(`Fetch transcript for session ${this.welcome?.header.id}: Transcript request IDs exhausted`);
         const reqId = this.nextRequest++;
         const timer = setTimeout(() => this.cancelRequest(reqId), TRANSCRIPT_TIMEOUT_MS);
         timer.unref();
@@ -292,7 +294,7 @@ export class SessionFeed {
 
   private validateCursor(cursor: HistoryCursor): void {
     if (!Number.isSafeInteger(cursor.before) || cursor.before < 0 || cursor.before > this.index.nextOrdinal)
-      throw new Error('Invalid history cursor');
+      throw new HistoryStateError(`Read session feed ${this.welcome?.header.id}, cursor ${cursor.before}: Invalid history cursor`);
   }
 
   private cancelRequest(reqId: number): void {
@@ -313,7 +315,7 @@ export class SessionFeed {
     this.index?.close();
     for (const viewer of viewers) {
       try { viewer.handlers.onClose(reason); }
-      catch (error) { console.warn('Could not close session feed viewer', error); }
+      catch (error) { reportFeedFailure(`Close session feed viewer ${this.welcome?.header.id}`, error); }
     }
     this.tools.clear();
     this.bus.clear();

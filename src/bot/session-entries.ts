@@ -1,9 +1,10 @@
+import { reportBotError } from './errors.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
-import { GrammyError } from 'grammy';
+import { TelegramMessageMissingError, TelegramMessageNotModifiedError } from '../telegram-errors.js';
 export interface SessionEntryDependencies {
   options: BotOptions;
   bot: Bot<Context>;
@@ -26,14 +27,13 @@ export class SessionEntries {
       try {
         await this.dependencies.bot.api.editMessageReplyMarkup(session.chatId, entry.messageId, {reply_markup});
       } catch (error) {
-        if (!(error instanceof GrammyError)) throw error;
-        if (error.description === 'Bad Request: message to edit not found') {
-          console.warn(`Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`,error);
+        if (error instanceof TelegramMessageMissingError) {
+          reportBotError(`Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`,error);
           this.dependencies.options.store.clearSessionEntry(session.id);
           continue;
         }
-        if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
-        console.warn(`Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`,error);
+        if (!(error instanceof TelegramMessageNotModifiedError)) throw error;
+        reportBotError(`Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`,error);
       }
       this.dependencies.options.store.setSessionEntry(session.id,entry.messageId,markup);
     }

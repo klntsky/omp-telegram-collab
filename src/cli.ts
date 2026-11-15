@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { existsSync, realpathSync } from 'node:fs';
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
-import { readConfig, defaultConfigPath } from './config.js';
+import { readConfig, defaultConfigPath, ConfigError } from './config.js';
 import { registerAdminCommands } from './cli-admin.js';
 import { notifyReload } from './cli/reload.js';
 import { joinSession } from './session-cli.js';
@@ -27,7 +27,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const start = async () => {
     const path = configPath();
     if (program.getOptionValueSource('config') === 'cli' && !existsSync(path))
-      throw new Error(`Configuration does not exist: ${path}. Run omp-telegram-collab --config ${JSON.stringify(path)} setup.`);
+      throw new ConfigError(['config'], `Configuration does not exist: ${path}. Run omp-telegram-collab --config ${JSON.stringify(path)} setup.`);
     const service = await startService(path);
     const shutdown = () => { void service.close().catch(error => { console.error('Shutdown failed:', error); process.exitCode = 1; }); };
     process.once('SIGINT', shutdown);
@@ -70,7 +70,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   void main().catch(error => {
-    if (!pollingFailureReported(error)) stderr.write(`${error instanceof Error ? error.message : 'Command failed'}\n`);
+    if (!pollingFailureReported(error)) stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   });
 }

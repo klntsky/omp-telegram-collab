@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { PendingPromptContent } from '../../shared/contracts.js';
 import type { PromptExtension } from '../telegram-commands.js';
+import { StoreStateError, rollbackStore } from './errors.js';
 
 export interface InitialDocumentSetup {
   automaticWorktree: boolean;
@@ -41,7 +42,7 @@ export class InitialDocuments {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db.prepare("UPDATE sessions SET initial_task=? WHERE id=? AND initial_state='pending' AND status='open'").run(task.text, id);
-      if (!Number(result.changes)) throw new Error('Session cannot update its initial task');
+      if (!Number(result.changes)) throw new StoreStateError(`Replace pending task for session ${id}: Session cannot update its initial task`);
       if (task.documents?.length) {
         this.db.prepare('INSERT INTO initial_documents VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET documents=excluded.documents')
           .run(id, JSON.stringify(task.documents));
@@ -50,8 +51,7 @@ export class InitialDocuments {
       }
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Replace pending task for session ${id}`, error);
     }
   }
 }

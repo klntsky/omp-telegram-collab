@@ -120,7 +120,7 @@ export class GuestClient {
 	constructor(socket: GuestTransport, readonly displayName: string) {
 		this.#socket = socket;
 		this.#socket.onOpen = () => this.#handleOpen();
-		this.#socket.onFrame = frame => this.#applyFrameSafe(frame);
+		this.#socket.onFrame = frame => this.#applyFrame(frame);
 		this.#socket.onClose = (reason, willReconnect) => this.#handleClose(reason, willReconnect);
 		this.#snapshot = this.#buildSnapshot();
 	}
@@ -173,7 +173,7 @@ export class GuestClient {
 	 * published now, so the snapshot reflects the frame on return.
 	 */
 	applyFrameForTest(frame: BrowserHostFrame, options: { flush?: boolean } = {}): void {
-		this.#applyFrameSafe(frame);
+		this.#applyFrame(frame);
 		if ((options.flush ?? true) && this.#publication.pending) this.#commit();
 	}
 
@@ -249,20 +249,6 @@ export class GuestClient {
 		}
 	}
 
-	/** Surfaces apply failures instead of letting the socket's recv chain swallow them. */
-	#applyFrameSafe(frame: BrowserHostFrame): void {
-		try {
-			this.#applyFrame(frame);
-		} catch (err) {
-			console.warn("collab: failed to apply frame", frame.t, err);
-			if (frame.t === "welcome" && !this.#welcomed) {
-				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
-				return;
-			}
-			this.#live.pushNotice("error", `failed to apply ${frame.t} frame`);
-			this.#commit();
-		}
-	}
 
 	#applyFrame(frame: BrowserHostFrame): void {
 		switch (frame.t) {

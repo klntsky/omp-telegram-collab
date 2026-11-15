@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { accessBrowserStorage, BrowserStorageUnavailableError } from "./storage";
 
 export type SystemTheme = "light" | "dark";
 export type ThemePreference = "system" | "light" | "dark";
@@ -7,10 +8,12 @@ const STORAGE_KEY = "omp-collab-theme";
 const DARK_SCHEME_QUERY = "(prefers-color-scheme: dark)";
 
 function readStoredPreference(): ThemePreference {
+	if (typeof window === "undefined") return "system";
 	try {
-		const stored = globalThis.localStorage.getItem(STORAGE_KEY);
+		const stored = accessBrowserStorage("Read theme preference", STORAGE_KEY, () => globalThis.localStorage?.getItem(STORAGE_KEY));
 		return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
-	} catch {
+	} catch (error) {
+		if (!(error instanceof BrowserStorageUnavailableError)) throw error;
 		// Private-mode or blocked storage: fall back to following the system.
 		return "system";
 	}
@@ -55,9 +58,10 @@ if (typeof window !== "undefined") {
 export function setThemePreference(next: ThemePreference): void {
 	preference = next;
 	try {
-		globalThis.localStorage.setItem(STORAGE_KEY, next);
-	} catch {
-		// Persistence is best-effort; still apply/emit the in-memory preference.
+		accessBrowserStorage("Save theme preference", STORAGE_KEY, () => globalThis.localStorage.setItem(STORAGE_KEY, next));
+	} catch (error) {
+		if (!(error instanceof BrowserStorageUnavailableError)) throw error;
+		// Denied storage permission still allows an in-memory preference.
 	}
 	applyResolvedTheme();
 	emit();

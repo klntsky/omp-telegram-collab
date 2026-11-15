@@ -1,3 +1,4 @@
+import { OmpNotRepositoryError, systemError, OmpSessionUnavailableError, OmpConfigurationError, OmpIdentityError, OmpProtocolError, parseJson, OmpCommandError, OmpRuntimeStoppingError, OmpHostBusyError } from './errors.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -31,8 +32,8 @@ export interface RuntimeWorktree {
 export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
 
   async function worktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
-    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
+    if (session.runtime.kind !== 'managed') throw new OmpSessionUnavailableError('Attached OMP sessions cannot switch worktrees', `Switch worktree session ${session.id}`);
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new OmpConfigurationError('Instance path is not configured', `Switch worktree session ${session.id}`);
     const reservation = await deps.reserveSession(session.id, beforeMutation);
     try { return await switchWorktree(session, branch, beforeMutation); }
     finally { reservation.release(); }
@@ -40,42 +41,42 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
 
   async function switchWorktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     deps.assertActive();
-    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
+    if (session.runtime.kind !== 'managed') throw new OmpSessionUnavailableError('Attached OMP sessions cannot switch worktrees', `Switch worktree session ${session.id}`);
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Switch worktree session ${session.id}`);
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new OmpConfigurationError('Instance path is not configured', `Switch worktree session ${session.id}`);
     const activity = deps.hostActivity(session.id);
-    if (activity.busy || activity.leases || deps.pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+    if (activity.busy || activity.leases || deps.pending.has(session.id)) throw new OmpHostBusyError('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees', `Switch worktree session ${session.id}`);
     await deps.ensure(session, beforeMutation);
     const host = deps.managed.get(session.id);
-    if (!host) throw new Error('Managed OMP host is not available');
+    if (!host) throw new OmpSessionUnavailableError('Managed OMP host is not available', `Switch worktree session ${session.id}`);
     const registered = (await deps.list(Date.now() + deps.config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed || deps.stopping.has(session.id)) throw new OmpRuntimeStoppingError(`Switch worktree session ${session.id}`);
     if (deps.hostActivity(session.id).busy || deps.hostActivity(session.id).leases || registered?.busy === true) {
-      throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      throw new OmpHostBusyError('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees', `Switch worktree session ${session.id}`);
     }
     const operation = (async () => {
       await beforeMutation?.();
       await deps.shutdown(session.id, host, 'worktree');
-      if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      if (!host.exited) throw new OmpHostBusyError('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees', `Switch worktree session ${session.id}`);
       await beforeMutation?.();
       const { dir, pin } = await deps.prepare(session);
       await beforeMutation?.();
       const result = await worktreeRpc(dir, pin, branch);
       const state = result.state;
       if (state.sessionId !== pin.sessionId || typeof state.sessionFile !== 'string') {
-        throw new Error('Native OMP worktree returned an invalid session identity');
+        throw new OmpProtocolError('Switch worktree', `session ${session.id}`, 'Native OMP worktree returned an invalid session identity');
       }
       const sessionFile = await realpath(state.sessionFile);
       const header = await readHeader(sessionFile);
       const cwd = await realpath(header.cwd);
       await deps.validateCwd(cwd);
-      if (header.id !== pin.sessionId || header.cwd !== cwd) throw new Error('Native OMP worktree history identity changed');
+      if (header.id !== pin.sessionId || header.cwd !== cwd) throw new OmpIdentityError('Native OMP worktree history identity changed', `Switch worktree session ${session.id}`);
       await beforeMutation?.();
       await chmod(sessionFile, 0o600);
       await beforeMutation?.();
       await writeBinding(dir, { ...pin, cwd, sessionFile });
       session.cwd = cwd;
-      if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
+      if (cwd === pin.cwd) throw new OmpSessionUnavailableError(result.text || 'OMP worktree command did not move the session', `Switch worktree session ${session.id}`);
       return result.text;
     })();
     deps.stopping.set(session.id, operation.then(() => undefined, () => undefined));
@@ -96,10 +97,10 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     let failure: Error | undefined;
     const { promise: completion, resolve, reject } = Promise.withResolvers<void>();
     const timer = setTimeout(() => {
-      failure = new Error('OMP worktree command timed out');
+      failure = new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, 'OMP worktree command timed out');
       child.kill('SIGKILL');
     }, deps.config.omp.startupTimeoutMs);
-    child.once('error', error => { failure = error; });
+    child.once('error', error => { failure = new OmpCommandError('Spawn worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, error); });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', part => { diagnostics += part; });
     child.stdout.setEncoding('utf8');
@@ -111,20 +112,21 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         buffer = buffer.slice(newline + 1);
         if (!line.trim()) continue;
         try {
-          const frame = JSON.parse(line) as Record<string, unknown>;
+          const frame = parseJson(line, 'Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`) as Record<string, unknown>;
+          if (!record(frame)) throw new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, 'Expected an RPC response object');
           if (frame.type === 'command_output' && typeof frame.text === 'string') outputs.push(frame.text);
           if (frame.type !== 'response') continue;
-          if (frame.success !== true) throw new Error(typeof frame.error === 'string' ? frame.error : 'OMP worktree RPC failed');
+          if (frame.success !== true) throw new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, typeof frame.error === 'string' ? frame.error : 'OMP worktree RPC failed');
           if (frame.id === 'worktree') {
-            if (!record(frame.data) || frame.data.agentInvoked !== false) throw new Error('OMP worktree unexpectedly invoked an agent');
+            if (!record(frame.data) || frame.data.agentInvoked !== false) throw new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, 'OMP worktree unexpectedly invoked an agent');
             child.stdin.write(`${JSON.stringify({ id: 'state', type: 'get_state' })}\n`);
           } else if (frame.id === 'state') {
-            if (!record(frame.data)) throw new Error('Invalid OMP worktree state');
+            if (!record(frame.data)) throw new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, 'Invalid OMP worktree state');
             state = frame.data;
             child.stdin.end();
           }
-        } catch (error) {
-          failure = error instanceof Error ? error : new Error(String(error));
+        } catch (error) { error = systemError(error, 'worktree OS operation');
+          failure = error instanceof Error ? error : new Error(`Worktree RPC (sessionFile ${pin.sessionFile}; cwd ${pin.cwd}): ${String(error)}`, { cause: error });
           child.stdin.end();
         }
       }
@@ -136,7 +138,7 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         if (text && !failure.message.includes(text)) failure.message += `\n${text}`;
         reject(failure);
       }
-      else if (code !== 0 || !state) reject(new Error(outputs.join('\n') || diagnostics || 'OMP worktree RPC exited without session state'));
+      else if (code !== 0 || !state) reject(new OmpProtocolError('Worktree RPC', `sessionFile ${pin.sessionFile}; cwd ${pin.cwd}`, outputs.join('\n') || diagnostics || 'OMP worktree RPC exited without session state'));
       else resolve();
     });
     child.stdin.on('error', error => { failure ??= error; });
@@ -155,7 +157,7 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
       const runtime = session.runtime;
       const hosts = await deps.list(Date.now() + deps.config.omp.startupTimeoutMs);
       const host = hosts.find(value => value.instanceId === runtime.instanceId && value.sessionId === runtime.sessionId);
-      if (!host) throw new Error('Attached OMP host is not available');
+      if (!host) throw new OmpProtocolError('Worktree RPC', `session ${session.id}`, 'Attached OMP host is not available');
       cwd = host.cwd;
     }
     const git = (args: string[], missingRepository = false): Promise<string | undefined> => {
@@ -169,8 +171,15 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         encoding: 'utf8',
       }, (error, stdout, stderr) => {
         if (!error) resolve(stdout.trim());
-        else if (missingRepository && error.code === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(stderr)) resolve(undefined);
-        else reject(error);
+        else {
+          // git rev-parse exposes absence through exit 128 and stderr, not a structured error frame.
+          const failure = missingRepository && error.code === 128 && /^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(stderr)
+            ? new OmpNotRepositoryError(cwd, error)
+            : new OmpCommandError('Inspect Git topic title', `cwd ${cwd}; command ${args[0]}`, error, error.code, error.signal);
+          if (failure instanceof OmpNotRepositoryError) resolve(undefined);
+          else reject(failure);
+        }
+
       });
       return promise;
     };

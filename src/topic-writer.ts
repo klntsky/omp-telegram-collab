@@ -47,7 +47,7 @@ export class TopicWriter {
       }
     } catch (error) {
       this.pending = this.desired !== undefined;
-      if (this.active()) this.onError(error);
+      this.onError(error);
     } finally {
       this.worker = undefined;
     }

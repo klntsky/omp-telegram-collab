@@ -8,6 +8,7 @@ import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/mod
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { MissingResourceError, systemOperation } from '../../../scripts/lib/system-errors.js';
 
 export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation' | 'documentCancellation' | 'documentAuthorization'>): void {
   it('saving the live session limit returns to the settings overview', async () => {
@@ -226,8 +227,9 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
         const pending = app.store.listSessions(app.telegram.bot.id).find(session => !existing.has(session.id));
         if (pending) {
           let binding;
-          try { binding = JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', pending.id, 'binding.json'), 'utf8')); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          const bindingPath = join(app.omp.dataDir, 'sessions', pending.id, 'binding.json');
+          try { binding = JSON.parse(await systemOperation(`Read pending session ${pending.id} binding ${bindingPath}`, () => readFile(bindingPath, 'utf8'))); }
+          catch (error) { if (!(error instanceof MissingResourceError)) throw error; }
           if (binding?.cwd && binding.cwd !== app.omp.workspace) {
             interruptedCwd = binding.cwd;
             app.omp.log('document.authorization.lost-response', {sessionId:pending.id, result, diagnostic});

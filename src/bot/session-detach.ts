@@ -3,7 +3,7 @@ import type { TopicSession, PromptContent, HostBinding } from '../../shared/cont
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
-import { GrammyError } from 'grammy';
+import { TelegramTopicNotModifiedError } from '../telegram-errors.js';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { findInstance } from '../config.js';
@@ -50,7 +50,7 @@ export class SessionDetach {
           findInstance(this.dependencies.options.config, this.dependencies.id, session.chatId)?.instance.id === session.instanceId,
       );
     } catch (error) {
-      if (!(error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')))
+      if (!(error instanceof TelegramTopicNotModifiedError))
         throw error;
     }
   }

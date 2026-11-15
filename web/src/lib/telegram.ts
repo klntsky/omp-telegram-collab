@@ -1,4 +1,7 @@
 import { refreshSystemTheme } from "./theme";
+import { decodeJson, InvalidJsonError } from "./decode";
+import { accessBrowserStorage, BrowserStorageUnavailableError } from "./storage";
+import { SessionError, SessionLaunchError, SessionProtocolError, SessionRequestError } from "./session-errors";
 
 export interface TelegramWebApp {
 	initData: string;
@@ -40,7 +43,7 @@ export type AuthorizedSession = ClosedAuthorizedSession | (SessionAuthorization 
 	ticket: string;
 });
 
-export class SessionAccessError extends Error {
+export class SessionAccessError extends SessionError {
 	constructor(message: string, readonly status?: number) {
 		super(message);
 	}
@@ -53,13 +56,15 @@ function readSessionCredential(launch: TelegramLaunch): string | undefined {
 	let cached = sessionCredentials.get(key);
 	if (!cached) {
 		try {
-			const stored: unknown = JSON.parse(globalThis.sessionStorage.getItem(key) ?? "null");
+			const stored = decodeJson(accessBrowserStorage("Read session credential", key, () => globalThis.sessionStorage.getItem(key)) ?? "null", `Decode session credential for bot ${launch.botId}, session ${launch.sessionId}`);
 			if (stored && typeof stored === "object" && "initData" in stored && "credential" in stored &&
 				typeof stored.initData === "string" && typeof stored.credential === "string" && stored.credential) {
 				cached = { initData: stored.initData, credential: stored.credential };
 				sessionCredentials.set(key, cached);
 			}
-		} catch {}
+		} catch (error) {
+			if (!(error instanceof InvalidJsonError) && !(error instanceof BrowserStorageUnavailableError)) throw error;
+		}
 	}
 	return cached?.initData === launch.initData ? cached.credential : undefined;
 }
@@ -69,28 +74,31 @@ function saveSessionCredential(launch: TelegramLaunch, credential: string): void
 	const cached = { initData: launch.initData, credential };
 	sessionCredentials.set(key, cached);
 	try {
-		globalThis.sessionStorage.setItem(key, JSON.stringify(cached));
-	} catch {}
+		accessBrowserStorage("Save session credential", key, () => globalThis.sessionStorage.setItem(key, JSON.stringify(cached)));
+	} catch (error) {
+		if (!(error instanceof BrowserStorageUnavailableError)) throw error;
+	}
 }
 
 export function readTelegramLaunch(): TelegramLaunch {
 	const app = window.Telegram?.WebApp;
 	if (!app?.initData) {
-		throw new Error("Open this Mini App using the OPEN AGENT button in your Telegram topic. Telegram authentication is required.");
+		throw new SessionLaunchError("Read Telegram launch: Open this Mini App using the OPEN AGENT button in your Telegram topic. Telegram authentication is required.");
 	}
 	const botHint = new URLSearchParams(window.location.search).get("bot");
 	const botId = Number(botHint);
 	if (!botHint || !/^\d+$/.test(botHint) || !Number.isSafeInteger(botId) || botId <= 0) {
-		throw new Error("This Mini App is missing its bot configuration. Set its BotFather app URL to include ?bot=<bot ID>, then reopen the topic’s OPEN AGENT button.");
+		throw new SessionLaunchError("Read Telegram launch: This Mini App is missing its bot configuration. Set its BotFather app URL to include ?bot=<bot ID>, then reopen the topic’s OPEN AGENT button.");
 	}
 	const startParam = app.initDataUnsafe.start_param;
 	if (typeof startParam !== "string" || !/^s_[A-Za-z0-9_-]{16,128}$/.test(startParam)) {
-		throw new Error("No session was selected. Open this Mini App from the OPEN AGENT button in a Telegram topic.");
+		throw new SessionLaunchError(`Read Telegram launch for bot ${botId}: No session was selected. Open this Mini App from the OPEN AGENT button in a Telegram topic.`);
 	}
 	return { botId, sessionId: startParam.slice(2), initData: app.initData };
 }
 
 export async function authorizeSession(launch: TelegramLaunch, signal: AbortSignal, generation?: number): Promise<AuthorizedSession> {
+	const operation = `Authorize bot ${launch.botId}, session ${launch.sessionId} via POST /api/session`;
 	const response = await fetch("/api/session", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
@@ -98,26 +106,36 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		cache: "no-store",
 		body: JSON.stringify({ ...launch, credential: readSessionCredential(launch), generation }),
 		signal,
+	}).catch(error => {
+		if (signal.aborted && error === signal.reason) throw error;
+		if (!(error instanceof TypeError)) throw error;
+		throw new SessionRequestError(`${operation}: ${error.message}`, { cause: error });
+	});
+	const body = await response.text().catch(error => {
+		if (signal.aborted && error === signal.reason) throw error;
+		if (!(error instanceof TypeError)) throw error;
+		throw new SessionRequestError(`${operation}: read HTTP ${response.status} response body: ${error.message}`, { cause: error });
 	});
 	if (!response.ok) {
-		const body = await response.text();
 		let message = body || `Session request failed (${response.status} ${response.statusText}).`;
 		try {
-			const error: unknown = JSON.parse(body);
+			const error = decodeJson(body, `${operation}: decode HTTP ${response.status} rejection`);
 			if (error && typeof error === "object" && "error" in error && typeof error.error === "string") {
 				message = error.error;
 			}
-		} catch {}
+		} catch (error) {
+			if (!(error instanceof InvalidJsonError)) throw error;
+		}
 		// Invalid access or a stale session generation requires explicit rejoin,
 		// so automatic recovery cannot undo /kill. See src/server.ts /api/session.
 		// Other statuses retain the existing retry path, including temporary
 		// authorization outages reported by the gateway as 503.
 		if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409) {
-			throw new SessionAccessError(message, response.status);
+			throw new SessionAccessError(`${operation} (HTTP ${response.status}): ${message}`, response.status);
 		}
-		throw new Error(message);
+		throw new SessionRequestError(`${operation} (HTTP ${response.status}): ${message}`);
 	}
-	const data: unknown = await response.json();
+	const data = decodeJson(body, `${operation}: decode response`);
 	if (
 		!data || typeof data !== "object" ||
 		!("session" in data) || !data.session || typeof data.session !== "object" ||
@@ -128,7 +146,7 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 		!("generation" in data) || typeof data.generation !== "number" || !Number.isSafeInteger(data.generation) || data.generation < 0 ||
 		!("displayName" in data) || typeof data.displayName !== "string" || !data.displayName
 	) {
-		throw new Error("Invalid session response. Retry in a moment.");
+		throw new SessionProtocolError(`${operation}: Invalid session response. Retry in a moment.`);
 	}
 	const common = {
 		credential: data.credential,
@@ -137,11 +155,11 @@ export async function authorizeSession(launch: TelegramLaunch, signal: AbortSign
 	};
 	let result: AuthorizedSession;
 	if (data.session.status === "closed") {
-		if ("ticket" in data) throw new Error("Invalid session response. Retry in a moment.");
+		if ("ticket" in data) throw new SessionProtocolError(`${operation}: Invalid session response. Retry in a moment.`);
 		result = { ...common, session: { id: data.session.id, name: data.session.name, status: "closed" } };
 	} else {
 		if (!("ticket" in data) || typeof data.ticket !== "string" || !/^[A-Za-z0-9_-]{16,512}$/.test(data.ticket)) {
-			throw new Error("Invalid session response. Retry in a moment.");
+			throw new SessionProtocolError(`${operation}: Invalid session response. Retry in a moment.`);
 		}
 		result = { ...common, session: { id: data.session.id, name: data.session.name, status: "open" }, ticket: data.ticket };
 	}

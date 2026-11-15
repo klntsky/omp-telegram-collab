@@ -5,13 +5,14 @@ import { Writable } from 'node:stream';
 import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from './lib/telegram-test-auth.js';
 import { appendTelegramTestSession, resolveTelegramTestEnvFile } from '../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
+import { ScriptUsageError, TelegramTestAuthorizationError, TelegramTestCancellationError } from './lib/telegram-test-errors.js';
 
 const filename = await resolveTelegramTestEnvFile();
 const credentials = readTelegramApplicationCredentials(parseEnv(await readFile(filename, 'utf8')));
-if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Run pnpm telegram:test:login in an interactive terminal');
+if (!process.stdin.isTTY || !process.stdout.isTTY) throw new ScriptUsageError('Authorize Telegram test login: Run pnpm telegram:test:login in an interactive terminal');
 const controller = new AbortController();
 const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]);
-const interrupt = () => controller.abort(new Error('Telegram test login interrupted'));
+const interrupt = () => controller.abort(new TelegramTestCancellationError('login interrupted'));
 let muted = false;
 const output = new Writable({
   write(chunk, _encoding, callback) {
@@ -37,7 +38,7 @@ const closeOnAbort = () => { void close().catch(error => { if (!errors.includes(
 signal.addEventListener('abort', closeOnAbort, { once: true });
 try {
   const config = await client.call({ _: 'help.getConfig' }, { timeout: 30000, abortSignal: signal });
-  if (!config.testMode) throw new Error('Refusing to authorize an account outside the Telegram test network');
+  if (!config.testMode) throw new TelegramTestAuthorizationError('Authorize Telegram test login: Refusing to authorize an account outside the Telegram test network');
   console.log("Use the phone number registered in Telegram's test environment and the actual code delivered to that account.");
   const user = await client.start({
     phone: () => ask('Test account phone number: '),
@@ -45,7 +46,7 @@ try {
     password: () => ask('Two-step verification password (hidden): ', true),
     abortSignal: signal,
   });
-  if (user.isBot) throw new Error('Telegram test provisioning requires a user account');
+  if (user.isBot) throw new TelegramTestAuthorizationError(`Authorize Telegram test login for user ${user.id}: Telegram test provisioning requires a user account`);
   const session = await exportTelegramTestSession(client, signal);
   signal.throwIfAborted();
   await appendTelegramTestSession(filename, session);

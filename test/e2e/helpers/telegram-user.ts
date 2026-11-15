@@ -5,6 +5,7 @@ import { TelegramTestExecution, type TelegramTestSession } from '../../../script
 import { acquireTelegramTestBot } from '../../../scripts/lib/telegram-test-bots.js';
 import { telegramTestDeadlineRemaining, telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { combineTelegramErrors } from './errors.js';
+import { TelegramTestCancellationError, TelegramTestRetryBudgetError } from '../../../scripts/lib/telegram-test-errors.js';
 
 let execution = new TelegramTestExecution();
 after(() => execution.close(), { timeout: 30000 });
@@ -73,7 +74,7 @@ export class TelegramTestUser {
             console.warn(`Telegram ${request._} account=${this.account.id} FLOOD_WAIT delay=${error.seconds}s`, error);
             const wait = error.seconds * 1000;
             if (wait >= deadline - performance.now()) {
-              throw new Error(`Telegram ${request._} account=${this.account.id}: required ${error.seconds}s delay exceeds remaining request budget`);
+              throw new TelegramTestRetryBudgetError(`Telegram ${request._} account=${this.account.id}: required ${error.seconds}s delay exceeds remaining request budget: ${error.message}`, { cause: error });
             }
             await delay(wait, undefined, { signal: bounded });
           }
@@ -88,11 +89,11 @@ export class TelegramTestUser {
   }
   async cancelSetup(): Promise<void> {
     this.#cancelled = true;
-    this.#controller.abort(new Error('Telegram test provisioning cancelled'));
+    this.#controller.abort(new TelegramTestCancellationError('provisioning cancelled'));
   }
   close(): Promise<void> {
     this.#closing ??= (async () => {
-      this.#controller.abort(new Error('Telegram test fixture user closed'));
+      this.#controller.abort(new TelegramTestCancellationError('fixture user closed'));
       const errors: unknown[] = [];
       try {
         if (this.#cancelled) {

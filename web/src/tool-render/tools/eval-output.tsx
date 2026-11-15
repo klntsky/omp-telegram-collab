@@ -81,11 +81,7 @@ function splitEvalOutput(output: string, views: readonly EvalViewEntry[]): EvalO
 }
 
 function jsonText(value: unknown): string {
-	try {
-		return JSON.stringify(value, null, 2) ?? String(value);
-	} catch {
-		return String(value);
-	}
+	return JSON.stringify(value, null, 2) ?? String(value);
 }
 
 function ViewBlock({ view }: { view: EvalView }): ReactNode {

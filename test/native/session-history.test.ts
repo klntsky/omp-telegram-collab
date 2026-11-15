@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import type { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { HostFrame, SessionEntry } from '@oh-my-pi/pi-wire';
@@ -10,11 +12,13 @@ import { emptyConfig, writeConfig } from '../../src/config.js';
 import { OmpRuntime } from '../../src/runtime.js';
 import { SessionFeed, type SessionFeedSubscription } from '../../src/session-feed.js';
 import { SessionHistory } from '../../src/session-history.js';
+import { SessionFeedError } from '../../src/session-feed-errors.js';
 import { GuestClient } from '../../web/src/lib/client.js';
 import type { GuestTransport } from '../../web/src/lib/socket.js';
 import { bounded } from '../e2e/helpers/async.js';
 import { createWriteTask, readSessionHistory, writeReadScenario, writeScenario, type WriteTask } from '../e2e/helpers/model-tasks.js';
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
+import { combineTelegramErrors } from '../e2e/helpers/errors.js';
 
 function readResult(entries: readonly SessionEntry[], task: WriteTask) {
   const entry = entries.find(entry => entry.type === 'message' && entry.message.role === 'toolResult' &&
@@ -58,7 +62,7 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
       try { await bounded(Promise.resolve().then(close), AbortSignal.timeout(30000)); }
       catch (error) { errors.push(error); }
     }
-    if (errors.length) throw new AggregateError(errors, 'Native history cleanup failed');
+    if (errors.length) throw combineTelegramErrors(...errors);
   });
   const omp = await setupOmpEnvironment({
     signal: t.signal,
@@ -125,6 +129,8 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
     connection.send(frame);
   });
   cleanup.push(() => feed.close());
+  let expectedIndexFailure = false;
+  const indexFailures: SessionFeedError[] = [];
   const history = new SessionHistory(feed, {
     sessionId: binding.sessionId,
     source: () => runtime.historySource(session),
@@ -132,7 +138,12 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
     assertActive() {
       if (closing) throw new Error('Native acceptance session is closing');
     },
-    onError: fail,
+    onError(error) {
+      if (expectedIndexFailure && error instanceof SessionFeedError) {
+        indexFailures.push(error);
+        omp.log('native.expected-index-failure', error);
+      } else fail(error);
+    },
   });
   cleanup.push(() => history.close());
   await history.prepare();
@@ -152,6 +163,8 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
     },
   }, t.signal);
   let refreshCount = 0;
+  let corruptNextRefresh = false;
+  let failedRefreshDirectory: string | undefined;
   connection = {
     send: frame => native.send(frame),
     async refreshSnapshot(onFrame) {
@@ -159,6 +172,14 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
       omp.log('native.refresh.start', { refreshCount });
       await native.refreshSnapshot(frame => {
         omp.log('native.refresh.frame', frame);
+        if (corruptNextRefresh && frame.t === 'snapshot-chunk' && frame.final) {
+          corruptNextRefresh = false;
+          // Fail the real replacement database on the final native chunk, so
+          // the transport has drained that snapshot before recovery begins.
+          const { refresh } = feed as unknown as { refresh: { index: { db: DatabaseSync; directory: string } } };
+          failedRefreshDirectory = refresh.index.directory;
+          refresh.index.db.exec('DROP TABLE entries');
+        }
         onFrame(frame);
       });
       omp.log('native.refresh.end', { refreshCount });
@@ -269,6 +290,35 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   assert.ok(final.some(entry => entry.type === 'message' && entry.message.role === 'toolResult' &&
     entry.message.toolCallId === followup.toolCallId && !entry.message.isError));
   assert.deepEqual(JSON.parse(await readFile(join(session.cwd, original.path), 'utf8')), replacement.evidence);
+
+  const { index: previousIndex } = feed as unknown as { index: { directory: string } };
+  expectedIndexFailure = true;
+  corruptNextRefresh = true;
+  feed.invalidateHistory();
+  try {
+    await assert.rejects(history.ensureFresh(), error => {
+      assert.ok(error instanceof SessionFeedError);
+      assert.equal(indexFailures.at(-1), error);
+      assert.ok(error.cause instanceof Error && 'code' in error.cause);
+      assert.equal(error.cause.code, 'ERR_SQLITE_ERROR');
+      assert.ok(error.message.includes(error.cause.message));
+      return true;
+    });
+  } finally {
+    expectedIndexFailure = false;
+  }
+  assert.ok(failedRefreshDirectory);
+  assert.equal(existsSync(failedRefreshDirectory), false);
+  assert.equal(existsSync(previousIndex.directory), true);
+  assert.equal(feed.historyFresh, false);
+  await history.ensureFresh();
+  assert.equal(feed.historyFresh, true);
+  assert.equal(existsSync(previousIndex.directory), false);
+  for (const reader of [warm, joined]) {
+    assert.deepEqual(readResult(reader.client.getSnapshot().entries, original).message.content, rewritten.message.content);
+    assert.ok(reader.client.getSnapshot().entries.some(entry => entry.type === 'message' &&
+      entry.message.role === 'toolResult' && entry.message.toolCallId === followup.toolCallId && !entry.message.isError));
+  }
   const finalHosts = (await omp.listHosts()).filter(host => host.sessionId === binding.sessionId);
   assert.deepEqual(finalHosts, [initialHost]);
   assert.equal(await runtime.isRunning(session), true);

@@ -133,7 +133,7 @@ test('first interactive setup saves defaults and enters bot registration immedia
       assert.notEqual(answer, undefined);
       return answer!;
     },
-  }), {message: 'Invalid Telegram bot token.'});
+  }));
   assert.deepEqual(answers, []);
   const config = readConfig(f.configPath);
   assert.equal(config.dataDir, defaults.dataDir);

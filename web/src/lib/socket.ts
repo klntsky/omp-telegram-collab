@@ -1,5 +1,7 @@
 import type { BrowserFrame, BrowserHostFrame } from "../../../shared/contracts";
 import { SessionAccessError } from "./telegram";
+import { decodeJson, InvalidJsonError } from "./decode";
+import { SessionProtocolError, SessionRequestError, SessionRequestTimeoutError } from "./session-errors";
 
 export type GatewayAction = BrowserFrame;
 
@@ -62,15 +64,18 @@ export class GatewaySocket implements GuestTransport {
 	async #openSocket(): Promise<void> {
 		const controller = new AbortController();
 		this.#authorization = controller;
-		const timeout = setTimeout(() => controller.abort(), 20_000);
+		const timeout = setTimeout(() => controller.abort(new SessionRequestTimeoutError()), 20_000);
 		let ticket = this.#ticket;
 		this.#ticket = null;
 		try {
 			ticket ??= await this.#refreshTicket(controller.signal);
 		} catch (error) {
+			if (controller.signal.aborted && error === controller.signal.reason && !(error instanceof SessionRequestTimeoutError)) return;
+			if (!(error instanceof SessionAccessError) && !(error instanceof SessionRequestError) &&
+				!(error instanceof SessionProtocolError) && !(error instanceof InvalidJsonError)) throw error;
 			if (this.#closed || this.#authorization !== controller) return;
-			if (error instanceof SessionAccessError) this.#finish(error.message);
-			else this.reconnect(`${error instanceof Error ? error.message : String(error)}\nReconnecting…`);
+			if (error instanceof SessionRequestError) this.reconnect(`${error.message}\nReconnecting…`);
+			else this.#finish(error.message);
 			return;
 		} finally {
 			clearTimeout(timeout);
@@ -85,8 +90,7 @@ export class GatewaySocket implements GuestTransport {
 			ws = new WebSocket(url);
 		} catch (error) {
 			logSocketError("Session WebSocket construction failed:", error, ticket, url.href);
-			this.reconnect("Could not connect to the session. Reconnecting…");
-			return;
+			throw error;
 		}
 		this.#ws = ws;
 		let gatewayError: string | undefined;
@@ -97,19 +101,20 @@ export class GatewaySocket implements GuestTransport {
 			if (this.#ws !== ws) return;
 			let frame: BrowserHostFrame;
 			try {
-				if (typeof event.data !== "string") throw new Error("Expected JSON");
-				const value: unknown = JSON.parse(event.data);
+				if (typeof event.data !== "string") throw new SessionProtocolError("Decode session WebSocket frame: Expected JSON");
+				const value = decodeJson(event.data, "Decode session WebSocket frame");
 				if (!value || typeof value !== "object" || !("t" in value) || typeof value.t !== "string") {
-					throw new Error("Invalid frame");
+					throw new SessionProtocolError("Decode session WebSocket frame: Invalid frame");
 				}
 				if (value.t === "gateway-error") {
-					if (!("message" in value) || typeof value.message !== "string") throw new Error("Invalid gateway diagnostic");
+					if (!("message" in value) || typeof value.message !== "string") throw new SessionProtocolError("Decode session WebSocket frame: Invalid gateway diagnostic");
 					gatewayError = value.message;
 					return;
 				}
 				frame = value as BrowserHostFrame;
-			} catch {
-				this.#finish("The session sent an invalid response. Rejoin to try again.");
+			} catch (error) {
+				if (!(error instanceof SessionProtocolError) && !(error instanceof InvalidJsonError)) throw error;
+				this.#finish(error.message);
 				return;
 			}
 			if (frame.t === "snapshot-chunk" && frame.final) this.#attempt = 0;
@@ -121,7 +126,7 @@ export class GatewaySocket implements GuestTransport {
 			}
 			this.onFrame?.(frame);
 		};
-		ws.onerror = () => {};
+		// WebSocket error events carry no diagnostic; the close event owns recovery.
 		ws.onclose = event => {
 			if (this.#ws !== ws) return;
 			if (event.code === 4001 || event.code === 4002 || event.code === 4003 || event.code === 4009) {
@@ -157,7 +162,7 @@ export class GatewaySocket implements GuestTransport {
 		} catch (error) {
 			logSocketError("Session WebSocket send failed; delivery is uncertain:", error,
 				new URL(ws.url).searchParams.get("ticket") ?? "", ws.url);
-			this.reconnect("Could not send to the session. Reconnecting; delivery is uncertain.");
+			throw error;
 		}
 	}
 

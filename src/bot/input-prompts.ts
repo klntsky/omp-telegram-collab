@@ -1,3 +1,4 @@
+import { BotPromptRejectedError } from './errors.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Context } from 'grammy';
 import type { TopicSession, PendingPromptContent } from '../../shared/contracts.js';
@@ -94,7 +95,7 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
         (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(deps.folderSettings(ctx.chat.id))) ||
         (session && deps.store.getSessionGeneration(session.id) !== generation)
       )
-        throw new Error('The session or group assignment changed while downloading the image');
+        throw new BotPromptRejectedError(`Route downloaded prompt (chat=${ctx.chat.id}, session=${session?.id}, instance=${instanceId}): The session or group assignment changed while downloading the image`);
       await deps.routePrompt(
         ctx,
         { text: intent.content.text, ...(images.length ? { images } : {}), ...(intent.content.documents?.length ? {documents:intent.content.documents} : {}) },

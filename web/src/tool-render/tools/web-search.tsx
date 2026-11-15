@@ -5,11 +5,8 @@ import type { ToolRenderer, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, resultTextOf, str, truncate } from "../util";
 
 function getDomain(url: string): string {
-	try {
-		return new URL(url).hostname.replace(/^www\./, "");
-	} catch {
-		return "";
-	}
+	if (!URL.canParse(url)) return "";
+	return new URL(url).hostname.replace(/^www\./, "");
 }
 
 function formatAge(seconds: unknown): string {

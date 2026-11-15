@@ -12,20 +12,23 @@ import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { startLocalRelay } from './local-relay.js';
 import { writeConfig } from '../src/config.js';
+import { MissingResourceError, systemOperation } from './lib/system-errors.js';
+import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
+import { OmpRuntimeStoppingError } from '../src/runtime/errors.js';
 
 const execute = promisify(execFile);
 
 async function exists(filename: string): Promise<boolean> {
-  try { await readFile(filename); return true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  try { await systemOperation(`Read smoke resource ${filename}`, () => readFile(filename)); return true; }
+  catch (error) { if (error instanceof MissingResourceError) return false; throw error; }
 }
 
 async function alive(pid: number): Promise<boolean> {
   try {
-    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const stat = await systemOperation(`Read process ${pid} status`, () => readFile(`/proc/${pid}/stat`, 'utf8'));
     return !['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]!);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    if (error instanceof MissingResourceError) return false;
     throw error;
   }
 }
@@ -76,6 +79,7 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
   let attached: TopicSession | undefined;
   const startingSession = { ...managed, id: 'runtime-kill-started-process' };
   const gracefulSession: TopicSession = { ...managed, id: 'runtime-stop-recovered' };
+  let primaryFailure: unknown;
   try {
     const first = await runtime.ensure(managed);
     const managedDirectory = join(directory, 'sessions', managed.id);
@@ -155,19 +159,21 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     await rejectedStartup;
     assert.equal(await runtime.isRunning(cancelled), false, 'kill during admission must not launch a host');
     const startingProcess = runtime.ensure(startingSession);
-    void startingProcess.catch(() => {});
+    void startingProcess.catch(error => {
+      if (!(error instanceof OmpRuntimeStoppingError)) console.error(`Start runtime kill smoke session ${startingSession.id}:`, error);
+    });
     let supervisorPid: number | undefined;
     await waitFor(async () => {
       const children = await readFile(`/proc/${process.pid}/task/${process.pid}/children`, 'utf8');
       for (const value of children.trim().split(/\s+/).filter(Boolean)) {
         try {
-          const argv = (await readFile(`/proc/${value}/cmdline`, 'utf8')).split('\0');
+          const argv = (await systemOperation(`Read process ${value} command line`, () => readFile(`/proc/${value}/cmdline`, 'utf8'))).split('\0');
           if (argv.includes(fileURLToPath(new URL('../src/host-supervisor.mjs', import.meta.url))) &&
               argv.includes(join(directory, 'sessions', startingSession.id, 'history.jsonl'))) {
             supervisorPid = Number(value);
             return true;
           }
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        } catch (error) { if (!(error instanceof MissingResourceError)) throw error; }
       }
       return false;
     }, 'Managed startup supervisor was not spawned');
@@ -180,16 +186,23 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
     await retiring;
     assert.equal(await alive(resumedLifecycle.pid), false, 'kill must safely supersede concurrent graceful retirement');
     console.log('PASS actual OMP recovered graceful stop, forceful busy attached kill, recovered managed kill, exact-history resume, identity refusal, unrelated-host isolation, startup cancellation, and concurrent retirement.');
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
-    if (attached && !terminalExited) await runtime.kill(attached).catch(() => {});
-    if (terminal && !terminalExited) {
-      terminal.kill('SIGKILL');
-      await waitFor(() => terminalExited, 'Disposable attached host cleanup failed');
+    const cleanupErrors: unknown[] = [];
+    if (attached && !terminalExited) await runtime.kill(attached).catch(error => { cleanupErrors.push(error); });
+    try {
+      if (terminal && !terminalExited) {
+        terminal.kill('SIGKILL');
+        await waitFor(() => terminalExited, 'Disposable attached host cleanup failed');
+      }
+    } catch (error) { cleanupErrors.push(error); }
+    for (const session of [startingSession, gracefulSession, managed]) {
+      try { await runtime.kill(session); } catch (error) { cleanupErrors.push(error); }
     }
-    await runtime.kill(startingSession).catch(() => {});
-    await runtime.kill(gracefulSession).catch(() => {});
-    await runtime.kill(managed).catch(() => {});
-    await runtime.close();
+    try { await runtime.close(); } catch (error) { cleanupErrors.push(error); }
+    if (cleanupErrors.length) throw combineTelegramErrors(...(primaryFailure === undefined ? cleanupErrors : [primaryFailure, ...cleanupErrors]));
   }
 }
 

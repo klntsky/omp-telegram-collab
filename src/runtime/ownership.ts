@@ -1,9 +1,10 @@
+import { OmpRuntimeOwnershipError, OmpIdentityError, OmpProtocolError, systemError, parseJson, OmpRuntimeStoppingError } from './errors.js';
+import { record, errno, RETIREMENT_GRANT } from './values.js';
 import { chmod, lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from '../../shared/contracts.js';
 import { type HostLifecycle } from './types.js';
-import { errno, RETIREMENT_GRANT } from './values.js';
 interface OwnershipDependencies {
   readonly closed: boolean;
   readonly config: AppConfig;
@@ -23,7 +24,7 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
   function acquire(): Promise<void> {
     if (acquiring) return acquiring;
     acquiring = (async () => {
-      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new OmpRuntimeStoppingError();
       await mkdir(deps.config.dataDir, { recursive: true, mode: 0o700 });
       const file = path.resolve(deps.config.dataDir, 'runtime-lock.sqlite');
       let database: DatabaseSync | undefined;
@@ -33,11 +34,12 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
         database.prepare('INSERT INTO owner (pid) VALUES (?)').run(process.pid);
         await chmod(file, 0o600);
         await revokeRetirementGrants();
-        if (deps.closed) throw new Error('OMP runtime is stopping');
+        if (deps.closed) throw new OmpRuntimeStoppingError();
         lock = database;
-      } catch (error) {
+      } catch (error) { error = systemError(error, 'ownership OS operation');
         database?.close();
-        throw new Error(`Cannot acquire exclusive OMP runtime ownership for dataDir: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        if (error instanceof Error && 'code' in error && error.code === 'ERR_SQLITE_ERROR' && 'errcode' in error && (error.errcode === 5 || error.errcode === 6)) throw new OmpRuntimeOwnershipError(deps.config.dataDir, error);
+        throw new Error(`Cannot acquire exclusive OMP runtime ownership for dataDir ${deps.config.dataDir}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     })();
     return acquiring;
@@ -48,10 +50,10 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
     let entries;
     try {
       const rootStat = await lstat(root);
-      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Managed session root is invalid');
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new OmpIdentityError('Managed session root is invalid', `Read session root ${root}`);
       entries = await readdir(root, { withFileTypes: true });
     }
-    catch (error) { if (errno(error, 'ENOENT')) return; throw error; }
+    catch (error) { error = systemError(error, 'ownership OS operation'); if (errno(error, 'ENOENT')) return; throw error; }
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
       const directory = path.join(root, entry.name);
@@ -66,7 +68,7 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
           if (!grantStat.isFile() || grantStat.isSymbolicLink() || (grantStat.mode & 0o077) !== 0 ||
               (process.getuid && grantStat.uid !== process.getuid())) continue;
           await unlink(grant);
-        } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+        } catch (error) { error = systemError(error, 'ownership OS operation'); if (!errno(error, 'ENOENT')) throw error; }
       }
     }
   }
@@ -74,15 +76,15 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
   async function lifecycle(id: string): Promise<HostLifecycle | undefined> {
     await acquire();
     try {
-      const value = JSON.parse(await readFile(path.join(deps.config.dataDir,'sessions',id,'lifecycle.json'),'utf8')) as HostLifecycle;
-      if (!Number.isSafeInteger(value.pid) || value.pid <= 1 || typeof value.socketPath !== 'string' || typeof value.sessionId !== 'string') return undefined;
+      const value = parseJson(await readFile(path.join(deps.config.dataDir,'sessions',id,'lifecycle.json'),'utf8'), 'Read runtime metadata', `session ${id}`) as HostLifecycle;
+      if (!record(value) || !Number.isSafeInteger(value.pid) || value.pid <= 1 || typeof value.socketPath !== 'string' || typeof value.sessionId !== 'string') throw new OmpProtocolError('Read lifecycle descriptor', `session ${id}`, 'Invalid OMP lifecycle descriptor');
       return value;
-    } catch (error) {
+    } catch (error) { error = systemError(error, 'ownership OS operation');
       if (errno(error,'ENOENT')) return undefined;
       throw error;
     }
   }
-  async function settleAcquisition(): Promise<void> { await acquiring?.catch(() => undefined); }
+  async function settleAcquisition(): Promise<void> { await acquiring?.catch(error => { console.error(`Settle runtime ownership ${deps.config.dataDir} failed:`, error); }); }
   function close(): void { lock?.close(); lock = undefined; }
   return { acquire, lifecycle, settleAcquisition, close };
 }

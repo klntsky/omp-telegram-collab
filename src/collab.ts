@@ -5,6 +5,8 @@ import { importRoomKey, open, seal } from './vendor/codec.js';
 import { encodeBase64Url, packEnvelope, parseCollabLink, unpackEnvelope } from './vendor/link.js';
 
 export class CollabTransportError extends Error {}
+export class CollabProtocolError extends Error {}
+export class CollabSnapshotError extends Error {}
 
 const SETUP_TIMEOUT_MS = 60_000;
 const HOST_TYPES: Record<string, true> = {
@@ -75,7 +77,7 @@ async function openCollab(
 ): Promise<CollabConnection> {
   signal?.throwIfAborted();
   const link = parseCollabLink(binding.url);
-  if ('error' in link || !link.writeToken) throw new Error('A valid control capability is required');
+  if ('error' in link || !link.writeToken) throw new CollabProtocolError(`Connect Collab session ${binding.sessionId}: A valid control capability is required`);
   const writeToken = encodeBase64Url(link.writeToken);
   const key = await importRoomKey(link.key);
   signal?.throwIfAborted();
@@ -95,8 +97,8 @@ async function openCollab(
     resolveSetup = resolve;
     rejectSetup = reject;
   });
-  const timer = setTimeout(() => finish(new CollabTransportError('Collab setup timed out')), SETUP_TIMEOUT_MS);
-  const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error('Collab setup aborted'));
+  const timer = setTimeout(() => finish(new CollabTransportError(`Collab setup timed out for session ${binding.sessionId}`)), SETUP_TIMEOUT_MS);
+  const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new CollabTransportError(`Collab setup aborted for session ${binding.sessionId}: ${String(signal?.reason)}`, {cause: signal?.reason}));
   signal?.addEventListener('abort', onAbort, { once: true });
 
   function finish(reason: string | Error): void {
@@ -104,9 +106,9 @@ async function openCollab(
     closed = true;
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
-    if (snapshot?.kind === 'refresh') rejectRefresh(snapshot, reason instanceof Error ? reason : new Error(reason));
+    if (snapshot?.kind === 'refresh') rejectRefresh(snapshot, reason instanceof Error ? reason : new CollabSnapshotError(`Refresh Collab snapshot for session ${binding.sessionId}: ${reason}`));
     ws.terminate();
-    if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new Error(reason));
+    if (!ready) rejectSetup(signal?.aborted ? signal.reason : reason instanceof Error ? reason : new CollabProtocolError(`Connect Collab session ${binding.sessionId}: ${reason}`));
     try {
       handlers.onClose(reason instanceof Error ? reason.message : reason);
     } catch (error) {
@@ -131,27 +133,27 @@ async function openCollab(
   }
 
   function queueSend(frame: GuestFrame): void {
-    if (closed || ws.readyState !== WebSocket.OPEN) throw new CollabTransportError('Collab connection is closed');
+    if (closed || ws.readyState !== WebSocket.OPEN) throw new CollabTransportError(`Send Collab ${frame.t} for session ${binding.sessionId}: Collab connection is closed`);
     sendChain = sendChain.then(async () => {
       if (closed) return;
       const envelope = packEnvelope(0, await seal(key, frame));
       if (closed) return;
       if (ws.readyState !== WebSocket.OPEN) {
-        throw new CollabTransportError('Collab transport cannot accept the frame');
+        throw new CollabTransportError(`Send Collab ${frame.t} for session ${binding.sessionId}: Collab transport cannot accept the frame`);
       }
       // Only actual send failures get transport classification; encoding failures
       // stay terminal, and recovery must not replay a possibly delivered frame.
       const sent = Promise.withResolvers<void>();
       try {
         ws.send(envelope, error => error
-          ? sent.reject(new CollabTransportError(error.message, {cause: error}))
+          ? sent.reject(new CollabTransportError(`Send Collab ${frame.t} for session ${binding.sessionId}: ${error.message}`, {cause: error}))
           : sent.resolve());
       } catch (error) {
-        throw new CollabTransportError(error instanceof Error ? error.message : String(error), {cause: error});
+        throw new CollabTransportError(`Send Collab ${frame.t} for session ${binding.sessionId}: ${error instanceof Error ? error.message : String(error)}`, {cause: error});
       }
       await sent.promise;
     }).catch(error => {
-      if (closed) return;
+      if (closed) { console.error(`Collab send failed after session ${binding.sessionId} closed:`, error); return; }
       console.error('Collab send failed; delivery may be uncertain:', error);
       finish(error instanceof Error ? error : `Collab send failed; delivery may be uncertain: ${String(error)}`);
     });
@@ -159,18 +161,18 @@ async function openCollab(
 
   const connection: CollabConnection = {
     send(frame) {
-      if (!ready) throw new Error('Collab snapshot is not ready');
-      if (!Object.hasOwn(GUEST_TYPES, frame.t)) throw new Error('Unsupported guest frame');
+      if (!ready) throw new CollabSnapshotError(`Send Collab frame for session ${binding.sessionId}: Collab snapshot is not ready`);
+      if (!Object.hasOwn(GUEST_TYPES, frame.t)) throw new CollabProtocolError(`Send Collab frame for session ${binding.sessionId}: Unsupported guest frame ${frame.t}`);
       queueSend(frame);
     },
     async refreshSnapshot(onFrame) {
-      if (closed) throw new Error('Collab connection is closed');
-      if (!ready) throw new Error('Collab snapshot is not ready');
-      if (snapshot) throw new Error('Collab snapshot refresh is already in progress');
+      if (closed) throw new CollabTransportError(`Refresh Collab snapshot for session ${binding.sessionId}: Collab connection is closed`);
+      if (!ready) throw new CollabSnapshotError(`Refresh Collab snapshot for session ${binding.sessionId}: Collab snapshot is not ready`);
+      if (snapshot) throw new CollabSnapshotError(`Refresh Collab snapshot for session ${binding.sessionId}: Collab snapshot refresh is already in progress`);
       const {promise, resolve, reject} = Promise.withResolvers<void>();
       const operation: Extract<SnapshotOperation, {kind: 'refresh'}> = {
         kind: 'refresh', welcomed: false, total: 0, received: 0, onFrame, resolve, reject, settled: false,
-        timer: setTimeout(() => rejectRefresh(operation, new Error('Collab snapshot refresh timed out')), SETUP_TIMEOUT_MS),
+        timer: setTimeout(() => rejectRefresh(operation, new CollabSnapshotError(`Refresh Collab snapshot for session ${binding.sessionId}: Collab snapshot refresh timed out`)), SETUP_TIMEOUT_MS),
       };
       snapshot = operation;
       try {
@@ -187,33 +189,36 @@ async function openCollab(
   };
 
   function deliver(frame: HostFrame): void {
+    // OMP's Collab host exposes these hello rejections as text, so classification
+    // stays at this wire boundary rather than leaking message matches to callers.
+    // https://github.com/klntsky/oh-my-pi/blob/main/packages/coding-agent/src/collab/host.ts#L796-L805 (#handleHello).
     if (frame.t === 'error' && snapshot?.kind === 'refresh' && !snapshot.welcomed &&
         (frame.message === 'Session transition in progress; join again when it completes' ||
          /^protocol mismatch: host speaks v\d+, guest sent v\d+$/.test(frame.message))) {
       const operation = snapshot;
       snapshot = undefined;
-      rejectRefresh(operation, new Error(frame.message));
+      rejectRefresh(operation, new CollabSnapshotError(`Refresh Collab snapshot for session ${binding.sessionId}: ${frame.message}`));
       return;
     }
     if (frame.t === 'welcome' || frame.t === 'snapshot-chunk') {
       const operation = snapshot;
-      if (!operation) throw new Error('Unexpected Collab snapshot');
+      if (!operation) throw new CollabProtocolError(`Receive Collab snapshot for session ${binding.sessionId}: Unexpected Collab snapshot`);
       if (frame.t === 'welcome') {
         if (operation.welcomed || frame.proto !== COLLAB_PROTO || frame.header?.id !== binding.sessionId) {
-          throw new Error('Collab session identity mismatch');
+          throw new CollabProtocolError(`Receive Collab welcome for session ${binding.sessionId}: Collab session identity mismatch`);
         }
-        if (frame.readOnly) throw new Error('Collab host refused control access');
-        if (!Number.isSafeInteger(frame.entryCount) || frame.entryCount < 0) throw new Error('Invalid Collab snapshot');
+        if (frame.readOnly) throw new CollabProtocolError(`Receive Collab welcome for session ${binding.sessionId}: Collab host refused control access`);
+        if (!Number.isSafeInteger(frame.entryCount) || frame.entryCount < 0) throw new CollabProtocolError(`Receive Collab welcome for session ${binding.sessionId}: Invalid Collab snapshot`);
         operation.welcomed = true;
         operation.total = frame.entryCount;
       } else {
-        if (!operation.welcomed) throw new Error('Collab snapshot arrived before welcome');
+        if (!operation.welcomed) throw new CollabProtocolError(`Receive Collab snapshot for session ${binding.sessionId}: Collab snapshot arrived before welcome`);
         if (!Array.isArray(frame.entries) || typeof frame.final !== 'boolean') {
-          throw new Error('Invalid Collab snapshot chunk');
+          throw new CollabProtocolError(`Receive Collab snapshot for session ${binding.sessionId}: Invalid Collab snapshot chunk`);
         }
         operation.received += frame.entries.length;
         if (operation.received > operation.total || (frame.final && operation.received !== operation.total)) {
-          throw new Error('Collab snapshot count mismatch');
+          throw new CollabProtocolError(`Receive Collab snapshot for session ${binding.sessionId}: Collab snapshot count mismatch`);
         }
       }
       if (operation.kind === 'refresh') {
@@ -262,7 +267,7 @@ async function openCollab(
     try {
       sendHello();
     } catch (error) {
-      if (closed) return;
+      if (closed) { console.error(`Collab hello failed after session ${binding.sessionId} closed:`, error); return; }
       console.error('Collab hello failed:', error);
       finish(error instanceof Error ? error : `Collab hello failed: ${String(error)}`);
     }
@@ -273,23 +278,26 @@ async function openCollab(
     if (!isBinary) {
       try {
         const control = JSON.parse(bytes.toString()) as { t?: string };
-        if (control.t === 'room-closed') finish(new CollabTransportError('Collab room closed'));
+        if (control.t === 'room-closed') finish(new CollabTransportError(`Collab room closed for session ${binding.sessionId}`));
       } catch (error) {
-        console.error('Invalid Collab relay control frame:', error instanceof SyntaxError ? error.name : error);
-        finish('Invalid Collab relay control frame');
+        const failure = error instanceof SyntaxError
+          ? new CollabProtocolError(`Parse Collab relay control frame for session ${binding.sessionId}: ${error.message}`, {cause: error})
+          : error;
+        console.error('Invalid Collab relay control frame:', failure);
+        finish(failure instanceof Error ? failure : new CollabProtocolError(`Parse Collab relay control frame for session ${binding.sessionId}: ${String(failure)}`, {cause: failure}));
       }
       return;
     }
     receiveChain = receiveChain.then(async () => {
       if (closed) return;
       const envelope = unpackEnvelope(bytes);
-      if (!envelope) throw new Error('Invalid Collab envelope');
+      if (!envelope) throw new CollabProtocolError(`Receive Collab envelope for session ${binding.sessionId}: Invalid Collab envelope`);
       const frame = await open(key, envelope.payload);
       if (closed) return;
-      if (!frame || typeof frame !== 'object' || !Object.hasOwn(HOST_TYPES, frame.t)) throw new Error('Invalid Collab host frame');
+      if (!frame || typeof frame !== 'object' || !Object.hasOwn(HOST_TYPES, frame.t)) throw new CollabProtocolError(`Receive Collab frame for session ${binding.sessionId}: Invalid Collab host frame`);
       deliver(frame as HostFrame);
     }).catch(error => {
-      if (closed) return;
+      if (closed) { console.error(`Collab receive failed after session ${binding.sessionId} closed:`, error); return; }
       console.error('Collab receive failed:', error);
       finish(error instanceof Error ? error : new Error(`Collab receive failed: ${String(error)}`, {cause: error}));
     });
@@ -297,8 +305,8 @@ async function openCollab(
   ws.on('error', error => {
     if (closed) return;
     console.error('Collab transport error:', error);
-    finish(new CollabTransportError(error.message, {cause: error}));
+    finish(new CollabTransportError(`Collab transport for session ${binding.sessionId}: ${error.message}`, {cause: error}));
   });
-  ws.on('close', (code, reason) => finish(new CollabTransportError(`Collab connection closed (${code})${reason.length ? `: ${reason.toString()}` : ''}`)));
+  ws.on('close', (code, reason) => finish(new CollabTransportError(`Collab connection closed for session ${binding.sessionId} (${code})${reason.length ? `: ${reason.toString()}` : ''}`)));
   return setup;
 }

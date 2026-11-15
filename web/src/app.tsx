@@ -12,6 +12,8 @@ import { GuestClient } from "./lib/client";
 import { GatewaySocket } from "./lib/socket";
 import { authorizeSession, mountTelegramEnvironment, readTelegramLaunch, SessionAccessError } from "./lib/telegram";
 import { useGuestSnapshot } from "./lib/use-guest";
+import { SessionError, SessionRequestTimeoutError } from "./lib/session-errors";
+import { InvalidJsonError } from "./lib/decode";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
 
@@ -36,7 +38,7 @@ export function App(): ReactNode {
 		setConnection({ kind: "authorizing" });
 		const controller = new AbortController();
 		requestRef.current = controller;
-		const timeout = setTimeout(() => controller.abort(), 20_000);
+		const timeout = setTimeout(() => controller.abort(new SessionRequestTimeoutError()), 20_000);
 		try {
 			const launch = readTelegramLaunch();
 			const authorized = await authorizeSession(launch, controller.signal);
@@ -59,8 +61,10 @@ export function App(): ReactNode {
 			setClient(next);
 			next.connect();
 		} catch (error) {
+			if (controller.signal.aborted && error === controller.signal.reason && !(error instanceof SessionRequestTimeoutError)) return;
+			if (!(error instanceof SessionError) && !(error instanceof InvalidJsonError)) throw error;
 			if (attempt === attemptRef.current) {
-				const message = error instanceof Error ? error.message : "Could not join this session. Retry in a moment.";
+				const message = error.message;
 				setConnection({ kind: "error", message });
 			}
 		} finally {

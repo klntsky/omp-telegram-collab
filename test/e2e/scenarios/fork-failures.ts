@@ -8,6 +8,7 @@ import { enrollForum } from '../helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, readSessionHistory, writeScenario } from '../helpers/model-tasks.js';
 import { combineTelegramErrors } from '../helpers/errors.js';
 import test from 'node:test';
+import { MissingResourceError, systemOperation } from '../../../scripts/lib/system-errors.js';
 
 export function registerForkFailures(): void {
 test('Telegram fork failures preserve completed forks and reject interrupted preparation', { timeout: 480000 }, async t => {
@@ -126,9 +127,10 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
     const destination = app.store.getSession(interruptedId!)!;
     assert.ok(destination);
     const sent = await app.sendAndWait(`/p ${probe.prompt}`, destination.threadId);
-    const admitted = await stat(join(app.omp.dataDir, 'sessions', destination.id, 'binding.json')).then(
+    const destinationBindingPath = join(app.omp.dataDir, 'sessions', destination.id, 'binding.json');
+    const admitted = await systemOperation(`Read interrupted fork ${destination.id} binding ${destinationBindingPath}`, () => stat(destinationBindingPath)).then(
       () => true,
-      (error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return false; throw error; },
+      error => { if (error instanceof MissingResourceError) return false; throw error; },
     );
     if (admitted) {
       await completeWriteTask(app, probe, sent, destination.threadId);

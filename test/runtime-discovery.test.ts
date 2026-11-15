@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { writeConfig } from '../src/config.js';
+import { ProcessNotRunningError, systemOperationSync } from '../scripts/lib/system-errors.js';
+import { OmpCommandError, OmpHostUnavailableError } from '../src/runtime/errors.js';
 
 const execute = promisify(execFile);
 
@@ -39,9 +41,9 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
         original = error;
       }
       await assert.rejects(runtime.attach('fixture', directory), error => {
-        assert.ok(error instanceof Error);
-        assert.equal(error.message, original.message);
-        assert.ok('code' in error);
+        assert.ok(error instanceof OmpCommandError && error.cause instanceof Error);
+        assert.equal(error.cause.message, original.message);
+        assert.ok(error.message.includes(original.message));
         assert.equal(error.code, original.code);
         assert.equal('signal' in error ? error.signal : undefined, original.signal);
         return true;
@@ -110,8 +112,8 @@ if (process.argv[2] !== 'collab') {
     async close() {
       const host = JSON.parse(await readFile(statePath, 'utf8')) as { pid: number } | null;
       if (host) {
-        try { process.kill(host.pid, 'SIGKILL'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        try { systemOperationSync(`Kill runtime discovery fixture process ${host.pid}`, () => process.kill(host.pid, 'SIGKILL')); }
+        catch (error) { if (!(error instanceof ProcessNotRunningError)) throw error; }
       }
       await runtime.close();
       await rm(directory, { recursive: true, force: true });
@@ -133,10 +135,11 @@ test('managed startup preserves the last original not-found diagnostic at its or
   t.after(() => app.close());
   const started = Date.now();
   await assert.rejects(app.runtime.ensure(app.session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal((error as NodeJS.ErrnoException).code, 1, error);
-    assert.equal((error as Error & { signal: string | null }).signal, null);
-    assert.ok(error.message.startsWith(`Command failed: ${app.executable} collab link fixture-host --json\nerror: no active Collab host matches fixture-host\n`));
+    assert.ok(error instanceof OmpHostUnavailableError && error.cause instanceof Error);
+    assert.equal(error.instanceId, 'fixture-host');
+    assert.equal('code' in error.cause ? error.cause.code : undefined, 1);
+    assert.equal('signal' in error.cause ? error.cause.signal : undefined, null);
+    assert.ok(error.message.includes(error.cause.message));
     return true;
   });
   const attempts = await app.attempts();
@@ -149,14 +152,16 @@ test('managed startup retains the original discovery rejection when the final pr
   const app = await startupFixture('deadline');
   t.after(() => app.close());
   await assert.rejects(app.runtime.ensure(app.session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal((error as NodeJS.ErrnoException).code, 1);
-    assert.equal((error as Error & {signal: string | null}).signal, null);
-    const cause = error.cause as Error & {code: number | null; signal: string; killed: boolean};
-    assert.ok(cause instanceof Error);
-    assert.equal(cause.code, null);
-    assert.equal(cause.signal, 'SIGKILL');
-    assert.equal(cause.killed, true);
+    assert.ok(error instanceof OmpHostUnavailableError && error.cause instanceof Error);
+    assert.equal(error.code, 1);
+    assert.equal('signal' in error.cause ? error.cause.signal : undefined, null);
+    assert.ok('deadlineError' in error && error.deadlineError instanceof OmpCommandError);
+    const deadlineError = error.deadlineError;
+    assert.equal(deadlineError.code, null);
+    assert.equal(deadlineError.signal, 'SIGKILL');
+    assert.ok(deadlineError.cause instanceof Error && 'killed' in deadlineError.cause && deadlineError.cause.killed === true);
+    assert.ok(error.message.includes(error.cause.message));
+    assert.ok(error.message.includes(deadlineError.message));
     return true;
   });
 });
@@ -165,9 +170,9 @@ test('managed startup does not retry a nontransient Collab link subprocess failu
   const app = await startupFixture('fatal');
   t.after(() => app.close());
   await assert.rejects(app.runtime.ensure(app.session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal((error as NodeJS.ErrnoException).code, 23);
-    assert.ok(error.message.startsWith(`Command failed: ${app.executable} collab link fixture-host --json\nerror: permission denied for fixture-host\n`));
+    assert.ok(error instanceof OmpCommandError && error.cause instanceof Error);
+    assert.equal(error.code, 23);
+    assert.ok(error.message.includes(error.cause.message));
     return true;
   });
   assert.equal((await app.attempts()).length, 1);

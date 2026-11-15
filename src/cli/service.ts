@@ -1,9 +1,9 @@
 import { stdout, stderr } from 'node:process';
 import { resolve, join } from 'node:path';
 import { watchFile, unwatchFile } from 'node:fs';
-import { chmod, unlink } from 'node:fs/promises';
+import { chmod, rm } from 'node:fs/promises';
 import { createServer as createControlServer, type Server, type ServerResponse } from 'node:http';
-import { readConfig, defaultConfigPath, validateStart, findInstance } from '../config.js';
+import { readConfig, defaultConfigPath, validateStart, findInstance, ConfigError } from '../config.js';
 import type { AppConfig } from '../../shared/contracts.js';
 import { launch } from './generation.js';
 import { pollingFailureReported } from './polling-failure.js';
@@ -15,6 +15,12 @@ function serviceSettings(config: AppConfig): string {
 
 export async function startService(configPath = defaultConfigPath()): Promise<{ close(): Promise<void>; reload(): Promise<void> }> {
   configPath = resolve(configPath);
+  class ServiceControlError extends Error {
+    constructor(detail: string, cause?: unknown) {
+      super(`Service control failed for ${configPath}: ${detail}`, { cause });
+      this.name = 'ServiceControlError';
+    }
+  }
   const pollingFailure = Promise.withResolvers<void>();
   let generation = await launch(readConfig(configPath), pollingFailure.resolve, true);
   let closing = false;
@@ -26,7 +32,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
 
   const reload = (): Promise<void> => {
     const operation = reloadTail.then(async () => {
-      if (closing) throw new Error('Service is stopping');
+      if (closing) throw new ServiceControlError('Service is stopping');
       const next = readConfig(configPath);
       validateStart(next);
       if (JSON.stringify(next) === applied) return;
@@ -59,43 +65,44 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       applied = JSON.stringify(generation.config);
       stdout.write(`Applied configuration: ${configPath}\n`);
     });
-    reloadTail = operation.catch(() => undefined);
+    // The returned operation owns rejection; this tail only serializes later work.
+    reloadTail = operation.then(() => undefined, () => undefined);
     return operation;
   };
 
   async function joinSession(chatId: unknown, topicId: unknown): Promise<{ result: { url: string; executable: string }; release(): void }> {
-    if (!Number.isSafeInteger(chatId) || (chatId as number) >= 0) throw new Error('chatId must be a negative safe integer');
-    if (!Number.isSafeInteger(topicId) || (topicId as number) <= 1) throw new Error('topicId must be a safe integer greater than 1');
+    if (!Number.isSafeInteger(chatId) || (chatId as number) >= 0) throw new ServiceControlError('chatId must be a negative safe integer');
+    if (!Number.isSafeInteger(topicId) || (topicId as number) <= 1) throw new ServiceControlError('topicId must be a safe integer greater than 1');
     await reload();
     const operation = reloadTail.then(async () => {
-      if (closing) throw new Error('Service is stopping');
+      if (closing) throw new ServiceControlError('Service is stopping');
       const current = generation;
       const matches = current.store.listSessions().filter(session => session.chatId === chatId && session.threadId === topicId &&
         current.config.bots.some(bot => bot.id === session.botId) &&
         current.store.isEnrolled(session.botId, session.chatId) &&
         findInstance(current.config, session.botId, session.chatId)?.instance.id === session.instanceId);
-      if (matches.length > 1) throw new Error('Topic session is ambiguous across configured bots');
+      if (matches.length > 1) throw new ServiceControlError('Topic session is ambiguous across configured bots');
       const session = matches[0];
-      if (!session) throw new Error('No enrolled, assigned topic session found');
+      if (!session) throw new ServiceControlError('No enrolled, assigned topic session found');
       const sessionGeneration = current.store.getSessionGeneration(session.id);
       const guard = async () => {
-        if (closing || generation !== current) throw new Error('Service is stopping or its generation changed');
+        if (closing || generation !== current) throw new ServiceControlError('Service is stopping or its generation changed');
         const persisted = readConfig(configPath);
         validateStart(persisted);
-        if (current.config.terminated || persisted.terminated) throw new Error('Service is terminated');
-        if (JSON.stringify(persisted) !== applied) throw new Error('Configuration changed during session join');
+        if (current.config.terminated || persisted.terminated) throw new ServiceControlError('Service is terminated');
+        if (JSON.stringify(persisted) !== applied) throw new ServiceControlError('Configuration changed during session join');
         const stored = current.store.getSession(session.id);
         if (!stored || stored.status !== 'open' || stored.botId !== session.botId ||
             stored.chatId !== session.chatId || stored.threadId !== session.threadId ||
             stored.instanceId !== session.instanceId || stored.cwd !== session.cwd ||
             current.store.getSessionGeneration(session.id) !== sessionGeneration) {
-          throw new Error('Topic session is not open or changed during session join');
+          throw new ServiceControlError('Topic session is not open or changed during session join');
         }
         if (!current.store.isEnrolled(session.botId, session.chatId) ||
             !current.config.bots.some(bot => bot.id === session.botId) ||
             findInstance(current.config, session.botId, session.chatId)?.instance.id !== session.instanceId ||
             findInstance(persisted, session.botId, session.chatId)?.instance.id !== session.instanceId) {
-          throw new Error('Topic session assignment changed');
+          throw new ServiceControlError('Topic session assignment changed');
         }
       };
       await guard();
@@ -104,7 +111,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       const release = current.runtime.retain(session.id);
       try {
         const bot = current.bots.find(bot => bot.id === session.botId);
-        if (!bot) throw new Error('Topic session bot is no longer configured');
+        if (!bot) throw new ServiceControlError('Topic session bot is no longer configured');
         await bot.ensureMirroring(session, binding, guard);
         await guard();
         return { result: { url: binding.url, executable: current.config.omp.executable }, release };
@@ -113,6 +120,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         throw error;
       }
     });
+    // joinSession's caller owns rejection; the queue must remain usable afterward.
     reloadTail = operation.then(() => undefined, () => undefined);
     return operation;
   }
@@ -120,19 +128,25 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   async function bindControl(dataDir: string): Promise<void> {
     const socket = join(dataDir, 'control.sock');
     if (controls.has(socket)) return;
-    await unlink(socket).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+    await rm(socket, { force: true });
     const control = createControlServer((request, response) => {
       void (async () => {
-        if (request.method !== 'POST' || !['/reload', '/session/join'].includes(request.url ?? '')) throw new Error('Use POST /reload');
+        if (request.method !== 'POST' || !['/reload', '/session/join'].includes(request.url ?? '')) throw new ServiceControlError('Use POST /reload');
         let body = '';
         for await (const chunk of request) {
           body += chunk;
-          if (Buffer.byteLength(body) > 8192) throw new Error('Request too large');
+          if (Buffer.byteLength(body) > 8192) throw new ServiceControlError('Request too large');
         }
-        const payload = JSON.parse(body);
-        if (payload.configPath !== configPath) throw new Error(`Running service uses a different configuration: ${configPath}`);
+        let payload: unknown;
+        try { payload = JSON.parse(body); }
+        catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+          throw new ServiceControlError(`Invalid control request JSON: ${error.message}`, error);
+        }
+        if (!payload || typeof payload !== 'object' || !('configPath' in payload)) throw new ServiceControlError('Control request must contain configPath');
+        if (payload.configPath !== configPath) throw new ServiceControlError(`Running service uses a different configuration: ${configPath}`);
         if (request.url === '/session/join') {
-          const { result, release } = await joinSession(payload.chatId, payload.topicId);
+          const { result, release } = await joinSession('chatId' in payload ? payload.chatId : undefined, 'topicId' in payload ? payload.topicId : undefined);
           if (response.destroyed) { release(); return; }
           joins.add(response);
           const releaseLease = () => {
@@ -154,11 +168,12 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
           response.end(JSON.stringify({ ok: true }));
         }
       })().catch(error => {
+        if (error instanceof Error) error.message = `Service control ${request.method ?? 'UNKNOWN'} ${request.url ?? '/'} for ${configPath}: ${error.message}`;
         if (!pollingFailureReported(error)) console.error('Service control request failed.', error);
-        response.writeHead(409, { 'content-type': 'application/json' });
+        response.writeHead(error instanceof ServiceControlError || error instanceof ConfigError ? 409 : 500, { 'content-type': 'application/json' });
         const detail = error as { code?: unknown; signal?: unknown } | null;
         response.end(JSON.stringify({
-          error: error instanceof Error ? error.message : 'Configuration reload failed',
+          error: error instanceof Error ? error.message : String(error),
           ...(typeof detail?.code === 'string' || typeof detail?.code === 'number' ? { code: detail.code } : {}),
           ...(typeof detail?.signal === 'string' ? { signal: detail.signal } : {}),
         }));
@@ -174,7 +189,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   }
 
   const changed = () => { void reload().catch(error => {
-    if (!pollingFailureReported(error)) stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : 'Reload failed'}\n`);
+    if (!pollingFailureReported(error)) stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : String(error)}\n`);
   }); };
   try { await bindControl(generation.config.dataDir); }
   catch (error) {

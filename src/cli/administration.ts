@@ -8,22 +8,28 @@ import { Store } from '../store.js';
 import type { AdminDependencies, AdminTelegram } from '../cli-admin.js';
 import { notifyReload } from './reload.js';
 
+class AdministrationError extends Error {
+  constructor(detail: string) {
+    super(`Administration failed: ${detail}`);
+    this.name = 'AdministrationError';
+  }
+}
 export type Options = Map<string, string[]>;
 export function one(options: Options, name: string): string | undefined {
   return options.get(name)?.[0];
 }
 function integer(value: string, label: string, min = 1, max = Number.MAX_SAFE_INTEGER): number {
-  if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new Error(`${label} must be an integer from ${min} through ${max}.`);
+  if (!/^-?\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < min || Number(value) > max) throw new AdministrationError(`${label} must be an integer from ${min} through ${max}.`);
   return Number(value);
 }
 export function promptMode(value: string, flag = 'all-messages-are-prompts'): boolean {
-  if (value !== 'true' && value !== 'false') throw new Error(`--${flag} must be true or false.`);
+  if (value !== 'true' && value !== 'false') throw new AdministrationError(`--${flag} must be true or false.`);
   return value === 'true';
 }
 const telegramRecord = z.record(z.unknown());
 function record(value: unknown): Record<string, unknown> {
   const result = telegramRecord.safeParse(value);
-  if (!result.success) throw new Error('Telegram returned an invalid response.');
+  if (!result.success) throw new AdministrationError('Telegram returned an invalid response.');
   return result.data;
 }
 
@@ -36,13 +42,22 @@ export class Administration {
     return readConfig(this.path);
   }
   writable(config: AppConfig): void {
-    if (!configWritable(config.configPath)) throw new Error(`Configuration is read-only: ${config.configPath}. Both the file and its parent directory must be writable.`);
+    if (!configWritable(config.configPath)) throw new AdministrationError(`Configuration is read-only: ${config.configPath}. Both the file and its parent directory must be writable.`);
   }
   async save(config: AppConfig, previousDataDir = config.dataDir, afterWrite?: () => void | Promise<void>): Promise<void> {
     this.writable(config);
     writeConfig(config);
+    let primary: unknown;
+    let failed = false;
     try { await afterWrite?.(); }
-    finally { await (this.deps.reload ?? notifyReload)(config, previousDataDir); }
+    catch (error) { primary = error; failed = true; }
+    try { await (this.deps.reload ?? notifyReload)(config, previousDataDir); }
+    catch (error) {
+      if (!failed) throw error;
+      console.error(`Configuration reload failed after applying side effects for ${config.configPath}:`, error);
+      if (primary instanceof Error) primary.message += `\nConfiguration reload also failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    if (failed) throw primary;
   }
   api(bot: BotConfig): AdminTelegram {
     if (this.deps.telegram) return this.deps.telegram(bot.token);
@@ -51,7 +66,7 @@ export class Administration {
   instance(config: AppConfig, input: string): InstanceConfig {
     const id = integer(input, 'Instance ID');
     const instance = config.instances.find(instance => instance.id === id);
-    if (!instance) throw new Error(`Instance ${id} is not configured.`);
+    if (!instance) throw new AdministrationError(`Instance ${id} is not configured.`);
     return instance;
   }
   nextId(config: AppConfig, store: Store, specified?: string): number {
@@ -59,20 +74,20 @@ export class Administration {
     let maximum = 0;
     for (const value of used) maximum = Math.max(maximum, value);
     const id = specified === undefined ? maximum + 1 : integer(specified, 'Instance ID');
-    if (!Number.isSafeInteger(id)) throw new Error('No safe instance ID remains.');
-    if (used.has(id)) throw new Error(`Instance ID ${id} is already configured or retained in history.`);
+    if (!Number.isSafeInteger(id)) throw new AdministrationError('No safe instance ID remains.');
+    if (used.has(id)) throw new AdministrationError(`Instance ID ${id} is already configured or retained in history.`);
     return id;
   }
   async selectBot(config: AppConfig, value?: string): Promise<BotConfig> {
     if (value !== undefined) {
       const id = integer(value, 'Bot ID');
       const bot = config.bots.find(bot => bot.id === id);
-      if (!bot) throw new Error(`Bot ${id} is not configured. Use bot add first.`);
+      if (!bot) throw new AdministrationError(`Bot ${id} is not configured. Use bot add first.`);
       return bot;
     }
     if (config.bots.length === 1) return config.bots[0]!;
-    if (!config.bots.length) throw new Error('No bots configured. Use bot add first.');
-    if (!this.interactive) throw new Error('Multiple bots configured; specify --bot ID.');
+    if (!config.bots.length) throw new AdministrationError('No bots configured. Use bot add first.');
+    if (!this.interactive) throw new AdministrationError('Multiple bots configured; specify --bot ID.');
     this.print(`Bots: ${config.bots.map(bot => bot.id).join(', ')}`);
     return this.selectBot(config, await this.ask('Bot ID: '));
   }
@@ -92,23 +107,23 @@ export class Administration {
   }
   async verifyForum(bot: BotConfig, chatId: number): Promise<{chat: Record<string, unknown>; me: Record<string, unknown>}> {
     const me = record(await this.api(bot).getMe());
-    if (me.id !== bot.id || me.is_bot !== true) throw new Error(`Configured token does not belong to bot ${bot.id}.`);
+    if (me.id !== bot.id || me.is_bot !== true) throw new AdministrationError(`Configured token does not belong to bot ${bot.id}.`);
     const chat = record(await this.api(bot).getChat(chatId));
-    if (chat.id !== chatId || chat.type !== 'supergroup' || chat.is_forum !== true) throw new Error('The chat must be a supergroup with Topics enabled.');
+    if (chat.id !== chatId || chat.type !== 'supergroup' || chat.is_forum !== true) throw new AdministrationError('The chat must be a supergroup with Topics enabled.');
     const member = record(await this.api(bot).getChatMember(chatId, bot.id));
-    if (member.status !== 'administrator' || member.can_manage_topics !== true || member.can_pin_messages !== true) throw new Error('Promote the bot to administrator with Manage Topics and Pin Messages permissions.');
+    if (member.status !== 'administrator' || member.can_manage_topics !== true || member.can_pin_messages !== true) throw new AdministrationError('Promote the bot to administrator with Manage Topics and Pin Messages permissions.');
     return {chat, me};
   }
   async requesterAdmin(bot: BotConfig, chatId: number, userId: number): Promise<void> {
     const member = record(await this.api(bot).getChatMember(chatId, userId));
     const user = record(member.user);
-    if (user.id !== userId || user.is_bot === true || !['creator', 'administrator'].includes(String(member.status))) throw new Error('The requester is no longer a current group administrator. Request preserved.');
+    if (user.id !== userId || user.is_bot === true || !['creator', 'administrator'].includes(String(member.status))) throw new AdministrationError('The requester is no longer a current group administrator. Request preserved.');
   }
   historySafe(config: AppConfig, store: Store, instanceId: number, botId: number, chatId: number): void {
     const current = findInstance(config, botId, chatId);
-    if (current && current.instance.id !== instanceId) throw new Error(`This bot/chat is already assigned to instance ${current.instance.id}. Remove that assignment first.`);
+    if (current && current.instance.id !== instanceId) throw new AdministrationError(`This bot/chat is already assigned to instance ${current.instance.id}. Remove that assignment first.`);
     for (const session of store.listSessions(botId)) {
-      if (session.chatId === chatId && session.instanceId !== instanceId) throw new Error('This bot/chat has histories pinned to a different logical instance. It cannot be reassigned safely.');
+      if (session.chatId === chatId && session.instanceId !== instanceId) throw new AdministrationError('This bot/chat has histories pinned to a different logical instance. It cannot be reassigned safely.');
     }
   }
   async create(input: string, specifiedId?: string): Promise<void> {
@@ -151,28 +166,28 @@ export class Administration {
   async approve(code: string, input: string | undefined, yes: boolean, specifiedMode?: boolean, specifiedProposals?: boolean, instanceValue?: string): Promise<void> {
     const config = this.load();
     this.writable(config);
-    if (!this.interactive && !yes) throw new Error('Noninteractive approval requires --yes and --instance ID or --path PATH.');
+    if (!this.interactive && !yes) throw new AdministrationError('Noninteractive approval requires --yes and --instance ID or --path PATH.');
     const store = new Store(join(config.dataDir, 'telegram.sqlite'));
     try {
       const pending = store.getSetupRequest(code);
-      if (!pending) throw new Error('Setup request not found or expired. Ask the group administrator to run /setup again.');
+      if (!pending) throw new AdministrationError('Setup request not found or expired. Ask the group administrator to run /setup again.');
       const bot = await this.selectBot(config, String(pending.botId));
       const {chat, me} = await this.verifyForum(bot, pending.chatId);
       await this.requesterAdmin(bot, pending.chatId, pending.userId);
       this.print(`Verified bot @${String(me.username ?? bot.id)} (${bot.id})\nVerified forum ${String(chat.title ?? pending.chatId)} (${pending.chatId})\nVerified requester ${pending.userId}, current group administrator.`);
-      if (input !== undefined && instanceValue !== undefined) throw new Error('Choose --instance ID or --path PATH, not both.');
+      if (input !== undefined && instanceValue !== undefined) throw new AdministrationError('Choose --instance ID or --path PATH, not both.');
       let target = instanceValue ?? input;
       if (!target && this.interactive) {
         this.show(config);
         target = await this.ask('Instance ID or project directory where OMP will run: ');
       }
-      if (!target) throw new Error('Approval requires --instance ID or --path PATH.');
+      if (!target) throw new AdministrationError('Approval requires --instance ID or --path PATH.');
       let instance: InstanceConfig;
       if (instanceValue !== undefined || (input === undefined && /^[1-9]\d*$/.test(target))) instance = this.instance(config, target);
       else {
         const defaultDir = canonicalPath(target);
         const current = findInstance(config, bot.id, pending.chatId)?.instance;
-        if (current && current.defaultDir !== defaultDir) throw new Error(`This bot/chat is already assigned to instance ${current.id} with a different default directory. Use --instance ID to select it.`);
+        if (current && current.defaultDir !== defaultDir) throw new AdministrationError(`This bot/chat is already assigned to instance ${current.id} with a different default directory. Use --instance ID to select it.`);
         instance = current ?? {id: this.nextId(config, store), defaultDir, chats: []};
       }
       const path = instance.defaultDir;
@@ -184,7 +199,7 @@ export class Administration {
       if (!yes && !/^(y|yes)$/i.test((await this.ask(`Connect this forum to ${path}? [y/N] `)).trim())) { this.print('Approval cancelled; request preserved.'); return; }
       await this.verifyForum(bot, pending.chatId);
       await this.requesterAdmin(bot, pending.chatId, pending.userId);
-      if (!store.getSetupRequest(code)) throw new Error('Setup request expired during approval. Ask the administrator to run /setup again.');
+      if (!store.getSetupRequest(code)) throw new AdministrationError('Setup request expired during approval. Ask the administrator to run /setup again.');
       if (assignment) Object.assign(assignment, {all_messages_are_prompts, users_can_propose_prompts});
       else instance.chats.push({botId: bot.id, chatId: pending.chatId, all_messages_are_prompts, users_can_propose_prompts});
       if (!config.instances.includes(instance)) config.instances.push(instance);
@@ -200,27 +215,27 @@ export class Administration {
     const config = this.load(true);
     this.writable(config);
     const envName = one(options, 'token-env');
-    if (envName && options.has('token-stdin')) throw new Error('Choose --token-env or --token-stdin, not both.');
+    if (envName && options.has('token-stdin')) throw new AdministrationError('Choose --token-env or --token-stdin, not both.');
     let token: string;
     if (envName) {
       const value = (this.deps.environment ?? process.env)[envName];
-      if (!value) throw new Error('The selected token environment variable is empty.');
+      if (!value) throw new AdministrationError('The selected token environment variable is empty.');
       token = value.trim();
     } else if (options.has('token-stdin')) {
       token = (await (this.deps.readToken ?? readTokenStdin)()).trim();
     } else {
-      if (!this.interactive) throw new Error('Use --token-stdin or --token-env VARIABLE for noninteractive bot add.');
+      if (!this.interactive) throw new AdministrationError('Use --token-stdin or --token-env VARIABLE for noninteractive bot add.');
       token = (await this.ask('Bot token (hidden): ', true)).trim();
     }
-    if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) throw new Error('Invalid Telegram bot token.');
+    if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) throw new AdministrationError('Invalid Telegram bot token.');
     const candidate: BotConfig = {id: integer(token.split(':')[0]!, 'Bot ID'), token};
     if (config.publicUrl) {
       candidate.miniAppShortName = one(options, 'mini-app-short-name') ?? (this.interactive ? (await this.ask('BotFather Mini App short name [app]: ')).trim() || 'app' : 'app');
-      if (!/^[A-Za-z0-9_]+$/.test(candidate.miniAppShortName)) throw new Error('Mini App short name must use only letters, numbers, or underscores.');
+      if (!/^[A-Za-z0-9_]+$/.test(candidate.miniAppShortName)) throw new AdministrationError('Mini App short name must use only letters, numbers, or underscores.');
     }
-    if (config.bots.some(bot => bot.id === candidate.id)) throw new Error(`Bot ${candidate.id} is already configured. Remove it before replacing its credentials.`);
+    if (config.bots.some(bot => bot.id === candidate.id)) throw new AdministrationError(`Bot ${candidate.id} is already configured. Remove it before replacing its credentials.`);
     const me = record(await this.api(candidate).getMe());
-    if (me.id !== candidate.id || me.is_bot !== true) throw new Error('Telegram token identity did not match the bot ID.');
+    if (me.id !== candidate.id || me.is_bot !== true) throw new AdministrationError('Telegram token identity did not match the bot ID.');
     config.bots.push(candidate);
     await this.save(config);
     this.print(`Added @${String(me.username ?? candidate.id)} (${candidate.id})${candidate.miniAppShortName ? `, Mini App ${candidate.miniAppShortName}` : ''}.`);
@@ -230,7 +245,7 @@ export class Administration {
     this.writable(config);
     const previousDataDir = config.dataDir;
     const interactive = options.size === 0;
-    if (interactive && !this.interactive) throw new Error('Setup requires service setting options or an interactive terminal.');
+    if (interactive && !this.interactive) throw new AdministrationError('Setup requires service setting options or an interactive terminal.');
     const value = async (flag: string, label: string, current: string): Promise<string> => {
       const specified = one(options, flag);
       if (specified !== undefined) return specified;
@@ -239,10 +254,10 @@ export class Administration {
     if (interactive) {
       this.print('The optional Mini App provides a live transcript, tool details, and subagent activity. It is read-only. It requires a public HTTPS origin and a BotFather Mini App for each bot. Telegram-only mode needs neither.');
       const answer = (await this.ask(`Enable Mini App? [${config.publicUrl ? 'Y/n' : 'y/N'}]: `)).trim().toLowerCase();
-      if (answer && !['y', 'yes', 'n', 'no'].includes(answer)) throw new Error('Answer yes or no to enable Mini App.');
+      if (answer && !['y', 'yes', 'n', 'no'].includes(answer)) throw new AdministrationError('Answer yes or no to enable Mini App.');
       const enabled = answer ? ['y', 'yes'].includes(answer) : config.publicUrl !== '';
       config.publicUrl = enabled ? await value('public-url', 'Public HTTPS origin', config.publicUrl) : '';
-      if (enabled && !config.publicUrl) throw new Error('Mini App requires a public HTTPS origin.');
+      if (enabled && !config.publicUrl) throw new AdministrationError('Mini App requires a public HTTPS origin.');
     } else config.publicUrl = await value('public-url', 'Public HTTPS origin', config.publicUrl);
     if (config.publicUrl) {
       for (const bot of config.bots) bot.miniAppShortName ??= 'app';
@@ -273,12 +288,12 @@ export class Administration {
   async remove(input: string): Promise<void> {
     const config = this.load(); this.writable(config);
     const instance = this.instance(config, input);
-    if (instance.chats.length) throw new Error('Remove this instance’s chat assignments before removing the instance.');
+    if (instance.chats.length) throw new AdministrationError('Remove this instance’s chat assignments before removing the instance.');
     config.instances = config.instances.filter(value => value.id !== instance.id);
     await this.save(config); this.print(`Removed instance ${instance.id}. Histories were retained.`);
   }
   async removeChat(input: string, options: Options): Promise<void> {
-    const chat = one(options, 'chat'); if (!chat) throw new Error('Specify --chat ID.');
+    const chat = one(options, 'chat'); if (!chat) throw new AdministrationError('Specify --chat ID.');
     const config = this.load(); this.writable(config); const instance = this.instance(config, input);
     const bot = await this.selectBot(config, one(options, 'bot')); const chatId = integer(chat, 'Chat ID', Number.MIN_SAFE_INTEGER, -1);
     instance.chats = instance.chats.filter(item => item.botId !== bot.id || item.chatId !== chatId);

@@ -1,6 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { constants, closeSync, fchmodSync, fstatSync, lstatSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { DocumentDestinationError } from './errors.js';
+
+class DocumentFileMissingError extends Error {}
+
+function documentStat(path: string) {
+  try { return lstatSync(path); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+      throw new DocumentFileMissingError(`Inspect document destination (path=${JSON.stringify(path)}): ${error.message}`, {cause: error});
+    throw error;
+  }
+}
 
 export function saveDocument(path: string, bytes: Uint8Array): boolean {
   let overwritten = false;
@@ -10,15 +22,15 @@ export function saveDocument(path: string, bytes: Uint8Array): boolean {
   const temporary = join(dirname(path), `.omp-document-${randomUUID()}.tmp`);
   try {
     let existing;
-    try { existing = lstatSync(path); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    try { existing = documentStat(path); } catch (error) {
+      if (!(error instanceof DocumentFileMissingError)) throw error;
     }
     if (existing) {
-      if (!existing.isFile()) throw new Error('The document destination is not a regular file.');
+      if (!existing.isFile()) throw new DocumentDestinationError(`Save document (path=${JSON.stringify(path)}): The document destination is not a regular file.`);
       // Opening without truncation checks file write permission, not just directory rename permission.
       fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       const current = fstatSync(fd);
-      if (!current.isFile()) throw new Error('The document destination is not a regular file.');
+      if (!current.isFile()) throw new DocumentDestinationError(`Save document (path=${JSON.stringify(path)}): The document destination is not a regular file.`);
       mode = current.mode & 0o777;
       const destinationFd = fd;
       fd = undefined;
@@ -43,7 +55,10 @@ export function saveDocument(path: string, bytes: Uint8Array): boolean {
     if (staged) {
       try { unlinkSync(temporary); } catch (unlinkError) { errors.push(unlinkError); }
     }
-    if (errors.length === 1) throw error;
-    throw new AggregateError(errors, errors.map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n'));
+    if (errors.length === 1) {
+      if (error instanceof Error) error.message = `Save document (path=${JSON.stringify(path)}): ${error.message}`;
+      throw error;
+    }
+    throw new AggregateError(errors, `Save document and clean up staging file (path=${JSON.stringify(path)}, temporary=${JSON.stringify(temporary)}):\n${errors.map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n')}`, {cause: error});
   }
 }

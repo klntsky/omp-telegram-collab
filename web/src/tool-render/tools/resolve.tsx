@@ -89,11 +89,7 @@ function Body(props: ToolRenderProps): ReactNode {
 			let text: string;
 			if (typeof v === "string") text = v;
 			else {
-				try {
-					text = JSON.stringify(v) ?? String(v);
-				} catch {
-					text = String(v);
-				}
+				text = JSON.stringify(v) ?? String(v);
 			}
 			extraRows.push(
 				<Kv key={k} k={k}>

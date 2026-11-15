@@ -1,3 +1,4 @@
+import { BotFolderRequestError, FolderSelectionError, reportBotError } from './errors.js';
 import { randomBytes } from 'node:crypto';
 import { accessSync, constants, mkdirSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -6,6 +7,16 @@ import type { AppConfig } from '../../shared/contracts.js';
 import { findInstance, readConfig, refreshTermination } from '../config.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
+
+function folderOperation<T>(operation: string, path: string, action: () => T): T {
+  try { return action(); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && typeof error.code === 'string' &&
+        ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EEXIST', 'EROFS', 'ENOSPC', 'ELOOP'].includes(error.code))
+      throw new FolderSelectionError(error.code, operation, path, error);
+    throw error;
+  }
+}
 
 export interface FolderSelectionDependencies {
   botId(): number;
@@ -29,7 +40,7 @@ export class FolderSelection {
   }>();
   folderSettings(chatId: number) {
     const assigned = findInstance(readConfig(this.dependencies.config.configPath), this.dependencies.botId(), chatId);
-    if (!assigned || assigned.instance.id !== this.dependencies.assignedId(chatId)) throw new Error('The group instance assignment changed');
+    if (!assigned || assigned.instance.id !== this.dependencies.assignedId(chatId)) throw new BotFolderRequestError(`Read folder settings (chat=${chatId}): The group instance assignment changed`);
     const chat = assigned.instance.chats.find(chat => chat.botId === this.dependencies.botId() && chat.chatId === chatId)!;
     return {instanceId:assigned.instance.id, defaultDir:assigned.instance.defaultDir, options:chat.folder_options?.length ? chat.folder_options : ['.']};
   }
@@ -54,14 +65,15 @@ export class FolderSelection {
         initial = {kind:'create',path};
         failure = `Create folder ${path}?`;
       } catch (error) {
-        console.error('Runtime folder selection failed.',error);
+        if (!(error instanceof FolderSelectionError)) throw error;
+        reportBotError(`Runtime folder selection failed (chat=${source.chat!.id}, path=${JSON.stringify(path)}).`,error);
         initial = {kind:'failed',path,create:false};
-        failure = `${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`;
+        failure = `${error.message}\nThe task is still pending.`;
       }
       if (cwd !== undefined) {
         if (active?.() === false || epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
             JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
-          throw new Error('Folder settings or service state changed. Send the command again.');
+          throw new BotFolderRequestError(`Select runtime folder (chat=${source.chat!.id}, path=${path}): Folder settings or service state changed. Send the command again.`);
         await resume(cwd,authority ?? source);
         return true;
       }
@@ -73,7 +85,7 @@ export class FolderSelection {
       (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.'), {reply_markup:{inline_keyboard:rows}});
     if (this.dependencies.stopped() || refreshTermination(this.dependencies.config) || epoch !== this.dependencies.admissionEpoch() ||
         JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
-      throw new Error('Folder settings or service state changed. Send the command again.');
+      throw new BotFolderRequestError(`Select runtime folder (chat=${source.chat!.id}): Folder settings or service state changed. Send the command again.`);
     const request = {...settings,state:initial,source,authority,messageId:message.message_id,
       expires:Date.now()+300000,epoch,fingerprint:JSON.stringify(settings),resume,active};
     this.folderRequests.set(token,request);
@@ -84,7 +96,7 @@ export class FolderSelection {
       }
       if (!pending) return;
       void source.api.editMessageText(source.chat!.id,message.message_id,'This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}})
-        .catch(error => console.error('Could not retire expired folder controls.',error));
+        .catch(error => reportBotError(`Could not retire expired folder controls (chat=${source.chat!.id}, message=${message.message_id}).`,error));
     },300000).unref();
     return true;
   }
@@ -180,9 +192,10 @@ export class FolderSelection {
       }
       cwd = resolved;
     } catch (error) {
-      console.error('Runtime folder selection failed.',error);
+      if (!(error instanceof FolderSelectionError)) throw error;
+      reportBotError(`Runtime folder selection failed (chat=${ctx.chat.id}, path=${JSON.stringify(path)}).`,error);
       request.state = {kind:'failed',path,create};
-      await restore(`${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`,[[
+      await restore(`${error.message}\nThe task is still pending.`,[[
         {text:'Retry',callback_data:`folder:${token}:retry`},
         ...(request.options.length > 1 ? [{text:'Choose another folder',callback_data:`folder:${token}:other`}] : []),
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
@@ -191,27 +204,27 @@ export class FolderSelection {
     await ctx.editMessageText(`Runtime folder: ${cwd}`,{reply_markup:{inline_keyboard:[]}});
     if (request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
         JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint)
-      throw new Error('This folder request is stale. Send the command again.');
+      throw new BotFolderRequestError(`Confirm runtime folder (chat=${ctx.chat.id}, path=${path}): This folder request is stale. Send the command again.`);
     await request.resume(cwd,ctx);
   }
   private resolveFolder(path: string, create: boolean): string | undefined {
-    if (create) mkdirSync(path,{recursive:true});
+    if (create) folderOperation('Create runtime folder', path, () => mkdirSync(path,{recursive:true}));
     else {
-      try { statSync(path); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      try { folderOperation('Inspect runtime folder', path, () => statSync(path)); } catch (error) {
+        if (!(error instanceof FolderSelectionError) || error.code !== 'ENOENT') throw error;
         let ancestor = dirname(path);
         while (true) {
-          try { statSync(ancestor); break; } catch (ancestorError) {
-            if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor) throw ancestorError;
+          try { folderOperation('Inspect runtime folder ancestor', ancestor, () => statSync(ancestor)); break; } catch (ancestorError) {
+            if (!(ancestorError instanceof FolderSelectionError) || ancestorError.code !== 'ENOENT' || dirname(ancestor) === ancestor) throw ancestorError;
             ancestor = dirname(ancestor);
           }
         }
-        accessSync(ancestor,constants.W_OK | constants.X_OK);
+        folderOperation('Check runtime folder creation permissions', ancestor, () => accessSync(ancestor,constants.W_OK | constants.X_OK));
         return undefined;
       }
     }
-    opendirSync(path).closeSync();
-    accessSync(path,constants.R_OK | constants.X_OK);
-    return realpathSync(path);
+    folderOperation('Open runtime folder', path, () => opendirSync(path).closeSync());
+    folderOperation('Check runtime folder permissions', path, () => accessSync(path,constants.R_OK | constants.X_OK));
+    return folderOperation('Resolve runtime folder', path, () => realpathSync(path));
   }
 }

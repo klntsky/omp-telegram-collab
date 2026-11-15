@@ -6,6 +6,7 @@ import { TelegramTestInbox } from './telegram-updates.js';
 import { combineTelegramErrors } from './errors.js';
 import type { TelegramTestBotLease } from '../../../scripts/lib/telegram-test-bots.js';
 import { telegramTestDeadlineRemaining, telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { TelegramTestLeaseError, TelegramTestProvisioningError } from '../../../scripts/lib/telegram-test-errors.js';
 
 export interface TelegramTestFixture {
   user: TelegramTestUser;
@@ -45,7 +46,7 @@ export async function teardownTelegramTestResources(options: {
       try {
         if (options.lease) {
           signal.throwIfAborted();
-          if (cancellationFailed || !forumSettled || !(options.canReleaseBot?.() ?? true)) throw new Error('Telegram bot poller did not stop; bot lease retained until process exit');
+          if (cancellationFailed || !forumSettled || !(options.canReleaseBot?.() ?? true)) throw new TelegramTestLeaseError('Teardown Telegram test resources: Telegram bot poller did not stop; bot lease retained until process exit');
           await options.lease.release();
         }
       } catch (error) { record(error); }
@@ -98,7 +99,7 @@ export async function setupTelegramTest(t: Pick<TestContext, 'after' | 'signal'>
       signal.throwIfAborted();
       const { token } = lease;
       const me = await step('telegram.bot.validate', () => createTelegramTestApi(token, signal).getMe());
-      if (!me.username) throw new Error(`Telegram test bot ${me.id} has no username`);
+      if (!me.username) throw new TelegramTestProvisioningError(`Validate Telegram test bot ${me.id}: Telegram test bot ${me.id} has no username`);
       const bot: TelegramTestBot = { id: me.id, username: me.username, token };
       forumSetup = createTelegramTestForum(user, bot, { title: options.title, signal, step });
       const forum = await forumSetup;

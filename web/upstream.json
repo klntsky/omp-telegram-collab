@@ -19,6 +19,8 @@
     "Use standard timer types and an ES2023-compatible transcript promise.",
     "Collapse recognized transcript metadata and displayed custom notices with the shared Collab web disclosure renderer.",
     "Make the Mini App read-only for every role by removing the composer, ask responses, agent commands, topic reopening, and their client APIs and styles; keep authentication, navigation, presentation controls, and transcript fetching.",
-    "Provide a minimal analytics-free HTML entry and local Vite build configuration."
+    "Provide a minimal analytics-free HTML entry and local Vite build configuration.",
+    "Translate malformed JSON and image input into typed validation errors at decoding boundaries, match KaTeX ParseError explicitly, and propagate unexpected renderer and serialization failures instead of silently falling back.",
+    "Handle malformed display URLs and code points through validation rather than blanket catch handlers; preserve upstream display labels."
   ]
 }

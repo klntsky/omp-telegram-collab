@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { ScriptUsageError } from './lib/telegram-test-errors.js';
 
 const stages = {
   cli: './env-smoke.ts',
@@ -9,7 +10,7 @@ type Stage = keyof typeof stages;
 const requested = process.argv.slice(2);
 const selected = requested.length ? requested : Object.keys(stages);
 for (const name of selected) {
-  if (!Object.hasOwn(stages, name)) throw new Error(`Unknown smoke stage ${JSON.stringify(name)}. Choose: ${Object.keys(stages).join(', ')}`);
+  if (!Object.hasOwn(stages, name)) throw new ScriptUsageError(`Unknown smoke stage ${JSON.stringify(name)}. Choose: ${Object.keys(stages).join(', ')}`);
 }
 
 const results: { name: string; code: number | null; signal: NodeJS.Signals | null }[] = [];

@@ -1,3 +1,5 @@
+import { BotSettingsRejectedError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
 import type { Context, Bot } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -26,14 +28,14 @@ export class SettingsPanelStore {
   async access(ctx: Context, panel: Pick<SettingsPanel, 'chatId' | 'instanceId'>, writable = false): Promise<AppConfig> {
     await this.deps.authorize(panel.chatId, ctx.from!.id);
     if (writable && !(this.deps.configWritable?.() ?? configWritable(this.deps.config.configPath))) {
-      throw new Error('Configuration is read-only. Ask the local operator to change its source or permissions. No settings were saved.');
+      throw new BotSettingsRejectedError(`Save settings (chat=${panel.chatId}, instance=${panel.instanceId}): Configuration is read-only. Ask the local operator to change its source or permissions. No settings were saved.`);
     }
     const member = await this.deps.api.getChatMember(panel.chatId, ctx.from!.id);
     const persisted = readConfig(this.deps.config.configPath);
     if (this.deps.assignedId(panel.chatId) !== panel.instanceId ||
         findInstance(persisted, this.deps.id(), panel.chatId)?.instance.id !== panel.instanceId ||
         !isAdministrator(member)) {
-      throw new Error('The configured instance assignment or administrator access changed. No settings were saved.');
+      throw new AuthorizationDeniedError(`Access settings (chat=${panel.chatId}, instance=${panel.instanceId}, user=${ctx.from!.id}): The configured instance assignment or administrator access changed. No settings were saved.`);
     }
     return persisted;
   }

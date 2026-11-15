@@ -1,3 +1,4 @@
+import { systemError, parseJson, OmpIdentityError, OmpSessionUnavailableError } from './errors.js';
 import { randomUUID } from 'node:crypto';
 import { access, chmod, constants, lstat, mkdir, opendir, readFile, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -23,7 +24,7 @@ export interface RuntimePaths {
 export function createPaths(deps: PathsDependencies): RuntimePaths {
 
   async function validateCwd(cwd: string): Promise<void> {
-    if (await realpath(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+    if (await realpath(cwd) !== cwd) throw new OmpIdentityError('Managed working directory identity changed', `Validate working directory ${cwd}`);
     const directory = await opendir(cwd);
     await directory.close();
     await access(cwd, constants.R_OK | constants.X_OK);
@@ -38,7 +39,7 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
   async function validateSessionPaths(sessions: TopicSession[], config = deps.config): Promise<void> {
     for (const session of sessions) {
       const assigned = findInstance(config, session.botId, session.chatId);
-      if (assigned && session.instanceId !== assigned.instance.id) throw new Error(`Chat ${session.chatId} has history pinned to another instance ID`);
+      if (assigned && session.instanceId !== assigned.instance.id) throw new OmpIdentityError(`Chat ${session.chatId} has history pinned to another instance ID`, `Managed session ${session.id}`);
     }
     for (const session of sessions) {
       if (session.runtime.kind !== 'managed') continue;
@@ -47,19 +48,19 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
         let contents: string;
         try {
           contents = await readFile(path.join(directory, 'binding.json'), 'utf8');
-        } catch (error) {
+        } catch (error) { error = systemError(error, 'paths OS operation');
           if (errno(error, 'ENOENT')) continue;
           throw error;
         }
-        const pin: unknown = JSON.parse(contents);
+        const pin: unknown = parseJson(contents, 'Read managed binding', `session ${session.id}`);
         if (!record(pin) || pin.version !== 1 || typeof pin.cwd !== 'string' || !path.isAbsolute(pin.cwd) ||
             typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) ||
-            typeof pin.sessionId !== 'string' || !pin.sessionId) throw new Error('Managed OMP binding is incompatible with this configuration');
+            typeof pin.sessionId !== 'string' || !pin.sessionId) throw new OmpIdentityError('Managed OMP binding is incompatible with this configuration', `Managed session ${session.id}`);
         const header = await readHeader(pin.sessionFile);
-        if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new Error('Managed OMP history identity changed');
+        if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new OmpIdentityError('Managed OMP history identity changed', `Managed session ${session.id}`);
         await validateCwd(pin.cwd);
         session.cwd = pin.cwd;
-      } catch (error) {
+      } catch (error) { error = systemError(error, 'paths OS operation');
         console.error(`Session ${session.id} recovery failed:`, error);
       }
     }
@@ -69,22 +70,22 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
     const metadata = path.join(deps.config.dataDir, 'sessions', session.id, 'binding.json');
     let pin: DurableBinding;
     try {
-      if (!(await lstat(metadata)).isFile()) throw new Error('Invalid managed binding metadata');
-      pin = JSON.parse(await readFile(metadata, 'utf8')) as DurableBinding;
-    } catch (error) {
+      if (!(await lstat(metadata)).isFile()) throw new OmpIdentityError('Invalid managed binding metadata', `Managed session ${session.id}`);
+      pin = parseJson(await readFile(metadata, 'utf8'), 'Read runtime metadata', `session ${session.id}`) as DurableBinding;
+    } catch (error) { error = systemError(error, 'paths OS operation');
       if (!errno(error, 'ENOENT')) throw error;
-      if (deps.managed.get(session.id)) throw new Error('Managed OMP binding is missing');
+      if (deps.managed.get(session.id)) throw new OmpIdentityError('Managed OMP binding is missing', `Managed session ${session.id}`);
       return undefined;
     }
     const cwd = await validatedSessionCwd(session);
     if (!record(pin) || pin.version !== 1 || typeof pin.sessionFile !== 'string' ||
         !path.isAbsolute(pin.sessionFile) || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
-      throw new Error('Managed OMP binding is incompatible with this configuration');
+      throw new OmpIdentityError('Managed OMP binding is incompatible with this configuration', `Managed session ${session.id}`);
     }
     const header = await readHeader(pin.sessionFile);
     const owned = deps.managed.get(session.id);
     if (header.id !== pin.sessionId || header.cwd !== pin.cwd || (owned && owned.sessionId !== pin.sessionId)) {
-      throw new Error('Managed OMP history identity changed');
+      throw new OmpIdentityError('Managed OMP history identity changed', `Managed session ${session.id}`);
     }
     return pin;
   }
@@ -93,39 +94,39 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
     const dir = path.resolve(deps.config.dataDir, 'sessions', session.id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const stat = await lstat(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Managed session directory is invalid');
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new OmpIdentityError('Managed session directory is invalid', `Managed session ${session.id}`);
     await chmod(dir, 0o700);
     const cwd = await validatedSessionCwd(session);
     const sessionFile = path.join(dir, 'history.jsonl');
     let pin: DurableBinding | undefined;
     try {
       const metadata = path.join(dir, 'binding.json');
-      if (!(await lstat(metadata)).isFile()) throw new Error('Invalid managed binding metadata');
-      pin = JSON.parse(await readFile(metadata, 'utf8')) as DurableBinding;
+      if (!(await lstat(metadata)).isFile()) throw new OmpIdentityError('Invalid managed binding metadata', `Managed session ${session.id}`);
+      pin = parseJson(await readFile(metadata, 'utf8'), 'Read runtime metadata', `session ${session.id}`) as DurableBinding;
       if (pin.version !== 1 || typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
-        throw new Error('Managed OMP binding is incompatible with this configuration');
+        throw new OmpIdentityError('Managed OMP binding is incompatible with this configuration', `Managed session ${session.id}`);
       }
       await chmod(metadata, 0o600);
-    } catch (error) {
+    } catch (error) { error = systemError(error, 'paths OS operation');
       if (!errno(error, 'ENOENT')) throw error;
     }
     if (!pin) {
       let header: { id: string; cwd: string };
       try {
         header = await readHeader(sessionFile);
-      } catch (error) {
+      } catch (error) { error = systemError(error, 'paths OS operation');
         if (!errno(error, 'ENOENT')) throw error;
-        if ((await readdir(dir)).some(file => file.endsWith('.jsonl'))) throw new Error('Unpinned managed histories require explicit recovery');
+        if ((await readdir(dir)).some(file => file.endsWith('.jsonl'))) throw new OmpSessionUnavailableError('Unpinned managed histories require explicit recovery', `Managed session ${session.id}`);
         const value = { type: 'session', version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd };
         await privateFile(sessionFile, `${JSON.stringify(value)}\n`, true);
         header = value;
       }
-      if (header.cwd !== cwd) throw new Error('Managed history working directory changed');
+      if (header.cwd !== cwd) throw new OmpIdentityError('Managed history working directory changed', `Managed session ${session.id}`);
       pin = { version: 1, sessionId: header.id, sessionFile, cwd };
       await writeBinding(dir, pin);
     }
     const header = await readHeader(pin.sessionFile);
-    if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new Error('Managed OMP history identity changed');
+    if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new OmpIdentityError('Managed OMP history identity changed', `Managed session ${session.id}`);
     await chmod(pin.sessionFile, 0o600);
     return { dir, pin };
   }

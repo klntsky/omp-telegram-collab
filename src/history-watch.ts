@@ -1,6 +1,7 @@
 import { watch, type BigIntStats, type FSWatcher } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
+import { HistoryClosedError, HistorySourceError, HistoryStateError, historyOperation } from './history-errors.js';
 
 export interface HistorySource { sessionId: string; path: string }
 export type HistoryFreshness = { state: 'clean' } | { state: 'dirty' } | { state: 'unverified'; error: unknown };
@@ -27,14 +28,20 @@ function diagnostic(error: unknown): string {
   return `${'code' in error ? String(error.code) : ''}\n${error.message}`;
 }
 
-export async function readHistoryHeader(handle: FileHandle): Promise<{ id: string; cwd: string }> {
+export async function readHistoryHeader(handle: FileHandle, source: string): Promise<{ id: string; cwd: string }> {
   const buffer = Buffer.alloc(64 * 1024);
-  const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
+  const { bytesRead } = await historyOperation(`Read OMP history header ${source}`, () => handle.read(buffer, 0, buffer.byteLength, 0));
   const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
-  let header = JSON.parse(lines[0] || '{}') as Record<string, unknown>;
-  if (header.type === 'title' && header.v === 1) header = JSON.parse(lines[1] || '{}') as Record<string, unknown>;
-  if (header.type !== 'session' || header.version !== 3 || typeof header.id !== 'string' || !header.id || typeof header.cwd !== 'string') {
-    throw new Error('Unsupported managed OMP session history format');
+  let header: Record<string, unknown>;
+  try {
+    header = JSON.parse(lines[0] || '{}') as Record<string, unknown>;
+    if (header?.type === 'title' && header.v === 1) header = JSON.parse(lines[1] || '{}') as Record<string, unknown>;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new HistorySourceError(`Parse OMP history header ${source}: ${error.message}`, {cause: error});
+  }
+  if (!header || header.type !== 'session' || header.version !== 3 || typeof header.id !== 'string' || !header.id || typeof header.cwd !== 'string') {
+    throw new HistorySourceError(`Read OMP history header ${source}: Unsupported managed OMP session history format`);
   }
   return { id: header.id, cwd: header.cwd };
 }
@@ -75,7 +82,8 @@ export class HistoryWatch {
       owner.#timer.unref();
       return owner;
     } catch (error) {
-      await owner.close();
+      try { await owner.close(); }
+      catch (cleanupError) { console.error(`Close history watcher after opening ${source.path} failed:`, cleanupError); }
       throw error;
     }
   }
@@ -105,8 +113,11 @@ export class HistoryWatch {
         this.#captures.set(checkpoint, { pin, revision: this.#revision });
         return checkpoint;
       } catch (error) {
-        if (pin) await this.#release(pin.handle);
-        if (!this.#closed) this.#unverified(error);
+        if (pin) {
+          try { await this.#release(pin.handle); }
+          catch (cleanupError) { console.error(`Release history capture for session ${this.#source.sessionId} failed:`, cleanupError); }
+        }
+        if (!this.#closed && error instanceof HistorySourceError) this.#unverified(error);
         throw error;
       }
     });
@@ -116,7 +127,7 @@ export class HistoryWatch {
   accept(checkpoint: HistoryCheckpoint): Promise<boolean> {
     return this.#run(async () => {
       const capture = this.#captures.get(checkpoint);
-      if (!capture) throw new Error('History checkpoint is not owned or has already been consumed');
+      if (!capture) throw new HistoryStateError(`Accept history checkpoint for session ${this.#source.sessionId}: History checkpoint is not owned or has already been consumed`);
       try {
         const status = await this.#check();
         if (status.state === 'unverified' || capture.revision !== this.#revision ||
@@ -154,63 +165,65 @@ export class HistoryWatch {
       this.#captures.clear();
       this.#baseline = undefined;
       const results = await Promise.allSettled([...this.#handles].map(handle => this.#release(handle)));
-      const failure = results.find(result => result.status === 'rejected');
-      if (failure?.status === 'rejected') throw failure.reason;
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, `Close history watcher for session ${this.#source.sessionId}: ${failures.map(diagnostic).join('\n')}`);
     });
     return this.#closing;
   }
 
   #assertOpen(): void {
-    if (this.#closed) throw new Error('History watcher is closed');
+    if (this.#closed) throw new HistoryClosedError(`History watcher is closed for session ${this.#source.sessionId}, source ${this.#source.path}`);
   }
 
   #run<T>(work: () => Promise<T>): Promise<T> {
-    if (this.#closed) return Promise.reject(new Error('History watcher is closed'));
+    if (this.#closed) return Promise.reject(new HistoryClosedError(`History watcher is closed for session ${this.#source.sessionId}, source ${this.#source.path}`));
     const operation = this.#serial.then(() => {
       this.#assertOpen();
       return work();
     });
-    this.#serial = operation.catch(() => {});
+    // The returned operation owns rejection; this tail only serializes subsequent work.
+    this.#serial = operation.then(() => undefined, () => undefined);
     return operation;
   }
 
   async #sample(): Promise<Sample> {
-    const canonical = await realpath(this.#source.path);
-    const metadata = await stat(canonical, { bigint: true });
-    const logical = await stat(this.#source.path, { bigint: true });
+    const canonical = await historyOperation(`Resolve history source ${this.#source.path} for session ${this.#source.sessionId}`, () => realpath(this.#source.path));
+    const metadata = await historyOperation(`Stat history source ${canonical} for session ${this.#source.sessionId}`, () => stat(canonical, { bigint: true }));
+    const logical = await historyOperation(`Stat logical history source ${this.#source.path} for session ${this.#source.sessionId}`, () => stat(this.#source.path, { bigint: true }));
     this.#assertOpen();
-    if (!metadata.isFile()) throw new Error(`History source is not a regular file: ${this.#source.path}`);
+    if (!metadata.isFile()) throw new HistorySourceError(`History source is not a regular file: ${this.#source.path}`);
     if (metadata.dev !== logical.dev || metadata.ino !== logical.ino) {
-      throw new Error(`History source changed while checking: ${this.#source.path}`);
+      throw new HistorySourceError(`History source changed while checking: ${this.#source.path}`);
     }
     return { canonical, metadata: logical };
   }
 
   async #pin(): Promise<Pin> {
-    const canonical = await realpath(this.#source.path);
-    const handle = await open(canonical, 'r');
+    const canonical = await historyOperation(`Resolve history source ${this.#source.path} for session ${this.#source.sessionId}`, () => realpath(this.#source.path));
+    const handle = await historyOperation(`Open history source ${canonical} for session ${this.#source.sessionId}`, () => open(canonical, 'r'));
     this.#handles.add(handle);
     try {
       this.#assertOpen();
-      const metadata = await handle.stat({ bigint: true });
-      if (!metadata.isFile()) throw new Error(`History source is not a regular file: ${this.#source.path}`);
-      const header = await readHistoryHeader(handle);
+      const metadata = await historyOperation(`Stat pinned history source ${canonical} for session ${this.#source.sessionId}`, () => handle.stat({ bigint: true }));
+      if (!metadata.isFile()) throw new HistorySourceError(`History source is not a regular file: ${this.#source.path}`);
+      const header = await readHistoryHeader(handle, `${this.#source.path} for session ${this.#source.sessionId}`);
       if (header.id !== this.#source.sessionId) {
-        throw new Error(`History source session identity changed: expected ${this.#source.sessionId}, found ${header.id}`);
+        throw new HistorySourceError(`History source session identity changed at ${this.#source.path}: expected ${this.#source.sessionId}, found ${header.id}`);
       }
       const sample = await this.#sample();
       if (rewritten({ canonical, metadata }, sample)) {
-        throw new Error(`History source changed while capturing: ${this.#source.path}`);
+        throw new HistorySourceError(`History source changed while capturing: ${this.#source.path}`);
       }
       return { handle, sample };
     } catch (error) {
-      await this.#release(handle);
+      try { await this.#release(handle); }
+      catch (cleanupError) { console.error(`Release history source ${canonical} for session ${this.#source.sessionId} failed:`, cleanupError); }
       throw error;
     }
   }
 
   async #release(handle: FileHandle): Promise<void> {
-    if (this.#handles.delete(handle)) await handle.close();
+    if (this.#handles.delete(handle)) await historyOperation(`Close history source ${this.#source.path} for session ${this.#source.sessionId}`, () => handle.close());
   }
 
   async #check(): Promise<HistoryFreshness> {
@@ -227,6 +240,7 @@ export class HistoryWatch {
       return this.#dirty ? { state: 'dirty' } : { state: 'clean' };
     } catch (error) {
       this.#assertOpen();
+      if (!(error instanceof HistorySourceError)) throw error;
       return { state: 'unverified', error: this.#unverified(error) };
     } finally {
       if (verified) await this.#release(verified.handle);
@@ -249,6 +263,7 @@ export class HistoryWatch {
     if (this.#error?.diagnostic === key) return this.#error.error;
     this.#revision++;
     this.#error = { error, diagnostic: key };
+    console.error(`History source is unverified for session ${this.#source.sessionId}, source ${this.#source.path}:`, error);
     this.#options.onChange?.({ state: 'unverified', error });
     return error;
   }
@@ -259,20 +274,31 @@ export class HistoryWatch {
     if (this.#watcher && this.#directory === directory) return;
     this.#watcher?.close();
     this.#watcher = undefined;
-    const watcher = watch(directory, { persistent: false }, (_event, filename) => {
-      if (this.#watcher === watcher && (filename === null || filename.toString() === this.#filename)) this.#hint();
-    });
+    let watcher: FSWatcher;
+    try {
+      watcher = watch(directory, { persistent: false }, (_event, filename) => {
+        if (this.#watcher === watcher && (filename === null || filename.toString() === this.#filename)) this.#hint();
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') throw error;
+      throw new HistorySourceError(`Watch history directory ${directory} for session ${this.#source.sessionId}: ${error.message}`, {cause: error});
+    }
     watcher.on('error', error => {
-      if (this.#closed || this.#watcher !== watcher) return;
+      const failure = new HistorySourceError(`Watch history directory ${directory} for session ${this.#source.sessionId}: ${error.message}`, {cause: error});
+      if (this.#closed || this.#watcher !== watcher) { console.error(failure); return; }
       watcher.close();
       this.#watcher = undefined;
-      void this.#run(async () => { this.#unverified(error); }).catch(() => {});
+      void this.#run(async () => { this.#unverified(failure); }).catch(error => {
+        if (!(error instanceof HistoryClosedError)) console.error(`Record history watch failure for session ${this.#source.sessionId}:`, error);
+      });
     });
     this.#directory = directory;
     this.#watcher = watcher;
   }
 
   #hint(): void {
-    if (!this.#closed) void this.check().catch(() => {});
+    if (!this.#closed) void this.check().catch(error => {
+      if (!(error instanceof HistoryClosedError)) console.error(`Check history source ${this.#source.path} for session ${this.#source.sessionId}:`, error);
+    });
   }
 }

@@ -4,6 +4,7 @@ import { parseEnv } from 'node:util';
 import { combineTelegramErrors } from '../../test/e2e/helpers/errors.js';
 import { readTelegramTestBotTokens } from './telegram-test-bots.js';
 import { withTelegramTestLock } from './telegram-test-lock.js';
+import { TelegramTestStorageSafetyError } from './telegram-test-errors.js';
 
 export async function appendTelegramTestBotToken(filename: string, token: string, signal: AbortSignal): Promise<void> {
   readTelegramTestBotTokens({ TELEGRAM_TEST_BOT_TOKENS: JSON.stringify([token]) });
@@ -14,7 +15,7 @@ export async function appendTelegramTestBotToken(filename: string, token: string
     let failed = false;
     try {
       const metadata = await file.stat();
-      if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to save Telegram test bot tokens in a non-regular or hard-linked file');
+      if (!metadata.isFile() || metadata.nlink !== 1) throw new TelegramTestStorageSafetyError(`Save Telegram test bot tokens in ${filename}: Refusing to save Telegram test bot tokens in a non-regular or hard-linked file`);
       const env = parseEnv(await file.readFile('utf8'));
       const tokens = env.TELEGRAM_TEST_BOT_TOKENS === undefined ? [] : readTelegramTestBotTokens(env);
       const existing = tokens.findIndex(value => value.split(':')[0] === token.split(':')[0]);

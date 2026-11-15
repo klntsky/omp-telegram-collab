@@ -1,12 +1,12 @@
 import { createServer as createHttpServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFile, stat, realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { z } from 'zod';
 import type { AppConfig, BrowserHostFrame, TopicSession } from '../shared/contracts.js';
 import { Store } from './store.js';
-import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
+import { AuthenticationError, AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
 import type { BotService } from './bot.js';
 import type { Omp } from './omp.js';
 import { SessionCapacityError } from './runtime/types.js';
@@ -14,6 +14,9 @@ import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 import type { SessionFeedSubscription } from './session-feed.js';
 import { CollabTransportError } from './collab.js';
+import { GatewayAccessError, GatewayInputError, StaticResourceMissingError, isStaticFile, parseGatewayInput } from './server-input.js';
+import { AuthorizationDeniedError } from './bot/types.js';
+import { BotSessionStateError } from './bot/errors.js';
 
 export type GatewayBot = Pick<BotService, 'id' | 'token' | 'authorizeSession' | 'requestCapacity' | 'ensureMirroring' | 'subscribeSessionFeed' | 'onSessionInvalidated'>;
 export interface ServerOptions { config: AppConfig; bots: GatewayBot[]; store: Store; runtime: Omp; staticDir?: string }
@@ -21,6 +24,11 @@ export interface GatewayServer extends Server { closeConnections(): Promise<void
 const requestSchema = z.object({botId:z.number().int().positive().safe(),sessionId:z.string().regex(/^[A-Za-z0-9_-]{22}$/),initData:z.string().min(1).max(32768),credential:z.string().min(1).max(2048).optional(),generation:z.number().int().nonnegative().safe().optional()}).strict();
 const mime: Record<string,string> = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.ico':'image/x-icon','.json':'application/json'};
 class SessionGenerationError extends Error {}
+class GatewayOperationError extends Error {
+  constructor(operation: string, cause: unknown) {
+    super(`${operation}: ${cause instanceof Error ? cause.message : String(cause)}`, {cause});
+  }
+}
 const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 class ServiceTerminatedError extends Error {
   constructor() { super(terminationMessage); }
@@ -36,10 +44,10 @@ async function body(request: IncomingMessage): Promise<unknown> {
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > 65536) throw new Error('Request too large');
+    if (bytes > 65536) throw new GatewayInputError('Read Mini App request body: Request too large');
     chunks.push(buffer);
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  return parseGatewayInput('Parse Mini App request body', () => JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
 export function createServer(options: ServerOptions): GatewayServer {
   const tickets = new TicketStore<TicketIdentity & {access: {session: TopicSession; canControl: boolean}}>();
@@ -62,22 +70,22 @@ export function createServer(options: ServerOptions): GatewayServer {
     signal?.throwIfAborted();
     checkTermination();
     const bot = botMap.get(identity.botId), session = options.store.getSession(identity.sessionId);
-    if (!bot || !session || session.botId !== identity.botId) throw new Error('Access denied');
+    if (!bot || !session || session.botId !== identity.botId) throw new GatewayAccessError(`Access denied for bot ${identity.botId}, session ${identity.sessionId}`);
     if (session.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (expected && session.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
     if (findInstance(options.config, session.botId, session.chatId)?.instance.id !== session.instanceId ||
-        await realpath(session.cwd) !== session.cwd) throw new Error('Instance is unavailable');
+        await realpath(session.cwd) !== session.cwd) throw new GatewayAccessError(`Instance is unavailable for session ${session.id}, directory ${session.cwd}`);
     signal?.throwIfAborted();
     checkGeneration(identity);
     const canControl = access ? access.canControl : await bot.authorizeSession(session,identity.userId,signal);
     signal?.throwIfAborted();
     const current = options.store.getSession(identity.sessionId);
-    if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new Error('Access denied');
+    if (!current || current.botId !== identity.botId || !options.store.isEnrolled(identity.botId,current.chatId)) throw new GatewayAccessError(`Access denied for bot ${identity.botId}, session ${identity.sessionId}`);
     if (current.status === 'detached') throw new SessionGenerationError('This topic is conversation-only; its session is detached');
     if (expected && current.status !== 'open') throw new SessionGenerationError('This topic is closed. Reopen it explicitly to connect.');
-    if (findInstance(options.config, current.botId, current.chatId)?.instance.id !== current.instanceId) throw new Error('Instance assignment changed');
-    if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instanceId !== session.instanceId || current.cwd !== session.cwd) throw new Error('Instance assignment changed');
-    if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instanceId !== expected.instanceId || current.cwd !== expected.cwd)) throw new Error('Instance assignment changed');
+    if (findInstance(options.config, current.botId, current.chatId)?.instance.id !== current.instanceId) throw new GatewayAccessError(`Instance assignment changed for session ${current.id}`);
+    if (current.chatId !== session.chatId || current.threadId !== session.threadId || current.instanceId !== session.instanceId || current.cwd !== session.cwd) throw new GatewayAccessError(`Instance assignment changed for session ${current.id}`);
+    if (expected && (current.chatId !== expected.chatId || current.threadId !== expected.threadId || current.instanceId !== expected.instanceId || current.cwd !== expected.cwd)) throw new GatewayAccessError(`Instance assignment changed for session ${current.id}`);
     checkGeneration(identity);
     checkTermination();
     return {bot,session:current,canControl};
@@ -105,17 +113,18 @@ export function createServer(options: ServerOptions): GatewayServer {
         if (request.aborted || response.destroyed) abort();
         try {
           checkTermination();
-          const parsed = requestSchema.parse(await withCancellation(body(request),controller.signal));
+          const awaitedBody = await withCancellation(body(request),controller.signal);
+          const parsed = parseGatewayInput('Validate Mini App session request', () => requestSchema.parse(awaitedBody));
           controller.signal.throwIfAborted();
           const bot = botMap.get(parsed.botId);
-          if (!bot) throw new Error('Access denied');
+          if (!bot) throw new GatewayAccessError(`Access denied for bot ${parsed.botId}, session ${parsed.sessionId}`);
           let identity: TicketIdentity;
           if (parsed.credential !== undefined) {
             identity = validateCredential(parsed.credential,bot.token,parsed.botId,parsed.sessionId);
             identity.generation = parsed.generation ?? options.store.getSessionGeneration(parsed.sessionId);
           } else {
             const authentication = validateInitData(parsed.initData,bot.token);
-            if (authentication.startParam !== `s_${parsed.sessionId}`) throw new Error('Access denied');
+            if (authentication.startParam !== `s_${parsed.sessionId}`) throw new GatewayAccessError(`Access denied for bot ${parsed.botId}, session ${parsed.sessionId}`);
             identity = {
               botId:parsed.botId,
               sessionId:parsed.sessionId,
@@ -141,14 +150,14 @@ export function createServer(options: ServerOptions): GatewayServer {
       }
       if (url.pathname.startsWith('/api/')) { json(response,404,{error:'Not found'}); return; }
       if (request.method !== 'GET' && request.method !== 'HEAD') { json(response,405,{error:'Method not allowed'}); return; }
-      const decoded = decodeURIComponent(url.pathname);
+      const decoded = parseGatewayInput('Decode Mini App static resource path', () => decodeURIComponent(url.pathname));
       const filename = resolve(root,`.${decoded === '/' ? '/index.html' : decoded}`);
       if (filename !== root && !filename.startsWith(root+sep)) { json(response,404,{error:'Not found'}); return; }
       let target = filename;
       let regular = false;
-      try { regular = (await stat(target)).isFile(); }
+      try { regular = await isStaticFile(target); }
       catch (error) {
-        if (!(error instanceof Error) || !('code' in error) || (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')) throw error;
+        if (!(error instanceof StaticResourceMissingError)) throw error;
       }
       if (!regular) { if (extname(decoded)) { json(response,404,{error:'Not found'}); return; } target = resolve(root,'index.html'); }
       const data = await readFile(target);
@@ -156,14 +165,16 @@ export function createServer(options: ServerOptions): GatewayServer {
       response.end(request.method === 'HEAD' ? undefined : data);
     })().catch(error => {
       if (authorizationSignal?.aborted && error === authorizationSignal.reason) return;
-      if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError))
-        console.error('Mini App HTTP request failed.', error);
+      if (!(error instanceof GatewayInputError) && !(error instanceof AuthenticationError))
+        console.error(new GatewayOperationError(`Mini App HTTP ${request.method ?? 'request'} failed`, error));
       if (response.destroyed || response.writableEnded) return;
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
-        else if (error instanceof SessionGenerationError) json(response,409,{error:error.message});
+        else if (error instanceof SessionGenerationError || error instanceof BotSessionStateError) json(response,409,{error:error.message});
         else if (error instanceof AuthorizationUnavailableError) json(response,503,{error:error.message});
-        else json(response,request.url?.startsWith('/api/') ? 403 : 404,{error:request.url?.startsWith('/api/') ? (error instanceof Error ? error.message : 'Authentication or access denied') : 'Not found'});
+        else if (error instanceof GatewayInputError || error instanceof AuthenticationError || error instanceof GatewayAccessError || error instanceof AuthorizationDeniedError)
+          json(response,403,{error:error.message});
+        else json(response,500,{error:new GatewayOperationError(`Mini App HTTP ${request.method ?? 'request'} failed`, error).message});
       } else response.end();
     });
   }) as GatewayServer;
@@ -180,9 +191,9 @@ export function createServer(options: ServerOptions): GatewayServer {
     void (async () => {
       const url = new URL(request.url ?? '/',publicOrigin);
       checkTermination();
-      if (closing || url.pathname !== '/api/socket' || (request.headers.origin && request.headers.origin !== publicOrigin) || sockets.clients.size >= 256 || url.searchParams.getAll('ticket').length !== 1) throw new Error('Access denied');
+      if (closing || url.pathname !== '/api/socket' || (request.headers.origin && request.headers.origin !== publicOrigin) || sockets.clients.size >= 256 || url.searchParams.getAll('ticket').length !== 1) throw new GatewayAccessError('Mini App WebSocket upgrade: Access denied');
       const identity = tickets.consume(url.searchParams.get('ticket') ?? '');
-      if (!identity) throw new Error('Access denied');
+      if (!identity) throw new GatewayAccessError('Mini App WebSocket upgrade: Access denied');
       await authorize(identity,identity.access.session,identity.access);
       checkGeneration(identity);
       checkTermination();
@@ -190,7 +201,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       upgraded = true;
       sockets.handleUpgrade(request,socket,head,ws => connectSocket(ws,identity));
     })().catch(error => {
-      console.error('Mini App WebSocket upgrade failed.', error);
+      console.error(new GatewayOperationError('Mini App WebSocket upgrade failed', error));
       if (error instanceof ServiceTerminatedError && !socket.destroyed && !upgraded) {
         const payload = JSON.stringify({error:error.message});
         socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\nConnection: close\r\n\r\n${payload}`);
@@ -213,7 +224,8 @@ export function createServer(options: ServerOptions): GatewayServer {
       if (sessionId !== identity.sessionId) return;
       try { checkTermination(); }
       catch (error) {
-        fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable');
+        if (!(error instanceof ServiceTerminatedError)) { void failAction(error); return; }
+        fail(4003,error.message);
         return;
       }
       fail(4003,reason ?? (options.store.getSession(sessionId)?.status === 'detached'
@@ -229,8 +241,9 @@ export function createServer(options: ServerOptions): GatewayServer {
         readAccess.session = current.session;
         readAccess.canControl = current.canControl;
       }).catch(error => {
-        console.error(`Mini App access refresh failed (${identity.botId}, ${identity.sessionId}).`, error);
-        fail(error instanceof AuthorizationUnavailableError ? 1013 : 4003,error instanceof Error ? error.message : 'Access or session unavailable');
+        const failure = new GatewayOperationError(`Mini App access refresh failed for bot ${identity.botId}, session ${identity.sessionId}`, error);
+        console.error(failure);
+        fail(error instanceof AuthorizationUnavailableError ? 1013 : error instanceof GatewayAccessError || error instanceof AuthorizationDeniedError || error instanceof SessionGenerationError || error instanceof BotSessionStateError ? 4003 : 1011,failure.message);
       })
         .finally(() => { refreshingAccess = false; });
     },30000);
@@ -245,17 +258,18 @@ export function createServer(options: ServerOptions): GatewayServer {
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
     async function failAction(error: unknown): Promise<void> {
-      console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
+      const failure = new GatewayOperationError(`Mini App session operation failed for bot ${identity.botId}, session ${identity.sessionId}`, error);
+      console.error(failure);
       if (error instanceof ServiceTerminatedError) fail(4003,error.message);
       else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
       else if (error instanceof CollabTransportError) fail(1011,error.message);
       else if (error instanceof SessionCapacityError) {
         fail(4009,error.message);
         const session = options.store.getSession(identity.sessionId);
-        if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(error => {
-          console.error(`Mini App capacity request failed (${identity.botId}, ${identity.sessionId}).`, error);
+        if (session) await botMap.get(identity.botId)?.requestCapacity(session,error).catch(error => {
+          console.error(new GatewayOperationError(`Mini App capacity request failed for bot ${identity.botId}, session ${identity.sessionId}`, error));
         });
-      } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
+      } else fail(error instanceof GatewayAccessError || error instanceof AuthorizationDeniedError || error instanceof SessionGenerationError || error instanceof BotSessionStateError ? 4003 : 1011,failure.message);
     }
     function enqueue(action: () => Promise<void>): void {
       if (closed) return;
@@ -286,19 +300,23 @@ export function createServer(options: ServerOptions): GatewayServer {
     }
     ws.on('error',error => {
       console.error(`Mini App WebSocket failed (${identity.botId}, ${identity.sessionId}).`, error);
-      fail(1011,'Connection failed');
+      fail(1011,`Mini App WebSocket failed for session ${identity.sessionId}: ${error.message}`);
     });
     ws.on('close',() => { closed=true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close(); });
     ws.on('message',(data,binary) => {
       try { checkTermination(); }
-      catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
+      catch (error) { void failAction(error); return; }
       if (binary) { fail(4002,'JSON text frames required'); return; }
       let frame;
-      try { frame = validateGuestFrame(JSON.parse(data.toString())); }
-      catch { fail(4002,'Invalid action'); return; }
+      try { frame = parseGatewayInput(`Parse Mini App action for session ${identity.sessionId}`, () => validateGuestFrame(JSON.parse(data.toString()))); }
+      catch (error) {
+        if (error instanceof GatewayInputError) fail(4002,error.message);
+        else void failAction(error);
+        return;
+      }
       enqueue(async () => {
         await authorize(identity,connectedSession,readAccess);
-        if (!upstream) throw new Error('Session not connected');
+        if (!upstream) throw new GatewayAccessError(`Session ${identity.sessionId} not connected`);
         checkTermination();
         void Promise.resolve(upstream.send(frame)).catch(failAction);
       });
@@ -321,11 +339,11 @@ export function createServer(options: ServerOptions): GatewayServer {
       const connection = await bot.subscribeSessionFeed(session,{
         onFrame: frame => {
           try { checkTermination(); }
-          catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
+          catch (error) { void failAction(error); return; }
           let payload: string;
           try { payload = JSON.stringify(frame); } catch (error) {
             console.error(`Mini App host frame serialization failed (${identity.botId}, ${identity.sessionId}).`, error);
-            fail(1011,'Invalid host frame'); return;
+            fail(1011,`Serialize Mini App host frame for session ${identity.sessionId}: ${error instanceof Error ? error.message : String(error)}`); return;
           }
           outgoing.push({frame,payload});
           flushOutgoing();

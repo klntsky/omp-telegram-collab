@@ -1,4 +1,4 @@
-import { GrammyError, type Bot, type Context } from 'grammy';
+import { GrammyError, HttpError, type Bot, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -9,6 +9,8 @@ import { withCancellation } from '../cancellation.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { AuthorizationDeniedError } from './types.js';
 import { help, terminationMessage } from './commands.js';
+import { BotOperationTimeoutError } from './errors.js';
+import { TelegramAccessDeniedError } from '../telegram-errors.js';
 
 interface AuthorizationDependencies {
   bot: Bot<Context>; config: AppConfig; store: Store; runtime: Omp;
@@ -32,11 +34,11 @@ async authorizeSession(session: TopicSession, userId: number, signal?: AbortSign
   private async authorizeMember(chatId: number, userId: number, statusOnly = false, signal?: AbortSignal) {
     signal?.throwIfAborted();
     if (this.deps.stopped()) throw this.deps.signal.reason;
-    if (refreshTermination(this.deps.config) && !statusOnly) throw new Error(terminationMessage);
+    if (refreshTermination(this.deps.config) && !statusOnly) throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}): ${terminationMessage}`);
     const instanceId = this.assignedId(chatId);
-    if (!this.deps.store.isEnrolled(this.deps.botId(), chatId)) throw new Error('Group not enrolled');
+    if (!this.deps.store.isEnrolled(this.deps.botId(), chatId)) throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}): Group not enrolled`);
     const deadline = new AbortController();
-    const timeoutReason = new DOMException('Telegram authorization lookup timed out after 10 seconds', 'TimeoutError');
+    const timeoutReason = new BotOperationTimeoutError(`Telegram authorization lookup failed (chat=${chatId}, user=${userId}, bot=${this.deps.botId()}): Telegram authorization lookup timed out after 10 seconds`);
     const cancellation = AbortSignal.any(signal ? [signal, this.deps.signal, deadline.signal] : [this.deps.signal, deadline.signal]);
     const telegram = new TelegramAbortController();
     const cancelTelegram = () => telegram.abort();
@@ -49,17 +51,22 @@ async authorizeSession(session: TopicSession, userId: number, signal?: AbortSign
         this.deps.bot.api.getChatMember(chatId, userId, telegram.signal),
         this.deps.bot.api.getChatMember(chatId, this.deps.botId(), telegram.signal),
       ]), cancellation).catch(error => {
-        if (cancellation.aborted && cancellation.reason !== timeoutReason) throw cancellation.reason;
+        if (cancellation.aborted && error === cancellation.reason && error !== timeoutReason) throw error;
+        if (error instanceof TelegramAccessDeniedError)
+          throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}): ${error.message}`, {cause: error});
+        if (!(error instanceof HttpError) && !(error instanceof GrammyError) && error !== timeoutReason) throw error;
         if (error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500 && error.error_code !== 429) throw error;
-        throw new AuthorizationUnavailableError(error);
+        const unavailable = new AuthorizationUnavailableError(error);
+        unavailable.message = `Authorize Telegram membership (chat=${chatId}, user=${userId}, bot=${this.deps.botId()}): ${unavailable.message}`;
+        throw unavailable;
       });
       cancellation.throwIfAborted();
-      if (refreshTermination(this.deps.config) && !statusOnly) throw new Error(terminationMessage);
-      if (this.assignedId(chatId) !== instanceId) throw new Error('The group instance assignment changed');
-      if (!isActiveMember(user)) throw new AuthorizationDeniedError('Group access denied');
-      if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new Error('Group access denied');
+      if (refreshTermination(this.deps.config) && !statusOnly) throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}): ${terminationMessage}`);
+      if (this.assignedId(chatId) !== instanceId) throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}, instance=${instanceId}): The group instance assignment changed`);
+      if (!isActiveMember(user)) throw new AuthorizationDeniedError(`Authorize Telegram membership (chat=${chatId}, user=${userId}): Group access denied`);
+      if (chat.type !== 'supergroup' || (!statusOnly && (!chat.is_forum || bot.status !== 'administrator' || !bot.can_manage_topics))) throw new AuthorizationDeniedError(`Authorize Telegram group (chat=${chatId}, bot=${this.deps.botId()}): Group access denied`);
       if (this.deps.stopped()) throw this.deps.signal.reason;
-      if (!this.deps.store.isEnrolled(this.deps.botId(), chatId)) throw new Error('Group not enrolled');
+      if (!this.deps.store.isEnrolled(this.deps.botId(), chatId)) throw new AuthorizationDeniedError(`Authorize Telegram membership (bot=${this.deps.botId()}, chat=${chatId}, user=${userId}): Group not enrolled`);
       return user;
     } finally {
       clearTimeout(timeout);
@@ -75,13 +82,13 @@ async ready(chatId: number): Promise<boolean> {
 
 assignedId(chatId: number): number {
     const assigned = findInstance(this.deps.config, this.deps.botId(), chatId);
-    if (!assigned) throw new Error('This group has no configured instance assignment');
+    if (!assigned) throw new AuthorizationDeniedError(`Resolve Telegram group instance (bot=${this.deps.botId()}, chat=${chatId}): This group has no configured instance assignment`);
     return assigned.instance.id;
   }
 
 assignedCwd(chatId: number): string {
     const assigned = findInstance(this.deps.config, this.deps.botId(), chatId);
-    if (!assigned) throw new Error('This group has no configured instance assignment');
+    if (!assigned) throw new AuthorizationDeniedError(`Resolve Telegram group working directory (bot=${this.deps.botId()}, chat=${chatId}): This group has no configured instance assignment`);
     return assigned.instance.defaultDir;
   }
 
@@ -90,13 +97,13 @@ sessionAssigned(session: TopicSession): boolean {
     if (this.deps.store.getTopicKind(session) === 'detached') return false;
     const stored = this.deps.store.getSession(session.id);
     if (!stored || stored.status === 'detached' || stored.botId !== session.botId || stored.chatId !== session.chatId || stored.threadId !== session.threadId || stored.instanceId !== session.instanceId || !session.instanceId) return false;
-    try { return this.assignedId(session.chatId) === session.instanceId; } catch { return false; }
+    return findInstance(this.deps.config, this.deps.botId(), session.chatId)?.instance.id === session.instanceId;
   }
 
 requireSessionAssignment(session: TopicSession): void {
     if (this.deps.stopped()) throw this.deps.signal.reason;
-    if (refreshTermination(this.deps.config)) throw new Error(terminationMessage);
-    if (!this.sessionAssigned(session)) throw new Error('This session is not assigned to its configured instance path');
+    if (refreshTermination(this.deps.config)) throw new AuthorizationDeniedError(`Authorize Telegram session (bot=${this.deps.botId()}, chat=${session.chatId}, session=${session.id}, instance=${session.instanceId}): ${terminationMessage}`);
+    if (!this.sessionAssigned(session)) throw new AuthorizationDeniedError(`Authorize Telegram session (bot=${this.deps.botId()}, chat=${session.chatId}, session=${session.id}, instance=${session.instanceId}): This session is not assigned to its configured instance path`);
   }
 
 allMessagesArePrompts(chatId: number): boolean {
@@ -152,7 +159,7 @@ async listAdmins(ctx: Context): Promise<void> {
     const deliver = async () => {
       await this.authorize(destination.chatId, ctx.from!.id);
       if (this.assignedId(destination.chatId) !== instanceId ||
-          findInstance(readConfig(this.deps.config.configPath), this.deps.botId(), destination.chatId)?.instance.id !== instanceId) throw new Error('The group instance assignment changed');
+          findInstance(readConfig(this.deps.config.configPath), this.deps.botId(), destination.chatId)?.instance.id !== instanceId) throw new AuthorizationDeniedError(`List administrators (bot=${this.deps.botId()}, chat=${destination.chatId}, user=${ctx.from!.id}, instance=${instanceId}): The group instance assignment changed`);
       await replyTo(ctx, destination, chunk);
     };
     for (const line of lines) {

@@ -3,6 +3,8 @@ import type { Store } from '../../../src/store.js';
 import type { TopicSession } from '../../../shared/contracts.js';
 import { telegramTestTimeouts } from '../../../scripts/lib/telegram-test-deadline.js';
 import { bounded } from './async.js';
+import { combineTelegramErrors } from './errors.js';
+import { TelegramTestTimeoutError } from '../../../scripts/lib/telegram-test-errors.js';
 
 export async function cleanupSessions(
   runtime: OmpRuntime,
@@ -11,8 +13,8 @@ export async function cleanupSessions(
   diagnostic: (message: string) => void,
 ): Promise<void> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(
-    `Telegram test session cleanup timed out after ${telegramTestTimeouts.cleanup}ms`,
+  const timer = setTimeout(() => controller.abort(new TelegramTestTimeoutError(
+    'session cleanup', telegramTestTimeouts.cleanup,
   )), telegramTestTimeouts.cleanup);
   const errors: unknown[] = [];
   try {
@@ -41,7 +43,7 @@ export async function cleanupSessions(
           record('Runtime termination', error);
         }
         if (failures.length) {
-          throw new AggregateError(failures, `Session ${session.id} termination failed`);
+          throw new AggregateError(failures, `Session ${session.id} termination failed:\n${failures.map(error => error instanceof Error ? error.message : String(error)).join('\n')}`, { cause: failures[0] });
         }
       });
       void operation.catch(error => {
@@ -50,7 +52,7 @@ export async function cleanupSessions(
         }
       });
       return bounded(operation, controller.signal).catch(error => {
-        const failure = new Error(`Cleanup failed for session ${session.id}`, { cause: error });
+        const failure = new Error(`Cleanup failed for session ${session.id}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
         diagnostic(`${failure.message}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
         errors.push(failure);
       });
@@ -59,5 +61,5 @@ export async function cleanupSessions(
   } finally {
     clearTimeout(timer);
   }
-  if (errors.length) throw new AggregateError(errors, 'Telegram session cleanup failed');
+  if (errors.length) throw combineTelegramErrors(...errors);
 }

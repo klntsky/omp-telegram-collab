@@ -5,7 +5,7 @@ import {
 	mathSpanInContext,
 	mathStartIndex,
 } from "../../vendor/math-delimiters";
-import { renderToString } from "katex";
+import { ParseError, renderToString } from "katex";
 import { escapeHtml } from "../../lib/format";
 
 /**
@@ -34,9 +34,10 @@ function renderMath(token: Tokens.Generic): string | false {
 		// scrolling the `math` element itself traps a few pixels of vertical scroll:
 		// its ink — fraction bars, radical overlines — overflows its own box.
 		return token.display ? `<span class="tr-math">${math}</span>` : math;
-	} catch {
-		// KaTeX threw outside its own error handling (e.g. macro expansion limit):
-		// show the source rather than let one span blank the whole message.
+	} catch (error) {
+		if (!(error instanceof ParseError)) throw error;
+		// KaTeX's ParseError marks invalid LaTeX; other renderer failures propagate.
+		// https://github.com/KaTeX/KaTeX/blob/main/src/ParseError.ts
 		return escapeHtml(typeof token.raw === "string" ? token.raw : token.text);
 	}
 }

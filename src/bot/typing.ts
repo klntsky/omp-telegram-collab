@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -65,7 +66,7 @@ export class TypingIndicators {
         () => this.typingActive(session, listener),
       )
       .catch((error) => {
-        console.warn(`Could not send typing action (${session.id}).`, error);
+        reportBotError(`Could not send typing action (${session.id}).`, error);
       });
   }
 }

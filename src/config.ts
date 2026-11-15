@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
-import { accessSync, closeSync, constants, existsSync, fchmodSync, fchownSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
+import { accessSync, closeSync, constants, existsSync, fchmodSync, fchownSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
-import { parseDocument, stringify } from 'yaml';
+import { LineCounter, parseDocument, stringify } from 'yaml';
 import { z } from 'zod';
 import type { AppConfig, InstanceConfig } from '../shared/contracts.js';
 import { isMentionableSkillName } from './skill-commands.js';
@@ -13,6 +13,14 @@ export class ConfigError extends Error {
     this.name = 'ConfigError';
   }
 }
+class ConfigPermissionError extends ConfigError {
+  constructor(path: string, detail: string, cause?: unknown) {
+    super(['config'], `${detail} Configuration file: ${path}`);
+    this.name = 'ConfigPermissionError';
+    this.cause = cause;
+  }
+}
+
 
 const tokenPattern = /^[1-9]\d*:[A-Za-z0-9_-]+$/;
 const literal = z.string().refine(value => !value.includes('\0'));
@@ -22,17 +30,14 @@ const absolutePath = nonempty.refine(value => isAbsolute(value) && normalize(val
 const relativeFolderPath = nonempty.refine(value => !isAbsolute(value)).transform(value => normalize(value).replace(/\/+$/, '') || '.');
 const publicUrlSchema = z.string().refine(value => {
   if (value === '') return true;
-  if (!/^https:\/\/[^/?#\\@]+\/?$/i.test(value)) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && url.pathname === '/' && !url.username && !url.password && !url.search && !url.hash;
-  } catch { return false; }
+  if (!/^https:\/\/[^/?#\\@]+\/?$/i.test(value) || !URL.canParse(value)) return false;
+  const url = new URL(value);
+  return url.protocol === 'https:' && url.pathname === '/' && !url.username && !url.password && !url.search && !url.hash;
 }).transform(value => value ? new URL(value).origin : '');
 const relayUrlSchema = z.string().refine(value => {
-  try {
-    const url = new URL(value);
-    return (url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))) && !url.username && !url.password && !value.includes('#');
-  } catch { return false; }
+  if (!URL.canParse(value)) return false;
+  const url = new URL(value);
+  return (url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))) && !url.username && !url.password && !value.includes('#');
 });
 const forbiddenArgs: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
@@ -80,9 +85,6 @@ const configSchema = z.object({
   }).strict(),
 }).strict();
 
-function errno(error: unknown, code: string): boolean {
-  return error instanceof Error && 'code' in error && error.code === code;
-}
 
 function failure(path: string, keys: string[], detail: string): ConfigError {
   return new ConfigError(keys, `${detail} Configuration file: ${path}`);
@@ -122,9 +124,9 @@ function validate(value: unknown, configPath: string): AppConfig {
     instanceIds.add(instance.id);
     try {
       const canonical = canonicalPath(instance.defaultDir);
-      if (canonical !== instance.defaultDir) throw new Error(`Directory resolves to ${canonical}.`);
+      if (canonical !== instance.defaultDir) throw failure(configPath, ['instances'], `Directory resolves to ${canonical}.`);
     } catch (error) {
-      throw failure(configPath, ['instances'], `Instance ${instance.id} defaultDir must be an existing canonical directory: ${error instanceof Error ? error.message : String(error)}`);
+      throw Object.assign(failure(configPath, ['instances'], `Instance ${instance.id} defaultDir must be an existing canonical directory: ${error instanceof Error ? error.message : String(error)}`), { cause: error });
     }
     for (const chat of instance.chats) {
       const key = `${chat.botId}:${chat.chatId}`;
@@ -143,9 +145,9 @@ export function defaultConfigPath(): string {
 export function canonicalPath(input: string): string {
   try {
     const path = realpathSync(resolve(input));
-    if (!statSync(path).isDirectory()) throw new Error(`Not a directory: ${path}`);
+    if (!statSync(path).isDirectory()) throw new ConfigError(['path'], `Not a directory: ${path}`);
     return path;
-  } catch (error) { throw new ConfigError(['path'], `Choose an existing accessible directory. ${error instanceof Error ? error.message : String(error)}`); }
+  } catch (error) { throw Object.assign(new ConfigError(['path'], `Choose an existing accessible directory for ${resolve(input)}. ${error instanceof Error ? error.message : String(error)}`), { cause: error }); }
 }
 
 export function emptyConfig(configPath: string): AppConfig {
@@ -164,7 +166,7 @@ export function readConfig(input: string): AppConfig {
     let source: string = '';
     let primary: ConfigError | undefined;
     try {
-      if (!fstatSync(fd).isFile()) throw new Error();
+      if (!fstatSync(fd).isFile()) throw failure(path, ['config'], 'Configuration is not a regular file.');
       source = readFileSync(fd, 'utf8');
     } catch (error) {
       primary = operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
@@ -174,8 +176,20 @@ export function readConfig(input: string): AppConfig {
       }
     }
     if (primary) throw primary;
-    const document = parseDocument(source, { uniqueKeys: true });
-    if (document.errors.length) throw failure(path, ['config'], 'Invalid YAML (including duplicate mapping keys).');
+    // Even without prettyErrors, YAML's parseBlockScalarHeader embeds raw source:
+    // https://github.com/eemeli/yaml/blob/v2.9.1/src/compose/resolve-block-scalar.ts
+    // Keep exact codes/offsets and line locations, but omit source-bearing messages
+    // and original causes: configuration text can contain bot credentials.
+    const lineCounter = new LineCounter();
+    const document = parseDocument(source, { uniqueKeys: true, prettyErrors: false, lineCounter });
+    if (document.errors.length) {
+      const diagnostics = document.errors.map(error => {
+        const start = lineCounter.linePos(error.pos[0]);
+        const end = lineCounter.linePos(error.pos[1]);
+        return `YAML ${error.code} at offsets ${error.pos[0]}-${error.pos[1]} (line ${start.line}, column ${start.col} through line ${end.line}, column ${end.col})`;
+      });
+      throw failure(path, ['config'], diagnostics.join('\n'));
+    }
     return validate(document.toJS({ maxAliasCount: 100 }), path);
   } catch (error) {
     throw operationFailure(path, error, 'Cannot read a regular, non-symlink YAML configuration file.');
@@ -207,21 +221,21 @@ function modeAllows(stat: Stats, write: boolean): boolean {
 
 function writableState(path: string): { file?: Stats; parent: Stats; parentPath: string } {
   let file: Stats | undefined;
-  try { file = lstatSync(path); } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
-  if (file && (!file.isFile() || file.isSymbolicLink() || !modeAllows(file, true))) throw new Error();
+  file = lstatSync(path, { throwIfNoEntry: false });
+  if (file && (!file.isFile() || file.isSymbolicLink() || !modeAllows(file, true))) throw new ConfigPermissionError(path, 'Configuration is not a writable regular file.');
   if (file) accessSync(path, constants.W_OK);
   let parentPath = dirname(path);
   while (!existsSync(parentPath)) {
     const ancestor = dirname(parentPath);
-    if (ancestor === parentPath) throw new Error();
+    if (ancestor === parentPath) throw new ConfigPermissionError(path, 'No existing parent directory found.');
     parentPath = ancestor;
   }
   const parent = lstatSync(parentPath);
-  if (!parent.isDirectory() || parent.isSymbolicLink() || !modeAllows(parent, true) || !modeAllows(parent, false)) throw new Error();
+  if (!parent.isDirectory() || parent.isSymbolicLink() || !modeAllows(parent, true) || !modeAllows(parent, false)) throw new ConfigPermissionError(path, `Parent directory is not writable and searchable: ${parentPath}`);
   accessSync(parentPath, constants.W_OK | constants.X_OK);
   for (let ancestor = dirname(parentPath); ; ancestor = dirname(ancestor)) {
     const stat = statSync(ancestor);
-    if (!stat.isDirectory() || !modeAllows(stat, false)) throw new Error();
+    if (!stat.isDirectory() || !modeAllows(stat, false)) throw new ConfigPermissionError(path, `Ancestor directory is not searchable: ${ancestor}`);
     accessSync(ancestor, constants.X_OK);
     if (ancestor === dirname(ancestor)) break;
   }
@@ -229,7 +243,15 @@ function writableState(path: string): { file?: Stats; parent: Stats; parentPath:
 }
 
 export function configWritable(input: string): boolean {
-  try { writableState(resolve(input)); return true; } catch { return false; }
+  let problem: unknown;
+  try { writableState(resolve(input)); return true; } catch (error) {
+    problem = error instanceof Error && 'code' in error && ['EACCES', 'EPERM', 'EROFS', 'ENOTDIR', 'ELOOP'].includes(String(error.code))
+      ? new ConfigPermissionError(resolve(input), error.message, error)
+      : error;
+  }
+  if (problem instanceof ConfigPermissionError) return false;
+  if (problem instanceof Error) problem.message = `Cannot determine configuration writability for ${resolve(input)}: ${problem.message}`;
+  throw problem;
 }
 
 function sameFile(left: Stats | undefined, right: Stats | undefined): boolean {
@@ -248,7 +270,7 @@ export function writeConfig(config: AppConfig): void {
     const initial = writableState(path);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const before = writableState(path);
-    if (!sameFile(initial.file, before.file)) throw new Error();
+    if (!sameFile(initial.file, before.file)) throw failure(path, ['config'], 'Configuration file changed before writing.');
     const parentPath = realpathSync(dirname(path));
     temporary = join(dirname(path), `.${randomBytes(16).toString('hex')}.tmp`);
     fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
@@ -263,7 +285,7 @@ export function writeConfig(config: AppConfig): void {
     fd = undefined;
     closeSync(written);
     const after = writableState(path);
-    if (!sameFile(before.file, after.file) || before.parent.dev !== after.parent.dev || before.parent.ino !== after.parent.ino || parentPath !== realpathSync(dirname(path))) throw new Error();
+    if (!sameFile(before.file, after.file) || before.parent.dev !== after.parent.dev || before.parent.ino !== after.parent.ino || parentPath !== realpathSync(dirname(path))) throw failure(path, ['config'], 'Configuration file or parent directory changed during writing.');
     if (!before.file) {
       linkSync(temporary, path);
       unlinkSync(temporary);
@@ -286,8 +308,8 @@ export function writeConfig(config: AppConfig): void {
       }
     }
     if (temporary !== undefined) {
-      try { unlinkSync(temporary); } catch (error) {
-        if (!errno(error, 'ENOENT')) primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot remove temporary configuration file.'));
+      try { rmSync(temporary, { force: true }); } catch (error) {
+        primary = cleanupFailure(primary, error, operationFailure(path, error, 'Cannot remove temporary configuration file.'));
       }
     }
   }
@@ -299,7 +321,7 @@ export function validateStart(config: AppConfig): void {
   const checked = validate(value, configPath);
   if (!checked.bots.length) {
     const configOption = configPath === defaultConfigPath() ? '' : ` --config '${configPath.replaceAll("'", "'\\''")}'`;
-    throw new Error(`No bots configured yet. Create one using omp-telegram-collab${configOption} bot add`);
+    throw failure(configPath, ['bots'], `No bots configured yet. Create one using omp-telegram-collab${configOption} bot add`);
   }
 }
 

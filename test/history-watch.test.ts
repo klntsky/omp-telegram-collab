@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { HistoryWatch, type HistoryFreshness, type HistoryWatchOptions } from '../src/history-watch.js';
+import { MissingResourceError, systemOperation } from '../scripts/lib/system-errors.js';
+import { HistorySourceError } from '../src/history-errors.js';
 
 function history(content: string, sessionId = 'native-session'): string {
   return `${JSON.stringify({ type: 'session', version: 3, id: sessionId, cwd: '/fixture' })}\n${content}`;
@@ -30,9 +32,9 @@ async function replace(file: string, content: string, sessionId = 'native-sessio
 
 async function handlesUnder(directory: string): Promise<string[]> {
   const links = await Promise.all((await readdir('/proc/self/fd')).map(async descriptor => {
-    try { return await readlink(`/proc/self/fd/${descriptor}`); }
+    try { return await systemOperation(`Read test file descriptor ${descriptor}`, () => readlink(`/proc/self/fd/${descriptor}`)); }
     catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return '';
+      if (error instanceof MissingResourceError) return '';
       throw error;
     }
   }));
@@ -189,15 +191,19 @@ test('missing files retain original diagnostics, deduplicate notifications, and 
   const result = await owner.check();
   assert.equal(result.state, 'unverified');
   if (result.state !== 'unverified') throw new Error('Expected file diagnostic');
-  assert.ok(result.error instanceof Error && 'code' in result.error && 'path' in result.error);
-  assert.equal(result.error.code, 'ENOENT');
-  assert.equal(result.error.path, file);
+  assert.ok(result.error instanceof HistorySourceError);
+  assert.ok(result.error.cause instanceof Error && 'code' in result.error.cause && 'path' in result.error.cause);
+  assert.equal(result.error.cause.code, 'ENOENT');
+  assert.equal(result.error.cause.path, file);
+  assert.ok(result.error.message.includes(result.error.cause.message));
   const reported = notifications.find(status => status.state === 'unverified');
   assert.ok(reported?.state === 'unverified');
-  assert.ok(reported.error instanceof Error && 'code' in reported.error && reported.error.code === 'ENOENT');
+  assert.ok(reported.error instanceof HistorySourceError);
   assert.equal(result.error, reported.error);
   await owner.check();
-  await assert.rejects(owner.capture(), { code: 'ENOENT', path: file });
+  await assert.rejects(owner.capture(), error => error instanceof HistorySourceError &&
+    error.cause instanceof Error && 'code' in error.cause && error.cause.code === 'ENOENT' &&
+    'path' in error.cause && error.cause.path === file);
   assert.equal(notifications.filter(status => status.state === 'unverified').length, 1);
   if (process.platform === 'linux') assert.equal((await handlesUnder(directory)).length, 1);
   await writeFile(file, history('recovered history'));
@@ -237,7 +243,9 @@ test('failed setup closes the source handle instead of retaining an unusable own
   const notAFile = join(directory, 'not-a-file');
   await mkdir(notAFile);
   await assert.rejects(HistoryWatch.open({ sessionId: 'native', path: notAFile }));
-  await assert.rejects(HistoryWatch.open({ sessionId: 'native', path: join(directory, 'missing') }), { code: 'ENOENT' });
+  await assert.rejects(HistoryWatch.open({ sessionId: 'native', path: join(directory, 'missing') }),
+    error => error instanceof HistorySourceError && error.cause instanceof Error &&
+      'code' in error.cause && error.cause.code === 'ENOENT');
   if (process.platform === 'linux') assert.deepEqual(await handlesUnder(directory), []);
 });
 

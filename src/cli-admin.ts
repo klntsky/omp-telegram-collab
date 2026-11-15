@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { createInterface, type Interface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import type { AppConfig } from '../shared/contracts.js';
 import { Administration, one, promptMode, type Options } from './cli/administration.js';
 
@@ -25,7 +25,7 @@ export function registerAdminCommands(program: Command, configPath: () => string
   let input: Interface | undefined;
   let muted = false;
   const question = dependencies.question ?? (async (prompt: string, hidden = false): Promise<string> => {
-    if (!(dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY))) throw new Error('This operation requires an interactive terminal.');
+    if (!(dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY))) throw new InvalidArgumentError('This operation requires an interactive terminal.');
     input ??= createInterface({ input: process.stdin, output: new Writable({ write(chunk, _encoding, callback) { if (!muted) process.stdout.write(chunk); callback(); } }), terminal: true });
     if (hidden) process.stdout.write(prompt);
     muted = hidden;
@@ -43,7 +43,7 @@ export function registerAdminCommands(program: Command, configPath: () => string
   const flag = (command: Command, flags: string, description: string, repeat = false): void => {
     const option = new Option(flags, description);
     option.argParser((value: string, previous: string[] | undefined): string[] => {
-      if (previous && !repeat) throw new Error(`Use --${option.name()} only once.`);
+      if (previous && !repeat) throw new InvalidArgumentError(`Use --${option.name()} only once.`);
       return [...(previous ?? []), value ?? 'true'];
     });
     command.addOption(option);
@@ -83,7 +83,7 @@ export function registerAdminCommands(program: Command, configPath: () => string
   policies(addChat);
   addChat.action((path: string, _values, command: Command) => {
     const values = options(command);
-    const chatId = one(values, 'chat'); if (!chatId) throw new Error('Specify --chat ID.');
+    const chatId = one(values, 'chat'); if (!chatId) throw new InvalidArgumentError('Specify --chat ID.');
     const mode = one(values, 'all-messages-are-prompts');
     const proposals = one(values, 'users-can-propose-prompts');
     return admin().addChat(path, chatId, one(values, 'bot'), mode === undefined ? undefined : promptMode(mode), proposals === undefined ? undefined : promptMode(proposals, 'users-can-propose-prompts'));

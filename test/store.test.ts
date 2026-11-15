@@ -8,6 +8,7 @@ import { Store } from '../src/store.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
+import { StoreOperationError } from '../src/store/errors.js';
 
 const topic = { botId, chatId, threadId: 17, instanceId: 1, cwd: '/work/project-a' };
 
@@ -71,7 +72,8 @@ test('topic display and generated prefix commit together or both roll back', () 
       BEGIN SELECT RAISE(ABORT,'Fixture prefix write failed'); END`);
     assert.throws(
       () => store.setTopicTitle(session.id, 'new-branch Readable title', 'new-branch'),
-      (error) => error instanceof Error && error.message === 'Fixture prefix write failed',
+      error => error instanceof StoreOperationError && error.cause instanceof Error &&
+        'code' in error.cause && error.cause.code === 'ERR_SQLITE_ERROR' && error.message.includes(error.cause.message),
     );
     assert.equal(store.getSession(session.id)?.name, 'old-branch Readable title');
     assert.equal(store.getTopicTitlePrefix(session.id), 'old-branch');

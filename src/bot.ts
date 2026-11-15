@@ -8,8 +8,12 @@ import { refreshTermination } from './config.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { sendTo } from './telegram-destination.js';
 import { installTelegramRetry } from './telegram-retry.js';
+import { installTelegramErrors, TelegramTopicMissingError, TelegramRequestCancelledError } from './telegram-errors.js';
 import type { SessionFeedHandlers, SessionFeedSubscription } from './session-feed.js';
 import { createBotComponents, type BotComponents } from './bot/composition.js';
+import { BotCancellationError, reportBotError } from './bot/errors.js';
+import type { SessionCapacityError } from './runtime/types.js';
+import type { Update } from 'grammy/types';
 
 export interface BotOptions { config: AppConfig; botConfig: BotConfig; token: string; store: Store; runtime: Omp; bot?: Bot<Context>; configWritable?: () => boolean; topicActivityEmojis?: { running: string; finished: string } }
 
@@ -43,6 +47,7 @@ export class BotService {
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
     installTelegramRetry(this.bot, this.telegramRetry.signal);
+    installTelegramErrors(this.bot, options.token);
     this.config = options.botConfig;
     this.token = options.token;
     this.components = createBotComponents(options, this.bot, {
@@ -83,8 +88,13 @@ async applyTermination(): Promise<void> {
         this.components.connections.dropListener(session.id);
       }
       const results = await Promise.allSettled(sessions.map(session => this.options.runtime.kill(session)));
-      const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
-      if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
+      const errors = results.flatMap((result, index) => {
+        if (result.status !== 'rejected') return [];
+        const error = result.reason;
+        if (error instanceof Error) error.message = `Terminate session ${sessions[index]!.id}: ${error.message}`;
+        return [error];
+      });
+      if (errors.length) throw new AggregateError(errors, `Terminate bot ${this.id} sessions:\n${errors.map(error => error instanceof Error ? error.message : String(error)).join('\n')}`);
     })().catch(error => { this.termination = undefined; throw error; });
     await this.termination;
   }
@@ -99,7 +109,7 @@ async sendStatusNotice(chatId: number, text: string, signal?: TelegramAbortSigna
     try {
       await sendTo(this.bot.api,topicDestination(chatId,threadId),text,undefined,signal);
     } catch (error) {
-      if (!(error instanceof GrammyError) || !/message thread not found|TOPIC_DELETED/i.test(error.description)) throw error;
+      if (!(error instanceof TelegramTopicMissingError)) throw error;
       await sendTo(this.bot.api,topicDestination(chatId,await create()),text,undefined,signal);
     }
   }
@@ -141,29 +151,33 @@ async start(onReady?: () => void): Promise<void> {
     try {
       let webhookRemoved = false;
       while (!controller.signal.aborted) {
+        let updates: Update[];
+        // Only retry polling requests. Handler failures may follow committed side effects,
+        // so replaying the entire update would duplicate a user operation.
         try {
           if (!webhookRemoved) {
             await this.bot.api.deleteWebhook({ drop_pending_updates: false }, controller.signal);
             webhookRemoved = true;
           }
-          const updates = await this.bot.api.getUpdates({
+          updates = await this.bot.api.getUpdates({
             offset, timeout: onReady ? 0 : 30, allowed_updates: ['message', 'callback_query', 'my_chat_member', 'inline_query'],
           }, controller.signal);
-          if (controller.signal.aborted) break;
-          onReady?.();
-          onReady = undefined;
-          for (const update of updates) {
-            if (controller.signal.aborted) break;
-            await this.bot.handleUpdate(update);
-            offset = update.update_id + 1;
-          }
         } catch (error) {
-          if (controller.signal.aborted) break;
+          if (controller.signal.aborted && error instanceof TelegramRequestCancelledError) break;
           const temporary = error instanceof GrammyError && (error.error_code === 429 || error.error_code >= 500);
           if (!temporary && !(error instanceof HttpError)) throw error;
-          console.warn('Telegram polling failed; retrying.', error);
+          reportBotError(`Telegram polling failed; retrying (bot=${this.id}, offset=${offset}).`, error);
           const seconds = error instanceof GrammyError ? error.parameters.retry_after ?? 5 : 5;
           await retryDelay(Math.max(0, seconds) * 1000, controller.signal);
+          continue;
+        }
+        if (controller.signal.aborted) break;
+        onReady?.();
+        onReady = undefined;
+        for (const update of updates) {
+          if (controller.signal.aborted) break;
+          await this.bot.handleUpdate(update);
+          offset = update.update_id + 1;
         }
       }
     } finally {
@@ -171,7 +185,9 @@ async start(onReady?: () => void): Promise<void> {
         const acknowledgement = new TelegramAbortController();
         const timeout = setTimeout(() => acknowledgement.abort(), 5000);
         try {
-          await this.bot.api.getUpdates({ offset, limit: 1, timeout: 0 }, acknowledgement.signal).catch(() => undefined);
+          await this.bot.api.getUpdates({ offset, limit: 1, timeout: 0 }, acknowledgement.signal).catch(error => {
+            reportBotError(`Telegram polling acknowledgement failed (bot=${this.id}, offset=${offset}).`, error);
+          });
         } finally {
           clearTimeout(timeout);
         }
@@ -183,14 +199,15 @@ async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
     const metadataCompletions = this.components.owners.disposeAll();
-    this.components.maintenance.background.abort(new Error('Bot background maintenance stopped'));
-    this.components.maintenance.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
+    this.components.maintenance.background.abort(new BotCancellationError(`Bot background maintenance stopped (bot=${this.id})`));
+    this.components.maintenance.catalogRefresh.abort(new BotCancellationError(`Bot catalog refresh stopped (bot=${this.id})`));
     this.apiAbort.abort();
     this.components.connections.delivery.close();
     this.components.maintenance.stopTimers();
     this.components.input.closeAlbums();
     this.polling?.controller.abort();
-    await this.polling?.done.catch(() => undefined);
+    const errors: unknown[] = [];
+    await this.polling?.done.catch(error => { errors.push(error); });
     for (const timer of this.components.recovery.reconnects.values()) clearTimeout(timer);
     this.components.recovery.reconnects.clear();
     this.components.owners.closedSessions.clear();
@@ -203,24 +220,28 @@ async close(): Promise<void> {
       item.feed.close();
       item.connection?.close();
       for (const reader of item.readers) {
-        reader.controller.abort(new Error('Session reader closed'));
+        reader.controller.abort(new BotCancellationError(`Session reader closed (session=${item.sessionId})`));
         reader.feed.close();
         reader.connection?.close();
       }
       item.readers.clear();
     }
     this.components.connections.listeners.clear();
-    await this.components.input.completion();
-    await Promise.all(listeners.map((listener) => listener.tail));
-    await Promise.all(listeners.map(listener => listener.history?.close()));
-    await Promise.all(this.components.maintenance.backgroundTasks);
-    await this.components.menus.completion();
-    await Promise.all(metadataCompletions);
+    const completions = await Promise.allSettled([
+      this.components.input.completion(),
+      ...listeners.map(listener => listener.tail),
+      ...listeners.map(listener => listener.history?.close()),
+      ...this.components.maintenance.backgroundTasks,
+      this.components.menus.completion(),
+      ...metadataCompletions,
+    ]);
+    for (const completion of completions) if (completion.status === 'rejected') errors.push(completion.reason);
+    if (errors.length) throw new AggregateError(errors, `Close bot ${this.id}:\n${errors.map(error => error instanceof Error ? error.message : String(error)).join('\n')}`);
   }
 
 async reconcileConfiguration(): Promise<void> {
     if (this.stopped) return;
-    this.components.maintenance.catalogRefresh.abort(new Error('Bot configuration changed'));
+    this.components.maintenance.catalogRefresh.abort(new BotCancellationError(`Bot configuration changed (bot=${this.id})`));
     this.components.maintenance.catalogRefresh = new AbortController();
     this.components.maintenance.catalogTasks.clear();
     this.components.presets.resetCatalogRefresh();
@@ -255,5 +276,5 @@ startBackground(): void{ return this.components.maintenance.startBackground(); }
 
 refreshSkillCatalogs(): Promise<void>{ return this.components.maintenance.refreshSkillCatalogs(); }
 
-async requestCapacity(session: TopicSession, limit: number): Promise<void>{ return this.components.capacity.requestCapacity(session, limit); }
+async requestCapacity(session: TopicSession, error: SessionCapacityError): Promise<void>{ return this.components.capacity.requestCapacity(session, error); }
 }

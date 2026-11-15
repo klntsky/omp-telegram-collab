@@ -11,11 +11,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 function Body({ args, result }: ToolRenderProps): ReactNode {
 	let dataText = "";
 	if (args.data !== undefined) {
-		try {
-			dataText = JSON.stringify(args.data, null, 2) ?? "";
-		} catch {
-			dataText = String(args.data);
-		}
+		dataText = JSON.stringify(args.data, null, 2) ?? "";
 	}
 	return (
 		<>

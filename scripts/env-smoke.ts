@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { readConfig } from '../src/config.js';
+import { MissingResourceError, systemOperation } from './lib/system-errors.js';
+import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -17,6 +19,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
   const configPath = join(cwd, 'custom.yaml');
   const cli = join(root, 'dist', 'cli.js');
   const run = (...args: string[]) => execute(process.execPath, [cli, ...args], { cwd, env: processEnv });
+  let primaryFailure: unknown;
   try {
     await run('--config', configPath, 'setup', '--public-url', 'https://cli.example', '--port', '3101', '--data-dir', 'private-data');
     await run('--config', configPath, 'create', '.');
@@ -52,9 +55,15 @@ export async function verifyEnvironmentCli(): Promise<void> {
     const missing = join(cwd, 'missing.yaml');
     await assert.rejects(run('start', '--config', missing));
     console.log('PASS compiled CLI configuration, stable numeric identities, protected-file reads/write rejection, and atomic refusal.');
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
-    await chmod(configPath, 0o600).catch(() => undefined);
-    await rm(cwd, { recursive: true, force: true });
+    const cleanupErrors: unknown[] = [];
+    try { await systemOperation(`Restore smoke config permissions ${configPath}`, () => chmod(configPath, 0o600)); }
+    catch (error) { if (!(error instanceof MissingResourceError)) cleanupErrors.push(error); }
+    try { await rm(cwd, { recursive: true, force: true }); } catch (error) { cleanupErrors.push(error); }
+    if (cleanupErrors.length) throw combineTelegramErrors(...(primaryFailure === undefined ? cleanupErrors : [primaryFailure, ...cleanupErrors]));
   }
 }
 

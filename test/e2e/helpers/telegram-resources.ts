@@ -7,6 +7,21 @@ import type { TelegramTestUser } from './telegram-user.js';
 import { combineTelegramErrors } from './errors.js';
 import { bounded } from './async.js';
 import { telegramTestDeadlineRemaining, telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
+import { TelegramTestAuthorizationError, TelegramTestProvisioningError } from '../../../scripts/lib/telegram-test-errors.js';
+
+class TelegramRetryCancelledError extends Error {
+  constructor(method: string, cause: Error) {
+    super(`Wait for Telegram test API ${method} retry: ${cause.message}`, { cause });
+  }
+}
+
+async function waitForRetry(method: string, milliseconds: number, signal: AbortSignal): Promise<void> {
+  try { await delay(milliseconds, undefined, { signal }); } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ABORT_ERR' ||
+      !signal.aborted || error.cause !== signal.reason) throw error;
+    throw new TelegramRetryCancelledError(method, error);
+  }
+}
 
 export interface TelegramTestBot {
   id: number;
@@ -37,9 +52,9 @@ export function createTelegramTestApi(token: string, signal: AbortSignal): Api {
           if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0 ||
               scope.aborted || requestSignal?.aborted || seconds * 1000 >= telegramTestDeadlineRemaining(scope)) return response;
           try {
-            await delay(seconds * 1000, undefined, { signal: retryStop.signal });
+            await waitForRetry(method, seconds * 1000, retryStop.signal);
           } catch (error) {
-            if (scope.aborted || requestSignal?.aborted) return response;
+            if (error instanceof TelegramRetryCancelledError && (scope.aborted || requestSignal?.aborted)) return response;
             throw error;
           }
           if (scope.aborted || requestSignal?.aborted) return response;
@@ -125,11 +140,11 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
     return await step('telegram.forum.configure', async () => {
       const resolved = await user.call({ _: 'contacts.resolveUsername', username: bot.username }, signal);
       const identity = resolved.users.find((value): value is tl.RawUser => value._ === 'user' && value.id === bot.id);
-      if (!identity?.accessHash) throw new Error(`Telegram did not resolve test bot ${bot.id} with a usable access hash`);
+      if (!identity?.accessHash) throw new TelegramTestProvisioningError(`Resolve Telegram test bot ${bot.id} for forum ${chat.id}: Telegram did not resolve test bot ${bot.id} with a usable access hash`);
       const botUser: tl.RawInputUser = { _: 'inputUser', userId: identity.id, accessHash: identity.accessHash };
       const invitation = await user.call({ _: 'channels.inviteToChannel', channel, users: [botUser] }, signal);
       user.client.handleClientUpdate(invitation.updates);
-      if (invitation.missingInvitees.length) throw new Error(`Telegram could not invite test bot ${bot.id}: ${JSON.stringify(invitation.missingInvitees)}`);
+      if (invitation.missingInvitees.length) throw new TelegramTestProvisioningError(`Invite Telegram test bot ${bot.id} to forum ${chat.id}: Telegram could not invite test bot ${bot.id}: ${JSON.stringify(invitation.missingInvitees)}`);
       const promotion = await user.call({
         _: 'channels.editAdmin', channel, userId: botUser,
         adminRights: { _: 'chatAdminRights', manageTopics: true, pinMessages: true }, rank: 'Test bot',
@@ -140,7 +155,7 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
         participant: { _: 'inputPeerUser', userId: identity.id, accessHash: identity.accessHash },
       }, signal);
       if (member.participant._ !== 'channelParticipantAdmin' || !member.participant.adminRights.manageTopics || !member.participant.adminRights.pinMessages) {
-        throw new Error(`Test bot ${bot.id} lacks Manage Topics or Pin Messages in forum ${chat.id}`);
+        throw new TelegramTestAuthorizationError(`Verify Telegram test bot ${bot.id} permissions in forum ${chat.id}: Test bot ${bot.id} lacks Manage Topics or Pin Messages in forum ${chat.id}`);
       }
       return forum;
     });

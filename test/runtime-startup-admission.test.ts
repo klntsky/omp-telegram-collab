@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, rm } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fixture } from './runtime-retirement-fixture.js';
+import { OmpCommandError } from '../src/runtime/errors.js';
 
 test('stop fences pending admission before it can launch a managed supervisor', async t => {
   const app = await fixture();
@@ -68,9 +69,10 @@ test('existing managed reconnect failure preserves its error without retiring th
   await app.failLink(true);
   const original = await app.originalError();
   await assert.rejects(app.runtime.ensure(app.session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal(error.message, original.message);
-    assert.equal((error as NodeJS.ErrnoException).code, original.code);
+    assert.ok(error instanceof OmpCommandError && error.cause instanceof Error);
+    assert.ok(original.cause instanceof Error);
+    assert.equal(error.cause.message, original.cause.message);
+    assert.equal('code' in error ? error.code : undefined, original.code);
     assert.equal('signal' in error ? error.signal : undefined, original.signal);
     return true;
   });

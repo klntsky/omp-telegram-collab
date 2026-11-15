@@ -1,3 +1,4 @@
+import { BotSessionStateError, BotPromptRejectedError, BotCancellationError, reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
 import type { CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -9,6 +10,7 @@ import { AuthorizationDeniedError } from './types.js';
 import type { PromptPreparation } from './prompt-preparation.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import { SessionCapacityError } from '../runtime/types.js';
+import { TelegramAccessDeniedError } from '../telegram-errors.js';
 
 export interface PromptReceiptsDependencies {
   authorize: (chatId: number, userId: number) => Promise<void>;
@@ -19,7 +21,7 @@ export interface PromptReceiptsDependencies {
   listen: (session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean) => Promise<CollabConnection>;
   uploadDocuments: PromptPreparation['uploadDocuments'];
   prepareInitialDocuments: PromptPreparation['prepareInitialDocuments'];
-  requestCapacity(session: TopicSession, limit: number): Promise<void>;
+  requestCapacity(session: TopicSession, error: SessionCapacityError): Promise<void>;
   requireSessionAssignment: (session: TopicSession) => void;
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
@@ -33,7 +35,7 @@ export class PromptReceipts {
   async prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent> {
     if (this.deps.options.store.hasPromptHistory(session.id)) return content;
     const chat = await this.deps.bot.api.getChat(session.chatId);
-    if (chat.type !== 'supergroup') throw new Error('Agent session requires a Telegram supergroup');
+    if (chat.type !== 'supergroup') throw new BotPromptRejectedError(`Prepare prompt (session=${session.id}, chat=${session.chatId}): Agent session requires a Telegram supergroup`);
     return {
       ...content,
       text: `<preamble>
@@ -60,16 +62,16 @@ ${content.text}`,
     onStartupRejected?: () => void,
   ): void {
     const session = this.deps.options.store.getSession(listener.sessionId);
-    if (!session) throw new Error('Session no longer exists');
+    if (!session) throw new BotSessionStateError(`Submit prompt (session=${listener.sessionId}): Session no longer exists`);
     this.deps.requireSessionAssignment(session);
     if (session.status !== 'open')
-      throw new Error('This topic is closed. Reopen it before submitting work.');
+      throw new BotSessionStateError(`Submit prompt (session=${session.id}): This topic is closed. Reopen it before submitting work.`);
     if (
       this.deps.getListener(session.id) !== listener ||
       listener.generation !== this.deps.options.store.getSessionGeneration(session.id)
     )
-      throw new Error('Session closed');
-    if (listener.ompSessionId === undefined) throw new Error('OMP session is not connected');
+      throw new BotSessionStateError(`Submit prompt (session=${session.id}): Session closed`);
+    if (listener.ompSessionId === undefined) throw new BotSessionStateError(`Submit prompt (session=${session.id}): OMP session is not connected`);
     const submissionId = this.deps.options.store.recordPromptSubmission(
       session.id,
       listener.ompSessionId,
@@ -92,10 +94,14 @@ ${content.text}`,
       });
     } catch (error) {
       observation.state = attempted ? 'acceptance unknown' : 'not accepted';
-      if (attempted) this.deps.options.store.markPromptSubmissionUncertain(submissionId);
-      else this.deps.options.store.rejectPromptSubmission(submissionId);
+      const failures: unknown[] = [error];
+      try {
+        if (attempted) this.deps.options.store.markPromptSubmissionUncertain(submissionId);
+        else this.deps.options.store.rejectPromptSubmission(submissionId);
+      } catch (failure) { failures.push(failure); }
       const index = listener.pendingPrompts.indexOf(pending);
       if (index !== -1) listener.pendingPrompts.splice(index, 1);
+      if (failures.length > 1) throw new AggregateError(failures, `Record failed prompt submission (session=${session.id}, submission=${submissionId}):\n${failures.map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n')}`, {cause: error});
       throw error;
     }
   }
@@ -103,10 +109,12 @@ ${content.text}`,
     try {
       await this.deps.authorize(session.chatId, userId);
       if (!isAdministrator(await this.deps.bot.api.getChatMember(session.chatId, authorityUserId))) {
-        throw new AuthorizationDeniedError('Administrator access changed before initial task submission.');
+        throw new AuthorizationDeniedError(`Submit initial task (session=${session.id}, chat=${session.chatId}, user=${authorityUserId}): Administrator access changed before initial task submission.`);
       }
       this.deps.requireSessionAssignment(session);
     } catch (error) {
+      if (error instanceof TelegramAccessDeniedError)
+        error = new AuthorizationDeniedError(`Authorize initial task (session=${session.id}, chat=${session.chatId}, user=${authorityUserId}): ${error.message}`, {cause: error});
       if (error instanceof AuthorizationDeniedError) this.deps.options.store.cancelInitialTask(session.id);
       throw error;
     }
@@ -115,7 +123,7 @@ ${content.text}`,
     // /stop cancels pending intent without retiring the native host generation.
     const check = () => {
       if (!this.deps.options.store.hasPendingInitialTask(session.id))
-        throw new Error('The initial task was cancelled before document preparation.');
+        throw new BotCancellationError(`Prepare initial task (session=${session.id}): The initial task was cancelled before document preparation.`);
     };
     check();
     await this.authorizeInitial(session, userId, authorityUserId);
@@ -138,22 +146,22 @@ ${content.text}`,
         await this.deps.prepareInitialDocuments(session, () => this.authorizePendingInitial(session, submittingUser, approvingUser));
       } catch (error) {
         if (error instanceof SessionCapacityError) {
-          try { await this.deps.requestCapacity(session, error.limit); }
-          catch (deliveryError) { console.error('Could not deliver initial document preparation capacity request.', deliveryError); }
+          try { await this.deps.requestCapacity(session, error); }
+          catch (deliveryError) { reportBotError(`Could not deliver initial document preparation capacity request (session=${session.id}).`, deliveryError); }
         }
         throw error;
       }
     }
     await this.deps.listen(session);
     const listener = this.deps.getListener(session.id);
-    if (!listener) throw new Error('Session closed');
+    if (!listener) throw new BotSessionStateError(`Submit initial task (session=${session.id}): Session closed`);
     if (this.deps.stopped()) throw this.deps.background.reason;
     if (!this.deps.options.store.hasPendingInitialTask(session.id)) return;
     const userId = this.deps.options.store.getInitialUser(session.id);
     const authorityUserId = this.deps.options.store.getInitialAuthority(session.id);
     if (!userId || !authorityUserId) {
       this.deps.options.store.cancelInitialTask(session.id);
-      throw new Error('Initial task has no authorizing administrator. Submit the task again.');
+      throw new AuthorizationDeniedError(`Submit initial task (session=${session.id}): Initial task has no authorizing administrator. Submit the task again.`);
     }
     await this.authorizeInitial(session, userId, authorityUserId);
     const pending = this.deps.options.store.getPendingInitialTask(session.id);
@@ -171,7 +179,7 @@ ${content.text}`,
     const prepared = await this.prepareContent(session, pendingTask);
     await this.authorizeInitial(session, userId, authorityUserId);
     if (this.deps.getListener(session.id) !== listener ||
-        listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+        listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new BotSessionStateError(`Submit initial task (session=${session.id}): Session closed`);
     this.deps.options.runtime.markPrompt(session.id);
     const claimed = this.deps.options.store.claimInitialTask(session.id);
     if (claimed === undefined) return;
@@ -240,6 +248,6 @@ ${content.text}`,
     void this.deps.delivery.run(session.chatId,
       () => this.deps.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.deps.stopped() && this.deps.sessionAssigned(session) && (listener === undefined || this.deps.getListener(session.id) === listener))
-      .catch(error => console.warn(`Could not show message acceptance reaction (${session.id}).`, error));
+      .catch(error => reportBotError(`Could not show message acceptance reaction (${session.id}).`, error));
   }
 }

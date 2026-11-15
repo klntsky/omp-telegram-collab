@@ -1,3 +1,4 @@
+import { parseJson, OmpHostControlError, OmpProtocolError, systemError, OmpIdentityError, OmpSessionUnavailableError } from './errors.js';
 import { randomUUID } from 'node:crypto';
 import { realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -49,7 +50,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     let lifecycle = await deps.lifecycle(id);
     const registered = async (): Promise<RegistryHost | undefined> => {
       const matches = (await deps.list(Date.now() + 5000)).filter(value => value.sessionId === host.sessionId);
-      if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
+      if (matches.length > 1) throw new OmpProtocolError('Resolve OMP host', `session ${id}; native session ${host.sessionId}`, 'More than one host is serving the OMP session');
       return matches[0];
     };
     let current = await registered();
@@ -86,28 +87,28 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     }
     if (!current) {
       if (lifecycle) {
-        if (lifecycle.sessionId !== host.sessionId) throw new Error('Managed OMP lifecycle identity changed');
+        if (lifecycle.sessionId !== host.sessionId) throw new OmpIdentityError('Managed OMP lifecycle identity changed', `Retire session ${id} (${host.sessionId})`);
         const identity = await procIdentity(lifecycle.pid);
         if (identity && identity.state !== 'Z' && identity.state !== 'X') {
           host.identity = { pid: lifecycle.pid, start: identity.start };
-          if (!guard && lifecycle.retirement !== 1) throw new Error('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.');
+          if (!guard && lifecycle.retirement !== 1) throw new OmpSessionUnavailableError('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.', `Retire session ${id} (${host.sessionId})`);
           if (lifecycle.retiring === true && lifecycle.retirement === 1) {
             host.retiring = true;
             host.retirement = { pid: lifecycle.pid, start: identity.start, socketPath: lifecycle.socketPath };
             return;
           }
-          if (!guard) throw new Error('OMP host is not registered; cannot safely retire its process');
+          if (!guard) throw new OmpSessionUnavailableError('OMP host is not registered; cannot safely retire its process', `Retire session ${id} (${host.sessionId})`);
           return;
         }
       }
       if (await settleManagedExit(id, host)) return;
     } else {
-      if (host.cwd !== undefined && await realpath(current.cwd) !== host.cwd) throw new Error('Managed host working directory changed');
+      if (host.cwd !== undefined && await realpath(current.cwd) !== host.cwd) throw new OmpIdentityError('Managed host working directory changed', `Retire session ${id} (${host.sessionId})`);
       if (host.binding && (host.binding.instanceId !== current.instanceId || host.binding.sessionId !== current.sessionId ||
-          host.binding.generation !== current.generation)) throw new Error('Managed OMP host identity changed');
+          host.binding.generation !== current.generation)) throw new OmpIdentityError('Managed OMP host identity changed', `Retire session ${id} (${host.sessionId})`);
       if (lifecycle && (lifecycle.sessionId !== host.sessionId || lifecycle.pid !== current.pid ||
           (host.process?.pid && lifecycle.supervisorPid !== host.process.pid))) {
-        throw new Error('Managed OMP lifecycle identity changed');
+        throw new OmpIdentityError('Managed OMP lifecycle identity changed', `Retire session ${id} (${host.sessionId})`);
       }
     }
     const identity = current ? await procIdentity(current.pid) : null;
@@ -121,8 +122,8 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       return;
     }
     if (!lifecycle || lifecycle.retirement !== 1 || (guard === 'worktree' && lifecycle.worktree !== true)) {
-      if (guard === 'worktree') throw new Error('This running OMP host does not support idle-guarded worktree switching. Stop it when idle with /kill, then retry /worktree.');
-      if (!guard) throw new Error('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.');
+      if (guard === 'worktree') throw new OmpSessionUnavailableError('This running OMP host does not support idle-guarded worktree switching. Stop it when idle with /kill, then retry /worktree.', `Retire session ${id} (${host.sessionId})`);
+      if (!guard) throw new OmpSessionUnavailableError('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.', `Retire session ${id} (${host.sessionId})`);
       return;
     }
     if (!current || !identity) return;
@@ -154,43 +155,50 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       socket.destroy();
       resolve({ outcome, ...(error ? { error } : {}) });
     };
-    const timer = setTimeout(() => done('unknown'), Math.max(1, requestDeadline - Date.now()));
+    const unknown = (error: Error) => { console.error(`Retire session ${id} communication failed:`, error); done('unknown'); };
+    const timer = setTimeout(() => unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Retirement request timed out')), Math.max(1, requestDeadline - Date.now()));
     socket.setEncoding('utf8');
     socket.once('error', error => {
       if (!settled) console.error(`Session ${id} retirement socket failed:`, error);
-      done('unknown');
+      unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Retirement communication failed'));
     });
     socket.once('connect', () => socket.write(request));
     let response = '';
     socket.on('data', data => {
       response += data;
-      if (Buffer.byteLength(response) > 16384) { done('unknown'); return; }
+      if (Buffer.byteLength(response) > 16384) { unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Invalid or oversized retirement response')); return; }
       if (!response.includes('\n')) return;
       try {
-        const result: unknown = JSON.parse(response.trim());
+        const result: unknown = parseJson(response.trim(), 'Retire host', `session ${id}; pid ${lifecycle.pid}`);
         if (!record(result) || result.requestId !== requestId || result.sessionId !== host.sessionId ||
-            result.pid !== lifecycle.pid) { done('unknown'); return; }
-        if (typeof result.error === 'string') { done('unknown', new Error(result.error)); return; }
+            result.pid !== lifecycle.pid) { unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Invalid or oversized retirement response')); return; }
+        if (typeof result.error === 'string') {
+          const error = result.errorKind === 'busy' || result.errorKind === 'rejected' || result.errorKind === 'unexpected'
+            ? new OmpHostControlError(result.errorKind === 'busy' ? 'rejected' : result.errorKind, 'Retire host', host.sessionId, result.error, { cause: { message: result.error, kind: result.errorKind } })
+            : new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, `Invalid lifecycle error discriminator: ${result.error}`);
+          done('unknown', error);
+          return;
+        }
         done(result.outcome === 'requested' || result.outcome === 'busy' || result.outcome === 'expired' ? result.outcome : 'unknown');
-      } catch (error) {
+      } catch (error) { error = systemError(error, 'retirement OS operation');
         console.error(`Session ${id} retirement response parsing failed:`, error);
-        done('unknown');
+        unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Retirement communication failed'));
       }
     });
-    socket.once('end', () => done('unknown'));
-    socket.once('close', () => done('unknown'));
+    socket.once('end', () => unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Retirement socket ended without a response')));
+    socket.once('close', () => unknown(new OmpProtocolError('Retire host', `session ${id}; pid ${lifecycle.pid}`, 'Retirement socket closed without a response')));
     const result = await promise;
     if (result.outcome !== 'requested') {
       let cancelled = false;
       try {
         try { await unlink(grant); cancelled = true; }
-        catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+        catch (error) { error = systemError(error, 'retirement OS operation'); if (!errno(error, 'ENOENT')) throw error; }
         const observed = await deps.lifecycle(id);
         const sameHost = observed?.pid === lifecycle.pid && observed.supervisorPid === lifecycle.supervisorPid &&
           observed.sessionId === lifecycle.sessionId && observed.socketPath === lifecycle.socketPath;
         host.retiring = alreadyRetiring || (sameHost && observed.retiring === true) || !cancelled;
         if (!host.retiring) delete host.retirement;
-      } catch (error) {
+      } catch (error) { error = systemError(error, 'retirement OS operation');
         retirement.error = error;
         throw error;
       }

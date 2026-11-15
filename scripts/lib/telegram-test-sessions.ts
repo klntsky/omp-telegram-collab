@@ -5,6 +5,7 @@ import { createTelegramTestBaseClient, exportTelegramTestSession, readTelegramAp
 import { acquireTelegramTestLock, withTelegramTestLock } from './telegram-test-lock.js';
 import { resolveTelegramTestEnvFile, withTelegramTestSessionStorage } from '../../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../../test/e2e/helpers/errors.js';
+import { TelegramTestAuthorizationError, TelegramTestCancellationError, TelegramTestLeaseError, TelegramTestSessionUnavailableError } from './telegram-test-errors.js';
 
 export interface TelegramTestSession {
   client: TelegramClient;
@@ -55,7 +56,7 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
           const lockName = telegramTestSessionLockName(retained);
           if (!childLeases.has(lockName)) {
             const release = await acquireTelegramTestLock(lockName, new AbortController().signal, true);
-            if (!release) throw new Error('Fresh Telegram session auth key is already leased');
+            if (!release) throw new TelegramTestLeaseError(`Lease forked Telegram test session ${lockName}: Fresh Telegram session auth key is already leased`);
             childLeases.set(lockName, release);
           }
           const existing = storage.sessions.findIndex(value => telegramTestSessionLockName(value) === lockName);
@@ -66,7 +67,7 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
         };
         try {
           const token = await base.call({ _: 'auth.exportLoginToken', apiId: credentials.apiId, apiHash: credentials.apiHash, exceptIds: [] }, { abortSignal: signal, timeout: 30000 });
-          if (token._ !== 'auth.loginToken') throw new Error(`Unexpected fresh Telegram QR response: ${token._}`);
+          if (token._ !== 'auth.loginToken') throw new TelegramTestAuthorizationError(`Request fresh Telegram test QR authorization: Unexpected fresh Telegram QR response: ${token._}`);
           approved = true;
           try {
             await seed.call({ _: 'auth.acceptLoginToken', token: token.token }, { abortSignal: signal, timeout: 30000 });
@@ -82,8 +83,8 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
             result = migrated;
             await persist();
           }
-          if (result._ !== 'auth.loginTokenSuccess') throw new Error(`Telegram QR authorization did not complete: ${result._}`);
-          if (result.authorization._ !== 'auth.authorization') throw new Error('Telegram QR authorization requires signup');
+          if (result._ !== 'auth.loginTokenSuccess') throw new TelegramTestAuthorizationError(`Complete Telegram test QR authorization: Telegram QR authorization did not complete: ${result._}`);
+          if (result.authorization._ !== 'auth.authorization') throw new TelegramTestAuthorizationError('Fork Telegram test session: Telegram QR authorization requires signup');
           await base.notifyLoggedIn(result.authorization);
           await persist();
           await exportTelegramTestSession(client, signal);
@@ -123,7 +124,7 @@ export async function forkTelegramTestSession(signal: AbortSignal): Promise<Tele
       }
     }
     const context = `No available Telegram test seed session (${busy} active; ${failures.length} failed). Run pnpm telegram:test:login if none remain.`;
-    throw new AggregateError(failures, [context, ...failures.map(error => error instanceof Error ? error.message : String(error))].join('\n'), { cause: failures[0] });
+    throw new TelegramTestSessionUnavailableError(failures, [context, ...failures.map(error => error instanceof Error ? error.message : String(error))].join('\n'), { cause: failures[0] });
     }, true));
   } catch (error) {
     if (prepared) {
@@ -158,7 +159,7 @@ export class TelegramTestExecution {
 
   close(): Promise<void> {
     return this.#closing ??= (async () => {
-      this.#controller.abort(new Error('Telegram test execution closed'));
+      this.#controller.abort(new TelegramTestCancellationError('execution closed'));
       await (await this.#session)?.close();
     })();
   }

@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
@@ -86,7 +87,7 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
     if (signal.aborted || this.deps.stopped()) return Promise.resolve();
     const startedAt = performance.now();
     const task = operation(signal).catch(error => {
-      if (error !== signal.reason) {
+      if (!signal.aborted || error !== signal.reason) {
         const failure = {operation:phase,at:Date.now(),error};
         if (phase.startsWith('skills:')) {
           const path = Number(phase.slice('skills:'.length));
@@ -95,7 +96,7 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
           observation.failed = true;
           this.catalogObservations.set(path,observation);
         } else if (phase.includes(':')) this.deps.sessionObservation(phase.slice(phase.indexOf(':')+1)).failure = failure;
-        console.error(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
+        reportBotError(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
       }
     }).finally(() => {
       this.backgroundTasks.delete(task);
@@ -124,8 +125,8 @@ private async notifyProviderSetupFailure(instanceId: number, defaultDir: string,
         await this.deps.bot.api.sendMessage(chatId, 'OMP is present, but no providers are set up. Log in to one of the inference providers OMP supports in the terminal', {}, controller.signal);
         notified.add(chatId);
       } catch (error) {
-        if (error !== signal.reason)
-          console.error(`Bot ${botId} chat ${chatId} background skills:${instanceId}:provider-setup-notice failed.`, error);
+        if (!signal.aborted || error !== signal.reason)
+          reportBotError(`Bot ${botId} chat ${chatId} background skills:${instanceId}:provider-setup-notice failed.`, error);
       } finally {
         signal.removeEventListener('abort', abort);
       }

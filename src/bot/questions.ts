@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import { randomBytes } from 'node:crypto';
 import type { Api, Context } from 'grammy';
 import type { CollabUiRequest } from '@oh-my-pi/pi-wire';
@@ -84,7 +85,7 @@ export class BotQuestions {
         void this.dependencies.delivery.run(question.session.chatId,
           () => this.dependencies.api.editMessageReplyMarkup(question.session.chatId,messageId,{reply_markup:{inline_keyboard:[]}}),
           () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(question.session))
-          .catch(error => console.warn(`Could not retire question controls (${question.session.id}).`, error));
+          .catch(error => reportBotError(`Could not retire question controls (${question.session.id}).`, error));
       }
     }
     if (answer !== undefined) {
@@ -107,7 +108,7 @@ export class BotQuestions {
           }
           offset = end;
         }
-      }).catch(error => { console.warn(`Could not show question answer (${question.session.id}).`, error); });
+      }).catch(error => { reportBotError(`Could not show question answer (${question.session.id}).`, error); });
     }
   }
   submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void {
@@ -149,7 +150,7 @@ export class BotQuestions {
         () => this.dependencies.api.setMessageReaction(question.session.chatId,message.message_id,[{type:'emoji',emoji:'👀'}]),
         () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(question.session) &&
           this.dependencies.listener(question.session.id) === question.listener && this.questions.get(token) === question)
-        .catch(error => { console.warn(`Could not show question selection receipt (${question.session.id}).`, error); });
+        .catch(error => { reportBotError(`Could not show question selection receipt (${question.session.id}).`, error); });
       const value = typeof option === 'string' ? option : option.label;
       this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
@@ -209,7 +210,7 @@ export class BotQuestions {
           void this.dependencies.delivery.run(session.chatId,
             () => this.dependencies.api.editMessageReplyMarkup(session.chatId,message.message_id,{reply_markup:{inline_keyboard:[]}}),
             () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(session))
-            .catch(error => console.warn(`Could not retire inactive question controls (${session.id}).`, error));
+            .catch(error => reportBotError(`Could not retire inactive question controls (${session.id}).`, error));
         }
       }
       if (request.kind === 'editor' && active()) {
@@ -223,7 +224,7 @@ export class BotQuestions {
       }
     }).catch(error => {
       this.endQuestion(token);
-      console.warn(`Could not relay agent question (${session.id}).`, error);
+      reportBotError(`Could not relay agent question (${session.id}).`, error);
     }).finally(() => { listener.queued--; });
   }
 }

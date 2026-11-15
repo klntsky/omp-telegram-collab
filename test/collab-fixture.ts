@@ -24,6 +24,13 @@ export async function hostFrames(frames: HostFrame[]) {
   const arrivals = new EventEmitter();
   let nextGuestIndex = 0;
   let connectionCount = 0;
+  const failures: unknown[] = [];
+  const pending: Promise<void>[] = [];
+  const recordFailure = (error: unknown) => {
+    failures.push(error);
+    arrivals.emit('frame');
+  };
+  server.on('error', recordFailure);
   server.on('connection', socket => {
     connectionCount++;
     let receiveChain = Promise.resolve();
@@ -35,12 +42,13 @@ export async function hostFrames(frames: HostFrame[]) {
         assert.ok(envelope);
         received.push(await open(key, envelope.payload) as GuestFrame);
         arrivals.emit('frame');
-      }).catch(() => socket.terminate());
+      }).catch(error => { recordFailure(error); socket.terminate(); });
+      pending.push(receiveChain);
     });
-    socket.on('error', () => socket.terminate());
-    void (async () => {
+    socket.on('error', error => { recordFailure(error); socket.terminate(); });
+    pending.push((async () => {
       for (const frame of frames) socket.send(packEnvelope(0, await seal(key, frame)));
-    })().catch(() => socket.terminate());
+    })().catch(error => { recordFailure(error); socket.terminate(); }));
   });
   await once(server, 'listening');
   const address = server.address();
@@ -49,7 +57,10 @@ export async function hostFrames(frames: HostFrame[]) {
     connected,
     get connectionCount() { return connectionCount; },
     async nextGuest() {
-      while (nextGuestIndex === received.length) await once(arrivals, 'frame');
+      while (nextGuestIndex === received.length) {
+        if (failures.length) throw failures[0];
+        await once(arrivals, 'frame');
+      }
       return received[nextGuestIndex++]!;
     },
     async send(nextFrames: HostFrame[]) {
@@ -65,6 +76,9 @@ export async function hostFrames(frames: HostFrame[]) {
       const { promise, resolve, reject } = Promise.withResolvers<void>();
       server.close(error => error ? reject(error) : resolve());
       await promise;
+      await Promise.all(pending);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map(error => error instanceof Error ? error.message : String(error)).join('\n'), { cause: failures[0] });
     },
   };
 }

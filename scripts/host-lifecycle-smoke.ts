@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import * as pty from '@lydell/node-pty';
+import { MissingResourceError, systemOperation } from './lib/system-errors.js';
+import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
 
 export async function verifyBusyHostRetirement(directory: string, executable: string, relayUrl: string): Promise<void> {
   const started = join(directory,'hold-started');
@@ -39,8 +41,8 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     }
   }
   async function exists(filename: string): Promise<boolean> {
-    try { await readFile(filename); return true; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+    try { await systemOperation(`Read lifecycle smoke resource ${filename}`, () => readFile(filename)); return true; }
+    catch (error) { if (error instanceof MissingResourceError) return false; throw error; }
   }
   let lifecycle: {socketPath:string;sessionId:string;pid:number;retirement:number} | undefined;
   async function requestRetirement(): Promise<void> {
@@ -52,10 +54,10 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     const request = {type:'retire',requestId,sessionId:lifecycle.sessionId,pid:lifecycle.pid,deadline:Date.now()+2000,guard:'none'};
     const {promise,resolve,reject} = Promise.withResolvers<void>();
     const socket = createConnection(lifecycle.socketPath);
-    socket.setTimeout(2000,()=>{socket.destroy();reject(new Error('Retirement request timed out'));});
+    socket.setTimeout(2000,()=>{socket.destroy();reject(new Error(`Retire smoke session ${request.sessionId}, request ${requestId}: Retirement request timed out`));});
     socket.once('error',reject);
-    socket.once('end',()=>reject(new Error('Retirement host disconnected before acknowledgement')));
-    socket.once('close',()=>reject(new Error('Retirement host closed before acknowledgement')));
+    socket.once('end',()=>reject(new Error(`Retire smoke session ${request.sessionId}, request ${requestId}: Retirement host disconnected before acknowledgement`)));
+    socket.once('close',()=>reject(new Error(`Retire smoke session ${request.sessionId}, request ${requestId}: Retirement host closed before acknowledgement`)));
     socket.once('connect',()=>socket.write(JSON.stringify(request)+'\n'));
     let input = '';
     socket.on('data',data=>{
@@ -71,9 +73,17 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
         resolve();
       } catch (error) { reject(error); }
     });
-    try { await promise; }
-    finally { await rm(grant,{force:true}); }
+    let failure: unknown;
+    let failed = false;
+    try { await promise; } catch (error) { failure = error; failed = true; throw error; }
+    finally {
+      try { await rm(grant,{force:true}); } catch (cleanup) {
+        if (failed) throw combineTelegramErrors(failure, cleanup);
+        throw cleanup;
+      }
+    }
   }
+  let primaryFailure: unknown;
   try {
     await waitFor(()=>exists(join(directory,'lifecycle.json')),'Lifecycle extension did not start');
     lifecycle = JSON.parse(await readFile(join(directory,'lifecycle.json'),'utf8'));
@@ -87,11 +97,16 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     await waitFor(()=>exists(finished),'Retirement interrupted the working command');
     await waitFor(()=>exited,'Idle host did not retire after its admitted command completed');
     console.log('PASS actual OMP host defers retirement while a local command is working, lets it finish, then exits without a signal.');
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
-    await writeFile(release,'release');
+    const cleanupErrors: unknown[] = [];
+    try { await writeFile(release,'release'); } catch (error) { cleanupErrors.push(error); }
     if (!exited && lifecycle) {
-      await requestRetirement().catch(()=>{});
-      await waitFor(()=>exited,'Guard smoke host failed to retire');
+      try { await requestRetirement(); } catch (error) { cleanupErrors.push(error); }
+      try { await waitFor(()=>exited,'Guard smoke host failed to retire'); } catch (error) { cleanupErrors.push(error); }
     }
+    if (cleanupErrors.length) throw combineTelegramErrors(...(primaryFailure === undefined ? cleanupErrors : [primaryFailure, ...cleanupErrors]));
   }
 }

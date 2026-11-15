@@ -1,3 +1,5 @@
+import { BotPromptRejectedError, BotSessionStateError, BotFolderRequestError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
 import type { Bot, Context } from 'grammy';
 import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -72,7 +74,7 @@ export class PromptAdmission {
       this.deps.requireSessionAssignment(session);
       if (session.status !== 'open') { await replyTo(ctx, contextDestination(ctx), 'This session is archived. Reopen the topic before sending instructions.'); return; }
     }
-    if (session?.runtime.kind === 'attached' && preparations.length) throw new Error('Attached sessions cannot run prompt preparations.');
+    if (session?.runtime.kind === 'attached' && preparations.length) throw new BotPromptRejectedError(`Prepare prompt (session=${session.id}): Attached sessions cannot run prompt preparations.`);
     const skillKey = this.deps.skillKey(ctx);
     const pendingSkills = frozenSkills?.names ?? this.deps.options.store.getPendingSkills(skillKey);
     const topicSkills = frozenSkills ? frozenSkills.topicSkills : session ? this.deps.options.store.getNewTopicSkills(session.id) : this.deps.defaultNewTopicSkills(ctx.chat!.id);
@@ -85,7 +87,7 @@ export class PromptAdmission {
       const proposalMode = this.deps.allMessagesArePrompts(ctx.chat!.id);
       await this.deps.chooseFolder(ctx,undefined,async (selected,authority) => {
         if (!this.deps.usersCanProposePrompts(ctx.chat!.id) || this.deps.allMessagesArePrompts(ctx.chat!.id) !== proposalMode)
-          throw new Error('This prompt proposal is no longer active.');
+          throw new BotPromptRejectedError(`Approve prompt (chat=${ctx.chat!.id}): This prompt proposal is no longer active.`);
         const names = worktree ? [] : [...new Set([...topicSkills,...selectedSkills.names])];
         const approvedContent = names.length ? {...originalContent,text:`${names.map(name => `/skill:${name}`).join(' ')}\n\n${originalContent.text}`} : originalContent;
         await this.deps.newSession(ctx,approvedContent,undefined,undefined,() => this.consumePendingSkills(skillKey,selectedSkills.names),worktree,authority,[],undefined,selected,selectedSkills);
@@ -95,17 +97,17 @@ export class PromptAdmission {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined)) {
       const check = () => {
         if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch)
-          throw new Error('The service is stopping');
+          throw new BotSessionStateError(`Prepare prompt (chat=${ctx.chat!.id}, session=${session?.id}): The service is stopping`);
         if (this.deps.assignedId(ctx.chat!.id) !== instanceId)
-          throw new Error('The group instance assignment changed');
+          throw new AuthorizationDeniedError(`Prepare prompt (chat=${ctx.chat!.id}, instance=${instanceId}): The group instance assignment changed`);
         if (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat!.id)))
-          throw new Error('Folder settings changed before execution. Send the command again.');
+          throw new BotFolderRequestError(`Prepare prompt (chat=${ctx.chat!.id}): Folder settings changed before execution. Send the command again.`);
         if (session) {
           this.deps.requireSessionAssignment(session);
           if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
               this.deps.options.store.getTopic({botId: this.deps.id(), destination: contextDestination(ctx)})?.id !== session.id ||
               this.deps.options.store.getSession(session.id)?.status !== 'open')
-            throw new Error('The session changed before the prompt could run');
+            throw new BotSessionStateError(`Prepare prompt (session=${session.id}): The session changed before the prompt could run`);
         }
       };
       const panel: PresetPanel = {
@@ -140,21 +142,21 @@ export class PromptAdmission {
       if (admin || session) {
         const available = await this.deps.options.runtime.listSkills(instanceId, session, undefined, cwd);
         const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
-        if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
+        if (missing.length) throw new BotPromptRejectedError(`Select prompt skills (chat=${ctx.chat!.id}, instance=${instanceId}, session=${session?.id}): Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
       }
       content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
     }
-    if (this.deps.assignedId(ctx.chat!.id) !== instanceId) throw new Error('The group instance assignment changed');
+    if (this.deps.assignedId(ctx.chat!.id) !== instanceId) throw new AuthorizationDeniedError(`Route prompt (chat=${ctx.chat!.id}, instance=${instanceId}): The group instance assignment changed`);
     if (session && (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
-        this.deps.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed while downloading the image');
+        this.deps.options.store.getSession(session.id)?.status !== 'open')) throw new BotSessionStateError(`Route prompt (session=${session.id}): The session changed while downloading the image`);
     if (await this.deps.currentAdmin(ctx)) {
       const authorizeExecution = async () => {
         await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
-        if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch) throw new Error('The service is stopping');
-        if (!(await this.deps.currentAdmin(ctx)) || this.deps.assignedId(ctx.chat!.id) !== instanceId || this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch) throw new Error('Prompt authority or assignment changed before execution.');
+        if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch) throw new BotSessionStateError(`Execute prompt (chat=${ctx.chat!.id}, session=${session?.id}): The service is stopping`);
+        if (!(await this.deps.currentAdmin(ctx)) || this.deps.assignedId(ctx.chat!.id) !== instanceId || this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch) throw new AuthorizationDeniedError(`Execute prompt (chat=${ctx.chat!.id}, user=${ctx.from!.id}, instance=${instanceId}): Prompt authority or assignment changed before execution.`);
         if (folderFingerprint && folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat!.id)))
-          throw new Error('Folder settings changed before execution. Send the command again.');
-        if (session && (this.deps.options.store.getSessionGeneration(session.id) !== generation || this.deps.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed before execution.');
+          throw new BotFolderRequestError(`Execute prompt (chat=${ctx.chat!.id}): Folder settings changed before execution. Send the command again.`);
+        if (session && (this.deps.options.store.getSessionGeneration(session.id) !== generation || this.deps.options.store.getSession(session.id)?.status !== 'open')) throw new BotSessionStateError(`Execute prompt (session=${session.id}): The session changed before execution.`);
       };
       let reservation: {bind(id:string):void;release():void} | undefined;
       if (extensions.length && session?.runtime.kind !== 'attached') {
@@ -169,7 +171,7 @@ export class PromptAdmission {
           const token = randomBytes(16).toString('base64url');
           if (this.deps.stopped() || refreshTermination(this.deps.options.config)) return;
           this.deps.capacity.pruneExpired();
-          const message = await replyTo(ctx, contextDestination(ctx), `OMP session limit reached (${error.limit}). Increase shared capacity to ${error.limit * 2} and execute this command?`, {
+          const message = await replyTo(ctx, contextDestination(ctx), `${error.message}\nIncrease shared capacity to ${error.limit * 2} and execute this command?`, {
             reply_markup:{inline_keyboard:[[
               {text:'Approve',callback_data:`capacity:approve:${token}`},
               {text:'Cancel',callback_data:`capacity:cancel:${token}`},
@@ -195,7 +197,7 @@ export class PromptAdmission {
       } finally { reservation?.release(); }
       return;
     }
-    if (preparations.length) throw new Error('Prompt preparations require a group administrator.');
+    if (preparations.length) throw new AuthorizationDeniedError(`Prepare prompt (chat=${ctx.chat!.id}, user=${ctx.from!.id}): Prompt preparations require a group administrator.`);
     if (!this.deps.usersCanProposePrompts(ctx.chat!.id)) return;
     const now = Date.now();
     for (const [token, proposal] of this.promptProposals) if (proposal.expires <= now) this.promptProposals.delete(token);
@@ -239,10 +241,10 @@ export class PromptAdmission {
     if (this.promptProposals.get(token) !== proposal) return;
     this.promptProposals.delete(token);
     await ctx.editMessageReplyMarkup({reply_markup:{inline_keyboard:[]}});
-    if (!(await this.deps.currentAdmin(ctx))) throw new Error('Administrator access changed before prompt approval.');
+    if (!(await this.deps.currentAdmin(ctx))) throw new AuthorizationDeniedError(`Approve prompt (chat=${ctx.chat.id}, user=${ctx.from?.id}): Administrator access changed before prompt approval.`);
     if (this.deps.assignedId(ctx.chat.id) !== proposal.instanceId ||
         (!proposal.sessionId && proposal.folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat.id))))
-      throw new Error('The prompt proposal assignment or folder settings changed before execution.');
+      throw new BotPromptRejectedError(`Approve prompt (chat=${ctx.chat.id}, instance=${proposal.instanceId}, session=${proposal.sessionId}): The prompt proposal assignment or folder settings changed before execution.`);
     if (session) {
       if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx))) {
         await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
@@ -261,20 +263,20 @@ export class PromptAdmission {
     this.deps.requireSessionAssignment(session);
     await this.deps.listen(session);
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
-    if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
+    if (!(await this.deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Submit prompt (session=${session.id}, user=${authority.from!.id}): Administrator access changed before prompt submission.`);
     if (this.deps.listener(session.id)?.initial) {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
     const uploaded = await this.deps.uploadDocuments(session, content, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
+      if (!(await this.deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Upload prompt documents (session=${session.id}, user=${authority.from!.id}): Administrator access changed before document upload.`);
     }, contextDestination(ctx));
     const prompt = await this.deps.prepareContent(session, uploaded);
     if (content.documents?.length || prompt !== uploaded) {
       // Upload acknowledgements and initial chat metadata await Telegram; submission is a separate mutation.
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
+      if (!(await this.deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Submit prompt (session=${session.id}, user=${authority.from!.id}): Administrator access changed before prompt submission.`);
     }
     const messageId = ctx.message!.message_id;
     const restore = selected && (selected.names.length || selected.topicSkills.length) ? () => {
@@ -295,7 +297,10 @@ export class PromptAdmission {
     try {
       this.deps.sendPrompt(this.deps.listener(session.id)!,prompt,messageId,restore);
     } catch (error) {
-      restore?.();
+      try { restore?.(); }
+      catch (restoreError) {
+        throw new AggregateError([error, restoreError], `Restore prompt selections after submission failed (session=${session.id}):\n${[error, restoreError].map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n')}`, {cause: error});
+      }
       throw error;
     }
     return true;

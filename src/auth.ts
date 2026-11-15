@@ -2,35 +2,45 @@ import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { BrowserFrame } from '../shared/contracts.js';
 
+export class AuthenticationError extends Error {}
+
 export class AuthorizationUnavailableError extends Error {
   constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause), {cause});
+    super(`Telegram authorization lookup failed: ${cause instanceof Error ? cause.message : String(cause)}`, {cause});
   }
 }
 
 const userSchema = z.object({ id: z.number().int().positive().safe(), first_name: z.string().min(1).max(256), last_name: z.string().max(256).optional(), username: z.string().max(256).optional(), is_bot: z.boolean().optional() }).passthrough();
 export interface InitData { user: z.infer<typeof userSchema>; authDate: number; startParam: string }
 export function validateInitData(raw: string, token: string, options: { now?: number; maxAgeSeconds?: number } = {}): InitData {
-  if (typeof raw !== 'string' || raw.length > 32768) throw new Error('Invalid Telegram authentication');
+  if (typeof raw !== 'string' || raw.length > 32768) throw new AuthenticationError('Invalid Telegram authentication');
   const params = new URLSearchParams(raw);
   const seen = new Set<string>();
-  for (const [key] of params) { if (seen.has(key)) throw new Error('Duplicate authentication field'); seen.add(key); }
+  for (const [key] of params) { if (seen.has(key)) throw new AuthenticationError('Duplicate authentication field'); seen.add(key); }
   const hash = params.get('hash');
-  if (!hash || !/^[a-fA-F0-9]{64}$/.test(hash)) throw new Error('Invalid Telegram authentication');
+  if (!hash || !/^[a-fA-F0-9]{64}$/.test(hash)) throw new AuthenticationError('Invalid Telegram authentication');
   const check = [...params].filter(([key]) => key !== 'hash').sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join('\n');
   const secret = createHmac('sha256', 'WebAppData').update(token).digest();
   const expected = createHmac('sha256', secret).update(check).digest();
-  if (!timingSafeEqual(expected, Buffer.from(hash, 'hex'))) throw new Error('Invalid Telegram authentication');
+  if (!timingSafeEqual(expected, Buffer.from(hash, 'hex'))) throw new AuthenticationError('Invalid Telegram authentication');
   const date = params.get('auth_date');
-  if (!date || !/^\d+$/.test(date)) throw new Error('Invalid authentication date');
+  if (!date || !/^\d+$/.test(date)) throw new AuthenticationError('Invalid authentication date');
   const authDate = Number(date);
   const now = (options.now ?? Date.now()) / 1000;
-  if (!Number.isSafeInteger(authDate) || authDate > now + 30 || now - authDate > (options.maxAgeSeconds ?? 3600)) throw new Error('Expired Telegram authentication');
-  const user = userSchema.parse(JSON.parse(params.get('user') ?? 'null'));
-  if (user.is_bot) throw new Error('Bot accounts cannot authenticate');
+  if (!Number.isSafeInteger(authDate) || authDate > now + 30 || now - authDate > (options.maxAgeSeconds ?? 3600)) throw new AuthenticationError('Expired Telegram authentication');
+  const user = parseAuthentication(() => userSchema.parse(JSON.parse(params.get('user') ?? 'null')), 'Telegram user authentication');
+  if (user.is_bot) throw new AuthenticationError('Bot accounts cannot authenticate');
   const startParam = params.get('start_param');
-  if (!startParam || !/^s_[A-Za-z0-9_-]{22}$/.test(startParam)) throw new Error('Invalid session start parameter');
+  if (!startParam || !/^s_[A-Za-z0-9_-]{22}$/.test(startParam)) throw new AuthenticationError('Invalid session start parameter');
   return { user, authDate, startParam };
+}
+
+function parseAuthentication<T>(parse: () => T, operation: string): T {
+  try { return parse(); }
+  catch (error) {
+    if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError)) throw error;
+    throw new AuthenticationError(`${operation}: ${error.message}`, {cause: error});
+  }
 }
 
 export function isActiveMember(member: unknown): boolean {
@@ -72,20 +82,20 @@ export function issueCredential(identity: TicketIdentity, token: string): string
   return `${payload}.${credentialSignature(payload, token).toString('base64url')}`;
 }
 export function validateCredential(raw: string, token: string, botId: number, sessionId: string): TicketIdentity {
-  if (typeof raw !== 'string' || raw.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(raw)) throw new Error('Invalid session credential');
+  if (typeof raw !== 'string' || raw.length > 2048 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(raw)) throw new AuthenticationError(`Invalid session credential for bot ${botId}, session ${sessionId}`);
   const [payload, signature] = raw.split('.') as [string, string];
   const actual = Buffer.from(signature, 'base64url');
   const expected = credentialSignature(payload, token);
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected) || actual.toString('base64url') !== signature) throw new Error('Invalid session credential');
-  const identity = credentialSchema.parse(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')));
-  if (identity.botId !== botId || identity.sessionId !== sessionId) throw new Error('Invalid session credential');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected) || actual.toString('base64url') !== signature) throw new AuthenticationError(`Invalid session credential for bot ${botId}, session ${sessionId}`);
+  const identity = parseAuthentication(() => credentialSchema.parse(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))), `Validate credential for bot ${botId}, session ${sessionId}`);
+  if (identity.botId !== botId || identity.sessionId !== sessionId) throw new AuthenticationError(`Invalid session credential for bot ${botId}, session ${sessionId}`);
   return identity;
 }
 export class TicketStore<T extends TicketIdentity = TicketIdentity> {
   private readonly tickets = new Map<string, { identity: T; expires: number }>();
   issue(identity: T, now = Date.now()): string {
     for (const [key, value] of this.tickets) if (value.expires <= now) this.tickets.delete(key);
-    if (this.tickets.size >= 10000) throw new Error('Too many pending connections');
+    if (this.tickets.size >= 10000) throw new AuthenticationError(`Too many pending connections for bot ${identity.botId}, session ${identity.sessionId}`);
     const ticket = randomBytes(32).toString('base64url');
     this.tickets.set(ticket, { identity, expires: now + 60000 });
     return ticket;

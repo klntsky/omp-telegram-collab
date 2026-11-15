@@ -1,3 +1,4 @@
+import { systemError } from './errors.js';
 import { readFile } from 'node:fs/promises';
 import { errno } from './values.js';
 export async function procIdentity(pid: number): Promise<{ parent: number; group: number; start: string; state: string } | null> {
@@ -6,7 +7,7 @@ export async function procIdentity(pid: number): Promise<{ parent: number; group
     const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
     return { parent: Number(fields[1]), group: Number(fields[2]), start: fields[19]!, state: fields[0]! };
-  } catch (error) {
+  } catch (error) { error = systemError(error, 'process OS operation');
     if (errno(error, 'ENOENT') || errno(error, 'ESRCH')) return null;
     throw error;
   }

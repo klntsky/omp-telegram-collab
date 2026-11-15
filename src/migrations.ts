@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { StoreStateError, rollbackStore } from './store/errors.js';
 
 const schema = `
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
@@ -36,16 +37,15 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 8) throw new Error(`Unsupported database schema version ${version}`);
+    if (version !== 0 && version !== 8) throw new StoreStateError(`Initialize store schema: Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
-      if (existing) throw new Error('Unsupported existing database');
+      if (existing) throw new StoreStateError('Initialize store schema: Unsupported existing database');
       db.exec(schema);
       db.exec('PRAGMA user_version=8');
     }
     db.exec('COMMIT');
   } catch (error) {
-    if (db.isTransaction) db.exec('ROLLBACK');
-    throw error;
+    rollbackStore(db, 'Initialize store schema', error);
   }
 }

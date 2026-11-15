@@ -1,3 +1,5 @@
+import { AuthorizationDeniedError } from './types.js';
+import { reportBotError } from './errors.js';
 import { HttpError, type Context } from 'grammy';
 import type { BotOptions } from '../bot.js';
 import { findInstance, refreshTermination } from '../config.js';
@@ -32,6 +34,7 @@ async showStatus(ctx: Context): Promise<void> {
     const lines = [`Bot: ${suspended ? 'online; service terminated' : 'ready'}`];
     try { lines.push(`Forum: ${await this.deps.ready(chatId) ? 'ready' : 'permissions need attention'}`); }
     catch (error) {
+      reportBotError(`Telegram forum permission lookup failed (chat=${chatId}).`, error);
       lines.push('Forum: unknown (permission lookup failed)');
       failures.push({operation:'Forum permissions',at:Date.now(),error});
     }
@@ -50,6 +53,7 @@ async showStatus(ctx: Context): Promise<void> {
         try {
           host = await withCancellation(this.deps.runtime.isRunning(session),AbortSignal.timeout(5000)) ? 'running' : 'stopped';
         } catch (error) {
+          reportBotError(`Host status lookup failed (session=${session.id}, chat=${chatId}).`, error);
           observation.failure = {operation:'Host status lookup',at:Date.now(),error};
         }
       }
@@ -79,7 +83,7 @@ async showStatus(ctx: Context): Promise<void> {
     const text = lines.join('\n');
     for (let offset = 0; offset < text.length;) {
       await this.deps.authorize(chatId,ctx.from!.id,true);
-      if (this.deps.assignedId(chatId) !== path) throw new Error('The group instance assignment changed');
+      if (this.deps.assignedId(chatId) !== path) throw new AuthorizationDeniedError(`Show status (chat=${chatId}, instance=${path}): The group instance assignment changed`);
       let end = Math.min(offset+3900,text.length);
       if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
       await replyTo(ctx,destination,text.slice(offset,end));

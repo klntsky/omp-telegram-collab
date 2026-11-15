@@ -6,6 +6,7 @@ import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
 import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
+import { StoreStateError, rollbackStore } from './store/errors.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -50,7 +51,8 @@ export class Store {
     try {
       initializeDatabase(this.db);
     } catch (error) {
-      this.db.close();
+      try { this.db.close(); }
+      catch (cleanupError) { console.error(`Close store ${filename} after initialization failure:`, cleanupError); }
       throw error;
     }
     for (const row of this.db
@@ -80,8 +82,7 @@ export class Store {
       this.markDetachedTopic(key);
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Detach topic ${key.botId}/${key.chatId}/${key.threadId}`, error);
     }
   }
   private markDetachedTopic(key: TopicKey): void {
@@ -104,8 +105,7 @@ export class Store {
       this.markDetachedTopic({botId,chatId,threadId});
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Set bot status topic ${botId}/${chatId}/${threadId}`, error);
     }
   }
   getPendingSkills(key: PendingSkillKey): string[] {
@@ -127,7 +127,7 @@ export class Store {
   }
   getSession(id: string): TopicSession | undefined { return session(this.db.prepare('SELECT * FROM sessions WHERE id=?').get(id) as Row | undefined); }
   setSessionCwd(id: string, cwd: string): void {
-    if (!isAbsolute(cwd)) throw new Error('A session requires an absolute working directory');
+    if (!isAbsolute(cwd)) throw new StoreStateError(`Set directory for session ${id}: A session requires an absolute working directory`);
     this.db.prepare('UPDATE sessions SET cwd=? WHERE id=?').run(cwd,id);
   }
   getTopic(key: { botId: number; destination: TopicDestination }): TopicSession | undefined {
@@ -135,16 +135,16 @@ export class Store {
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
   createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PendingPromptContent, initialUserId?: number, authorityUserId = initialUserId, preparation?: 'fork'): TopicSession {
-    if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new Error('A session requires a positive safe integer instance ID');
-    if (!isAbsolute(key.cwd)) throw new Error('A session requires an absolute working directory');
-    if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
-    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length && !initialTask.documents?.length) throw new Error('An initial task requires text, images, or documents');
+    if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new StoreStateError(`Create session for topic ${key.botId}/${key.chatId}/${key.threadId}: A session requires a positive safe integer instance ID`);
+    if (!isAbsolute(key.cwd)) throw new StoreStateError(`Create session for topic ${key.botId}/${key.chatId}/${key.threadId}: A session requires an absolute working directory`);
+    if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new StoreStateError(`Create session for chat ${key.chatId}: A session requires a non-General topic`);
+    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length && !initialTask.documents?.length) throw new StoreStateError(`Create session for topic ${key.botId}/${key.chatId}/${key.threadId}: An initial task requires text, images, or documents`);
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      if (this.getTopicKind(key) === 'detached') throw new Error('A detached topic cannot have a session');
+      if (this.getTopicKind(key) === 'detached') throw new StoreStateError(`Create session for topic ${key.botId}/${key.chatId}/${key.threadId}: A detached topic cannot have a session`);
       const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_id,cwd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instanceId, key.cwd);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
-      if (created.instanceId !== key.instanceId) throw new Error('This topic history belongs to a different instance ID');
+      if (created.instanceId !== key.instanceId) throw new StoreStateError(`Create session for topic ${key.botId}/${key.chatId}/${key.threadId}, instance ${key.instanceId}: This topic history belongs to a different instance ID`);
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
       if (Number(result.changes) && initialTask?.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(initialTask.images));
       if (Number(result.changes) && initialTask?.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(created.id,JSON.stringify(initialTask.documents));
@@ -156,8 +156,7 @@ export class Store {
       this.db.exec('COMMIT');
       return created;
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Create session for topic ${key.botId}/${key.chatId}/${key.threadId}`, error);
     }
   }
   listSessions(botId?: number): TopicSession[] {
@@ -176,8 +175,7 @@ export class Store {
       }
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Update session ${id}`, error);
     }
     return this.getSession(id);
   }
@@ -209,8 +207,7 @@ export class Store {
       this.setTopicTitlePrefix(id, prefix);
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Set topic title for session ${id}`, error);
     }
   }
   getSessionGeneration(id: string): number {
@@ -249,24 +246,22 @@ export class Store {
       this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Recover initial task preparations for bot ${botId}`, error);
     }
   }
   setInitialTask(id: string, task: PendingPromptContent, userId: number, authorityUserId = userId): void {
-    if (!task.text.trim() && !task.images?.length && !task.documents?.length) throw new Error('An initial task requires text, images, or documents');
+    if (!task.text.trim() && !task.images?.length && !task.documents?.length) throw new StoreStateError(`Set initial task for session ${id}: An initial task requires text, images, or documents`);
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db.prepare("UPDATE sessions SET initial_task=?,initial_state='pending' WHERE id=? AND initial_state IS NULL AND status='open'").run(task.text,id);
-      if (!Number(result.changes)) throw new Error('Session cannot accept an initial task');
+      if (!Number(result.changes)) throw new StoreStateError(`Set initial task for session ${id}: Session cannot accept an initial task`);
       if (task.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(id,JSON.stringify(task.images));
       if (task.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(id,JSON.stringify(task.documents));
       this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(id,userId);
       this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(id,authorityUserId);
       this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Set initial task for session ${id}`, error);
     }
   }
   getInitialDocumentSetup(id: string): InitialDocumentSetup | undefined {
@@ -293,8 +288,7 @@ export class Store {
       this.db.exec('COMMIT');
       return content;
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Claim initial task for session ${id}`, error);
     }
   }
   cancelInitialTask(id: string): void {

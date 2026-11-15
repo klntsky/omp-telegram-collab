@@ -10,6 +10,8 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { MissingResourceError, ProcessNotRunningError, systemOperation, systemOperationSync } from '../scripts/lib/system-errors.js';
+import { OmpCommandError } from '../src/runtime/errors.js';
 
 const execute = promisify(execFile);
 type RetirementMode = 'busy' | 'uncertain' | 'accepted' | 'delayed' | 'never-received' | 'cancel-failure';
@@ -111,10 +113,10 @@ if (process.argv[2] !== 'collab') {
     if (request.sessionId !== descriptor.sessionId || request.pid !== descriptor.pid || Date.now() >= request.deadline) return false;
     const next = { ...descriptor, retiring: true };
     try {
-      await writeFile(grantPath(request.requestId), JSON.stringify(next), { flag: 'r+' });
-      await rename(grantPath(request.requestId), lifecyclePath);
+      await systemOperation(`Write retirement grant ${request.requestId} for session ${request.sessionId}`, () => writeFile(grantPath(request.requestId), JSON.stringify(next), { flag: 'r+' }));
+      await systemOperation(`Rename retirement grant ${request.requestId} to ${lifecyclePath}`, () => rename(grantPath(request.requestId), lifecyclePath));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      if (error instanceof MissingResourceError) return false;
       throw error;
     }
     Object.assign(descriptor, next);
@@ -124,7 +126,7 @@ if (process.argv[2] !== 'collab') {
   const handleConnection = (socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.on('error', () => {});
+    socket.on('error', error => { failures.push(error); });
     if (mode === 'never-received') { socket.pause(); return; }
     let input = '';
     socket.on('data', data => {
@@ -206,19 +208,23 @@ if (process.argv[2] !== 'collab') {
     },
     async originalError() {
       try { await execute(executable, ['collab', 'link', host.instanceId, '--json'], { cwd: dataDir }); }
-      catch (error) { return error as Error & { code: number; signal: string | null }; }
+      catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'number') throw error;
+        const signal = 'signal' in error && typeof error.signal === 'string' ? error.signal : null;
+        return new OmpCommandError('Probe fixture registry failure', executable, error, error.code, signal);
+      }
       throw new Error('Expected registry failure');
     },
     async close() {
       delayed.resolve();
       await Promise.all(handled);
-      const startedPid = await readFile(startedPidPath, 'utf8').catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      const startedPid = await systemOperation(`Read started process ID ${startedPidPath}`, () => readFile(startedPidPath, 'utf8')).catch(error => {
+        if (error instanceof MissingResourceError) return undefined;
         throw error;
       });
       if (startedPid) {
-        try { process.kill(Number(startedPid), 'SIGKILL'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        try { systemOperationSync(`Kill fixture process ${startedPid}`, () => process.kill(Number(startedPid), 'SIGKILL')); }
+        catch (error) { if (!(error instanceof ProcessNotRunningError)) throw error; }
       }
       if (fixtureProcess) {
         if (fixtureProcess.exitCode === null && fixtureProcess.signalCode === null) fixtureProcess.kill();

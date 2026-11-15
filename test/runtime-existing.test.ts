@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { OmpCommandError, OmpProtocolError, OmpSessionUnavailableError } from '../src/runtime/errors.js';
 
 test('passive resolution adopts existing identities and never launches absent or disappearing hosts', {timeout:15000}, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'omp-existing-host-')));
@@ -46,7 +47,7 @@ else if(args[1]==='link'){
 `);
     await chmod(executable,0o700);
     for (const runtimeKind of [session.runtime, {kind:'attached',instanceId:host.instanceId,sessionId:host.sessionId}] as const) {
-      await assert.rejects(runtime.ensure({...session,status:'closed',runtime:runtimeKind}),{message:'Session closed'});
+      await assert.rejects(runtime.ensure({...session,status:'closed',runtime:runtimeKind}),OmpSessionUnavailableError);
     }
     assert.equal(await runtime.stop({...session,status:'closed'}),true);
     assert.equal(await readFile(commandsPath,'utf8'),'');
@@ -75,9 +76,10 @@ else if(args[1]==='link'){
     });
     const original = await failedLookup.promise;
     await assert.rejects(runtime.resolveExisting(session),error => {
-      assert.ok(error instanceof Error && 'code' in error);
+      assert.ok(error instanceof OmpCommandError && error.cause instanceof Error);
       assert.equal(error.code,original.code);
-      assert.equal(error.message,original.message);
+      assert.equal(error.cause.message,original.message);
+      assert.ok(error.message.includes(original.message));
       return true;
     });
     await writeFile(statePath,JSON.stringify({hosts:[host],disappear:true}));
@@ -151,5 +153,6 @@ test('history source preserves file diagnostics and rejects incompatible managed
   await writeFile(binding, JSON.stringify({ ...pin, cwd: join(directory, 'another') }));
   await assert.rejects(runtime.historySource(session), /Managed OMP binding is incompatible/);
   await writeFile(binding, '{invalid JSON');
-  await assert.rejects(runtime.historySource(session), SyntaxError);
+  await assert.rejects(runtime.historySource(session), error => error instanceof OmpProtocolError &&
+    error.cause instanceof SyntaxError && error.message.includes(error.cause.message));
 });

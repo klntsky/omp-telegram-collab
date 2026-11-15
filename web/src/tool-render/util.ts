@@ -3,6 +3,7 @@
  * `globalThis` feature probes, no host package imports.
  */
 import type { ToolResultImage, ToolResultLike } from "./types";
+import { decodeJson, InvalidJsonError } from "../lib/decode";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -22,11 +23,7 @@ export function display(value: unknown): string {
 	if (value == null) return "";
 	if (typeof value === "string") return value;
 	if (typeof value === "number" || typeof value === "boolean") return String(value);
-	try {
-		return JSON.stringify(value) ?? "";
-	} catch {
-		return String(value);
-	}
+	return JSON.stringify(value) ?? "";
 }
 
 /** Replace `/Users/<x>` / `/home/<x>` prefix with `~` for display. */
@@ -53,12 +50,13 @@ export function scopePaths(args: Record<string, unknown>): string[] {
 		const trimmed = raw.trim();
 		if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
 			try {
-				const parsed: unknown = JSON.parse(trimmed);
+				const parsed = decodeJson(trimmed, "Decode tool search scope paths");
 				if (Array.isArray(parsed) && parsed.every((p): p is string => typeof p === "string")) {
 					return parsed;
 				}
-			} catch {
-				// Not valid JSON — treat the whole string as one path.
+			} catch (error) {
+				if (!(error instanceof InvalidJsonError)) throw error;
+				// A malformed model-provided array is still a valid literal path.
 			}
 		}
 		return [raw];

@@ -1,3 +1,6 @@
+import { BotPromptRejectedError, BotSessionStateError, BotWorkingDirectoryError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
+import { redactTelegramFailure } from '../telegram-errors.js';
 import type { Bot, Context } from 'grammy';
 import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -11,6 +14,9 @@ import { basename, join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
 import type { InitialDocumentSetup } from '../store/initial-documents.js';
+import { TelegramFileDownloadError } from '../telegram-errors.js';
+
+class PromptAttachmentError extends Error {}
 
 export interface PromptPreparationDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -27,16 +33,30 @@ export interface PromptPreparationDependencies {
 
 export class PromptPreparation {
   constructor(private readonly deps: PromptPreparationDependencies) {}
-  async promptImages(attachments: TelegramImage[]): Promise<ImageContent[]> {
-    return Promise.all(attachments.map(async ({fileId,mimeType}): Promise<ImageContent> => {
-      if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
-      const file = await this.deps.bot.api.getFile(fileId);
-      if (!file.file_path) throw new Error('Telegram image file path is unavailable');
+  private async downloadFile(filePath: string, kind: 'image' | 'document', fileId: string): Promise<ArrayBuffer> {
+    const context = `Telegram ${kind} download (bot=${this.deps.id()}, file=${fileId})`;
+    try {
       const environment = this.deps.bot.api.options?.environment === 'test' ? 'test/' : '';
-      const response = await fetch(`https://api.telegram.org/file/bot${this.deps.token}/${environment}${file.file_path}`);
-      if (!response.ok) throw new Error(`Telegram image download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
-      return {type:'image',data:Buffer.from(await response.arrayBuffer()).toString('base64'),mimeType};
+      const response = await fetch(`https://api.telegram.org/file/bot${this.deps.token}/${environment}${filePath}`);
+      if (!response.ok) throw new TelegramFileDownloadError(`Telegram ${kind} download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
+      return await response.arrayBuffer();
+    } catch (error) {
+      redactTelegramFailure(error, this.deps.token);
+      // File URLs include the bot token; describe the attachment, never the request URL.
+      if (error instanceof Error) error.message = `${context}: ${error.message}`;
+      throw error;
+    }
+  }
+  async promptImages(attachments: TelegramImage[]): Promise<ImageContent[]> {
+    const results = await Promise.allSettled(attachments.map(async ({fileId,mimeType}): Promise<ImageContent> => {
+      if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new PromptAttachmentError(`Prepare Telegram image (file=${fileId}): Unsupported image type: ${mimeType}`);
+      const file = await this.deps.bot.api.getFile(fileId);
+      if (!file.file_path) throw new PromptAttachmentError(`Prepare Telegram image (file=${fileId}): Telegram image file path is unavailable`);
+      return {type:'image',data:Buffer.from(await this.downloadFile(file.file_path, 'image', fileId)).toString('base64'),mimeType};
     }));
+    const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length) throw new AggregateError(errors, `Prepare Telegram image attachments (bot=${this.deps.id()}):\n${errors.map(error => error instanceof Error ? error.message : String(error)).join('\n')}`);
+    return results.map(result => (result as PromiseFulfilledResult<ImageContent>).value);
   }
   async uploadDocuments(session: TopicSession, content: PendingPromptContent, authorize: () => Promise<void>, destination: TopicDestination, saved?: (remaining: PendingPromptContent) => void): Promise<PromptContent> {
     const {documents, ...prompt} = content;
@@ -44,27 +64,24 @@ export class PromptPreparation {
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const check = async () => {
       await authorize();
-      if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new Error('The service is stopping');
+      if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new BotSessionStateError(`Upload documents (session=${session.id}): The service is stopping`);
       this.deps.requireSessionAssignment(session);
       if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
           this.deps.options.store.getSession(session.id)?.status !== 'open')
-        throw new Error('The session changed before document upload.');
+        throw new BotSessionStateError(`Upload documents (session=${session.id}): The session changed before document upload.`);
     };
     let text = prompt.text;
     for (const [index, document] of documents.entries()) {
       const fileName = basename(document.fileName.replaceAll('\\', '/'));
       if (!fileName || fileName === '.' || fileName === '..' || /[\x00-\x1f\x7f]/.test(fileName))
-        throw new Error('The document filename is unsafe.');
+        throw new PromptAttachmentError(`Prepare document upload (session=${session.id}): The document filename is unsafe.`);
       await check();
       const file = await this.deps.bot.api.getFile(document.fileId);
-      if (!file.file_path) throw new Error('Telegram document file path is unavailable');
-      const environment = this.deps.bot.api.options?.environment === 'test' ? 'test/' : '';
-      const response = await fetch(`https://api.telegram.org/file/bot${this.deps.token}/${environment}${file.file_path}`);
-      if (!response.ok) throw new Error(`Telegram document download failed: ${response.status} ${response.statusText}\n${await response.text()}`);
-      const bytes = Buffer.from(await response.arrayBuffer());
+      if (!file.file_path) throw new PromptAttachmentError(`Prepare document upload (session=${session.id}, file=${document.fileId}): Telegram document file path is unavailable`);
+      const bytes = new Uint8Array(await this.downloadFile(file.file_path, 'document', document.fileId));
       await check();
       const cwd = session.cwd;
-      if (realpathSync(cwd) !== cwd) throw new Error('Session working directory identity changed');
+      if (realpathSync(cwd) !== cwd) throw new BotWorkingDirectoryError(`Upload documents (session=${session.id}, path=${cwd}): Session working directory identity changed`);
       const path = join(cwd, fileName);
       const overwritten = saveDocument(path, bytes);
       text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
@@ -80,7 +97,7 @@ export class PromptPreparation {
   async preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority = ctx): Promise<void> {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
+      if (!(await this.deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Prepare prompt (session=${session.id}, user=${authority.from!.id}): Prompt preparations require a group administrator.`);
     }, text => this.deps.replyPresetText(ctx, text));
   }
   async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
@@ -100,14 +117,14 @@ export class PromptPreparation {
   }
   private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, setup?: InitialDocumentSetup): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
-      throw new Error('Choose a model preset before preparing the prompt.');
+      throw new BotPromptRejectedError(`Prepare prompt (session=${session.id}): Choose a model preset before preparing the prompt.`);
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const checkSession = () => {
-      if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new Error('The service is stopping');
+      if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new BotSessionStateError(`Prepare prompt (session=${session.id}): The service is stopping`);
       this.deps.requireSessionAssignment(session);
       if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
           this.deps.options.store.getSession(session.id)?.status !== 'open') {
-        throw new Error('The session changed before prompt preparation could finish');
+        throw new BotSessionStateError(`Prepare prompt (session=${session.id}): The session changed before prompt preparation could finish`);
       }
     };
     const applyPreset = async (name: string) => {
@@ -148,7 +165,7 @@ export class PromptPreparation {
         await report(`🌳 ${text}`);
         if (selectedPreset !== undefined) await applyPreset(selectedPreset);
       } else {
-        if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');
+        if (extension.name === undefined) throw new BotPromptRejectedError(`Prepare prompt (session=${session.id}): Choose a model preset before preparing the prompt.`);
         await applyPreset(extension.name);
         selectedPreset = extension.name;
       }

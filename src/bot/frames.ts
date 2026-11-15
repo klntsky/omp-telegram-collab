@@ -1,3 +1,5 @@
+import { reportBotError } from './errors.js';
+
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, PromptContent } from '../../shared/contracts.js';
 import type { HostFrame, CollabUiRequest, CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -10,6 +12,8 @@ import { miniAppInterruptionAuthor } from '../../shared/interruption.js';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import { renderTelegramMarkdown } from '../telegram-markdown.js';
+class OmpNoticeError extends Error {}
+class OmpInstructionError extends Error {}
 
 export interface FrameProjectionDependencies {
   acknowledgeMessage: (session: TopicSession, messageId: number, listener?: Listener) => void;
@@ -76,10 +80,12 @@ export class FrameProjection {
       this.deps.syncTopicTitle(session, listener, frame.state.sessionName);
     }
     if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'error') {
+      const error = new OmpNoticeError(`OMP notice (session=${session.id}, ompSession=${ompSessionId}): ${frame.event.message}`, {cause: frame.event});
+      reportBotError(`OMP notice failed (session=${session.id}).`, error);
       this.deps.sessionObservation(session.id).failure = {
         operation: 'OMP notice',
         at: Date.now(),
-        error: frame.event.message,
+        error,
       };
     }
     if (frame.t === 'ui-request') {
@@ -116,7 +122,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         `⛔️${interruptedBy} interrupted the chat`,
         {},
-      ).catch(error => console.warn(`Could not deliver interruption notice (${session.id}).`, error));
+      ).catch(error => reportBotError(`Could not deliver interruption notice (${session.id}).`, error));
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
@@ -155,6 +161,8 @@ export class FrameProjection {
     }
     this.deps.refreshTyping(session, listener);
     if (frame.t === 'error') {
+      const error = new OmpInstructionError(`OMP instruction (session=${session.id}, ompSession=${ompSessionId}): ${frame.message}`, {cause: frame});
+      reportBotError(`OMP instruction failed (session=${session.id}).`, error);
       const observation = this.deps.activityObservation(session);
       observation.suspect = true;
       ++observation.revision;
@@ -171,7 +179,7 @@ export class FrameProjection {
       this.deps.sessionObservation(session.id).failure = {
         operation: 'OMP instruction',
         at: Date.now(),
-        error: frame.message,
+        error,
       };
       if (isStartupRejection(frame)) pending?.onStartupRejected?.();
     }
@@ -186,7 +194,7 @@ export class FrameProjection {
           this.deps.bot.api,
           topicDestination(session.chatId, session.threadId),
           `The host is still starting. The initial task was not admitted; send your task again after startup. ${this.deps.promptHelp(session.chatId)}`,
-        ).catch(error => console.warn(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
+        ).catch(error => reportBotError(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
       } else {
         initial.timer = setTimeout(() => {
           void this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId)
@@ -210,8 +218,8 @@ export class FrameProjection {
               this.deps.sendPrompt(listener, initial.content, initial.messageId);
             })
             .catch(error => {
-              if (!this.deps.stopped() && error !== this.deps.background.reason)
-                console.warn(`Could not retry initial task submission (${session.id}).`, error);
+              if (!this.deps.background.aborted || error !== this.deps.background.reason)
+                reportBotError(`Could not retry initial task submission (${session.id}).`, error);
               clearTimeout(initial.timer);
               if (listener.initial === initial) listener.initial = undefined;
             });
@@ -237,7 +245,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         prefix + frame.message,
         { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
-      ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
+      ).catch(error => reportBotError(`Could not deliver OMP error notice (${session.id}).`, error));
       return;
     }
     if (frame.t === 'snapshot-chunk') {
@@ -320,7 +328,7 @@ export class FrameProjection {
           });
         }
       })
-      .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
+      .catch(error => reportBotError(`Could not mirror OMP reply (${session.id}).`, error))
       .finally(() => {
         listener.queued--;
       });

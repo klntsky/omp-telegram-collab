@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import { HttpError, type Bot, type Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -55,6 +56,7 @@ install(): void {
         await this.deps.handle(ctx, intent);
       };
       const task = urgent ? process() : this.updateTail.then(process);
+      // The middleware below owns reporting; this tail only serializes subsequent updates.
       if (!urgent) this.updateTail = task.catch(() => undefined);
       try {
         await task;
@@ -63,7 +65,7 @@ install(): void {
       } finally {
         this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
-          await ctx.answerCallbackQuery().catch(error => console.warn('Could not acknowledge Telegram callback.', error));
+          await ctx.answerCallbackQuery().catch(error => reportBotError(`Could not acknowledge Telegram callback (update=${ctx.update.update_id}).`, error));
       }
     });
 }
@@ -81,7 +83,7 @@ install(): void {
       inputKind: intent?.kind,
       action: intent?.kind === 'command' ? intent.action : undefined,
     };
-    console.error('Telegram operation failed.', error, context);
+    reportBotError('Telegram operation failed.', error, context);
     if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
       const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
       if (session && this.deps.sessionAssigned(session)) this.deps.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
@@ -99,7 +101,7 @@ install(): void {
     await replyTo(ctx, contextDestination(ctx), prefix + details, {
       entities: [{type:'pre',offset:prefix.length,length:details.length}],
     }).catch(deliveryError => {
-      console.error('Could not deliver Telegram operation error notice.', deliveryError, context);
+      reportBotError('Could not deliver Telegram operation error notice.', deliveryError, context);
     });
   }
 
@@ -174,6 +176,6 @@ install(): void {
     await this.deps.delivery.run(ctx.chat.id,
       () => this.deps.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.deps.stopped() && findInstance(this.deps.config,this.deps.botId(),ctx.chat!.id)?.instance.id === assigned.instance.id)
-      .catch(error => console.warn('Could not show message receipt reaction.', error));
+      .catch(error => reportBotError(`Could not show message receipt reaction (chat=${ctx.chat?.id}, message=${ctx.message?.message_id}).`, error));
   }
 }

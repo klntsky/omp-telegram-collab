@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Badge, InvalidArg, Note, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../util";
+import { decodeJson, InvalidJsonError } from "../../lib/decode";
 
 interface AskOption {
 	label: string;
@@ -59,8 +60,9 @@ function normalizeOptions(raw: unknown): AskOption[] {
 function normalizeQuestions(raw: unknown): AskQuestion[] {
 	if (typeof raw === "string") {
 		try {
-			raw = JSON.parse(raw);
-		} catch {
+			raw = decodeJson(raw, "Decode ask tool questions");
+		} catch (error) {
+			if (!(error instanceof InvalidJsonError)) throw error;
 			return [];
 		}
 	}

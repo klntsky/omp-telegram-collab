@@ -1,3 +1,4 @@
+import { BotSettingsRejectedError } from './errors.js';
 import type { Context, Bot } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -24,7 +25,7 @@ export class SettingsMutations {
     if (panel.folderInput) {
       const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
       const paths = [...new Set(input.split('\n').map(path => path.trim()).filter(Boolean))];
-      if (!paths.length || paths.some(path => isAbsolute(path) || path.includes('\0'))) throw new Error('Reply with relative folder paths, one per line.');
+      if (!paths.length || paths.some(path => isAbsolute(path) || path.includes('\0'))) throw new BotSettingsRejectedError(`Save runtime folders (chat=${panel.chatId}, instance=${panel.instanceId}): Reply with relative folder paths, one per line.`);
       const config = await this.deps.panels.access(ctx,panel,true);
       const chat = findInstance(config,this.deps.id(),panel.chatId)!.instance.chats.find(chat => chat.botId === this.deps.id() && chat.chatId === panel.chatId)!;
       const before = (chat.folder_options ?? []).join('\n') || '(none)';
@@ -39,7 +40,7 @@ export class SettingsMutations {
     const input = ctx.message && 'text' in ctx.message ? ctx.message.text?.trim() ?? '' : '';
     const target = Number(input);
     if (!/^[0-9]+$/.test(input) || !Number.isSafeInteger(target) || target < 1)
-      throw new Error('The live session count limit must be a positive safe integer.');
+      throw new BotSettingsRejectedError(`Save session capacity (chat=${panel.chatId}): The live session count limit must be a positive safe integer.`);
     const config = await this.deps.panels.access(ctx, panel, true);
     const before = String(config.omp.maxSessions);
     config.omp.maxSessions = target;
@@ -66,8 +67,8 @@ export class SettingsMutations {
             ? (await this.deps.runtime.listSkills(panel.instanceId)).map((entry) => entry.name)
             : await this.deps.runtime.availableModelPresets(panel.instanceId);
         if (!names.includes(action.value))
-          throw new Error(
-            `Unknown ${action.field === 'default_new_topic_skills' ? 'skill' : 'model preset'}: ${action.value}`,
+          throw new BotSettingsRejectedError(
+            `Save default setting (chat=${panel.chatId}, instance=${panel.instanceId}): Unknown ${action.field === 'default_new_topic_skills' ? 'skill' : 'model preset'}: ${action.value}`,
           );
       }
       const current = await this.deps.panels.access(ctx, panel, true);

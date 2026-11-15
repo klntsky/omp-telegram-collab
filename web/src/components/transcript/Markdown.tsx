@@ -8,10 +8,8 @@ import { mathExtension } from "./math";
 
 function unescapeHtml(raw: string): string {
 	const parseCodePoint = (value: number): string => {
-		if (Number.isFinite(value) && value >= 0 && value <= 0x10ffff) {
-			try {
-				return String.fromCodePoint(value);
-			} catch {}
+		if (Number.isInteger(value) && value >= 0 && value <= 0x10ffff) {
+			return String.fromCodePoint(value);
 		}
 		return "";
 	};
@@ -45,14 +43,9 @@ function unescapeHtml(raw: string): string {
 }
 function safeHref(href: string): string | null {
 	const trimmed = href.trim();
-	let protocol: string;
-	try {
-		// Resolve the scheme exactly as the browser will: the URL parser strips leading
-		// C0 controls and embedded tab/newline that a text check would carry through.
-		({ protocol } = new URL(trimmed, "https://relative.invalid/"));
-	} catch {
-		return null;
-	}
+	// URL.canParse handles malformed input without catching unrelated runtime failures.
+	if (!URL.canParse(trimmed, "https://relative.invalid/")) return null;
+	const { protocol } = new URL(trimmed, "https://relative.invalid/");
 	if (protocol === "https:" || protocol === "http:" || protocol === "mailto:") return trimmed;
 	return null; // unknown scheme (javascript:, data:, …)
 }
@@ -79,11 +72,7 @@ const md = new Marked({
 md.use(mathExtension);
 
 function renderMarkdown(text: string): string {
-	try {
-		return md.parse(text, { async: false });
-	} catch {
-		return escapeHtml(text);
-	}
+	return md.parse(text, { async: false });
 }
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): ReactNode {
@@ -167,24 +156,20 @@ export function renderStreamingMarkdown(
 	const src = text.includes("\t") ? text.replaceAll("\t", "    ") : text;
 	const base = src.length > prefix.source.length && src.startsWith(prefix.source) ? prefix : NO_PREFIX;
 	const rest = base.source.length === 0 ? src : src.slice(base.source.length);
-	try {
-		const tokens = md.lexer(rest);
-		// A reference definition resolves links anywhere, including the frozen
-		// prefix, which was lexed without it; with no prefix, `tokens` already
-		// lexed the whole text with its definitions.
-		for (const _label in tokens.links) {
-			return { html: base === NO_PREFIX ? md.parser(tokens) : renderMarkdown(text), prefix: NO_PREFIX };
-		}
-		const { count, end } = stableTokenCount(rest, tokens);
-		if (count === 0) return { html: base.html + md.parser(tokens), prefix: base };
-		const frozen: FrozenMarkdownPrefix = {
-			source: src.slice(0, base.source.length + end),
-			html: base.html + md.parser(tokens.slice(0, count)),
-		};
-		return { html: frozen.html + md.parser(tokens.slice(count)), prefix: frozen };
-	} catch {
-		return { html: renderMarkdown(text), prefix: NO_PREFIX };
+	const tokens = md.lexer(rest);
+	// A reference definition resolves links anywhere, including the frozen
+	// prefix, which was lexed without it; with no prefix, `tokens` already
+	// lexed the whole text with its definitions.
+	for (const _label in tokens.links) {
+		return { html: base === NO_PREFIX ? md.parser(tokens) : renderMarkdown(text), prefix: NO_PREFIX };
 	}
+	const { count, end } = stableTokenCount(rest, tokens);
+	if (count === 0) return { html: base.html + md.parser(tokens), prefix: base };
+	const frozen: FrozenMarkdownPrefix = {
+		source: src.slice(0, base.source.length + end),
+		html: base.html + md.parser(tokens.slice(0, count)),
+	};
+	return { html: frozen.html + md.parser(tokens.slice(count)), prefix: frozen };
 }
 
 /**

@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { OmpCommandError } from '../src/runtime/errors.js';
 
 const execute = promisify(execFile);
 
@@ -88,9 +89,9 @@ test('unexpected Git failures retain their subprocess diagnostics', async t => {
     original = error;
   }
   await assert.rejects(app.runtime.topicTitleStatus(app.session), error => {
-    assert.ok(error instanceof Error);
-    assert.equal(error.message, original.message);
-    assert.ok('code' in error);
+    assert.ok(error instanceof OmpCommandError && error.cause instanceof Error);
+    assert.equal(error.cause.message, original.message);
+    assert.ok(error.message.includes(original.message));
     assert.equal(error.code, original.code);
     return true;
   });

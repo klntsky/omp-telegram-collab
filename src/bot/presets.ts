@@ -1,3 +1,5 @@
+import { BotSessionStateError, BotCommandRejectedError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
 import type { Bot, Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -7,6 +9,7 @@ import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { withCancellation } from '../cancellation.js';
 import type { PresetAction, PresetPanel } from './types.js';
 import { groupCommands } from './commands.js';
+import { OmpHostBusyError } from '../runtime/errors.js';
 
 export interface PresetDependencies {
   botId: number;
@@ -40,14 +43,14 @@ export class BotPresets {
     const session = this.dependencies.store.getTopic({botId: this.dependencies.botId, destination: panel.destination});
     if (!session || session.id !== panel.sessionId || session.status !== 'open' ||
         this.dependencies.store.getSessionGeneration(session.id) !== panel.generation)
-      throw new Error('The session changed before the model preset command could run');
+      throw new BotSessionStateError(`Select model preset (session=${panel.sessionId}, chat=${panel.chatId}): The session changed before the model preset command could run`);
     this.dependencies.requireSessionAssignment(session);
     return session;
   }
   checkPresetPanel(panel: PresetPanel): void {
     if (panel.continuation) {
       if (!panel.continuation.active || panel.expires <= Date.now())
-        throw new Error('This model preset selection is no longer active.');
+        throw new BotCommandRejectedError(`Select model preset (chat=${panel.chatId}, session=${panel.sessionId}): This model preset selection is no longer active.`);
       panel.continuation.check();
     }
     else this.presetSession(panel);
@@ -82,7 +85,7 @@ export class BotPresets {
     }
     if (panel.continuation) button('Cancel', {kind: 'cancel'});
     this.checkPresetPanel(panel);
-    if (this.dependencies.assignedId(panel.chatId) !== panel.instanceId) throw new Error('The group instance assignment changed');
+    if (this.dependencies.assignedId(panel.chatId) !== panel.instanceId) throw new AuthorizationDeniedError(`Render model presets (chat=${panel.chatId}, instance=${panel.instanceId}): The group instance assignment changed`);
     const extra = {reply_markup: {inline_keyboard: rows}};
     if (panel.messageId === 0) {
       const message = await sendTo(this.dependencies.api, panel.destination, text, extra);
@@ -140,7 +143,7 @@ export class BotPresets {
       if (panel.continuation) {
         const pending = panel.continuation;
         await this.dependencies.authorize(panel.chatId, pending.source.from!.id);
-        if (!(await this.dependencies.currentAdmin(pending.source))) throw new Error('Prompt preparations require a group administrator.');
+        if (!(await this.dependencies.currentAdmin(pending.source))) throw new AuthorizationDeniedError(`Prepare prompt (chat=${panel.chatId}, user=${pending.source.from!.id}): Prompt preparations require a group administrator.`);
         pending.check();
         if (panel.expires <= Date.now() || this.presetPanels.get(panel.token) !== panel) return;
         this.presetPanels.delete(panel.token);
@@ -172,8 +175,8 @@ export class BotPresets {
           await authorizeMutation();
           await this.dependencies.runtime.modelPresets(session, name);
         } catch (error) {
-          if (!(error instanceof Error) || error.message !== 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets') throw error;
-          await replyTo(ctx, panel.destination, "Can't change model preset while busy. /stop first");
+          if (!(error instanceof OmpHostBusyError)) throw error;
+          await replyTo(ctx, panel.destination, error.message);
           await ctx.answerCallbackQuery();
           return;
         } finally {

@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
 import { getHljs, replaceTabs, resultImagesOf, resultTextOf, shortenPath, stripAnsi } from "./util";
+import { decodeImageData, InvalidImageDataError } from "../lib/decode";
 
 export type Tone = "accent" | "ok" | "err" | "warn";
 
@@ -74,12 +75,8 @@ function useHighlight(code: string, lang: string | null | undefined): string | n
 		if (!lang) return null;
 		const hljs = getHljs();
 		if (!hljs) return null;
-		try {
-			if (!hljs.getLanguage(lang)) return null;
-			return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
-		} catch {
-			return null;
-		}
+		if (!hljs.getLanguage(lang)) return null;
+		return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
 	}, [code, lang]);
 }
 
@@ -180,14 +177,15 @@ export function ResultText({
 
 function openImage(img: ToolResultImage): void {
 	try {
-		const bin = atob(img.data);
+		const bin = decodeImageData(img.data);
 		const bytes = new Uint8Array(bin.length);
 		for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 		const url = URL.createObjectURL(new Blob([bytes], { type: img.mimeType }));
 		window.open(url, "_blank", "noopener");
 		setTimeout(() => URL.revokeObjectURL(url), 60_000);
-	} catch {
-		// undecodable image data — the broken thumbnail already conveys it
+	} catch (error) {
+		if (!(error instanceof InvalidImageDataError)) throw error;
+		// Invalid image input already appears as a broken thumbnail.
 	}
 }
 

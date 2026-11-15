@@ -5,17 +5,15 @@ import { parseEnv, promisify } from 'node:util';
 import { resolveTelegramTestEnvFile } from '../../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../../test/e2e/helpers/errors.js';
 import { acquireTelegramTestLock } from './telegram-test-lock.js';
+import { decodeTelegramTestConfiguration, TelegramTestCancellationError, TelegramTestConfigurationError, TelegramTestLeaseError, TelegramTestStorageSafetyError } from './telegram-test-errors.js';
 
 export function readTelegramTestBotTokens(env: NodeJS.ProcessEnv): string[] {
-  let tokens: unknown;
-  try { tokens = JSON.parse(env.TELEGRAM_TEST_BOT_TOKENS ?? 'null'); } catch {
-    throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a nonempty JSON array of bot tokens');
-  }
+  const tokens = decodeTelegramTestConfiguration(env.TELEGRAM_TEST_BOT_TOKENS ?? 'null', 'TELEGRAM_TEST_BOT_TOKENS');
   if (!Array.isArray(tokens) || tokens.length === 0 || tokens.some(token => typeof token !== 'string' || !/^[1-9]\d*:[A-Za-z0-9_-]{30,}$/.test(token))) {
-    throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a nonempty JSON array of bot tokens');
+    throw new TelegramTestConfigurationError('Read TELEGRAM_TEST_BOT_TOKENS: TELEGRAM_TEST_BOT_TOKENS must be a nonempty JSON array of bot tokens');
   }
   if (new Set(tokens.map(token => token.split(':')[0])).size !== tokens.length) {
-    throw new Error('TELEGRAM_TEST_BOT_TOKENS contains duplicate bot identities');
+    throw new TelegramTestConfigurationError('Read TELEGRAM_TEST_BOT_TOKENS: TELEGRAM_TEST_BOT_TOKENS contains duplicate bot identities');
   }
   return tokens;
 }
@@ -54,13 +52,14 @@ export async function acquireTelegramTestBot(signal: AbortSignal, options: { che
 }
 
 async function readSavedBotTokens(): Promise<string[]> {
-  const file = await open(await resolveTelegramTestEnvFile(), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const filename = await resolveTelegramTestEnvFile();
+  const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let tokens: string[];
   let readFailure: unknown;
   let readFailed = false;
   try {
     const metadata = await file.stat();
-    if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to read Telegram test bot tokens from a non-regular or hard-linked file');
+    if (!metadata.isFile() || metadata.nlink !== 1) throw new TelegramTestStorageSafetyError(`Read Telegram test bot tokens from ${filename}: Refusing to read Telegram test bot tokens from a non-regular or hard-linked file`);
     tokens = readTelegramTestBotTokens(parseEnv(await file.readFile('utf8')));
   } catch (error) { readFailure = error; readFailed = true; throw error; } finally {
     try { await file.close(); } catch (cleanup) {
@@ -85,12 +84,15 @@ async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
   let failure: unknown;
   let failed = false;
   try { winner = await Promise.race(waiters); } catch (error) { failure = error; failed = true; }
-  stop.abort();
+  stop.abort(new TelegramTestCancellationError('bot lease race completed'));
   const settled = await Promise.allSettled(waiters);
   const cleanupErrors: unknown[] = [];
   for (const result of settled) {
     if (result.status === 'fulfilled' && result.value !== winner) {
       try { await result.value.release(); } catch (error) { cleanupErrors.push(error); }
+    }
+    if (result.status === 'rejected' && result.reason !== waitingSignal.reason && result.reason !== failure) {
+      cleanupErrors.push(result.reason);
     }
   }
   if (winner && (cleanupErrors.length || failed || signal.aborted)) {
@@ -109,7 +111,7 @@ async function acquireBot(signal: AbortSignal): Promise<TelegramTestBotLease> {
   let token: string;
   try {
     const current = (await readSavedBotTokens()).find(value => value.split(':')[0] === lease.token.split(':')[0]);
-    if (!current) throw new Error('Leased Telegram bot was removed from the configured token pool');
+    if (!current) throw new TelegramTestLeaseError(`Acquire Telegram test bot ${lease.token.split(':')[0]}: Leased Telegram bot was removed from the configured token pool`);
     signal.throwIfAborted();
     token = current;
   } catch (error) {

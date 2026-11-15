@@ -1,3 +1,4 @@
+import { settleOperations, systemError, parseJson, OmpConfigurationError, OmpSkillDiscoveryCancelledError, OmpProtocolError, OmpRuntimeStoppingError } from './errors.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -37,7 +38,7 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
   async function cachedSkills(instancePath: string, signal?: AbortSignal): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     deps.assertActive();
-    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new OmpRuntimeStoppingError();
     const cached = skillCatalogs.get(instancePath);
     if (cached && cached.expiresAt > Date.now()) {
       skillCatalogs.delete(instancePath);
@@ -48,15 +49,15 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
     let pending = skillDiscovery.get(instancePath);
     if (pending?.controller.signal.aborted) {
       const abandoned = pending;
-      await abandoned.promise.catch(error => {
-        if (error !== abandoned.controller.signal.reason) throw error;
+      await abandoned.promise.catch(error => { error = systemError(error, 'skills OS operation');
+        if (!(error instanceof OmpSkillDiscoveryCancelledError || error instanceof OmpRuntimeStoppingError) || error !== abandoned.controller.signal.reason) throw error;
       });
       return cachedSkills(instancePath, signal);
     }
     if (!pending) {
       const controller = new AbortController();
       const discovery = discoverSkills(instancePath, controller.signal).then(catalog => {
-        if (catalog.some(value => !value.name)) throw new Error('OMP returned an invalid skill catalog');
+        if (catalog.some(value => !value.name)) throw new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'OMP returned an invalid skill catalog');
         rememberSkills(instancePath, { catalog, expiresAt: Date.now() + 5 * 60_000 });
         return catalog;
       }).catch((error: unknown) => {
@@ -73,9 +74,9 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
       return await (signal ? withCancellation(pending.promise, signal) : pending.promise);
     } finally {
       if (--pending.consumers === 0) {
-        pending.controller.abort(signal?.reason ?? new Error('Skill discovery has no remaining consumers'));
-        await pending.promise.catch(error => {
-          if (error !== pending.controller.signal.reason) throw error;
+        pending.controller.abort(new OmpSkillDiscoveryCancelledError({ cause: signal?.reason }));
+        await pending.promise.catch(error => { error = systemError(error, 'skills OS operation');
+          if (!(error instanceof OmpSkillDiscoveryCancelledError || error instanceof OmpRuntimeStoppingError) || error !== pending.controller.signal.reason) throw error;
         });
       }
     }
@@ -98,7 +99,7 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
     const args = ompArguments(deps.config.omp.args);
     for (const arg of args) {
       if (!arg.flag.startsWith('-') || ['--', '--alias', '--prewalk', '--prewalk-into', '--plan', '--plan-yolo', '--plan-yolo-into'].includes(arg.flag)) {
-        throw new Error(`OMP argument ${arg.flag} conflicts with turn-free skill discovery`);
+        throw new OmpConfigurationError(`OMP argument ${arg.flag} conflicts with turn-free skill discovery`, `Discover skills in ${instancePath}`);
       }
     }
     const directory = await mkdtemp(path.join(tmpdir(), 'omp-tg-skills-'));
@@ -112,7 +113,7 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
         skills: { enableSkillCommands: true },
       }));
       deps.assertActive();
-      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new OmpRuntimeStoppingError();
       signal.throwIfAborted();
       child = spawn(deps.config.omp.executable, [
         ...deps.config.omp.args, '--cwd', instancePath, '--config', config,
@@ -134,11 +135,11 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
           settled = true;
           clearTimeout(timer);
           if (error) {
-            if (stderr) error.message += `\n${stderr}`;
+            if (stderr && !(error instanceof OmpProviderSetupError)) error.message += `\n${stderr}`;
             reject(error);
           } else resolve(commands!);
         };
-        const timer = setTimeout(() => finish(new Error('OMP skill discovery timed out')), deps.config.omp.startupTimeoutMs);
+        const timer = setTimeout(() => finish(new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'OMP skill discovery timed out')), deps.config.omp.startupTimeoutMs);
         processHandle.once('error', error => finish(error));
         processHandle.once('close', (code, signal) => {
           const message = `OMP skill discovery exited before responding (code ${code}, signal ${signal})`;
@@ -148,19 +149,19 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
           // exits before runRpcMode when no model was selected.
           const missingProvider = code !== null && code !== 0 && signal === null
             && stderr.includes('No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.');
-          finish(Object.assign(missingProvider ? new OmpProviderSetupError(message) : new Error(message), { code, signal }));
+          finish(Object.assign(missingProvider ? new OmpProviderSetupError(`${message} (cwd ${instancePath}): ${stderr}`, { cause: { code, signal, diagnostic: stderr } }) : new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, message), { code, signal }));
         });
         processHandle.stderr!.setEncoding('utf8');
         processHandle.stderr!.on('data', (part: string) => {
           if (settled) return;
           stderr += part;
-          if (Buffer.byteLength(stderr) > 2 * 1024 * 1024) finish(new Error('OMP skill discovery diagnostics are too large'));
+          if (Buffer.byteLength(stderr) > 2 * 1024 * 1024) finish(new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'OMP skill discovery diagnostics are too large'));
         });
         processHandle.stdout!.setEncoding('utf8');
         processHandle.stdout!.on('data', (part: string) => {
           if (settled) return;
           bytes += Buffer.byteLength(part);
-          if (bytes > 2 * 1024 * 1024) { finish(new Error('OMP skill discovery response is too large')); return; }
+          if (bytes > 2 * 1024 * 1024) { finish(new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'OMP skill discovery response is too large')); return; }
           input += part;
           let newline;
           while ((newline = input.indexOf('\n')) !== -1) {
@@ -168,17 +169,17 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
             input = input.slice(newline + 1);
             if (!line.trim()) continue;
             try {
-              const response: unknown = JSON.parse(line);
+              const response: unknown = parseJson(line, 'Read skill RPC', `cwd ${instancePath}`);
               if (!record(response) || response.id !== requestId) continue;
-              if (response.success !== true) throw new Error(typeof response.error === 'string' ? response.error : JSON.stringify(response));
-              if (!record(response.data) || !Array.isArray(response.data.commands)) throw new Error('Invalid OMP available commands response');
+              if (response.success !== true) throw new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, typeof response.error === 'string' ? response.error : JSON.stringify(response));
+              if (!record(response.data) || !Array.isArray(response.data.commands)) throw new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'Invalid OMP available commands response');
               const commands = response.data.commands.filter((command: unknown) => record(command) && command.source === 'skill');
               finish(undefined, commands.map((command: Record<string, unknown>) => {
-                if (typeof command.name !== 'string' || !command.name.startsWith('skill:')) throw new Error('Invalid OMP skill command name');
+                if (typeof command.name !== 'string' || !command.name.startsWith('skill:')) throw new OmpProtocolError('Skill discovery', `cwd ${instancePath}`, 'Invalid OMP skill command name');
                 return { name: command.name.slice(6), description: typeof command.description === 'string' ? command.description : '' };
               }));
-            } catch (error) {
-              finish(error instanceof Error ? error : new Error(String(error)));
+            } catch (error) { error = systemError(error, 'skills OS operation');
+              finish(error instanceof Error ? error : new Error(`Read skill RPC (cwd ${instancePath}): ${String(error)}`, { cause: error }));
             }
           }
         });
@@ -200,13 +201,13 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
     try {
       if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
       else child.kill('SIGKILL');
-    } catch (error) {
+    } catch (error) { error = systemError(error, 'skills OS operation');
       if (!errno(error, 'ESRCH')) throw error;
     }
   }
   async function closeDiscovery(): Promise<void> {
-    for (const discovery of skillDiscovery.values()) discovery.controller.abort(new Error('OMP runtime is stopping'));
-    await Promise.allSettled([...skillDiscovery.values()].map(discovery => discovery.promise));
+    for (const discovery of skillDiscovery.values()) discovery.controller.abort(new OmpRuntimeStoppingError());
+    await settleOperations([...skillDiscovery.values()].map(discovery => discovery.promise), 'Close skill discovery');
     skillCatalogs.clear();
   }
   return { cachedSkills, killSkillProcess, closeDiscovery };

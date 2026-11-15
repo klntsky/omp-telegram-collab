@@ -3,6 +3,8 @@ import * as terms from './telegram-command-parser.terms.js';
 import { commandTokenContext } from './telegram-command-tokens.js';
 import { isMentionableSkillName } from './skill-commands.js';
 
+class TelegramCommandValidationError extends Error {}
+
 export type PromptExtension =
   | { kind: 'model-preset'; name?: string }
   | { kind: 'worktree' }
@@ -78,7 +80,15 @@ export function parseTelegramCommand(
   try {
     const byStart = new Map(tokens.map(token => [token.start, token]));
     const parser = generatedParser.configure({ strict: true, contextTracker: commandTokenContext(byStart) });
-    const tree = parser.parse(text);
+    const tree = (() => {
+      try { return parser.parse(text); }
+      catch (error) {
+        // Lezer strict parsing signals invalid input with SyntaxError, not arbitrary failures.
+        // https://github.com/lezer-parser/lr/blob/main/src/parse.ts — Parse.advance.
+        if (!(error instanceof SyntaxError)) throw error;
+        throw new TelegramCommandValidationError(`Telegram command /${root.action ?? 'skill'} parsing failed: ${error.message}`, {cause: error});
+      }
+    })();
     const request = tree.topNode.firstChild!;
     if (request.name !== 'Prompt' && request.name !== 'SkillPrompt') {
       const argument = tokens.length > 1 ? text.slice(tokens[1]!.start, tokens.at(-1)!.end) : '';
@@ -87,20 +97,20 @@ export function parseTelegramCommand(
         case 'Configuration':
         case 'Lifecycle':
         case 'Guidance':
-          if (tokens.length > 1) throw new SyntaxError(`Usage: /${root.action}`);
+          if (tokens.length > 1) throw new TelegramCommandValidationError(`Usage: /${root.action}`);
           break;
         case 'Start':
         case 'OptionalArgument':
         case 'Skills':
           if (tokens.length > 2 || (tokens[1] && tokens[1].kind !== 'text'))
-            throw new SyntaxError(`Usage: /${root.action} ${request.name === 'Skills' ? '[clear]' : request.name === 'Start' ? '[payload]' : root.action === 'worktree' ? '[branch]' : '[name]'}`);
+            throw new TelegramCommandValidationError(`Usage: /${root.action} ${request.name === 'Skills' ? '[clear]' : request.name === 'Start' ? '[payload]' : root.action === 'worktree' ? '[branch]' : '[name]'}`);
           break;
         case 'Attach':
-          if (!tokens[1] || tokens[1].kind !== 'text') throw new SyntaxError('Usage: /attach <instanceId> [name]');
+          if (!tokens[1] || tokens[1].kind !== 'text') throw new TelegramCommandValidationError('Usage: /attach <instanceId> [name]');
           break;
       }
-      if (request.name === 'Skills' && argument && argument !== 'clear') throw new SyntaxError('Expected clear or no argument');
-      if (root.action === 'modelpreset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new SyntaxError('Invalid model preset name');
+      if (request.name === 'Skills' && argument && argument !== 'clear') throw new TelegramCommandValidationError('Telegram /skills validation failed: Expected clear or no argument');
+      if (root.action === 'modelpreset' && argument && !/^[A-Za-z][\w-]*$/.test(argument)) throw new TelegramCommandValidationError('Telegram /modelpreset validation failed: Invalid model preset name');
       return { kind: 'command', action: root.action!, argument };
     }
     const extensions: PromptExtension[] = [];
@@ -136,7 +146,7 @@ export function parseTelegramCommand(
       : { kind: 'selection', name: root.skill! };
     return { kind: 'prompt', action: root.action === 'new' ? 'new' : 'p', text: prompt, extensions };
   } catch (error) {
-    if (!(error instanceof Error)) throw error;
+    if (!(error instanceof TelegramCommandValidationError)) throw error;
     return { kind: 'invalid', error };
   }
 }

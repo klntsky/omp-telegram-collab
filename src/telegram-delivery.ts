@@ -4,6 +4,7 @@ import {
   type AbortSignal as TelegramAbortSignal,
 } from 'abort-controller';
 import { withTelegramDeliveryRetry } from './telegram-retry.js';
+import { TelegramDeliveryTimeoutError, TelegramRequestCancelledError } from './telegram-errors.js';
 
 type LaneName = 'ordinary' | 'name' | 'icon';
 
@@ -203,7 +204,7 @@ export class TelegramDelivery {
         };
         const timer = setTimeout(() => {
           finish(() =>
-            finished.reject(new Error('Telegram topic delivery timed out after 5000ms')),
+            finished.reject(new TelegramDeliveryTimeoutError(`Telegram topic ${name} delivery failed (chat=${chatId}, session=${key}): Telegram topic delivery timed out after 5000ms`)),
           );
           controller.abort();
         }, 5000);
@@ -216,6 +217,11 @@ export class TelegramDelivery {
           void raw.then(
             (value) => finish(() => finished.resolve(value)),
             (error) => {
+              if (settled && !(error instanceof TelegramRequestCancelledError)) {
+                // Cancellation settles the caller before the dependency finishes. A late rejection
+                // still needs an owner; an aborted transport does not prove this was cancellation.
+                console.error(`Late Telegram topic ${name} delivery failure (chat=${chatId}, session=${key}).`, error);
+              }
               this.observeRateLimit(chat, error);
               finish(() => finished.reject(error));
             },
@@ -261,7 +267,8 @@ export class TelegramDelivery {
       try {
         if (topic.active() && now - topic.refreshedAt < 4000) continue;
       } catch (error) {
-        topic.pending?.reject(error);
+        if (topic.pending) topic.pending.reject(error);
+        else console.error(`Telegram typing eligibility failed (thread=${id}).`, error);
       }
       topic.pending?.cancel();
       chat.topics.delete(id);

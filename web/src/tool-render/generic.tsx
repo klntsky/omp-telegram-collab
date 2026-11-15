@@ -9,12 +9,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 }
 
 function Body({ args, result }: ToolRenderProps): ReactNode {
-	let argText = "";
-	try {
-		argText = JSON.stringify(args, null, 2) ?? "";
-	} catch {
-		argText = String(args);
-	}
+	const argText = JSON.stringify(args, null, 2) ?? "";
 	return (
 		<>
 			{argText && argText !== "{}" && (

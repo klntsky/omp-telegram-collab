@@ -1,3 +1,4 @@
+import { BotSessionStateError } from './errors.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { Listener, TopicActivity } from './types.js';
@@ -77,7 +78,7 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           activeListener.connection !== connection ||
           activeListener.generation !== deps.store.getSessionGeneration(session.id)
         )
-          throw new Error('Session closed');
+          throw new BotSessionStateError(`Stop session (session=${session.id}, chat=${ctx.chat.id}): Session closed`);
         activeListener.pendingAnswers.clear();
         activeListener.pendingStops.push(message.message_id);
         try {

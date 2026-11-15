@@ -3,6 +3,31 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+class MissingLifecycleFileError extends Error {
+  constructor(cause) { super(`Lifecycle file disappeared: ${cause.message}`, { cause }); this.name = 'MissingLifecycleFileError'; }
+}
+
+function lifecycleFileError(error) {
+  return error instanceof Error && error.code === 'ENOENT' ? new MissingLifecycleFileError(error) : error;
+}
+
+function capabilityError(error, capability) {
+  if (error instanceof Error && ['ERR_MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error.code)) {
+    return new HostRequestError('rejected', `Load OMP host ${capability}: ${error.message}`, { cause: error });
+  }
+  console.error(`Load OMP host ${capability} failed:`, error);
+  return error;
+}
+
+class HostRequestError extends Error {
+  constructor(kind, message, options) { super(message, options); this.name = 'HostRequestError'; this.kind = kind; }
+}
+
+function errorResponse(error, operation, sessionId) {
+  if (!(error instanceof HostRequestError)) console.error(`OMP lifecycle ${operation} failed (session ${sessionId}):`, error);
+  return { errorKind: error instanceof HostRequestError ? error.kind : 'unexpected', error: `${operation} (session ${sessionId}): ${error instanceof Error ? error.message : String(error)}` };
+}
+
 
 export default async function hostLifecycle(pi) {
   const directory = process.env.OMP_TELEGRAM_SESSION_DIR;
@@ -19,13 +44,13 @@ export default async function hostLifecycle(pi) {
   try {
     ({ getActiveSkills } = await import('@oh-my-pi/pi-coding-agent/extensibility/skills'));
   } catch (error) {
-    skillsError = error;
+    skillsError = capabilityError(error, 'skills');
   }
   // Native module exports depend on the installed OMP host and can be absent on older hosts.
   try {
     ({ findScopedSettings } = await import('@oh-my-pi/pi-coding-agent/config/settings'));
   } catch (error) {
-    settingsError = error;
+    settingsError = capabilityError(error, 'scoped settings');
   }
   pi.on('session_start', async (_event, context) => {
     if (context.agent.kind !== 'main' || server) return;
@@ -42,7 +67,7 @@ export default async function hostLifecycle(pi) {
       };
       try {
         if (settingsError) throw settingsError;
-        if (!settings) throw new Error('OMP host scoped settings are unavailable for the forum default model preset');
+        if (!settings) throw new HostRequestError('rejected', 'OMP host scoped settings are unavailable for the forum default model preset');
         const [presets, resolver, modelSettings, sessionSettings] = await Promise.all([
           import('@oh-my-pi/pi-coding-agent/config/model-presets'),
           import('@oh-my-pi/pi-coding-agent/config/model-resolver'),
@@ -50,7 +75,7 @@ export default async function hostLifecycle(pi) {
           import('@oh-my-pi/pi-coding-agent/session/settings'),
         ]);
         const lookup = presets.getModelPreset(settings, startupPreset);
-        if (lookup.kind !== 'found') throw new Error(presets.formatModelPresetSwitch(startupPreset, lookup));
+        if (lookup.kind !== 'found') throw new HostRequestError('rejected', presets.formatModelPresetSwitch(startupPreset, lookup));
         const preset = lookup.preset;
         modelSettings.cfgModelRoles.override(settings, Object.fromEntries([
           ...Object.keys(modelSettings.cfgModelRoles.get(settings)).map(role => [role, null]),
@@ -80,37 +105,37 @@ export default async function hostLifecycle(pi) {
             ) };
         if (!resolved.model) {
           const reason = selector ? `default model \`${selector}\` is not available` : 'no model with configured credentials is available';
-          throw new Error(presets.formatModelPresetSwitch(startupPreset, { kind: 'unavailable', reason }));
+          throw new HostRequestError('rejected', presets.formatModelPresetSwitch(startupPreset, { kind: 'unavailable', reason }));
         }
-        if (!await pi.setModel(resolved.model)) throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
+        if (!await pi.setModel(resolved.model)) throw new HostRequestError('rejected', `No API key for ${resolved.model.provider}/${resolved.model.id}`);
         pi.setThinkingLevel(resolved.explicitThinkingLevel
           ? resolved.thinkingLevel
           : sessionSettings.cfgDefaultThinkingLevel.get(settings));
         startupReady = () => publish({ ready: true });
       } catch (error) {
-        publish({ error: error instanceof Error ? error.message : String(error) });
+        publish(errorResponse(error, 'Apply startup model preset', sessionId));
         context.shutdown();
         return;
       }
     }
     const assertAvailable = request => {
       if (request.sessionId !== sessionId || context.sessionManager.getSessionId() !== sessionId) {
-        throw new Error('OMP session identity changed during model preset control');
+        throw new HostRequestError('rejected', 'OMP session identity changed during model preset control');
       }
-      if (descriptor?.retiring) throw new Error('OMP host is retiring');
-      if (Date.now() >= request.deadline) throw new Error('OMP model preset request expired before execution');
+      if (descriptor?.retiring) throw new HostRequestError('rejected', 'OMP host is retiring');
+      if (Date.now() >= request.deadline) throw new HostRequestError('rejected', 'OMP model preset request expired before execution');
     };
     const runPresets = async request => {
       assertAvailable(request);
       if (settingsError) throw settingsError;
-      if (!settings) throw new Error('OMP host scoped settings are unavailable; restart this managed host');
+      if (!settings) throw new HostRequestError('rejected', 'OMP host scoped settings are unavailable; restart this managed host');
       const presets = await import('@oh-my-pi/pi-coding-agent/config/model-presets');
       if (request.name === undefined) {
         assertAvailable(request);
         const names = presets.getModelPresetNames(settings);
         return names.length > 0 ? `Model presets: ${names.join(', ')}` : 'No model presets saved. Use /modelpreset save <name> to create one.';
       }
-      if (!context.isIdle() || context.hasPendingMessages()) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching model presets');
+      if (!context.isIdle() || context.hasPendingMessages()) throw new HostRequestError('busy', 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets');
       const [resolver, modelSettings, cli, sessionSettings] = await Promise.all([
         import('@oh-my-pi/pi-coding-agent/config/model-resolver'),
         import('@oh-my-pi/pi-coding-agent/config/model-settings'),
@@ -122,7 +147,7 @@ export default async function hostLifecycle(pi) {
         ? await resolver.resolveModelScope(patterns, context.modelRegistry, resolver.getModelMatchPreferences(settings), settings)
         : [];
       const lookup = presets.getModelPreset(settings, request.name);
-      if (lookup.kind !== 'found') throw new Error(presets.formatModelPresetSwitch(request.name, lookup));
+      if (lookup.kind !== 'found') throw new HostRequestError('rejected', presets.formatModelPresetSwitch(request.name, lookup));
       const preset = lookup.preset;
       const modelRoles = Object.fromEntries([
         ...Object.keys(modelSettings.cfgModelRoles.get(settings)).map(role => [role, null]),
@@ -144,27 +169,28 @@ export default async function hostLifecycle(pi) {
           ) };
       if (!resolved.model) {
         const reason = selector ? `default model \`${selector}\` is not available` : 'no model with configured credentials is available';
-        throw new Error(presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason }));
+        throw new HostRequestError('rejected', presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason }));
       }
       if (!context.modelRegistry.hasConfiguredAuth(resolved.model)) {
-        throw new Error(presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason: `no credentials for ${resolved.model.provider}/${resolved.model.id}` }));
+        throw new HostRequestError('rejected', presets.formatModelPresetSwitch(request.name, { kind: 'unavailable', reason: `no credentials for ${resolved.model.provider}/${resolved.model.id}` }));
       }
       assertAvailable(request);
-      if (!context.isIdle() || context.hasPendingMessages()) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching model presets');
+      if (!context.isIdle() || context.hasPendingMessages()) throw new HostRequestError('busy', 'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets');
       const previousOverrides = settings.overlayLayers().overrides;
       const level = resolved.explicitThinkingLevel ? resolved.thinkingLevel : nextThinking;
       let switched = false;
       try {
         modelSettings.cfgModelRoles.override(settings, modelRoles);
         sessionSettings.cfgDefaultThinkingLevel.override(settings, nextThinking);
-        if (!await pi.setModel(resolved.model)) throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
+        if (!await pi.setModel(resolved.model)) throw new HostRequestError('rejected', `No API key for ${resolved.model.provider}/${resolved.model.id}`);
         pi.setThinkingLevel(level);
         switched = true;
         return presets.formatModelPresetSwitch(request.name, {
           kind: 'switched', model: resolved.model, thinkingLevel: level, shadowed: [], shadowedThinking: undefined,
         });
       } catch (error) {
-        throw new Error(presets.formatModelPresetSwitch(request.name, {
+        if (!(error instanceof HostRequestError)) throw error;
+        throw new HostRequestError('rejected', presets.formatModelPresetSwitch(request.name, {
           kind: 'failed', reason: error instanceof Error ? error.message : String(error), shadowed: [],
         }), { cause: error });
       } finally {
@@ -191,17 +217,21 @@ export default async function hostLifecycle(pi) {
         const respond = result => {
           if (socket.destroyed) return;
           const response = JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, ...result });
-          socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, error: 'OMP model preset response is too large' })}\n`);
+          socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, errorKind: 'rejected', error: 'OMP model preset response is too large' })}\n`);
         };
         try {
-          request = JSON.parse(input.trim());
+          try { request = JSON.parse(input.trim()); }
+          catch (error) {
+            if (!(error instanceof SyntaxError)) throw error;
+            throw new HostRequestError('rejected', `Invalid lifecycle request JSON: ${error.message}`, { cause: error });
+          }
           if (request?.type === 'retire') {
             if (typeof request.requestId !== 'string' ||
                 !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.requestId) ||
                 typeof request.sessionId !== 'string' || !Number.isSafeInteger(request.pid) ||
                 !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000 ||
                 !['idle', 'none'].includes(request.guard)) {
-              throw new Error('Invalid OMP retirement request');
+              throw new HostRequestError('rejected', 'Invalid OMP retirement request');
             }
             const retirementResponse = outcome => respond({ sessionId: request.sessionId, pid: request.pid, outcome });
             if (request.sessionId !== sessionId || context.sessionManager.getSessionId() !== sessionId ||
@@ -219,7 +249,7 @@ export default async function hostLifecycle(pi) {
               writeFileSync(grant, JSON.stringify(nextDescriptor), { flag: 'r+', mode: 0o600 });
               renameSync(grant, join(directory, 'lifecycle.json'));
             } catch (error) {
-              if (error.code !== 'ENOENT') throw error;
+              if (!(lifecycleFileError(error) instanceof MissingLifecycleFileError)) throw error;
               retirementResponse('expired');
               return;
             }
@@ -235,34 +265,37 @@ export default async function hostLifecycle(pi) {
               request.requestId.length > 128 || typeof request.sessionId !== 'string' ||
               (request.name !== undefined && typeof request.name !== 'string') ||
               !Number.isSafeInteger(request.deadline) || request.deadline > Date.now() + 15000) {
-            throw new Error('Invalid OMP model preset request');
+            throw new HostRequestError('rejected', 'Invalid OMP model preset request');
           }
           assertAvailable(request);
         } catch (error) {
-          respond({ error: error instanceof Error ? error.message : String(error) });
+          respond(errorResponse(error, request?.type ?? 'Parse lifecycle request', sessionId));
           return;
         }
         clearTimeout(timeout);
         const commandTimeout = setTimeout(() => socket.destroy(), Math.max(1, request.deadline - Date.now()));
         socket.once('close', () => clearTimeout(commandTimeout));
         const operation = (commandTail ?? Promise.resolve()).then(() => {
-          if (socket.destroyed) throw new Error('OMP model preset request disconnected before execution');
+          if (socket.destroyed) throw new HostRequestError('rejected', 'OMP model preset request disconnected before execution');
           if (request.type === 'set_session_title') {
             assertAvailable(request);
-            if (typeof request.name !== 'string' || !request.name.trim()) throw new Error('OMP session title cannot be empty');
-            if (typeof pi.setSessionName !== 'function') throw new Error('OMP host session title control is unavailable');
+            if (typeof request.name !== 'string' || !request.name.trim()) throw new HostRequestError('rejected', 'OMP session title cannot be empty');
+            if (typeof pi.setSessionName !== 'function') throw new HostRequestError('rejected', 'OMP host session title control is unavailable');
             return Promise.resolve(pi.setSessionName(request.name)).then(() => '');
           }
           if (request.type === 'list_skills') {
             assertAvailable(request);
             if (skillsError) throw skillsError;
-            if (typeof getActiveSkills !== 'function') throw new Error('OMP host skill discovery is unavailable');
+            if (typeof getActiveSkills !== 'function') throw new HostRequestError('rejected', 'OMP host skill discovery is unavailable');
             return JSON.stringify(getActiveSkills().map(skill => ({ name: skill.name, description: skill.description ?? '' })));
           }
           return runPresets(request);
         });
         commandTail = operation.then(() => {}, () => {});
-        void operation.then(text => respond({ text }), error => respond({ error: error instanceof Error ? error.message : String(error) }));
+        void operation.then(
+          text => respond({ text }),
+          error => respond(errorResponse(error, request.type, sessionId)),
+        );
       });
       socket.on('error', error => {
         console.error('OMP lifecycle socket error:', error);
@@ -293,7 +326,7 @@ export default async function hostLifecycle(pi) {
     server.close();
     for (const filename of [socketPath, join(directory, 'lifecycle.json')]) {
       if (!filename) continue;
-      try { unlinkSync(filename); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      try { unlinkSync(filename); } catch (error) { if (!(lifecycleFileError(error) instanceof MissingLifecycleFileError)) throw error; }
     }
   });
 }

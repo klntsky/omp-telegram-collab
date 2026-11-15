@@ -1,3 +1,5 @@
+import { BotWorkingDirectoryError } from './errors.js';
+import { reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -9,6 +11,7 @@ import { isActiveMember, isAdministrator } from '../auth.js';
 import { contextDestination, replyTo, sendTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import type { CapacityRequest } from './types.js';
+import type { SessionCapacityError } from '../runtime/types.js';
 
 export interface CapacityDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime' | 'configWritable'>;
@@ -39,11 +42,12 @@ export class CapacityAdmission {
   }
   set(token: string, request: CapacityRequest): void { this.capacityRequests.set(token, request); }
   delete(token: string): void { this.capacityRequests.delete(token); }
-  async requestCapacity(session: TopicSession, limit: number): Promise<void> {
+  async requestCapacity(session: TopicSession, error: SessionCapacityError): Promise<void> {
+    const {limit} = error;
     if (!this.deps.sessionAssigned(session)) return;
     if (!(this.deps.options.configWritable?.() ?? configWritable(this.deps.options.config.configPath))) {
       const command = `${this.deps.localCliCommand()} setup`;
-      await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), `OMP session limit reached (${limit}). Configuration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
+      await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), `${error.message}\nConfiguration is read-only; ask the local operator to change its source or permissions, then run:\n${command}`);
       return;
     }
     const now = Date.now();
@@ -53,7 +57,7 @@ export class CapacityAdmission {
     }
     const token = randomBytes(16).toString('base64url');
     const message = await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId),
-      `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by a group administrator is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
+      `${error.message}\nIncrease the shared configured limit from ${limit} to ${limit * 2}? Confirmation by a group administrator is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
       { reply_markup: { inline_keyboard: [[
         { text: `Confirm ${limit} → ${limit * 2}`, callback_data: `capacity:approve:${token}` },
         { text: 'Cancel', callback_data: `capacity:cancel:${token}` },
@@ -102,7 +106,7 @@ export class CapacityAdmission {
       if (command.cwd !== undefined) {
         opendirSync(command.cwd).closeSync();
         accessSync(command.cwd,constants.R_OK | constants.X_OK);
-        if (realpathSync(command.cwd) !== command.cwd) throw new Error('Managed working directory identity changed');
+        if (realpathSync(command.cwd) !== command.cwd) throw new BotWorkingDirectoryError(`Approve session capacity (chat=${ctx.chat.id}, path=${command.cwd}): Managed working directory identity changed`);
       }
       const persisted = readConfig(this.deps.options.config.configPath);
       if (findInstance(persisted, this.deps.id(), request.chatId)?.instance.id !== command.instanceId ||
@@ -138,7 +142,7 @@ export class CapacityAdmission {
     this.deps.options.config.omp.maxSessions = request.limit * 2;
     this.deps.options.runtime.increaseSessionLimit(request.limit);
     await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`)
-      .catch(error => console.warn(`Could not deliver session capacity increase notice (${session.id}).`, error));
+      .catch(error => reportBotError(`Could not deliver session capacity increase notice (${session.id}).`, error));
     if (this.deps.options.store.hasPendingInitialTask(session.id)) await this.deps.sendInitial(session);
     else await this.deps.listen(session);
   }

@@ -1,3 +1,4 @@
+import { OmpIdentityError, systemError } from './errors.js';
 import { randomUUID } from 'node:crypto';
 import { lstat, open, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,7 +28,7 @@ export async function writeBinding(dir: string, binding: DurableBinding): Promis
       await handle.close();
     }
   } finally {
-    await unlink(temporary).catch(error => {
+    await unlink(temporary).catch(error => { error = systemError(error, 'files OS operation');
       if (!errno(error, 'ENOENT')) throw error;
     });
   }
@@ -35,10 +36,10 @@ export async function writeBinding(dir: string, binding: DurableBinding): Promis
 
 export async function readHeader(file: string): Promise<{ id: string; cwd: string }> {
   const stat = await lstat(file);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Managed history must be a regular file');
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new OmpIdentityError('Managed history must be a regular file', `Read managed history ${file}`);
   const handle = await open(file, 'r');
   try {
-    return await readHistoryHeader(handle);
+    return await readHistoryHeader(handle, file);
   } finally {
     await handle.close();
   }

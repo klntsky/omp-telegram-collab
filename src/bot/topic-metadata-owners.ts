@@ -1,9 +1,12 @@
-import { GrammyError } from 'grammy';
+import { BotCancellationError, reportBotError } from './errors.js';
+import { TelegramTopicNotModifiedError, TelegramRequestCancelledError } from '../telegram-errors.js';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { TopicSession } from '../../shared/contracts.js';
 import { TopicWriter } from '../topic-writer.js';
 import type { KnownTopicActivity, TopicActivity, TopicMetadata, TopicTitleSource, HostActivityObservation, SessionMetadataOwner } from './types.js';
 import type { MetadataDependencies } from './metadata-dependencies.js';
+
+class TelegramTopicIconUnavailableError extends Error {}
 
 export class TopicMetadataOwners {
   readonly metadataOwners = new Map<string, SessionMetadataOwner>();
@@ -22,7 +25,7 @@ export class TopicMetadataOwners {
         const find = (emoji: string) => {
           const normalized = emoji.replace(/\uFE0F/g, '');
           const id = stickers.find(sticker => sticker.emoji?.replace(/\uFE0F/g, '') === normalized)?.custom_emoji_id;
-          if (!id) throw new Error(`Telegram topic icon unavailable: ${emoji}`);
+          if (!id) throw new TelegramTopicIconUnavailableError(`Resolve Telegram topic icon (bot=${this.deps.bot.botInfo!.id}, emoji=${emoji}): Telegram topic icon unavailable: ${emoji}`);
           return id;
         };
         const emojis = this.deps.options.topicActivityEmojis ?? { running: '⚡', finished: '🏁' };
@@ -38,7 +41,7 @@ export class TopicMetadataOwners {
     const activity = this.metadataOwners.get(id)?.activity;
     if (activity) {
       activity.controller?.abort(
-        new Error('Activity observation canceled because its listener closed'),
+        new BotCancellationError(`Activity observation canceled because its listener closed (session=${id})`),
       );
       activity.value = 'unknown';
       activity.observedAt = undefined;
@@ -51,7 +54,7 @@ export class TopicMetadataOwners {
     if (!owner) return;
     this.invalidateActivity(id);
     owner.disposed = true;
-    owner.controller.abort(new Error('Session metadata ownership changed'));
+    owner.controller.abort(new BotCancellationError(`Session metadata ownership changed (session=${id})`));
     owner.metadata = undefined;
     owner.recovery = undefined;
     if (!owner.titleWrite) this.metadataOwners.delete(id);
@@ -176,7 +179,7 @@ export class TopicMetadataOwners {
               } catch (error) {
                 if (
                   !(
-                    error instanceof GrammyError && error.description.includes('TOPIC_NOT_MODIFIED')
+                    error instanceof TelegramTopicNotModifiedError
                   )
                 )
                   throw error;
@@ -205,14 +208,14 @@ export class TopicMetadataOwners {
           ),
         eligible,
         (error) => {
-          if (!owned()) return;
+          if (error instanceof TelegramRequestCancelledError && !owned()) return;
           this.deps.sessionObservation(session.id).failure = {
             operation:
               field === 'name' ? 'Topic title synchronization' : 'Topic icon synchronization',
             at: Date.now(),
             error,
           };
-          console.warn(`Could not synchronize topic ${field} (${session.id}).`, error);
+          reportBotError(`Could not synchronize topic ${field} (${session.id}).`, error);
         },
       );
       return result;

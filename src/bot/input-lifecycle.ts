@@ -1,3 +1,6 @@
+import { BotFolderRequestError, BotWorkingDirectoryError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
+import { reportBotError } from './errors.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -61,14 +64,14 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           await deps.authorize(ctx.chat!.id,ctx.from!.id);
           if (authority.callbackQuery) {
             await deps.authorize(ctx.chat!.id,authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before manual session registration.');
+            if (!(await deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Register manual session (chat=${ctx.chat!.id}, user=${authority.from!.id}): Administrator access changed before manual session registration.`);
           }
           if (epoch !== deps.admissionEpoch || deps.stopped || refreshTermination(deps.config) ||
               folderFingerprint !== JSON.stringify(deps.folderSettings(ctx.chat!.id)))
-            throw new Error('Folder settings or service state changed before manual session registration.');
+            throw new BotFolderRequestError(`Register manual session (chat=${ctx.chat!.id}, path=${cwd}): Folder settings or service state changed before manual session registration.`);
           opendirSync(cwd).closeSync();
           accessSync(cwd,constants.R_OK | constants.X_OK);
-          if (realpathSync(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+          if (realpathSync(cwd) !== cwd) throw new BotWorkingDirectoryError(`Register manual session (chat=${ctx.chat!.id}, path=${cwd}): Managed working directory identity changed`);
           if (deps.store.getTopic({botId:deps.id,destination})) return;
           const created = deps.store.createSession(
             {
@@ -84,7 +87,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
           if (deps.createsTopicWorktrees(ctx.chat!.id)) {
             await deps.authorize(ctx.chat!.id, authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
+            if (!(await deps.currentAdmin(authority))) throw new AuthorizationDeniedError(`Create worktree (session=${created.id}, user=${authority.from!.id}): Administrator access changed before worktree creation.`);
             await deps.createTopicWorktree(created);
           }
           await deps.announce(created);
@@ -123,8 +126,8 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           );
           void metadata.name.observe(edited.name);
           void deps.applySessionTitle(session).catch((error) => {
+            reportBotError(`Could not synchronize session title (${session.id}).`, error);
             if (deps.stopped || deps.config.terminated || !deps.sessionAssigned(session)) return;
-            console.warn(`Could not synchronize session title (${session.id}).`, error);
             deps.sessionObservation(session.id).failure = {
               operation: 'Topic title synchronization',
               at: Date.now(),
@@ -151,11 +154,11 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
               void metadata.icon.observe(value);
             })
             .catch((error) => {
+              reportBotError(`Could not synchronize topic icon (${session.id}).`, error);
               if (!deps.stopped && !deps.config.terminated &&
                   deps.metadataOwners.get(session.id)?.metadata === metadata &&
                   deps.sessionAssigned(session) &&
                   deps.store.getSessionGeneration(session.id) === metadata.generation) {
-                console.warn(`Could not synchronize topic icon (${session.id}).`, error);
                 deps.sessionObservation(session.id).failure = {
                   operation: 'Topic icon synchronization',
                   at: Date.now(),
@@ -180,7 +183,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             () => !deps.stopped && deps.sessionAssigned(session),
           )
           .catch((error) => {
-            console.warn(
+            reportBotError(
               `Could not delete topic edit notice (${session.id}, ${message.message_id}).`,
               error,
             );

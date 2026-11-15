@@ -1,3 +1,4 @@
+import { settleOperations, OmpConfigurationError, OmpRuntimeStoppingError } from './errors.js';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { type DurableBinding, type ManagedHost } from './types.js';
 interface TerminationDependencies {
@@ -24,8 +25,8 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
 
   function stop(session: TopicSession): Promise<boolean> {
     if (session.runtime.kind === 'attached') return Promise.resolve(true);
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
-    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) return Promise.reject(new Error('Instance path is not configured'));
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new OmpConfigurationError('Invalid managed session identifier', `Stop session ${session.id}`));
+    if (!deps.config.instances.some(instance => instance.id === session.instanceId)) return Promise.reject(new OmpConfigurationError('Instance path is not configured', `Stop session ${session.id}`));
     return stopHost(session.id, undefined, session).then(() => {
       const host = deps.managed.get(session.id);
       return !host || host.exited;
@@ -36,7 +37,7 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
     const pending = deps.stopping.get(id);
     if (pending) return session ? pending.then(() => stopHost(id, guard, session)) : pending;
     const operation = (async () => {
-      await deps.pending.get(id)?.catch(() => undefined);
+      await deps.pending.get(id)?.catch(error => { console.error(`Settle session ${id} startup before stop failed:`, error); });
       let host = deps.managed.get(id);
       if (session) {
         const pin = await deps.readManagedBinding(session);
@@ -54,8 +55,8 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
   }
 
   function kill(session: TopicSession): Promise<void> {
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
-    if (deps.closed) return Promise.reject(new Error('OMP runtime is stopping'));
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new OmpConfigurationError('Invalid managed session identifier', `Stop session ${session.id}`));
+    if (deps.closed) return Promise.reject(new OmpRuntimeStoppingError());
     const pending = deps.killing.get(session.id);
     if (pending) return pending;
     const ids = new Set([session.id]);
@@ -66,7 +67,7 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
       }
     }
     const operation = Promise.resolve().then(async () => {
-      await Promise.allSettled([...ids].map(id => deps.pending.get(id)));
+      await settleOperations([...ids].map(id => deps.pending.get(id)), `Settle startup before killing session ${session.id}`);
       await deps.acquire();
       await deps.killSession(session);
     }).finally(() => {

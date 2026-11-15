@@ -1,3 +1,6 @@
+import { BotPromptRejectedError, BotSessionStateError, BotFolderRequestError, BotWorkingDirectoryError } from './errors.js';
+import { AuthorizationDeniedError } from './types.js';
+import { reportBotError } from './errors.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PendingPromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -55,10 +58,10 @@ export class TopicCreation {
     const epoch = this.dependencies.admissionEpoch;
     const instanceId = this.dependencies.assignedId(ctx.chat!.id);
     if (attached && attached.instanceId !== instanceId)
-      throw new Error('The group instance assignment changed');
-    if (worktree && attached) throw new Error('Attached sessions cannot create managed worktrees');
+      throw new AuthorizationDeniedError(`Create topic (chat=${ctx.chat!.id}, instance=${instanceId}): The group instance assignment changed`);
+    if (worktree && attached) throw new BotPromptRejectedError(`Create topic (chat=${ctx.chat!.id}, instance=${instanceId}): Attached sessions cannot create managed worktrees`);
     if (this.dependencies.assignedId(ctx.chat!.id) !== instanceId)
-      throw new Error('The group instance assignment changed');
+      throw new AuthorizationDeniedError(`Create topic (chat=${ctx.chat!.id}, instance=${instanceId}): The group instance assignment changed`);
     if (!attached && cwd === undefined && await this.dependencies.chooseFolder(ctx,authority,selected =>
       this.newSession(ctx,task,attached,name,accepted,worktree,authority,extensions,undefined,selected,proposedSkills))) return;
     if (!attached && !worktree && task !== undefined && proposedSkills) {
@@ -66,7 +69,7 @@ export class TopicCreation {
       if (names.length) {
         const available = await this.dependencies.options.runtime.listSkills(instanceId, undefined, undefined, cwd);
         const missing = names.filter(name => !available.some(skill => skill.name === name));
-        if (missing.length) throw new Error(`Skills are no longer available: ${missing.join(', ')}`);
+        if (missing.length) throw new BotPromptRejectedError(`Select topic skills (chat=${ctx.chat!.id}, instance=${instanceId}): Skills are no longer available: ${missing.join(', ')}`);
       }
     }
     const title =
@@ -77,14 +80,14 @@ export class TopicCreation {
     const initialIcon =
       task !== undefined && !worktree ? (await this.dependencies.getIconIds()).running : undefined;
     if (!(await this.dependencies.currentAdmin(authority)))
-      throw new Error('Administrator access changed before topic creation.');
-    if (this.dependencies.stopped || refreshTermination(this.dependencies.options.config)) throw new Error('The service is stopping');
+      throw new AuthorizationDeniedError(`Create topic (chat=${ctx.chat!.id}, user=${authority.from!.id}): Administrator access changed before topic creation.`);
+    if (this.dependencies.stopped || refreshTermination(this.dependencies.options.config)) throw new BotSessionStateError(`Create topic (chat=${ctx.chat!.id}): The service is stopping`);
     if (epoch !== this.dependencies.admissionEpoch || folderFingerprint !== JSON.stringify(this.dependencies.folderSettings(ctx.chat!.id)))
-      throw new Error('Folder settings changed before topic creation. Send the command again.');
+      throw new BotFolderRequestError(`Create topic (chat=${ctx.chat!.id}): Folder settings changed before topic creation. Send the command again.`);
     if (cwd !== undefined) {
       opendirSync(cwd).closeSync();
       accessSync(cwd,constants.R_OK | constants.X_OK);
-      if (realpathSync(cwd) !== cwd) throw new Error('Managed working directory identity changed');
+      if (realpathSync(cwd) !== cwd) throw new BotWorkingDirectoryError(`Create topic (chat=${ctx.chat!.id}, path=${cwd}): Managed working directory identity changed`);
     }
     const topic = await this.dependencies.bot.api.createForumTopic(
       ctx.chat!.id,
@@ -92,9 +95,9 @@ export class TopicCreation {
       initialIcon ? { icon_custom_emoji_id: initialIcon } : {},
     );
     if (this.dependencies.assignedId(ctx.chat!.id) !== instanceId)
-      throw new Error('The group instance assignment changed');
+      throw new AuthorizationDeniedError(`Create topic (chat=${ctx.chat!.id}, topic=${topic.message_thread_id}, instance=${instanceId}): The group instance assignment changed`);
     if (epoch !== this.dependencies.admissionEpoch || folderFingerprint !== JSON.stringify(this.dependencies.folderSettings(ctx.chat!.id)))
-      throw new Error('Folder settings changed during topic creation. Send the command again.');
+      throw new BotFolderRequestError(`Create topic (chat=${ctx.chat!.id}, topic=${topic.message_thread_id}): Folder settings changed during topic creation. Send the command again.`);
     const automaticWorktree = !attached && !worktree && !extensions.some(extension => extension.kind === 'worktree') && this.dependencies.createsTopicWorktrees(ctx.chat!.id);
     const session = this.dependencies.options.store.createSession(
       { botId: this.dependencies.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instanceId, cwd: attached?.cwd ?? cwd ?? this.dependencies.assignedCwd(ctx.chat!.id) },
@@ -114,11 +117,11 @@ export class TopicCreation {
       if (automaticWorktree && !durableDocumentSetup) {
         await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
         if (!(await this.dependencies.currentAdmin(authority)))
-          throw new Error('Administrator access changed before worktree creation.');
+          throw new AuthorizationDeniedError(`Create topic worktree (session=${session.id}, user=${authority.from!.id}): Administrator access changed before worktree creation.`);
         await this.dependencies.createTopicWorktree(session);
         if (task !== undefined && !extensions.length && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+          if (!(await this.dependencies.currentAdmin(authority))) throw new AuthorizationDeniedError(`Submit initial task (session=${session.id}, user=${authority.from!.id}): Administrator access changed before initial task submission.`);
           this.dependencies.requireSessionAssignment(session);
           this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
         }
@@ -128,13 +131,13 @@ export class TopicCreation {
           await this.dependencies.preparePrompt(ctx, session, extensions, authority);
         } catch (error) {
           await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
-            console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
+            reportBotError(`Could not deliver the created topic link after prompt preparation failed (session=${session.id}).`, deliveryError);
           });
           throw error;
         }
         if (task !== undefined && !task.documents?.length) {
           await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
+          if (!(await this.dependencies.currentAdmin(authority))) throw new AuthorizationDeniedError(`Submit initial task (session=${session.id}, user=${authority.from!.id}): Administrator access changed before initial task submission.`);
           this.dependencies.requireSessionAssignment(session);
           this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
         }

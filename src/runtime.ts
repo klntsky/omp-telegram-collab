@@ -1,3 +1,4 @@
+import { OmpServiceTerminatedError, OmpConfigurationError, OmpSessionUnavailableError, OmpIdentityError, OmpProtocolError, parseJson, settleOperations, OmpRuntimeStoppingError } from './runtime/errors.js';
 import { createActivity, type RuntimeActivity } from './runtime/activity.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -72,11 +73,11 @@ export class OmpRuntime implements Omp {
   #sessionLimit: number;
   constructor(config: AppConfig) {
     if (!Number.isInteger(config.omp.maxSessions) || config.omp.maxSessions < 1 || !Number.isFinite(config.omp.startupTimeoutMs) || config.omp.startupTimeoutMs < 1) {
-      throw new Error('Invalid OMP runtime limits');
+      throw new OmpConfigurationError('Invalid OMP runtime limits', 'OMP runtime configuration');
     }
     for (const arg of config.omp.args) {
       const flag = arg.split('=', 1)[0]!;
-      if (Object.hasOwn(FORBIDDEN_ARGS, flag) || flag.startsWith('--from-')) throw new Error(`OMP argument ${flag} conflicts with managed hosting`);
+      if (Object.hasOwn(FORBIDDEN_ARGS, flag) || flag.startsWith('--from-')) throw new OmpConfigurationError(`OMP argument ${flag} conflicts with managed hosting`, 'OMP runtime configuration');
     }
     this.#config = config;
     this.#sessionLimit = config.omp.maxSessions;
@@ -259,12 +260,12 @@ export class OmpRuntime implements Omp {
   #assertActive(): void {
     if (refreshTermination(this.#config)) {
       this.#reservations.clear();
-      throw new Error('The service got terminated, only admin can resume it (remove terminated: true from the config)');
+      throw new OmpServiceTerminatedError();
     }
   }
   getSessionLimit(): number { return this.#sessionLimit; }
   setSessionLimit(limit: number): void {
-    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid OMP session limit');
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new OmpConfigurationError('Invalid OMP session limit', 'OMP runtime configuration');
     this.#sessionLimit = limit;
   }
   increaseSessionLimit(expectedLimit: number): boolean {
@@ -280,9 +281,9 @@ export class OmpRuntime implements Omp {
     return {
       bind: id => {
         this.#assertActive();
-        if (this.#closed || !this.#reservations.has(token)) throw new Error('OMP reservation expired');
-        if (sessionId !== undefined && id !== sessionId) throw new Error('OMP reservation target cannot change');
-        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Invalid managed session identifier');
+        if (this.#closed || !this.#reservations.has(token)) throw new OmpSessionUnavailableError('OMP reservation expired', 'OMP runtime session admission');
+        if (sessionId !== undefined && id !== sessionId) throw new OmpSessionUnavailableError('OMP reservation target cannot change', 'OMP runtime session admission');
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new OmpConfigurationError('Invalid managed session identifier', 'OMP runtime configuration');
         this.#reservations.set(token, id);
         sessionId = id;
       },
@@ -298,7 +299,7 @@ export class OmpRuntime implements Omp {
   worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
   #instanceDirectory(instanceId: number): string {
     const instance = this.#config.instances.find(instance => instance.id === instanceId);
-    if (!instance) throw new Error('Instance ID is not configured');
+    if (!instance) throw new OmpConfigurationError('Instance ID is not configured', 'OMP runtime configuration');
     return instance.defaultDir;
   }
   validateSessionPaths: (sessions: TopicSession[], config?: AppConfig) => Promise<void>;
@@ -321,18 +322,18 @@ export class OmpRuntime implements Omp {
   historySource: (session: TopicSession) => Promise<{ sessionId: string; path: string } | undefined>;
   resolveExisting: (session: TopicSession) => Promise<HostBinding | undefined>;
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
-    if (session.status !== 'open') return Promise.reject(new Error('Session closed'));
+    if (session.status !== 'open') return Promise.reject(new OmpSessionUnavailableError('Session closed', 'OMP runtime session admission'));
     try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
-    if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
-    if (!this.#config.instances.some(instance => instance.id === session.instanceId)) return Promise.reject(new Error('Instance path is not configured'));
+    if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new OmpRuntimeStoppingError());
+    if (!this.#config.instances.some(instance => instance.id === session.instanceId)) return Promise.reject(new OmpConfigurationError('Instance path is not configured', 'OMP runtime configuration'));
     const pending = this.#pending.get(session.id);
     if (pending) return pending;
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new Error('Invalid managed session identifier'));
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return Promise.reject(new OmpConfigurationError('Invalid managed session identifier', 'OMP runtime configuration'));
     const operation = session.runtime.kind === 'managed'
       ? this.#admitManaged(session,beforeMutation)
       : this.#registry.attach(session.runtime.instanceId, session.cwd).then(binding => {
         if (session.runtime.kind !== 'attached' || binding.sessionId !== session.runtime.sessionId) {
-          throw new Error('Attached OMP session identity changed');
+          throw new OmpIdentityError('Attached OMP session identity changed', `Ensure session ${session.id}`);
         }
         return binding;
       });
@@ -346,26 +347,26 @@ export class OmpRuntime implements Omp {
   async listSkills(instanceId: number, session?: TopicSession, signal?: AbortSignal, discoveryCwd?: string): Promise<Array<{ name: string; description: string }>> {
     signal?.throwIfAborted();
     this.#assertActive();
-    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (this.#closed) throw new OmpRuntimeStoppingError();
     const instancePath = this.#instanceDirectory(instanceId);
-    if (session && session.instanceId !== instanceId) throw new Error('Session does not belong to this instance ID');
+    if (session && session.instanceId !== instanceId) throw new OmpConfigurationError('Session does not belong to this instance ID', 'OMP runtime configuration');
     let values: unknown;
     // Preserve the public activity port's dispatch, including operation instrumentation.
     if (session?.runtime.kind === 'managed' && await this.isRunning(session)) {
       if (!(await this.#ownership.lifecycle(session.id))?.skills) {
-        throw new Error('OMP host does not support skill discovery. Kill this managed host and send a new prompt to load the updated lifecycle extension.');
+        throw new OmpSessionUnavailableError('OMP host does not support skill discovery. Kill this managed host and send a new prompt to load the updated lifecycle extension.', 'OMP runtime session admission');
       }
-      values = JSON.parse(await this.#hostControl.hostControl(session, undefined, 'list_skills'));
+      values = parseJson(await this.#hostControl.hostControl(session, undefined, 'list_skills'), 'List host skills', `session ${session.id}`);
     } else {
       const cwd = session ? await this.#paths.validatedSessionCwd(session) : discoveryCwd ?? instancePath;
       if (!session && discoveryCwd !== undefined) await this.#paths.validateCwd(cwd);
       values = await this.#skills.cachedSkills(cwd, signal);
     }
     if (!Array.isArray(values) || values.some(value => !record(value) || typeof value.name !== 'string' || !value.name || typeof value.description !== 'string')) {
-      throw new Error('OMP returned an invalid skill catalog');
+      throw new OmpProtocolError('List skills', `instance ${instanceId}`, 'OMP returned an invalid skill catalog');
     }
     this.#assertActive();
-    if (this.#closed) throw new Error('OMP runtime is stopping');
+    if (this.#closed) throw new OmpRuntimeStoppingError();
     this.#instanceDirectory(instanceId);
     return (values as Array<{ name: string; description: string }>)
       .map(value => ({ name: value.name, description: value.description }))
@@ -384,9 +385,9 @@ export class OmpRuntime implements Omp {
     this.#closing = (async () => {
       for (const child of this.#skillProcesses) this.#skills.killSkillProcess(child);
       await this.#skills.closeDiscovery();
-      await Promise.allSettled(this.#pending.values());
+      await settleOperations(this.#pending.values(), 'Close pending runtime sessions');
       await this.#fork.drain();
-      await Promise.allSettled(this.#killing.values());
+      await settleOperations(this.#killing.values(), 'Close pending runtime kills');
       await this.#ownership.settleAcquisition();
       await this.retireIdle(0);
       this.#ownership.close();

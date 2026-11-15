@@ -28,6 +28,8 @@ Admin listings share the current-member authorization boundary. The adapter read
 
 The configuration layer owns the persistent service-termination switch. Telegram dispatch, gateway access and frame forwarding, and runtime admission recheck that switch at their respective boundaries, preventing a client or reconnect from bypassing suspension. Bot adapters invalidate pending interactions and invoke the runtime's identity-checked kill boundary; the service and Telegram polling stay alive.
 
+Integration boundaries translate recognized dependency failures into custom error classes before supported-flow handlers act on them. Handlers match classes or cancellation identity, not diagnostic text. Native protocols that expose only text are classified once at their adapter boundary; first-party lifecycle protocols carry an explicit failure category. Error messages retain the failed operation, relevant resource or session identity, and the exact original diagnostic without secrets. Translation preserves the original cause. Unexpected failures propagate to an operation owner or are persistently reported; they do not become retryable or expected outcomes merely because a catch observes them. Cleanup preserves the primary failure and every secondary diagnostic.
+
 ## Telegram integration
 
 Each bot adapter owns Telegram command handling, membership checks, prompt proposals, interactive questions, and transcript mirroring for its bot. It translates authorized user actions into operations on `Omp`. It does not own OMP's conversation history or execute model turns itself.

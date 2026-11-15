@@ -17,6 +17,7 @@ import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { createCollaborationObserver } from './collaboration-observer.js';
 import { cleanupLifecycle } from './lifecycle-cleanup.js';
+import { TelegramTestProvisioningError, TelegramTestTimeoutError } from '../../../scripts/lib/telegram-test-errors.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -67,7 +68,7 @@ export async function setupCollaborationTest(
 
   t.after(async () => {
     closing = true;
-    const cleanupTimer = setTimeout(() => cleanupController.abort(new Error('Telegram test collaboration cleanup timed out after 15000ms')), cleanupTimeoutMs);
+    const cleanupTimer = setTimeout(() => cleanupController.abort(new TelegramTestTimeoutError('collaboration cleanup', cleanupTimeoutMs)), cleanupTimeoutMs);
     const errors: unknown[] = [];
     const cleanup = async (run: Cleanup) => {
       try {
@@ -162,7 +163,7 @@ export async function setupCollaborationTest(
   instrumentRuntime(runtime);
   const stickers = await telegram.api.getForumTopicIconStickers();
   const [running, finished] = [...new Set(stickers.map(sticker => sticker.emoji).filter((emoji): emoji is string => Boolean(emoji)))];
-  if (!running || !finished) throw new Error('Telegram test network must provide two distinct topic icon emojis');
+  if (!running || !finished) throw new TelegramTestProvisioningError('Provision Telegram test topic icons: Telegram test network must provide two distinct topic icon emojis');
   const topicActivityEmojis = { running, finished };
   omp.log('telegram.topic.icons', { topicActivityEmojis });
   await telegram.api.deleteWebhook({ drop_pending_updates: true });

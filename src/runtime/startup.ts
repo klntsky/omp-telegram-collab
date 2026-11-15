@@ -1,3 +1,4 @@
+import { OmpProcessError, systemError, parseJson, OmpIdentityError, OmpSessionUnavailableError, OmpHostUnavailableError, OmpDiscoveryTimeoutError, OmpCommandError, OmpProtocolError, OmpHostControlError, OmpHostBusyError, OmpRuntimeStoppingError, OmpSessionRetiringError } from './errors.js';
 import { spawn } from 'node:child_process';
 import { readFile, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -38,24 +39,24 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
     let prepared: { dir: string; pin: DurableBinding };
     try { prepared = await deps.prepare(session); }
-    catch (error) {
+    catch (error) { error = systemError(error, 'startup OS operation');
       if (!owned) deps.managed.delete(id);
       throw error;
     }
     try {
       await deps.acquire();
       const { dir, pin } = prepared;
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
       deps.assertActive();
       let hosts = await deps.list(deadline);
       const matches = hosts.filter(host => host.sessionId === pin.sessionId);
-      if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
+      if (matches.length > 1) throw new OmpProcessError('Start managed OMP host', `session ${id}`, 'More than one host is serving the managed OMP session');
       if (matches.length === 1) {
         const host = matches[0]!;
-        if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
+        if (await realpath(host.cwd) !== pin.cwd) throw new OmpIdentityError('Managed host working directory changed', `Start managed session ${id}`);
         while (!await presetReady(dir, pin, host.pid)) {
-          if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (Date.now() >= deadline) throw new OmpProcessError('Start managed OMP host', `session ${id}`, 'Managed OMP startup preset timed out');
+          if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
           deps.assertActive();
           await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
@@ -82,17 +83,17 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (owned.retirement?.error !== undefined) throw owned.retirement.error;
         owned.retiring = owned.retirement !== undefined || (currentLifecycle && lifecycle.retiring === true);
         deps.managed.set(id,owned);
-        if (owned.retiring) throw new Error('Session is retiring; rejoin after it settles');
+        if (owned.retiring) throw new OmpSessionRetiringError('Session is retiring; rejoin after it settles', `Start session ${id}`);
         deps.assertActive();
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
         return binding;
       }
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
       if (owned?.retirement) {
         const identity = await procIdentity(owned.retirement.pid);
         if (identity && identity.start === owned.retirement.start && identity.state !== 'Z' && identity.state !== 'X') {
           if (owned.retirement.error !== undefined) throw owned.retirement.error;
-          throw new Error('Session is retiring; rejoin after it settles');
+          throw new OmpSessionRetiringError('Session is retiring; rejoin after it settles', `Start session ${id}`);
         }
         delete owned.retirement;
         owned.retiring = false;
@@ -100,7 +101,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       if (owned?.identity) {
         const identity = await procIdentity(owned.identity.pid);
         if (identity && identity.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') {
-          throw new Error('OMP host is not registered; cannot safely start another process');
+          throw new OmpSessionUnavailableError('OMP host is not registered; cannot safely start another process', `Start managed session ${id}`);
         }
         delete owned.identity;
       }
@@ -116,11 +117,11 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       if (launch.preset !== undefined) {
         await privateFile(startupFile, JSON.stringify({ sessionId: pin.sessionId, preset: launch.preset }));
       } else {
-        await unlink(startupFile).catch(error => { if (!errno(error, 'ENOENT')) throw error; });
+        await unlink(startupFile).catch(error => { error = systemError(error, 'startup OS operation'); if (!errno(error, 'ENOENT')) throw error; });
       }
       await beforeMutation?.();
       deps.assertActive();
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
       const child = spawn(process.execPath, [
         hostSupervisorPath,
         deps.config.omp.executable,
@@ -142,27 +143,27 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       spawned = owned;
       deps.managed.set(id,owned);
       const record = owned;
-      child.once('error',error => { record.failure = error.message; record.exited = true; });
+      child.once('error',error => { record.failure = error; record.exited = true; });
       child.once('exit',() => {
         record.exited = true;
         if (deps.managed.get(id) === record) deps.managed.delete(id);
       });
       while (Date.now() < deadline) {
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
         deps.assertActive();
-        if (record.failure) throw new Error(record.failure);
+        if (record.failure) throw record.failure;
         if (launch.preset !== undefined) await presetReady(dir, pin);
-        if (record.exited || !child.pid) throw new Error('Managed OMP process exited before its host was available');
+        if (record.exited || !child.pid) throw new OmpProcessError('Start managed OMP host', `session ${id}`, 'Managed OMP process exited before its host was available');
         for (const host of hosts) {
           if (!await belongsTo(host.pid,child.pid)) continue;
-          if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new Error('Managed OMP process switched its pinned session');
+          if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new OmpIdentityError('Managed OMP process switched its pinned session', `Start managed session ${id}`);
           if (!await presetReady(dir, pin, host.pid)) continue;
           let binding: HostBinding;
           try {
             binding = await deps.resolve(host,deadline);
-          } catch (error) {
-            if (!(error instanceof Error) || !('code' in error) || error.code !== 1 ||
-                !error.message.endsWith(`\nerror: no active Collab host matches ${host.instanceId}\n`)) throw error;
+          } catch (error) { error = systemError(error, 'startup OS operation');
+            if (!(error instanceof OmpHostUnavailableError)) throw error;
+
             discoveryFailure = error;
             continue;
           }
@@ -170,25 +171,26 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           const identity = await procIdentity(host.pid);
           if (identity) record.identity = { pid: host.pid, start: identity.start };
           deps.assertActive();
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (deps.closed || deps.stopping.has(id)) throw new OmpRuntimeStoppingError(`Start session ${id}`);
           return binding;
         }
         await delay(Math.min(200,Math.max(1,deadline-Date.now())));
         if (Date.now() < deadline) hosts = await deps.list(deadline);
       }
-      throw discoveryFailure ?? new Error('Managed OMP startup timed out');
-    } catch (error) {
+      throw discoveryFailure ?? new OmpProcessError('Start managed OMP host', `session ${id}`, 'Managed OMP startup timed out');
+    } catch (error) { error = systemError(error, 'startup OS operation');
       if (
         discoveryFailure &&
         error instanceof Error &&
         error !== discoveryFailure &&
         Date.now() >= deadline &&
-        (error.message === 'OMP discovery timed out' ||
-          ('killed' in error && error.killed === true &&
-            'code' in error && error.code === null &&
-            'signal' in error && error.signal === 'SIGKILL'))
+        (error instanceof OmpDiscoveryTimeoutError ||
+          (error instanceof OmpCommandError &&
+            error.code === null &&
+            error.signal === 'SIGKILL'))
       ) {
-        Object.defineProperty(discoveryFailure, 'cause', { value: error, configurable: true });
+        discoveryFailure.message += `\nStartup deadline failure for session ${id}: ${error.message}`;
+        Object.defineProperty(discoveryFailure, 'deadlineError', { value: error, configurable: true });
         error = discoveryFailure;
       }
       if (spawned && !spawned.exited && !deps.killing.has(id)) {
@@ -196,6 +198,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (!deps.stopping.has(id)) deps.stopping.set(id, cleanup);
         try { await cleanup; }
         catch (cleanupError) {
+          console.error(`Startup cleanup for session ${id} failed:`, cleanupError);
           if (error instanceof Error) {
             Object.defineProperty(error, 'cleanupError', { value: cleanupError, configurable: true });
             error.message += `\nOMP startup cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
@@ -215,14 +218,18 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
 
   async function presetReady(dir: string, pin: DurableBinding, pid?: number): Promise<boolean> {
     let status: unknown;
-    try { status = JSON.parse(await readFile(path.join(dir, 'startup-preset.json'), 'utf8')); }
-    catch (error) { if (errno(error, 'ENOENT')) return true; throw error; }
+    try { status = parseJson(await readFile(path.join(dir, 'startup-preset.json'), 'utf8'), 'Read runtime metadata', `startup status ${dir}`); }
+    catch (error) { error = systemError(error, 'startup OS operation'); if (errno(error, 'ENOENT')) return true; throw error; }
     if (!record(status) || status.sessionId !== pin.sessionId || typeof status.preset !== 'string') {
-      throw new Error('Invalid managed OMP startup preset status');
+      throw new OmpProcessError('Start managed OMP host', `session ${pin.sessionId}; directory ${dir}`, 'Invalid managed OMP startup preset status');
     }
     if (status.pid === undefined) return false;
-    if (!Number.isSafeInteger(status.pid) || (pid !== undefined && status.pid !== pid)) throw new Error('Managed OMP startup preset host identity changed');
-    if (typeof status.error === 'string') throw new Error(status.error);
+    if (!Number.isSafeInteger(status.pid) || (pid !== undefined && status.pid !== pid)) throw new OmpIdentityError('Managed OMP startup preset host identity changed', `Start managed session ${pin.sessionId}`);
+    if (typeof status.error === 'string') {
+      if (status.errorKind !== 'rejected' && status.errorKind !== 'unexpected' && status.errorKind !== 'busy') throw new OmpProtocolError('Startup model preset', `session ${pin.sessionId}`, `Invalid lifecycle error discriminator: ${status.error}`);
+      if (status.errorKind === 'busy') throw new OmpHostBusyError(status.error);
+      throw new OmpHostControlError(status.errorKind, 'Startup model preset', pin.sessionId, status.error, { cause: { message: status.error, kind: status.errorKind } });
+    }
     return status.ready === true;
   }
 

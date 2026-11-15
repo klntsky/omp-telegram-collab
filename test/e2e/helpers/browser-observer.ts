@@ -9,6 +9,7 @@ import { createServer } from '../../../src/server.js';
 import { GuestClient, type ConnectionPhase, type GuestSnapshot } from '../../../web/src/lib/client.js';
 import { GatewaySocket } from '../../../web/src/lib/socket.js';
 import { SessionAccessError } from '../../../web/src/lib/telegram.js';
+import { SessionRequestError } from '../../../web/src/lib/session-errors.js';
 import { bounded } from './async.js';
 import type { CollaborationTest } from './collaboration-fixture.js';
 
@@ -73,7 +74,7 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
       // Match authorizeSession in web/src/lib/telegram.ts so this fixture cannot
       // recover across an access denial or invalidated session generation.
       if ([401, 403, 404, 409].includes(response.status)) throw new SessionAccessError(diagnostic, response.status);
-      throw new Error(diagnostic);
+      throw new SessionRequestError(`Authorize browser observer session ${session.id} via POST /api/session (HTTP ${response.status}): ${diagnostic}`);
     }
     const result = z.object({ ticket: z.string(), displayName: z.string() }).parse(await response.json());
     app.omp.registerSecret(result.ticket);

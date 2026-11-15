@@ -1,3 +1,4 @@
+import { BotCancellationError, BotSessionStateError, reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
@@ -19,7 +20,7 @@ export interface SessionConnectionsDependencies {
   invalidateActivity: (id: string) => void;
   onFrame: (session: TopicSession, listener: Listener, frame: HostFrame, replay?: boolean) => void;
   refreshTyping: (session: TopicSession, listener: Listener) => void;
-  requestCapacity: (session: TopicSession, limit: number) => Promise<void>;
+  requestCapacity: (session: TopicSession, error: SessionCapacityError) => Promise<void>;
   requireSessionAssignment: (session: TopicSession) => void;
   scheduleReconnect: (session: TopicSession, attempt?: number) => void;
   sessionAssigned: (session: TopicSession) => boolean;
@@ -35,7 +36,7 @@ export class SessionConnections {
   constructor(private readonly deps: SessionConnectionsDependencies) {}
   async subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
     const listener = this.listeners.get(session.id);
-    if (!listener?.connection) throw new Error('Session closed');
+    if (!listener?.connection) throw new BotSessionStateError(`Subscribe to session feed (session=${session.id}): Session closed`);
     this.requireFeedListener(session, listener);
     if (session.runtime.kind === 'attached') return this.subscribeAttachedFeed(session, listener, handlers);
     await listener.history!.ensureFresh();
@@ -45,11 +46,7 @@ export class SessionConnections {
       send: async frame => {
         this.requireFeedListener(session, listener);
         if (frame.t === 'history-page') {
-          try { await listener.history!.ensureFresh(); }
-          catch {
-            this.requireFeedListener(session, listener);
-            return;
-          }
+          await listener.history!.ensureFresh();
           this.requireFeedListener(session, listener);
         }
         subscription.send(frame);
@@ -62,24 +59,24 @@ export class SessionConnections {
     this.deps.requireSessionAssignment(session);
     if (this.deps.options.store.getSession(session.id)?.status !== 'open' ||
         this.listeners.get(session.id) !== listener ||
-        listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
+        listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new BotSessionStateError(`Access session feed (session=${session.id}): Session closed`);
   }
 
   private async subscribeAttachedFeed(session: TopicSession, listener: Listener, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
     const binding = await this.deps.options.runtime.resolveExisting(session);
     this.requireFeedListener(session, listener);
-    if (!binding) throw new Error('Session closed');
+    if (!binding) throw new BotSessionStateError(`Subscribe to attached session feed (session=${session.id}): Session closed`);
     const reader: {feed: SessionFeed; connection?: CollabConnection; controller: AbortController} = {
       controller: new AbortController(),
       feed: new SessionFeed(frame => {
-        if (!reader.connection) throw new Error('Session not connected');
+        if (!reader.connection) throw new BotSessionStateError(`Send attached session frame (session=${session.id}): Session not connected`);
         reader.connection.send(frame);
       }),
     };
     listener.readers.add(reader);
     const close = () => {
       listener.readers.delete(reader);
-      reader.controller.abort(new Error('Session reader closed'));
+      reader.controller.abort(new BotCancellationError(`Session reader closed (session=${session.id})`));
       reader.feed.close();
       reader.connection?.close();
     };
@@ -113,12 +110,12 @@ export class SessionConnections {
     listener?.feed.close(reason);
     if (listener) {
       for (const reader of listener.readers) {
-        reader.controller.abort(new Error(reason));
+        reader.controller.abort(new BotCancellationError(`Session reader closed (session=${id}): ${reason}`));
         reader.feed.close(reason);
         reader.connection?.close();
       }
       listener.readers.clear();
-      if (listener.history) void listener.history.close().catch(error => console.error('Could not close session history', error));
+      if (listener.history) void listener.history.close().catch(error => reportBotError(`Could not close session history (session=${id})`, error));
     }
     listener?.connection?.close();
   }
@@ -133,7 +130,7 @@ export class SessionConnections {
       return Promise.reject(new Error('Existing host binding is required'));
     this.deps.requireSessionAssignment(session);
     if (this.deps.options.store.getSession(session.id)?.status !== 'open')
-      return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
+      return Promise.reject(new BotSessionStateError(`Connect session (session=${session.id}): This topic is closed. Reopen it before connecting.`));
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const existing = this.listeners.get(session.id);
     if (existing?.promise && existing.generation === generation) return existing.promise;
@@ -142,7 +139,7 @@ export class SessionConnections {
       sessionId: session.id,
       generation,
       feed: new SessionFeed(frame => {
-        if (!listener.connection) throw new Error('Session not connected');
+        if (!listener.connection) throw new BotSessionStateError(`Send session frame (session=${session.id}): Session not connected`);
         listener.connection.send(frame);
       }),
       tail: Promise.resolve(),
@@ -169,7 +166,7 @@ export class SessionConnections {
       this.deps.options.store.getSession(session.id)?.status === 'open' &&
       this.deps.options.store.getSessionGeneration(session.id) === generation &&
       this.listeners.get(session.id) === listener;
-    const closed = new Error('Session closed');
+    const closed = new BotCancellationError(`Connect session ${session.id}: Session closed`);
     listener.promise = (
       binding ? Promise.resolve(binding) : this.deps.options.runtime.ensure(session, beforeMutation)
     )
@@ -188,7 +185,7 @@ export class SessionConnections {
             assertActive: () => this.requireFeedListener(session, listener),
             onError: error => {
               this.deps.sessionObservation(session.id).failure = {operation: 'Session history refresh', at: Date.now(), error};
-              console.error('Could not refresh session history', error);
+              reportBotError(`Could not refresh session history (session=${session.id})`, error);
             },
           });
           await listener.history.prepare();
@@ -247,8 +244,12 @@ export class SessionConnections {
             error,
           };
         try {
-          if (!existingOnly && error instanceof SessionCapacityError && active())
-            await this.deps.requestCapacity(session, error.limit);
+          if (!existingOnly && error instanceof SessionCapacityError && active()) {
+            try { await this.deps.requestCapacity(session, error); }
+            catch (deliveryError) {
+              throw new AggregateError([error, deliveryError], `Request session capacity (session=${session.id}):\n${[error, deliveryError].map(failure => failure instanceof Error ? failure.message : String(failure)).join('\n')}`, {cause: error});
+            }
+          }
           if (
             error !== closed ||
             !recoverClosed ||

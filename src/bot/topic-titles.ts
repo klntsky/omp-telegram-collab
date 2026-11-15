@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import type { TopicSession } from '../../shared/contracts.js';
 import { refreshTermination } from '../config.js';
 import { SessionTitleUnsupportedError } from '../runtime/types.js';
@@ -32,11 +33,11 @@ export class TopicTitles {
         try {
           await this.deps.options.runtime.setSessionTitle(current, title);
         } catch (error) {
+          reportBotError(`Could not synchronize session title (${session.id}).`, error);
           if (!this.deps.isStopped() && !this.deps.options.config.terminated && !owner.disposed &&
               owner.generation === generation && owner.title === source &&
               this.deps.sessionAssigned(current) &&
               this.deps.options.store.getSessionGeneration(session.id) === generation) {
-            console.warn(`Could not synchronize session title (${session.id}).`, error);
             this.deps.sessionObservation(session.id).failure = {
               operation: 'Session title synchronization',
               at: Date.now(),
@@ -107,8 +108,8 @@ export class TopicTitles {
         source.humanTitle = source.humanTitle.slice(source.prefix.length + 1);
       publish();
     } catch (error) {
+      reportBotError(`Could not synchronize topic title (${session.id}).`, error);
       if (!active() || this.owners.metadataOwners.get(session.id)?.title !== source) return;
-      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.deps.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),
@@ -147,8 +148,8 @@ export class TopicTitles {
       if (pending !== undefined || title !== undefined) source.humanTitle = human;
       await this.projectTopicTitle(session, human, active);
     })().catch((error) => {
+      reportBotError(`Could not synchronize topic title (${session.id}).`, error);
       if (!active()) return;
-      console.warn(`Could not synchronize topic title (${session.id}).`, error);
       this.deps.sessionObservation(session.id).failure = {
         operation: 'Topic title synchronization',
         at: Date.now(),

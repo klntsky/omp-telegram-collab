@@ -2,6 +2,9 @@ import type { CollabConnection } from '../shared/contracts.js';
 import type { HistoryWatch, HistoryCheckpoint, HistorySource } from './history-watch.js';
 import type { Omp } from './omp.js';
 import { SessionFeed } from './session-feed.js';
+import { HistoryClosedError, HistorySourceError, HistoryStateError } from './history-errors.js';
+import { CollabSnapshotError, CollabTransportError } from './collab.js';
+import { SessionFeedError } from './session-feed-errors.js';
 
 export interface SessionHistoryOptions {
   sessionId: string;
@@ -23,14 +26,14 @@ export class SessionHistory {
   constructor(readonly feed: SessionFeed, private readonly options: SessionHistoryOptions) {}
 
   private assertActive(): void {
-    if (this.closed) throw new Error('Session history is closed');
+    if (this.closed) throw new HistoryClosedError(`Session history is closed for session ${this.options.sessionId}`);
     this.options.assertActive();
   }
 
   private async openWatch(): Promise<HistoryWatch> {
     const source = await this.options.source();
     this.assertActive();
-    if (!source || source.sessionId !== this.options.sessionId) throw new Error('Managed OMP history source is unavailable');
+    if (!source || source.sessionId !== this.options.sessionId) throw new HistorySourceError(`Managed OMP history source is unavailable for session ${this.options.sessionId}`);
     const watch = await this.options.watch(source, {
       pollIntervalMs: 5_000,
       onChange: state => {
@@ -42,7 +45,11 @@ export class SessionHistory {
       },
     });
     try { this.assertActive(); }
-    catch (error) { await watch.close(); throw error; }
+    catch (error) {
+      try { await watch.close(); }
+      catch (cleanupError) { console.error(`Close history watcher for session ${this.options.sessionId}:`, cleanupError); }
+      throw error;
+    }
     this.watch = watch;
     return watch;
   }
@@ -54,6 +61,7 @@ export class SessionHistory {
       this.assertActive();
     } catch (error) {
       this.fail(error);
+      if (!(error instanceof HistorySourceError) && !(error instanceof HistoryStateError)) throw error;
     }
   }
 
@@ -68,6 +76,7 @@ export class SessionHistory {
         else this.feed.invalidateHistory();
       } catch (error) {
         this.fail(error);
+        if (!(error instanceof HistorySourceError) && !(error instanceof HistoryStateError)) throw error;
       } finally {
         await this.watch.discard(checkpoint);
       }
@@ -81,7 +90,10 @@ export class SessionHistory {
     if (!this.connection || this.closed || this.refreshing || !this.pendingChange) return;
     queueMicrotask(() => {
       if (!this.connection || this.closed || this.refreshing || !this.pendingChange) return;
-      void this.ensureFresh().catch(() => {});
+      // refreshOnce reports its rejection through fail before this scheduled observer consumes it.
+      void this.ensureFresh().catch(error => {
+        if (!(error instanceof HistoryClosedError)) console.error(`Refresh scheduled history for session ${this.options.sessionId}:`, error);
+      });
     });
   }
 
@@ -103,7 +115,7 @@ export class SessionHistory {
       if (state.state === 'clean' && this.feed.historyFresh) return;
       this.feed.invalidateHistory();
       if (state.state === 'unverified') throw state.error;
-      if (!this.connection) throw new Error('Session not connected');
+      if (!this.connection) throw new HistoryStateError(`Refresh history for session ${this.options.sessionId}: Session not connected`);
       for (let attempt = 0; attempt < 2; attempt++) {
         this.pendingChange = false;
         const checkpoint = await watch.capture();
@@ -125,7 +137,7 @@ export class SessionHistory {
           await watch.discard(checkpoint);
         }
       }
-      throw new Error('Session history changed repeatedly while refreshing');
+      throw new HistorySourceError(`Session history changed repeatedly while refreshing session ${this.options.sessionId}`);
     })().catch(error => {
       this.fail(error);
       throw error;
@@ -138,8 +150,12 @@ export class SessionHistory {
   }
 
   private fail(error: unknown): void {
+    if (this.closed && error instanceof HistoryClosedError) return;
+    console.error(`Session history failed for session ${this.options.sessionId}:`, error);
     if (this.closed) return;
-    this.feed.discardHistoryRefresh(error);
+    this.feed.discardHistoryRefresh();
+    if (error instanceof HistorySourceError || error instanceof HistoryStateError || error instanceof CollabSnapshotError || error instanceof CollabTransportError || error instanceof SessionFeedError)
+      this.feed.reportHistoryError(error);
     this.options.onError(error);
   }
 
@@ -150,7 +166,8 @@ export class SessionHistory {
     this.feed.discardHistoryRefresh();
     this.closing = (async () => {
       await this.watch?.close();
-      await this.refreshing?.catch(() => {});
+      // The refresh task reports through fail; closing still waits for its completion.
+      await this.refreshing?.then(() => undefined, () => undefined);
     })();
     return this.closing;
   }

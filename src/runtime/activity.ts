@@ -1,3 +1,4 @@
+import { OmpSessionRetiringError } from './errors.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import { miniAppInterruptionAuthor } from '../../shared/interruption.js';
 import { type ManagedHost, type HostActivity } from './types.js';
@@ -29,7 +30,7 @@ export function createActivity(deps: ActivityDependencies): RuntimeActivity {
 
   function retain(id: string): () => void {
     deps.assertActive();
-    if (deps.managed.get(id)?.retiring || deps.stopping.has(id)) throw new Error('Session is retiring; rejoin after it settles');
+    if (deps.managed.get(id)?.retiring || deps.stopping.has(id)) throw new OmpSessionRetiringError('Session is retiring; rejoin after it settles', `Session activity ${id}`);
     const activity = hostActivity(id);
     activity.leases++;
     activity.lastUsed = Date.now();
@@ -44,7 +45,7 @@ export function createActivity(deps: ActivityDependencies): RuntimeActivity {
 
   function markPrompt(id: string): void {
     deps.assertActive();
-    if (deps.managed.get(id)?.retiring || deps.stopping.has(id)) throw new Error('Session is retiring; resend after it settles');
+    if (deps.managed.get(id)?.retiring || deps.stopping.has(id)) throw new OmpSessionRetiringError('Session is retiring; resend after it settles', `Session activity ${id}`);
     const activity = hostActivity(id);
     activity.busy = true;
     activity.awaitingTurn = true;

@@ -47,7 +47,7 @@ export interface ManagedHost {
   identity?: { pid: number; start: string };
   exited: boolean;
   retiring: boolean;
-  failure?: string;
+  failure?: Error;
   retirement?: { pid: number; start: string; socketPath: string; error?: unknown };
 }
 

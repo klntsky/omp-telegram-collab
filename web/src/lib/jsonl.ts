@@ -1,3 +1,5 @@
+import { decodeJson, InvalidJsonError } from "./decode";
+
 /**
  * Incremental JSONL parsing for streamed subagent transcripts.
  *
@@ -13,9 +15,9 @@ export function parseJsonl(text: string, carry: string): { items: unknown[]; car
 		const trimmed = line.trim();
 		if (!trimmed) continue;
 		try {
-			items.push(JSON.parse(trimmed));
-		} catch {
-			// skip unparseable line
+			items.push(decodeJson(trimmed, "Decode streamed transcript JSONL line"));
+		} catch (error) {
+			if (!(error instanceof InvalidJsonError)) throw error;
 		}
 	}
 	return { items, carry: nextCarry };

@@ -1,3 +1,4 @@
+import { reportBotError } from './errors.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -66,7 +67,7 @@ export class MirrorRecovery {
               }
               await withCancellation(this.deps.refreshTopicStatus(existing), signal);
             } catch (error) {
-              if (error === signal.reason) throw error;
+              if (signal.aborted && error === signal.reason) throw error;
               if (
                 !this.deps.stopped() &&
                 !(error instanceof SessionCapacityError) &&
@@ -147,7 +148,7 @@ export class MirrorRecovery {
         this.deps.bot.api,
         topicDestination(session.chatId, session.threadId),
         'Session mirroring disconnected.',
-      ).catch(error => console.warn(`Could not deliver mirroring disconnected notice (${session.id}).`, error));
+      ).catch(error => reportBotError(`Could not deliver mirroring disconnected notice (${session.id}).`, error));
       return;
     }
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -173,7 +174,7 @@ export class MirrorRecovery {
             await withCancellation(this.deps.refreshTopicStatus(active), signal);
           } catch (error) {
             if (
-              error !== signal.reason &&
+              (!signal.aborted || error !== signal.reason) &&
               !this.deps.stopped() &&
               !(error instanceof SessionCapacityError) &&
               this.deps.options.store.getSessionGeneration(active.id) === generation

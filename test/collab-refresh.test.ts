@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { COLLAB_PROTO, WRITE_TOKEN_BYTES, type HostFrame } from '@oh-my-pi/pi-wire';
-import { connectCollab } from '../src/collab.js';
+import { CollabSnapshotError, CollabTransportError, connectCollab } from '../src/collab.js';
 import { encodeBase64Url } from '../src/vendor/link.js';
 import { hostFrames, state, welcome, emptySnapshot, historyEntry, liveConnection } from './collab-fixture.js';
 
@@ -88,7 +88,7 @@ test('a recognized history-only hello refusal never reaches instruction handling
   const app = await liveConnection(t);
   const rejection: HostFrame = {t: 'error', message: 'Session transition in progress; join again when it completes'};
   const refreshing = app.connection.refreshSnapshot(() => assert.fail('Rejected refresh callback ran'));
-  const rejected = assert.rejects(refreshing, {message: rejection.message});
+  const rejected = assert.rejects(refreshing, error => error instanceof CollabSnapshotError && error.message.includes(rejection.message));
   await app.host.nextGuest();
   await app.host.send([rejection]);
   await rejected;
@@ -159,7 +159,7 @@ test('close rejects a waiting refresh, releases its timer, and rejects later ref
   const app = await liveConnection(t);
   t.mock.timers.enable({apis: ['setTimeout']});
   const refreshing = app.connection.refreshSnapshot(() => assert.fail('Closed refresh callback ran'));
-  const rejected = assert.rejects(refreshing, {message: 'closed'});
+  const rejected = assert.rejects(refreshing, CollabSnapshotError);
   await app.host.nextGuest();
   app.connection.close();
   await rejected;
@@ -171,12 +171,20 @@ test('close rejects a waiting refresh, releases its timer, and rejects later ref
 test('transport close rejects the waiting refresh with its connection diagnostic', {timeout: 5000}, async t => {
   const app = await liveConnection(t);
   const refreshing = app.connection.refreshSnapshot(() => {});
-  const rejected = assert.rejects(refreshing, /Collab connection closed/);
+  let diagnostic: string | undefined;
+  const rejected = assert.rejects(refreshing, error => {
+    assert.ok(error instanceof CollabTransportError);
+    diagnostic = error.message;
+    return true;
+  });
   await app.host.nextGuest();
   const [socket] = await app.host.connected;
+  const transportClosed = Promise.withResolvers<number>();
+  socket.once('close', transportClosed.resolve);
   socket.close(1000);
   await rejected;
-  assert.equal(await app.closed, 'Collab connection closed (1000)');
+  assert.equal(await transportClosed.promise, 1000);
+  assert.equal(await app.closed, diagnostic);
 });
 
 test('public send cannot send arbitrary native hello frames', {timeout: 5000}, async t => {

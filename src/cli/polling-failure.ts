@@ -16,6 +16,7 @@ export function reportPollingFailure(bot: { id: number; username?: string }, err
   const context = error instanceof GrammyError && error.error_code === 409
     ? `Telegram polling conflict for ${identity}. Independent service processes cannot share the same Telegram bot token, even under different OS users, on different machines, or in different groups. Stop the conflicting consumer or use a separate bot token for each independent service. The entire service is stopping.`
     : `Telegram polling stopped for ${identity}. The entire service is stopping.`;
+  if (error instanceof Error) error.message = `${context}\n${error.message}`;
   console.error(context, error);
   if (typeof error === 'object' && error !== null) reported.add(error);
 }

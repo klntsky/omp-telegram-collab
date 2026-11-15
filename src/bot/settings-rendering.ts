@@ -1,3 +1,4 @@
+import { AuthorizationDeniedError } from './types.js';
 import type { Bot, Context } from 'grammy';
 import type { AppConfig, TypingMode } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -112,7 +113,7 @@ export async function renderSettings(
             .filter(isMentionableSkillName)
         : await deps.runtime.availableModelPresets(panel.instanceId);
       if (deps.assignedId(panel.chatId) !== panel.instanceId)
-        throw new Error('The group instance assignment changed');
+        throw new AuthorizationDeniedError(`Render settings (chat=${panel.chatId}, instance=${panel.instanceId}): The group instance assignment changed`);
       const selectedSkills = chat.default_new_topic_skills ?? [];
       const selection = skill ? selectedSkills.join(', ') || 'No default skills' : chat.default_model_preset ?? 'Use host default';
       text = `${skill ? 'Default skills' : 'Default model preset'}\nApplies to this group.\nCurrent choice: ${selection}\n${names.length ? `Choices ${offset + 1}–${Math.min(offset + 8, names.length)} of ${names.length}.` : 'No named choices available.'}\n${skill ? 'Toggle each skill independently. New topics use these skills. Existing topics are unchanged.' : 'The preset applies when a managed host next starts. Running hosts are unchanged.'}`;

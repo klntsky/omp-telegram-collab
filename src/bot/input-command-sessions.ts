@@ -1,3 +1,4 @@
+import { BotCommandRejectedError, BotSessionStateError } from './errors.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
@@ -28,9 +29,9 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
   const { ctx, session, destination, detached, assigned, action, arg } = input;
   const message = ctx.message;
       if (action === 'fork') {
-        if (arg) throw new Error('Usage: /fork');
+        if (arg) throw new BotCommandRejectedError(`Validate /fork (chat=${ctx.chat.id}): Usage: /fork`);
         if (!session || destination.kind !== 'topic' || session.runtime.kind !== 'managed' || session.status !== 'open')
-          throw new Error('Use /fork inside an open managed session topic.');
+          throw new BotCommandRejectedError(`Validate /fork (chat=${ctx.chat.id}): Use /fork inside an open managed session topic.`);
         await deps.forkSession(ctx, session);
         return true;
       }
@@ -54,7 +55,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         await deps.authorize(ctx.chat.id, ctx.from.id);
         deps.requireSessionAssignment(session);
         if (session.status !== 'open')
-          throw new Error('This session is archived. Reopen the topic before creating a worktree.');
+          throw new BotSessionStateError(`Create worktree (session=${session.id}): This session is archived. Reopen the topic before creating a worktree.`);
         let text: string;
         try {
           text = await deps.runtime.worktree(session, arg || undefined);

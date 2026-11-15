@@ -12,6 +12,8 @@ import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from
 import { readSessionHistory } from './model-tasks.js';
 import type { TopicSession } from '../../../shared/contracts.js';
 import { resolveTelegramTestEnvFile } from './telegram-env.js';
+import { MissingResourceError, systemOperation } from '../../../scripts/lib/system-errors.js';
+import { decodeTelegramTestConfiguration, TelegramTestConfigurationError } from '../../../scripts/lib/telegram-test-errors.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
   scenarios: readonly FakeLlmScenario[];
@@ -34,24 +36,17 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
       if (env[key]) registerSecret(env[key]!);
     }
     if (env.TELEGRAM_TEST_BOT_TOKENS) {
-      let tokens: unknown;
-      try { tokens = JSON.parse(env.TELEGRAM_TEST_BOT_TOKENS); }
-      catch { throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings'); }
+      const tokens = decodeTelegramTestConfiguration(env.TELEGRAM_TEST_BOT_TOKENS, 'TELEGRAM_TEST_BOT_TOKENS');
       if (!Array.isArray(tokens) || !tokens.every((token: unknown): token is string => typeof token === 'string' && token.length > 0)) {
-        throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings');
+        throw new TelegramTestConfigurationError('Read TELEGRAM_TEST_BOT_TOKENS for test environment: TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings');
       }
       for (const token of tokens) registerSecret(token);
     }
   }
   if (options.telegramSecrets !== false && process.env.TELEGRAM_TEST_SESSIONS) {
-    let sessions: unknown;
-    try {
-      sessions = JSON.parse(process.env.TELEGRAM_TEST_SESSIONS);
-    } catch {
-      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
-    }
+    const sessions = decodeTelegramTestConfiguration(process.env.TELEGRAM_TEST_SESSIONS, 'TELEGRAM_TEST_SESSIONS');
     if (!Array.isArray(sessions) || !sessions.every((session: unknown): session is string => typeof session === 'string')) {
-      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
+      throw new TelegramTestConfigurationError('Read TELEGRAM_TEST_SESSIONS for test environment: TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
     }
     for (const session of sessions) registerSecret(session);
   }
@@ -95,8 +90,8 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     try {
       const sessionsDir = join(dataDir, 'sessions');
       let sessions: string[] = [];
-      try { sessions = await readdir(sessionsDir); } catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+      try { sessions = await systemOperation(`List E2E session artifacts ${sessionsDir}`, () => readdir(sessionsDir)); } catch (error) {
+        if (!(error instanceof MissingResourceError)) throw error;
       }
       for (const session of sessions) {
         const directory = join(sessionsDir, session);

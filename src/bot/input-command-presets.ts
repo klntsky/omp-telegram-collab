@@ -1,3 +1,4 @@
+import { BotSessionStateError } from './errors.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import type { Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -5,6 +6,7 @@ import type { PresetPanel } from './types.js';
 import type { BotOptions } from '../bot.js';
 import type { CommandRouteInput } from './input-router.js';
 import { randomBytes } from 'node:crypto';
+import { OmpHostBusyError } from '../runtime/errors.js';
 
 
 
@@ -87,20 +89,15 @@ export async function inputCommandPresets(deps: InputCommandPresetsDependencies,
             deps.store.getSessionGeneration(session.id) !== generation ||
             deps.store.getSession(session.id)?.status !== 'open'
           )
-            throw new Error('The session changed before the model preset command could run');
+            throw new BotSessionStateError(`Select model preset (session=${session.id}, chat=${ctx.chat.id}): The session changed before the model preset command could run`);
           const text = await deps.runtime.modelPresets(session, arg);
           await deps.replyPresetText(ctx, text);
         } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            error.message !==
-              'OMP host is busy; wait for the current turn and queued messages to finish before switching model presets'
-          )
-            throw error;
+          if (!(error instanceof OmpHostBusyError)) throw error;
           await replyTo(
             ctx,
             contextDestination(ctx),
-            "Can't change model preset while busy. /stop first",
+            error.message,
           );
         } finally {
           release();

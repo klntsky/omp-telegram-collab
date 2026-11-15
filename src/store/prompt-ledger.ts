@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { MessageAnchor } from '../store.js';
+import { rollbackStore } from './errors.js';
 
 function promptFingerprint(content: PromptContent): string {
   return createHash('sha256')
@@ -65,8 +66,7 @@ export class PromptLedger {
       this.db.exec('COMMIT');
       return Number(row?.boundary ?? 0);
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Begin prompt receipt snapshot for session ${sessionId}, OMP session ${ompSessionId}`, error);
     }
   }
   recordPromptReceipt(
@@ -160,8 +160,7 @@ export class PromptLedger {
         ...(pending && !ambiguous ? { submissionId: Number(pending.id) } : {}),
       };
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      rollbackStore(this.db, `Record prompt receipt for session ${sessionId}, OMP session ${anchor.ompSessionId}, entry ${anchor.entryId}`, error);
     }
   }
   recordPromptMessageAlias(sessionId: string, sourceMessageId: number, messageId: number): void {

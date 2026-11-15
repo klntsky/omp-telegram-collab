@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseEnv } from 'node:util';
+import { inspect, parseEnv } from 'node:util';
 import { tl } from '@mtcute/node';
 import { readStringSession, writeStringSession } from '@mtcute/node/utils.js';
 import { isDeadTelegramTestSession, telegramTestSessionLockName } from '../scripts/lib/telegram-test-sessions.js';
 import { appendTelegramTestSession, withTelegramTestSessionStorage } from './e2e/helpers/telegram-env.js';
 import { withTelegramTestLock } from '../scripts/lib/telegram-test-lock.js';
+import { readTelegramApplicationCredentials, readTelegramTestSessions, validateTelegramTestSession } from '../scripts/lib/telegram-test-auth.js';
+import { decodeTelegramTestConfiguration, TelegramTestAuthorizationError, TelegramTestConfigurationError } from '../scripts/lib/telegram-test-errors.js';
 
 function session(seed: number): string {
   return writeStringSession(readStringSession({ testMode: true, authKey: new Uint8Array(256).fill(seed) }));
@@ -43,4 +45,26 @@ test('pruning persists an empty list and later login can recover it without losi
   const env = parseEnv(await readFile(filename, 'utf8'));
   assert.equal(env.UNRELATED, 'keep');
   assert.deepEqual(JSON.parse(env.TELEGRAM_TEST_SESSIONS!), [session(2)]);
+});
+
+test('credential validation distinguishes supported configuration and session decoding failures', () => {
+  assert.throws(() => readTelegramApplicationCredentials({}), TelegramTestConfigurationError);
+  assert.throws(() => readTelegramTestSessions({ TELEGRAM_TEST_SESSIONS: '[]' }), TelegramTestConfigurationError);
+  const unsupportedVersion = Buffer.from([2]).toString('base64url');
+  assert.throws(() => validateTelegramTestSession(unsupportedVersion), error => {
+    assert.ok(error instanceof TelegramTestAuthorizationError && error.cause instanceof Error);
+    assert.ok(error.message.includes(error.cause.message));
+    return true;
+  });
+});
+
+test('malformed credential JSON never exposes source excerpts through its diagnostic or cause stack', () => {
+  for (const [key, secret] of [['TELEGRAM_TEST_SESSIONS', 's3ssionSecret'], ['TELEGRAM_TEST_BOT_TOKENS', 'b0tSecret']] as const) {
+    assert.throws(() => decodeTelegramTestConfiguration(secret, key), error => {
+      assert.ok(error instanceof TelegramTestConfigurationError && error.cause instanceof SyntaxError);
+      assert.ok(error.message.includes(error.cause.message));
+      assert.ok(!inspect(error, { depth: null }).includes(secret));
+      return true;
+    });
+  }
 });

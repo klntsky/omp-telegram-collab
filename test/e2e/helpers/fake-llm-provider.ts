@@ -4,6 +4,12 @@ import type { Duplex } from 'node:stream';
 import { z } from 'zod';
 import { bounded } from './async.js';
 
+class ModelRequestAbortedError extends Error {
+  constructor(cause: Error) {
+    super(`Read model provider test request: ${cause.message}`, { cause });
+  }
+}
+
 export type FakeLlmStep =
   | { type: 'text'; text: string }
   | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> }
@@ -174,10 +180,11 @@ export async function startFakeLlmProvider(options: {
     socket.once('close', () => sockets.delete(socket));
   });
   server.on('clientError', (error, socket) => {
-    if (expectedAborts.has(socket) && 'code' in error && error.code === 'ECONNRESET') {
-      options.log('fake-llm-request-abort-reset', error);
+    const failure = 'code' in error && error.code === 'ECONNRESET' ? new ModelRequestAbortedError(error) : error;
+    if (expectedAborts.has(socket) && failure instanceof ModelRequestAbortedError) {
+      options.log('fake-llm-request-abort-reset', failure);
     } else {
-      recordError(error);
+      recordError(failure);
     }
     socket.destroy();
   });

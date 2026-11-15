@@ -3,6 +3,7 @@ import { Writable } from 'node:stream';
 import { formatWithOptions } from 'node:util';
 import { resolveTelegramTestEnvFile } from '../test/e2e/helpers/telegram-env.js';
 import { createTelegramTestBot, saveTelegramTestBot } from './lib/telegram-test-bot-provision.js';
+import { TelegramTestCancellationError } from './lib/telegram-test-errors.js';
 
 const args = process.argv.slice(2);
 if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) {
@@ -13,7 +14,7 @@ if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) {
 } else {
   const controller = new AbortController();
   const signal = controller.signal;
-  const interrupt = () => controller.abort(new Error('Telegram test bot provisioning interrupted'));
+  const interrupt = () => controller.abort(new TelegramTestCancellationError('bot provisioning interrupted'));
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', interrupt);
   try {

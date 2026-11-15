@@ -1,3 +1,4 @@
+import { BotOperationTimeoutError, reportBotError } from './errors.js';
 import type { TopicSession } from '../../shared/contracts.js';
 import { withCancellation } from '../cancellation.js';
 import type { TopicActivity } from './types.js';
@@ -47,11 +48,11 @@ export class TopicActivityMonitor {
       const value = this.owners.topicIconValue(session, ids);
       if (value !== undefined) await metadata.icon.publish(value);
     } catch (error) {
+      reportBotError(`Could not synchronize topic icon (${session.id}).`, error);
       if (!this.deps.isStopped() && !this.deps.options.config.terminated &&
           this.owners.metadataOwners.get(session.id)?.metadata === metadata &&
           this.deps.sessionAssigned(session) &&
           this.deps.options.store.getSessionGeneration(session.id) === metadata.generation) {
-        console.warn(`Could not synchronize topic icon (${session.id}).`, error);
         this.deps.sessionObservation(session.id).failure = {
           operation: 'Topic icon synchronization',
           at: Date.now(),
@@ -68,7 +69,7 @@ export class TopicActivityMonitor {
     observation.controller = controller;
     const signal = AbortSignal.any([this.deps.background.signal, controller.signal]);
     const timeout = setTimeout(
-      () => controller.abort(new Error('Host activity lookup timed out after 5 seconds')),
+      () => controller.abort(new BotOperationTimeoutError(`Host activity lookup failed (session=${session.id}): Host activity lookup timed out after 5 seconds`)),
       5000,
     );
     const active = () =>
@@ -107,8 +108,9 @@ export class TopicActivityMonitor {
       );
     })()
       .catch((error) => {
+        if (error === signal.reason && signal.aborted && !active()) return;
+        reportBotError(`Could not look up host activity (${session.id}).`, error);
         if (active()) {
-          console.warn(`Could not look up host activity (${session.id}).`, error);
           void this.setTopicStatus(session, 'unknown');
           this.deps.sessionObservation(session.id).failure = {
             operation: 'Host status lookup',

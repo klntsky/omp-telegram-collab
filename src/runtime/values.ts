@@ -1,9 +1,10 @@
+import { OmpSystemError } from './errors.js';
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function errno(error: unknown, code: string): boolean {
-  return error instanceof Error && 'code' in error && error.code === code;
+  return error instanceof OmpSystemError && error.code === code;
 }
 
 export function delay(ms: number): Promise<void> {

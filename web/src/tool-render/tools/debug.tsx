@@ -158,11 +158,7 @@ function Body(props: ToolRenderProps): ReactNode {
 
 	let customArgsJson = "";
 	if (isRecord(args.arguments)) {
-		try {
-			customArgsJson = JSON.stringify(args.arguments, null, 2) ?? "";
-		} catch {
-			customArgsJson = "";
-		}
+		customArgsJson = JSON.stringify(args.arguments, null, 2) ?? "";
 	}
 
 	const snapshot = snapshotOf(result);
