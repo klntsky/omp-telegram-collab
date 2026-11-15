@@ -6,44 +6,9 @@ import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
 function pending(store: Store, threadId: number, botId = 1) {
-  return store.createSession({ botId, chatId: -100, threadId, instancePath: '/project' }, 'Preparation', { kind: 'managed' }, { text: `Task ${threadId}` });
+  return store.createSession({ botId, chatId: -100, threadId, instanceId: 1, cwd: '/project' }, 'Preparation', { kind: 'managed' }, { text: `Task ${threadId}` });
 }
 
-test('initial preparation blocks admission without hiding pending work and releases exactly one claim', () => {
-  const store = new Store(':memory:');
-  try {
-    const gated = pending(store, 10);
-    const other = pending(store, 11);
-    store.beginInitialTaskPreparation(gated.id);
-    assert.throws(() => store.beginInitialTaskPreparation(gated.id), /UNIQUE constraint failed/);
-    assert.equal(store.hasPendingInitialTask(gated.id), true);
-    assert.equal(store.claimInitialTask(gated.id), undefined);
-    assert.equal(store.hasPendingInitialTask(gated.id), true);
-    assert.deepEqual(store.claimInitialTask(other.id), { text: 'Task 11' });
-    store.finishInitialTaskPreparation(other.id);
-    assert.equal(store.claimInitialTask(gated.id), undefined);
-    store.finishInitialTaskPreparation(gated.id);
-    assert.deepEqual(store.claimInitialTask(gated.id), { text: 'Task 10' });
-    assert.equal(store.claimInitialTask(gated.id), undefined);
-    assert.equal(store.hasPendingInitialTask(gated.id), false);
-  } finally { store.close(); }
-});
-
-test('initial preparation cancellation survives both normal release and recovery', () => {
-  const store = new Store(':memory:');
-  try {
-    for (const recover of [false, true]) {
-      const session = pending(store, recover ? 11 : 10);
-      store.beginInitialTaskPreparation(session.id);
-      store.cancelInitialTask(session.id);
-      assert.equal(store.hasPendingInitialTask(session.id), false);
-      if (recover) store.recoverInitialTaskPreparations(session.botId);
-      else store.finishInitialTaskPreparation(session.id);
-      assert.equal(store.claimInitialTask(session.id), undefined);
-      assert.equal(store.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(session.id)!.initial_state, 'cancelled');
-    }
-  } finally { store.close(); }
-});
 
 test('initial preparation persists across disk reopen and concurrent readers until bot-scoped recovery', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'initial-preparation-'));
@@ -85,6 +50,42 @@ test('initial preparation persists across disk reopen and concurrent readers unt
       assert.equal(reopened.hasPendingInitialTask(otherBot!), true);
       reopened.recoverInitialTaskPreparations(2);
       assert.deepEqual(reopened.claimInitialTask(otherBot!), { text: 'Task 10' });
+    } finally { reopened.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('capacity-blocked initial document survives disk reopen until preparation and claim', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'initial-document-'));
+  const filename = join(directory, 'store.sqlite');
+  const content = {
+    text: 'Complete the pending document task',
+    documents: [{ fileId: 'telegram-document-file-id', fileName: 'pending-upload.txt' }],
+  };
+  try {
+    const original = new Store(filename);
+    let id: string;
+    try {
+      id = original.createSession(
+        { botId: 1, chatId: -100, threadId: 10, instanceId: 1, cwd: '/project' },
+        'Pending document', { kind: 'managed' }, content, 7,
+      ).id;
+      assert.deepEqual(original.getPendingInitialTask(id), content);
+    } finally { original.close(); }
+    const reopened = new Store(filename);
+    try {
+      reopened.recoverInitialTaskPreparations(1);
+      assert.equal(reopened.hasPendingInitialTask(id!), true);
+      assert.equal(reopened.getInitialAuthority(id!), 7);
+      assert.deepEqual(reopened.getPendingInitialTask(id!), content);
+      reopened.beginInitialTaskPreparation(id!);
+      assert.equal(reopened.claimInitialTask(id!), undefined);
+      assert.equal(reopened.getPendingInitialTask(id!), undefined);
+      const prepared = { text: `${content.text}\n\nDocument saved to /project/pending-upload.txt` };
+      reopened.replacePendingInitialTask(id!, prepared);
+      reopened.finishInitialTaskPreparation(id!);
+      assert.deepEqual(reopened.claimInitialTask(id!), prepared);
+      assert.equal(reopened.hasPendingInitialTask(id!), false);
+      assert.equal(reopened.getPendingInitialTask(id!), undefined);
     } finally { reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

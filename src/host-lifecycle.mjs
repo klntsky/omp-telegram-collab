@@ -264,9 +264,13 @@ export default async function hostLifecycle(pi) {
         commandTail = operation.then(() => {}, () => {});
         void operation.then(text => respond({ text }), error => respond({ error: error instanceof Error ? error.message : String(error) }));
       });
-      socket.on('error', () => {});
+      socket.on('error', error => {
+        console.error('OMP lifecycle socket error:', error);
+      });
     });
-    server.on('error', () => {});
+    server.on('error', error => {
+      console.error('OMP lifecycle server error:', error);
+    });
     server.listen(socketPath, () => {
       chmodSync(socketPath, 0o600);
       descriptor = {

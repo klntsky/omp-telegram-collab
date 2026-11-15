@@ -1,0 +1,158 @@
+/* Tool renderer design system — `tv-` namespace.
+ *
+ * Host-adaptive tokens: collab-web defines --fg/--fg-muted/…, the HTML export
+ * page defines --text/--muted/--dim/… from the active theme. Every color used
+ * below resolves through the `--tv-*` bridge with a static fallback so the
+ * bundle also works standalone. Dense devtool aesthetic: mono type, hairlines,
+ * 4px radii, whisper hovers. */
+
+.tv-card {
+	--tv-fg: var(--fg, var(--text, oklch(0.92 0.01 307)));
+	--tv-muted: var(--fg-muted, var(--muted, oklch(0.71 0.016 307)));
+	--tv-faint: var(--fg-faint, var(--dim, oklch(0.53 0.018 307)));
+	--tv-accent: var(--accent, oklch(0.674 0.23 341));
+	--tv-ok: var(--ok, var(--success, oklch(0.76 0.14 150)));
+	--tv-err: var(--err, var(--error, oklch(0.66 0.19 25)));
+	--tv-warn: var(--warn, var(--warning, oklch(0.79 0.14 85)));
+	--tv-border: var(--border, oklch(1 0 0 / 9%));
+	--tv-inset: var(--bg-inset, var(--info-bg, oklch(0 0 0 / 22%)));
+	--tv-raised: var(--bg-raised, var(--container-bg, oklch(1 0 0 / 4%)));
+	--tv-ring: var(--ring, oklch(0.817 0.112 205 / 70%));
+	--tv-mono: var(--font-mono, ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace);
+
+	border: 1px solid var(--tv-border);
+	border-radius: 6px;
+	font-family: var(--tv-mono);
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--tv-fg);
+	isolation: isolate;
+	overflow: hidden;
+}
+
+.tv-card--error {
+	border-color: color-mix(in oklch, var(--tv-err) 40%, var(--tv-border));
+}
+
+/* ---- header ---- */
+
+.tv-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 5px 10px;
+	background: none;
+	border: 0;
+	font: inherit;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.tv-head:hover {
+	background: color-mix(in oklch, var(--tv-fg) 4%, transparent);
+}
+
+.tv-head:focus-visible {
+	outline: 2px solid var(--tv-ring);
+	outline-offset: -2px;
+}
+
+.tv-status {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+}
+
+.tv-status--ok {
+	background: var(--tv-ok);
+}
+
+.tv-status--err {
+	background: var(--tv-err);
+}
+
+.tv-status--pending {
+	background: var(--tv-faint);
+}
+
+.tv-spin {
+	flex: none;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in oklch, var(--tv-faint) 50%, transparent);
+	border-top-color: var(--tv-accent);
+	animation: tv-rot 0.7s linear infinite;
+}
+
+.tv-name {
+	flex: none;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--tv-muted);
+}
+
+.tv-sum {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 11.5px;
+	color: var(--tv-muted);
+}
+
+.tv-sum > * {
+	white-space: nowrap;
+}
+
+.tv-chev {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	margin-left: 2px;
+	border-right: 1.5px solid var(--tv-faint);
+	border-bottom: 1.5px solid var(--tv-faint);
+	transform: rotate(-45deg) translateY(-1px);
+	transition: transform 0.15s ease;
+}
+
+.tv-head[aria-expanded="true"] .tv-chev {
+	transform: rotate(45deg);
+}
+
+/* ---- body ---- */
+
+.tv-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px 10px 10px;
+	border-top: 1px solid var(--tv-border);
+}
+
+.tv-intent {
+	font-style: italic;
+	font-size: 11px;
+	color: var(--tv-faint);
+}
+
+.tv-partial {
+	margin: 0;
+	padding: 6px 10px;
+	border-top: 1px solid var(--tv-border);
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--tv-faint);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 160px;
+	overflow-y: auto;
+}
+

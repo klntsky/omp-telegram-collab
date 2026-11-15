@@ -1,8 +1,34 @@
-import type { GuestFrame, HostFrame, ImageContent } from '@oh-my-pi/pi-wire';
+import type { GuestFrame, HostFrame, ImageContent, SessionEntry } from '@oh-my-pi/pi-wire';
+
+export interface HistoryCursor {
+  epoch: string;
+  before: number;
+}
+
+export interface HistoryPage {
+  entries: SessionEntry[];
+  older: HistoryCursor | null;
+}
+
+export type BrowserFrame =
+  | Extract<GuestFrame, {t: 'fetch-transcript'}>
+  | {t: 'history-page'; reqId: number; cursor: HistoryCursor};
+
+export type BrowserHostFrame =
+  | HostFrame
+  | {t: 'history-state'; older: HistoryCursor | null}
+  | {t: 'history-page'; reqId: number; cursor: HistoryCursor; page: HistoryPage}
+  | {t: 'history-invalidated'}
+  | {t: 'history-reset'; page: HistoryPage}
+  | {t: 'history-error'; message: string};
 
 export interface PromptContent {
   text: string;
   images?: ImageContent[];
+}
+
+export interface PendingPromptContent extends PromptContent {
+  documents?: { fileId: string; fileName: string }[];
 }
 
 export interface BotConfig {
@@ -14,13 +40,15 @@ export interface BotConfig {
 export type TypingMode = 'disabled' | 'streaming' | 'inference';
 
 export interface InstanceConfig {
-  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; folder_options?: string[]; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skill?: string }[];
+  id: number;
+  defaultDir: string;
+  chats: { botId: number; chatId: number; all_messages_are_prompts?: boolean; users_can_propose_prompts?: boolean; create_topic_worktrees?: boolean; folder_options?: string[]; typing_indicators?: TypingMode; default_model_preset?: string; default_new_topic_skills?: string[] }[];
 }
 
 export interface AppConfig {
   terminated?: boolean;
   bots: BotConfig[];
-  instances: Record<string, InstanceConfig>;
+  instances: InstanceConfig[];
   publicUrl: string;
   host: string;
   port: number;
@@ -43,10 +71,11 @@ export interface TopicKey {
 
 export interface TopicSession extends TopicKey {
   id: string;
-  instancePath: string;
+  instanceId: number;
+  cwd: string;
   name: string;
   status: 'open' | 'closed' | 'detached';
-  runtime: { kind: 'managed'; cwd?: string } | { kind: 'attached'; instanceId: string; sessionId: string };
+  runtime: { kind: 'managed' } | { kind: 'attached'; instanceId: string; sessionId: string };
   createdAt: number;
 }
 
@@ -59,6 +88,7 @@ export interface HostBinding {
 
 export interface CollabConnection {
   send(frame: GuestFrame): void;
+  refreshSnapshot(onFrame: (frame: Extract<HostFrame, {t: 'welcome' | 'snapshot-chunk'}>) => void): Promise<void>;
   close(): void;
 }
 

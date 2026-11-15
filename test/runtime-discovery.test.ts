@@ -16,7 +16,7 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
     const directory = await mkdtemp(join(tmpdir(), 'omp-discovery-error-'));
     const executable = join(directory, 'omp');
     const config: AppConfig = {
-      bots: [], instances: {}, configPath: join(directory, 'config.yaml'),
+      bots: [], instances: [], configPath: join(directory, 'config.yaml'),
       publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
       omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 10000 },
     };
@@ -94,14 +94,14 @@ if (process.argv[2] !== 'collab') {
 `);
   await chmod(executable, 0o700);
   const config: AppConfig = {
-    bots: [], instances: { [directory]: { chats: [] } }, configPath: join(directory, 'config.yaml'),
+    bots: [], instances: [{id: 1, defaultDir: directory, chats: []}], configPath: join(directory, 'config.yaml'),
     publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
     omp: { executable, args: [], maxSessions: 1, startupTimeoutMs },
   };
   writeConfig(config);
   const runtime = new OmpRuntime(config);
   const session: TopicSession = {
-    id: 'topic', botId: 1, chatId: -100, threadId: 2, instancePath: directory,
+    id: 'topic', botId: 1, chatId: -100, threadId: 2, instanceId: 1, cwd: directory,
     name: 'Discovery regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' },
   };
   return {

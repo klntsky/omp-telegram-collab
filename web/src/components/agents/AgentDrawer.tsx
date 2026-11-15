@@ -1,8 +1,8 @@
 import type { AgentSnapshot, SessionEntry, SubagentLifecyclePayload, SubagentProgressPayload } from "@oh-my-pi/pi-wire";
-import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import type { ConnectionPhase, GuestClient } from "../../lib/client";
+import type { GuestClient } from "../../lib/client";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
@@ -18,18 +18,13 @@ export function AgentDrawer(props: {
 	progress?: SubagentProgressPayload;
 	lifecycle?: SubagentLifecyclePayload;
 	client: GuestClient;
-	phase: ConnectionPhase;
-	/** Watching-only guests do not see kill/revive/chat controls. */
-	readOnly?: boolean;
 	/** Forwarded to tool renderers so nested task cards can drill further. */
 	host?: TranscriptProps["host"];
 	onClose(): void;
 }): ReactNode {
-	const { agent, progress, lifecycle, client, phase, readOnly, host, onClose } = props;
-	const canControl = phase === "live" && !readOnly;
+	const { agent, progress, lifecycle, client, host, onClose } = props;
 	const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
 	const [fetchError, setFetchError] = useState<string | null>(null);
-	const [draft, setDraft] = useState("");
 	/** Resumes a stopped poll loop; null while no loop is mounted. */
 	const resumePollingRef = useRef<(() => void) | null>(null);
 	const quiescentRef = useRef(false);
@@ -125,13 +120,6 @@ export function AgentDrawer(props: {
 		resumePollingRef.current?.();
 	}, [progress, lifecycle, agent.status, agent.lastActivity]);
 
-	const sendChat = () => {
-		const text = draft.trim();
-		if (!text || !canControl) return;
-		client.sendAgentCmd("chat", agent.id, text);
-		setDraft("");
-	};
-
 	const p = progress?.progress;
 	const model = p?.resolvedModel;
 	const ctxPct =
@@ -148,28 +136,6 @@ export function AgentDrawer(props: {
 					{model ? <span className="ag-chip ag-chip--model">{model}</span> : null}
 				</div>
 				<div className="ag-drawer-actions">
-					{agent.status === "running" && !readOnly ? (
-						<button
-							type="button"
-							className="ag-btn ag-btn--danger"
-							disabled={!canControl}
-							onClick={() => client.sendAgentCmd("kill", agent.id)}
-						>
-							<OctagonX size={13} aria-hidden />
-							kill
-						</button>
-					) : null}
-					{(agent.status === "parked" || agent.status === "aborted") && !readOnly ? (
-						<button
-							type="button"
-							className="ag-btn"
-							disabled={!canControl}
-							onClick={() => client.sendAgentCmd("revive", agent.id)}
-						>
-							<RotateCcw size={13} aria-hidden />
-							revive
-						</button>
-					) : null}
 					<button type="button" className="ag-iconbtn" aria-label="close" onClick={onClose}>
 						<X size={15} aria-hidden />
 					</button>
@@ -227,31 +193,6 @@ export function AgentDrawer(props: {
 					<div className="ag-empty">no transcript available</div>
 				)}
 			</div>
-			{!readOnly && (
-				<form
-					className="ag-chat"
-					onSubmit={e => {
-						e.preventDefault();
-						sendChat();
-					}}
-				>
-					<input
-						className="ag-chat-input"
-						value={draft}
-						placeholder={`message ${agent.displayName}…`}
-						onChange={e => setDraft(e.target.value)}
-						disabled={!canControl}
-					/>
-					<button
-						type="submit"
-						className="ag-iconbtn"
-						aria-label="send"
-						disabled={!canControl || draft.trim().length === 0}
-					>
-						<SendHorizontal size={15} aria-hidden />
-					</button>
-				</form>
-			)}
 		</aside>
 	);
 }

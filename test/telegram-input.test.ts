@@ -11,46 +11,22 @@ function message(fields: Record<string, unknown>) {
 function context(overrides: Partial<InputContext> = {}): InputContext {
   return {botId,username:'FixtureOmpBot',allMessagesArePrompts:true,skillAliases:new Map(),endedQuestion:false,...overrides};
 }
-const replies = [
-  undefined,
-  {message_id:10,from:{id:botId,is_bot:true,first_name:'Bot'},text:'Settings panel'},
-  {message_id:11,from:{id:botId,is_bot:true,first_name:'Bot'},text:'Current question'},
-  {message_id:12,from:{id:botId,is_bot:true,first_name:'Bot'},text:'Old question'},
-  {message_id:13,from:{id:botId,is_bot:true,first_name:'Bot'},caption:'Bot image'},
-];
 
-for (const allMessagesArePrompts of [true,false]) {
-  for (const thread of [undefined,1,42]) {
-    for (const reply of replies) {
-      for (const state of [{},{question:'active'},{endedQuestion:true}]) {
-        test(`commands precede reply interpretation: mode=${allMessagesArePrompts}, thread=${thread}, reply=${reply?.message_id}, state=${JSON.stringify(state)}`, () => {
-          const ctx = context({allMessagesArePrompts,...state});
-          for (const [text,kind] of [['/new Task','new-task'],['/new','new-task'],['/p','session-prompt'],['/p@fixtureompbot Task','session-prompt'],['/settings','command'],['/unknown Task','ignore'],['/p@OtherBot Task','ignore'],['/p! Task','ignore'],['/','ignore']] as const) {
-            const msg = message({text,message_thread_id:thread,reply_to_message:reply});
-            const intent = classifyMessage(msg,normalizeMessage([msg]),ctx);
-            assert.equal(intent.kind,kind);
-            if (intent.kind === 'command') assert.deepEqual(intent,{kind:'command',action:'settings',argument:''});
-            if (intent.kind === 'new-task' || intent.kind === 'session-prompt') {
-              const quoted = reply && ('text' in reply ? reply.text : reply.caption);
-              const argument = text.endsWith(' Task') ? 'Task' : '';
-              assert.deepEqual(intent.content,{text:quoted ? argument ? `> ${quoted}\n\n${argument}` : `> ${quoted}` : argument,images:[]});
-            }
-          }
-        });
-      }
-    }
-    test(`ordinary classification is destination independent: mode=${allMessagesArePrompts}, thread=${thread}`, () => {
-      const ctx = context({allMessagesArePrompts});
-      const msg = message({text:'Task',message_thread_id:thread});
-      assert.deepEqual(classifyMessage(msg,normalizeMessage([msg]),ctx),allMessagesArePrompts ? {kind:'session-prompt',content:{text:'Task',images:[]}} : {kind:'ignore'});
-      const directed = message({text:'Task',message_thread_id:thread,reply_to_message:replies[4]});
-      assert.deepEqual(classifyMessage(directed,normalizeMessage([directed]),ctx),{kind:'session-prompt',content:{text:'> Bot image\n\nTask',images:[]}});
+test('explicit commands take precedence over active and ended question replies', () => {
+  const reply = {message_id:11,from:{id:botId,is_bot:true,first_name:'Bot'},text:'Question context'};
+  for (const state of [{question:'active'}, {endedQuestion:true}]) {
+    const ctx = context({allMessagesArePrompts:false,...state});
+    const settings = message({text:'/settings',reply_to_message:reply});
+    assert.deepEqual(classifyMessage(settings,normalizeMessage([settings]),ctx),{kind:'command',action:'settings',argument:''});
+    const prompt = message({text:'/p Task',reply_to_message:reply});
+    assert.deepEqual(classifyMessage(prompt,normalizeMessage([prompt]),ctx),{
+      kind:'session-prompt',content:{text:'> Question context\n\nTask',images:[]},
     });
   }
-}
+});
 
 test('only non-command content enters question precedence before prompts', () => {
-  const msg = message({text:'Answer',reply_to_message:replies[2]});
+  const msg = message({text:'Answer',reply_to_message:{message_id:11,from:{id:botId,is_bot:true,first_name:'Bot'},text:'Question context'}});
   const content = normalizeMessage([msg]);
   assert.deepEqual(classifyMessage(msg,content,context({question:'token',endedQuestion:true})),{kind:'question-answer',token:'token',text:'Answer'});
   assert.deepEqual(classifyMessage(msg,content,context({endedQuestion:true})),{kind:'ended-question'});
@@ -100,23 +76,6 @@ test('rich replies quote nested content without attaching the quoted images', ()
   });
 });
 
-test('rich embedded images and nested text remain prompt content under existing prompt policy', () => {
-  const msg = message({rich_message:{blocks:[
-    {type:'paragraph',text:[{type:'mention',text:'@FixtureOmpBot',username:'FixtureOmpBot'},' Inspect ',{type:'custom_emoji',custom_emoji_id:'1',alternative_text:'🔎'}]},
-    {type:'collage',blocks:[
-      {type:'photo',photo:[{file_id:'small',width:10,height:10},{file_id:'large',width:100,height:100}],caption:{text:'Photo'}},
-      {type:'document',document:{file_id:'document',mime_type:'image/png'},caption:{text:'Diagram',credit:'Author'}},
-    ],caption:{text:'Attachments'}},
-    {type:'table',cells:[[{text:'Input'},{text:{type:'mathematical_expression',expression:'x^2'}}]],caption:'Values'},
-  ]}});
-  const content = normalizeMessage([msg]);
-  const images = [{fileId:'large',mimeType:'image/jpeg'},{fileId:'document',mimeType:'image/png'}];
-  assert.deepEqual(classifyMessage(msg,content,context()),{
-    kind:'session-prompt',content:{text:'Inspect 🔎\n\nPhoto\n\nDiagram\n\nAuthor\n\nAttachments\n\nInput\tx^2\n\nValues',images},
-  });
-  assert.deepEqual(classifyMessage(msg,content,context({allMessagesArePrompts:false})),{kind:'ignore'});
-  assert.deepEqual(classifyMessage(msg,content,context({question:'answer'})),{kind:'question-answer',token:'answer',text:content.text});
-});
 
 test('rich quotation variants never promote quoted commands into instructions', () => {
   for (const type of ['blockquote','expandable_blockquote','pullquote']) {

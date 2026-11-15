@@ -3,7 +3,7 @@ import type { Message, RichBlock, RichText } from 'grammy/types';
 import { parseTelegramCommand, type PromptExtension } from './telegram-commands.js';
 
 export interface TelegramImage { fileId: string; mimeType: string }
-export interface TelegramContent { text: string; images: TelegramImage[] }
+export interface TelegramContent { text: string; images: TelegramImage[]; documents?: {fileId:string;fileName:string}[] }
 export type InputIntent =
   | { kind: 'ignore' }
   | { kind: 'event' }
@@ -38,18 +38,18 @@ function richText(text: RichText, bot?: {id:number;username:string}): string {
   return '';
 }
 
-function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:number;username:string}): string {
+function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:number;username:string}, documents: NonNullable<TelegramContent['documents']> = []): string {
   return blocks.map(block => {
     const parts: string[] = [];
     if (block.type === 'blockquote' || block.type === 'expandable_blockquote' || block.type === 'pullquote') {
-      const content = block.type === 'blockquote' ? richBlocks(block.blocks,images,bot) : richText(block.text,bot);
+      const content = block.type === 'blockquote' ? richBlocks(block.blocks,images,bot,documents) : richText(block.text,bot);
       const quote = [content,block.credit === undefined ? '' : richText(block.credit,bot)].filter(Boolean).join('\n\n');
       return quote ? quote.split('\n').map(line => `> ${line}`).join('\n') : '';
     }
     if (block.type === 'list') {
       return block.items.map(item => {
         const label = item.has_checkbox ? `${item.label} [${item.is_checked ? 'x' : ' '}]` : item.label;
-        return `${label} ${richBlocks(item.blocks,images,bot).replace(/\n/g,'\n  ')}`;
+        return `${label} ${richBlocks(item.blocks,images,bot,documents).replace(/\n/g,'\n  ')}`;
       }).join('\n');
     }
     if (block.type === 'table') {
@@ -58,14 +58,12 @@ function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:numb
     if (block.type === 'details') parts.push(richText(block.summary,bot));
     if ('text' in block) parts.push(richText(block.text,bot));
     if ('expression' in block) parts.push(block.expression);
-    if ('blocks' in block) parts.push(richBlocks(block.blocks,images,bot));
+    if ('blocks' in block) parts.push(richBlocks(block.blocks,images,bot,documents));
     if (block.type === 'photo' && block.photo.length) {
       const photo = block.photo.reduce((largest,size) => size.width * size.height > largest.width * largest.height ? size : largest);
       images.push({fileId:photo.file_id,mimeType:'image/jpeg'});
     }
-    if (block.type === 'document' && block.document.mime_type?.startsWith('image/')) {
-      images.push({fileId:block.document.file_id,mimeType:block.document.mime_type});
-    }
+    if (block.type === 'document') documents.push({fileId:block.document.file_id,fileName:block.document.file_name ?? 'document'});
     if (block.type === 'map') parts.push(`${block.location.latitude}, ${block.location.longitude}`);
     if (block.type === 'buttons') parts.push(block.buttons.map(button => richText(button.text,bot)).join(' '));
     if (block.type === 'table' && block.caption !== undefined) parts.push(richText(block.caption,bot));
@@ -77,22 +75,23 @@ function richBlocks(blocks: RichBlock[], images: TelegramImage[], bot?: {id:numb
   }).filter(Boolean).join('\n\n');
 }
 
-function messageText(message: Message, bot?: {id:number;username:string}, images: TelegramImage[] = []): string | undefined {
-  if (message.rich_message) return richBlocks(message.rich_message.blocks,images,bot);
+function messageText(message: Message, bot?: {id:number;username:string}, images: TelegramImage[] = [], documents: NonNullable<TelegramContent['documents']> = []): string | undefined {
+  if (message.rich_message) return richBlocks(message.rich_message.blocks,images,bot,documents);
   return 'text' in message ? message.text : 'caption' in message ? message.caption : undefined;
 }
 
 export function normalizeMessage(messages: NonNullable<Context['message']>[]): TelegramContent {
   const texts: string[] = [];
   const images: TelegramImage[] = [];
+  const documents: NonNullable<TelegramContent['documents']> = [];
   for (const message of messages) {
-    const text = messageText(message,undefined,images);
+    const text = messageText(message,undefined,images,documents);
     if (text) texts.push(text);
     const photo = message.photo?.length ? message.photo.reduce((largest, size) => size.width * size.height > largest.width * largest.height ? size : largest) : undefined;
     if (photo) images.push({fileId:photo.file_id,mimeType:'image/jpeg'});
-    else if (message.document?.mime_type?.startsWith('image/')) images.push({fileId:message.document.file_id,mimeType:message.document.mime_type});
+    if (message.document && !message.rich_message) documents.push({fileId:message.document.file_id,fileName:message.document.file_name ?? 'document'});
   }
-  return {text:texts.join('\n\n'),images};
+  return {text:texts.join('\n\n'),images,...(documents.length ? {documents} : {})};
 }
 
 export function classifyMessage(message: NonNullable<Context['message']>, content: TelegramContent, context: InputContext): InputIntent {
@@ -114,7 +113,7 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
     if (parsed.kind === 'ignore') return parsed;
     if (parsed.kind === 'invalid') return parsed;
     if (parsed.kind === 'selection') {
-      if (content.images.length) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:parsed.name}]};
+      if (content.images.length || content.documents?.length) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:parsed.name}]};
       return {kind:'skill-selection',text:`/skill:${parsed.name}`};
     }
     if (parsed.kind === 'prompt') return {
@@ -122,13 +121,13 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
       content:withContext(parsed.text),
       ...(parsed.extensions.length ? {extensions:parsed.extensions} : {}),
     };
-    if (parsed.kind === 'command' && content.images.length) {
+    if (parsed.kind === 'command' && (content.images.length || content.documents?.length)) {
       const skill = context.skillAliases.get(parsed.action);
       if (skill) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:skill.name}]};
     }
     return parsed;
   }
-  if (!content.text.trim() && !content.images.length) return {kind:'ignore'};
+  if (!content.text.trim() && !content.images.length && !content.documents?.length) return {kind:'ignore'};
   if (context.question) return {kind:'question-answer',token:context.question,text:content.text};
   if (context.endedQuestion) return {kind:'ended-question'};
   const directed = reply?.from?.id === context.botId && !('forum_topic_created' in reply) && reply.message_id !== message.message_thread_id;
@@ -141,5 +140,5 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
         (entity.type === 'text_mention' && entity.user.id === context.botId)) text = text.slice(0,entity.offset) + text.slice(entity.offset+entity.length);
   }
   text = text.trim();
-  return text || content.images.length ? {kind:'session-prompt',content:{...content,text}} : {kind:'ignore'};
+  return text || content.images.length || content.documents?.length ? {kind:'session-prompt',content:{...content,text}} : {kind:'ignore'};
 }

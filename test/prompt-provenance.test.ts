@@ -6,7 +6,7 @@ const sender = 'Telegram @fixture_bot';
 function fixture() {
   const store = new Store(':memory:');
   const session = store.createSession(
-    { botId: 1, chatId: -100, threadId: 42, instancePath: '/fixture' },
+    { botId: 1, chatId: -100, threadId: 42, instanceId: 1, cwd: '/fixture' },
     'Provenance',
   );
   return { store, id: session.id };

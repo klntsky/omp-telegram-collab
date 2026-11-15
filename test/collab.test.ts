@@ -1,49 +1,47 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { test } from 'node:test';
-import { WebSocketServer } from 'ws';
-import { COLLAB_PROTO, WRITE_TOKEN_BYTES, type HostFrame } from '@oh-my-pi/pi-wire';
-import { connectCollab, readCollabState } from '../src/collab.js';
-import { generateRoomKey, importRoomKey, seal } from '../src/vendor/codec.js';
-import { formatCollabLink, packEnvelope } from '../src/vendor/link.js';
+import WebSocket from 'ws';
+import type { HostFrame } from '@oh-my-pi/pi-wire';
+import { CollabTransportError, connectCollab, readCollabState } from '../src/collab.js';
+import { emptySnapshot, hostFrames, state, welcome } from './collab-fixture.js';
 
-const sessionId = 'handshake-session';
-const state = { cwd: '/fixture', isStreaming: false, queuedMessageCount: 0, participants: [] };
-const welcome: Extract<HostFrame, { t: 'welcome' }> = {
-  t: 'welcome', proto: COLLAB_PROTO,
-  header: { type: 'session', id: sessionId, cwd: '/fixture', timestamp: new Date(0).toISOString() },
-  state, agents: [], entryCount: 0,
-};
-
-async function hostFrames(frames: HostFrame[]) {
-  const rawKey = generateRoomKey();
-  const key = await importRoomKey(rawKey);
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-  const connected = once(server,'connection');
-  server.on('connection', socket => {
-    socket.on('error', () => socket.terminate());
-    void (async () => {
-      for (const frame of frames) socket.send(packEnvelope(0, await seal(key, frame)));
-    })().catch(() => socket.terminate());
+test('a room closed during setup is retryable without changing its diagnostic', {timeout: 5000}, async t => {
+  const host = await hostFrames([]);
+  t.after(() => host.close());
+  const reasons: string[] = [];
+  const connection = connectCollab(host.binding, 'Guest', {
+    onFrame(frame) { assert.fail(`Unexpected frame: ${frame.t}`); },
+    onClose(reason) { reasons.push(reason); },
   });
-  await once(server, 'listening');
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
-  return {
-    connected,
-    binding: {
-      instanceId: 'fixture-host', generation: 1, sessionId,
-      url: formatCollabLink(`ws://127.0.0.1:${address.port}`, 'handshake-room', rawKey, new Uint8Array(WRITE_TOKEN_BYTES)),
-    },
-    async close() {
-      for (const socket of server.clients) socket.terminate();
-      const { promise, resolve, reject } = Promise.withResolvers<void>();
-      server.close(error => error ? reject(error) : resolve());
-      await promise;
-    },
-  };
-}
+  const rejected = assert.rejects(connection, error =>
+    error instanceof CollabTransportError && error.message === 'Collab room closed');
+  const [socket] = await host.connected;
+  socket.send(JSON.stringify({t: 'room-closed'}));
+  await rejected;
+  assert.deepEqual(reasons, ['Collab room closed']);
+});
 
+test('a hello send racing socket closure remains retryable with its original cause', {timeout: 5000}, async t => {
+  const host = await hostFrames([]);
+  t.after(() => host.close());
+  const send = WebSocket.prototype.send;
+  t.mock.method(WebSocket.prototype, 'send', function(this: WebSocket, ...args: Parameters<WebSocket['send']>) {
+    this.close(1001, 'Closing during hello send');
+    return send.apply(this, args);
+  });
+  const reasons: string[] = [];
+  await assert.rejects(connectCollab(host.binding, 'Guest', {
+    onFrame(frame) { assert.fail(`Unexpected frame: ${frame.t}`); },
+    onClose(reason) { reasons.push(reason); },
+  }), error => {
+    assert.ok(error instanceof CollabTransportError);
+    assert.ok(error.cause instanceof Error);
+    assert.equal(error.message, error.cause.message);
+    assert.deepEqual(reasons, [error.message]);
+    return true;
+  });
+});
 test('live host broadcasts before welcome do not reject an authenticated session snapshot', { timeout: 5000 }, async () => {
   const frames: HostFrame[] = [
     { t: 'state', state: { ...state, isStreaming: true } },
@@ -131,3 +129,13 @@ for (const [label,frame,reason] of [
     finally { await host.close(); }
   });
 }
+
+test('initial snapshot callback failures still reject setup with the original error', {timeout: 5000}, async t => {
+  const host = await hostFrames([welcome, emptySnapshot]);
+  t.after(() => host.close());
+  const diagnostic = new Error('Original initial callback failure');
+  await assert.rejects(connectCollab(host.binding, 'Guest', {
+    onFrame() { throw diagnostic; },
+    onClose() {},
+  }), error => error === diagnostic);
+});
