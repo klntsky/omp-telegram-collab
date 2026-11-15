@@ -4,6 +4,7 @@ import { join, relative } from 'node:path';
 import { it } from 'node:test';
 import type { TopicSession } from '../../../shared/contracts.js';
 import type { WorktreeTarget } from '../../../src/omp.js';
+import { OmpRuntime } from '../../../src/runtime.js';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import type { FakeLlmScenario } from '../helpers/fake-llm-provider.js';
 import { createWriteTask, readSessionHistory } from '../helpers/model-tasks.js';
@@ -147,6 +148,17 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
     assert.ok(host);
     try {
       await assert.rejects(app.runtime.deleteWorktree({ ...session, status: 'closed' }, target, async () => {}), /host is busy/);
+      // A fresh runtime has neither observed this turn nor retained its prompt lease.
+      // It must consult native activity rather than interrupting the unknown turn.
+      const unobserved = new OmpRuntime(app.config);
+      try {
+        await assert.rejects(
+          unobserved.deleteWorktree({ ...session, status: 'closed' }, target, async () => {}),
+          /host has not stopped; worktree cleanup refused/,
+        );
+      } finally {
+        await unobserved.close();
+      }
       await retained(false);
       assert.equal(await app.runtime.isRunning(session), true);
       assert.equal((await app.omp.listHosts()).find(candidate => candidate.sessionId === target.sessionId)?.pid, host.pid);

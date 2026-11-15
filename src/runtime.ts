@@ -122,7 +122,11 @@ export class OmpRuntime implements Omp {
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
       readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
-      stop: (session) => runtime.stop(session),
+      stopIdle: async (session) => {
+        await runtime.#termination.stopHost(session.id, 'worktree', session);
+        const host = runtime.#managed.get(session.id);
+        return !host || host.exited;
+      },
       skillProcesses: this.#skillProcesses,
     });
     this.#paths = createPaths({

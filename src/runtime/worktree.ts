@@ -22,7 +22,7 @@ interface WorktreeDependencies {
   prepare(session: TopicSession): Promise<{ dir: string; pin: DurableBinding }>;
   validateCwd(cwd: string): Promise<void>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;
-  stop(session: TopicSession): Promise<boolean>;
+  stopIdle(session: TopicSession): Promise<boolean>;
   readonly skillProcesses: Set<ChildProcess>;
 }
 
@@ -120,9 +120,9 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     };
     await beforeMutation();
     assertBoundary();
-    if (!await deps.stop(session)) throw new Error('OMP host has not stopped; worktree cleanup refused');
+    if (!await deps.stopIdle(session)) throw new Error('OMP host has not stopped; worktree cleanup refused');
     assertBoundary();
-    // Public stop must finish before installing the deletion fence it would wait on.
+    // Guarded retirement must finish before installing the deletion fence it would wait on.
     const operation = Promise.resolve().then(async () => {
       const pin = await deps.readManagedBinding(session);
       const current = pin && await inspectBinding(pin);
