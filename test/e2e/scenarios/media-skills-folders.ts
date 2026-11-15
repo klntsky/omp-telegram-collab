@@ -9,7 +9,7 @@ import { completeWriteTask, taskInput, taskReadResult } from '../helpers/model-t
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
-export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'mention' | 'mentionImage' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'documentMentionAlbum' | 'documentFinalAuthority' | 'settingsReply' | 'followup' | 'general'>): void {
+export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'mention' | 'mentionImage' | 'replyPrompt' | 'replyMention' | 'replyImage' | 'replyDocument' | 'replyQuoted' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'documentMentionAlbum' | 'documentFinalAuthority' | 'settingsReply' | 'followup' | 'general'>): void {
   it('media, skills, and folders', async t => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
@@ -64,6 +64,49 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
         assert.ok(!input.text.toLowerCase().includes(`@${app.telegram.bot.username.toLowerCase()}`));
       }
     }
+    // JsonMessage embeds the same-chat reply with its text/media, but not nested replies:
+    // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp (JsonMessage::store).
+    for (const [task, trigger] of [
+      [tasks.replyPrompt, `/p@${app.telegram.bot.username}`],
+      [tasks.replyMention, `@${app.telegram.bot.username.toUpperCase()}`],
+    ] as const) {
+      const selected = await app.sendAndWait(task.prompt, session.threadId);
+      const submitted = await replyText(app, selected.id, session.threadId, trigger);
+      await completeWriteTask(app, task, submitted, session.threadId);
+      const input = taskInput(app.omp.provider, task);
+      assert.ok(input.text.endsWith(task.prompt));
+      assert.ok(!input.text.includes(`> ${task.prompt}`));
+      assert.deepEqual(input.images, []);
+    }
+    const selectedImage = await sendPhoto(app, session.threadId, tasks.replyImage.prompt, photoBase64);
+    await app.waitForMessageHandled(selectedImage.id);
+    const imageReply = await replyText(app, selectedImage.id, session.threadId, '/p');
+    await completeWriteTask(app, tasks.replyImage, imageReply, session.threadId);
+    const replyImageInput = taskInput(app.omp.provider, tasks.replyImage);
+    assert.ok(replyImageInput.text.endsWith(tasks.replyImage.prompt));
+    assert.ok(!replyImageInput.text.includes(`> ${tasks.replyImage.prompt}`));
+    assert.equal(replyImageInput.images.length, 1);
+    assert.match(replyImageInput.images[0]!, /^data:image\/[^;]+;base64,/);
+    const replyDocumentName = 'selected-reply-document.txt';
+    const replyDocumentBytes = Buffer.from('Only the selected replied document is attached.');
+    const selectedDocument = await sendDocument(app, replyDocumentName, replyDocumentBytes, {
+      threadId: session.threadId, caption: tasks.replyDocument.prompt,
+    });
+    await app.waitForMessageHandled(selectedDocument.id);
+    const replyDocumentPath = join(session.cwd, replyDocumentName);
+    assert.equal(existsSync(replyDocumentPath), false);
+    const documentReply = await replyText(app, selectedDocument.id, session.threadId, `@${app.telegram.bot.username}`);
+    await completeWriteTask(app, tasks.replyDocument, documentReply, session.threadId);
+    assert.deepEqual(await readFile(replyDocumentPath), replyDocumentBytes);
+    const replyDocumentInput = taskInput(app.omp.provider, tasks.replyDocument);
+    assert.ok(replyDocumentInput.text.includes(replyDocumentPath));
+    assert.ok(replyDocumentInput.text.includes(tasks.replyDocument.prompt));
+    assert.ok(!replyDocumentInput.text.includes(`> ${tasks.replyDocument.prompt}`));
+    assert.deepEqual(replyDocumentInput.images, []);
+    const quotedSource = await app.sendAndWait('Explicit prompt reply context', session.threadId);
+    const quotedReply = await replyText(app, quotedSource.id, session.threadId, `/p ${tasks.replyQuoted.prompt}`);
+    await completeWriteTask(app, tasks.replyQuoted, quotedReply, session.threadId);
+    assert.ok(taskInput(app.omp.provider, tasks.replyQuoted).text.endsWith(`> Explicit prompt reply context\n\n${tasks.replyQuoted.prompt}`));
     const requestsBeforeDiscussion = app.omp.provider.requests.size;
     await app.sendAndWait('@OtherUnrelatedBot ignored discussion', session.threadId);
     await app.sendAndWait(`${app.telegram.bot.username} ignored plain username`, session.threadId);
@@ -87,7 +130,11 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     const skillPicker = await openPanel(app, '/skills', session.threadId);
     await clickPanel(app, skillPicker, 0);
     await clickPanel(app, skillPicker, 0);
-    await app.sendAndWait('/skill_e2e_review', session.threadId);
+    const skillCommand = await app.sendAndWait('/skill_e2e_review', session.threadId);
+    assert.deepEqual(app.store.getPendingSkills(skillKey), ['e2e-review']);
+    await app.sendAndWait('/skills clear', session.threadId);
+    assert.deepEqual(app.store.getPendingSkills(skillKey), []);
+    await replyText(app, skillCommand.id, session.threadId, '/p');
     assert.deepEqual(app.store.getPendingSkills(skillKey), ['e2e-review']);
     const generalPicker = await openPanel(app, '/skills');
     await clickPanel(app, generalPicker, 0);
@@ -150,6 +197,7 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.general).text.includes(`/skill:e2e-review\n\n${tasks.general.prompt}`));
     app.omp.provider.assertComplete([tasks.image.name, tasks.explicitImage.name, tasks.mention.name, tasks.mentionImage.name, tasks.document.name, tasks.documentOverwrite.name, tasks.documentOnly.name, tasks.settingsReply.name, tasks.followup.name, tasks.general.name]);
+    app.omp.provider.assertComplete([tasks.replyPrompt.name, tasks.replyMention.name, tasks.replyImage.name, tasks.replyDocument.name, tasks.replyQuoted.name]);
   });
   it('existing-session upload rechecks authority before submitting its prompt', async () => {
     const app = getApp();

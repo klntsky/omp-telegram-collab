@@ -1,4 +1,3 @@
-import type { Context } from 'grammy';
 import type { Message, RichBlock, RichText } from 'grammy/types';
 import { parseTelegramCommand, type PromptExtension } from './telegram-commands.js';
 
@@ -93,7 +92,7 @@ function messageText(message: Message, bot?: {id:number;username:string;mentione
   return text;
 }
 
-export function normalizeMessage(messages: NonNullable<Context['message']>[]): TelegramContent {
+export function normalizeMessage(messages: readonly Message[]): TelegramContent {
   const texts: string[] = [];
   const images: TelegramImage[] = [];
   const documents: NonNullable<TelegramContent['documents']> = [];
@@ -107,12 +106,29 @@ export function normalizeMessage(messages: NonNullable<Context['message']>[]): T
   return {text:texts.join('\n\n'),images,...(documents.length ? {documents} : {})};
 }
 
-export function classifyMessage(message: NonNullable<Context['message']>, content: TelegramContent, context: InputContext, messages: readonly NonNullable<Context['message']>[] = [message]): InputIntent {
+export function classifyMessage(message: Message, content: TelegramContent, context: InputContext, messages: readonly Message[] = [message]): InputIntent {
   const lifecycle = 'forum_topic_created' in message || 'forum_topic_edited' in message || 'forum_topic_closed' in message || 'forum_topic_reopened' in message;
   if ('forward_origin' in message || 'forward_date' in message || (message.from?.is_bot && !lifecycle)) return {kind:'ignore'};
   if (lifecycle) return {kind:'event'};
   if (!message.from || message.from.is_bot) return {kind:'ignore'};
-  const reply = message.reply_to_message;
+  let reply = message.reply_to_message;
+  let selected = false;
+  if (reply && !content.images.length && !content.documents?.length) {
+    const parsed = content.text.startsWith('/') ? parseTelegramCommand(content.text,context.username,context.skillAliases) : undefined;
+    const bot = {id:context.botId,username:context.username,mentioned:false};
+    const addressedText = parsed ? undefined : messages.map(part => messageText(part,bot)).filter(Boolean).join('\n\n').trim();
+    const barePrompt = parsed?.kind === 'prompt' && parsed.action === 'p' && !parsed.text && !parsed.extensions.length;
+    const bareMention = !context.question && !context.endedQuestion && bot.mentioned && !addressedText;
+    if (barePrompt || bareMention) {
+      // Select only Telegram's embedded message, never its author's authority or reply chain.
+      // Keeping Context untouched preserves the invoking user's authorization and destination.
+      message = reply;
+      messages = [reply];
+      content = normalizeMessage([reply]);
+      reply = undefined;
+      selected = true;
+    }
+  }
   const quote = () => {
     const quoted = reply && messageText(reply);
     return quoted ? quoted.split(/\r?\n/).map(line => `> ${line}`).join('\n') : '';
@@ -141,15 +157,15 @@ export function classifyMessage(message: NonNullable<Context['message']>, conten
     return parsed;
   }
   if (!content.text.trim() && !content.images.length && !content.documents?.length) return {kind:'ignore'};
-  if (context.question) return {kind:'question-answer',token:context.question,text:content.text};
-  if (context.endedQuestion) return {kind:'ended-question'};
+  if (!selected && context.question) return {kind:'question-answer',token:context.question,text:content.text};
+  if (!selected && context.endedQuestion) return {kind:'ended-question'};
   const directed = reply?.from?.id === context.botId && !('forum_topic_created' in reply) && reply.message_id !== message.message_thread_id;
   const bot = {id:context.botId,username:context.username,mentioned:false};
   // Client::get_input_media stores entities per album member, so strip before joining captions.
   // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
   let text = messages.map(part => messageText(part,bot)).filter(Boolean).join('\n\n');
   if (directed) return {kind:'session-prompt',content:withContext(bot.mentioned ? text.trim() : content.text)};
-  if (!context.allMessagesArePrompts && !bot.mentioned) return {kind:'ignore'};
+  if (!selected && !context.allMessagesArePrompts && !bot.mentioned) return {kind:'ignore'};
   text = text.trim();
   if (!text && !content.images.length && !content.documents?.length) return {kind:'ignore'};
   return {kind:'session-prompt',content:bot.mentioned ? withContext(text) : {...content,text}};
