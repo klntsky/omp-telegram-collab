@@ -101,7 +101,7 @@ export class SettingsMutations {
             ? (setting as string[] | undefined)?.join(', ') || 'No default skills'
             : setting === undefined ? 'Use host default' : String(setting);
         if (page === 'prompts')
-          return setting === false ? 'Commands, mentions, and replies only' : 'All messages';
+          return setting === false ? '/p <prompt>, mentions, and replies only' : 'All messages';
         if (page === 'proposals')
           return setting === true ? 'Members with admin approval' : 'Admins only';
         return setting === true ? 'Enabled' : 'Disabled';

@@ -189,7 +189,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark saved selections with ✅, including skills, model presets, and typing options. Settings categories and navigation buttons use icons. Message handling distinguishes all messages from commands, mentions, and replies only. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark saved selections with ✅, including skills, model presets, and typing options. Settings categories and navigation buttons use icons. Message handling distinguishes “All messages” from “/p <prompt>, mentions, and replies only”. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
 
 The settings overview arrives with its controls in the initial message, without a loading placeholder.
 
