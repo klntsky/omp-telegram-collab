@@ -6,6 +6,7 @@ import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
 import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
+import { PromptQueue } from './store/prompt-queue.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -38,6 +39,7 @@ function session(row: Row | undefined): TopicSession | undefined {
 import { PromptLedger } from './store/prompt-ledger.js';
 export class Store {
   readonly db: DatabaseSync;
+  readonly promptQueue: PromptQueue;
   private readonly prompts: PromptLedger;
   private readonly initialDocuments: InitialDocuments;
   constructor(filename: string) {
@@ -45,6 +47,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.prompts = new PromptLedger(this.db, id => this.getSession(id));
     this.initialDocuments = new InitialDocuments(this.db);
+    this.promptQueue = new PromptQueue(this.db);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
@@ -172,6 +175,7 @@ export class Store {
         if (value.status === 'closed') {
           this.db.prepare("INSERT OR IGNORE INTO session_pending_close_icons SELECT id FROM sessions WHERE id=? AND status!='closed'").run(id);
         } else this.completeCloseIcon(id);
+        if (value.status !== 'open') this.db.prepare('DELETE FROM prompt_queue WHERE session_id=?').run(id);
         this.db.prepare('UPDATE sessions SET status=? WHERE id=?').run(value.status, id);
       }
       this.db.exec('COMMIT');
@@ -299,6 +303,7 @@ export class Store {
   }
   cancelInitialTask(id: string): void {
     this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
+    this.db.prepare('DELETE FROM prompt_queue WHERE session_id=?').run(id);
   }
   getInitialAuthority(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_authorities WHERE session_id=?').get(id);

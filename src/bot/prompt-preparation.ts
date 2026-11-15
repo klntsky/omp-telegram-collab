@@ -6,8 +6,8 @@ import type { ImageContent } from '@oh-my-pi/pi-wire';
 import type { TelegramImage } from '../telegram-input.js';
 import { findInstance, refreshTermination } from '../config.js';
 import { realpathSync } from 'node:fs';
-import { saveDocument } from './document-file.js';
-import { basename, join } from 'node:path';
+import { documentFileName, saveDocument } from './document-file.js';
+import { join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
 import type { InitialDocumentSetup } from '../store/initial-documents.js';
@@ -52,9 +52,7 @@ export class PromptPreparation {
     };
     let text = prompt.text;
     for (const [index, document] of documents.entries()) {
-      const fileName = basename(document.fileName.replaceAll('\\', '/'));
-      if (!fileName || fileName === '.' || fileName === '..' || /[\x00-\x1f\x7f]/.test(fileName))
-        throw new Error('The document filename is unsafe.');
+      const fileName = documentFileName(document.fileName);
       await check();
       const file = await this.deps.bot.api.getFile(document.fileId);
       if (!file.file_path) throw new Error('Telegram document file path is unavailable');

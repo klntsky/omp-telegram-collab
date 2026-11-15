@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { constants, closeSync, fchmodSync, fstatSync, lstatSync, openSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+
+export function documentFileName(value: string): string {
+  const name = basename(value.replaceAll('\\', '/'));
+  if (!name || name === '.' || name === '..' || /[\x00-\x1f\x7f]/.test(name))
+    throw new Error('The document filename is unsafe.');
+  return name;
+}
 
 export function saveDocument(path: string, bytes: Uint8Array): boolean {
   let overwritten = false;

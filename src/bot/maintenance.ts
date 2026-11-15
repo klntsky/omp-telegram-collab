@@ -12,6 +12,7 @@ interface MaintenanceDependencies {
  botId(): number; stopped(): boolean; restoreSessions(): void;
  sessionAssigned(session: TopicSession): boolean;
  sendInitial(session: TopicSession): Promise<void>;
+ drainPrompts(session: TopicSession): Promise<void>;
  refreshTopicStatus(session: TopicSession): Promise<void>;
  recoverExistingMirror(session: TopicSession): Promise<void>;
  dropListener(id: string): void; refreshPresetCatalogs(): Promise<void>;
@@ -56,6 +57,7 @@ startBackground(): void {
                     );
                   }
                   await Promise.all([
+                    this.runBackground(`prompt-queue:${session.id}`, () => this.deps.drainPrompts(session)),
                     this.runBackground(`topic-status:${session.id}`, () =>
                       this.deps.refreshTopicStatus(session),
                     ),

@@ -7,7 +7,7 @@ import { refreshTermination } from './config.js';
 import { HistoryWatch } from './history-watch.js';
 import { connectCollab, readCollabState } from './collab.js';
 import type { Omp } from './omp.js';
-import { type ForkTarget, type ManagedHost } from './runtime/types.js';
+import { SessionRetiringError, type ForkTarget, type ManagedHost } from './runtime/types.js';
 import { FORBIDDEN_ARGS } from './runtime/arguments.js';
 import { record } from './runtime/values.js';
 import { createFork, type RuntimeFork } from './runtime/fork.js';
@@ -323,7 +323,8 @@ export class OmpRuntime implements Omp {
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     if (session.status !== 'open') return Promise.reject(new Error('Session closed'));
     try { this.#assertActive(); } catch (error) { return Promise.reject(error); }
-    if (this.#closed || this.#stopping.has(session.id)) return Promise.reject(new Error('OMP runtime is stopping'));
+    if (this.#closed) return Promise.reject(new Error('OMP runtime is stopping'));
+    if (this.#stopping.has(session.id)) return Promise.reject(new SessionRetiringError('OMP runtime is stopping'));
     if (!this.#config.instances.some(instance => instance.id === session.instanceId)) return Promise.reject(new Error('Instance path is not configured'));
     const pending = this.#pending.get(session.id);
     if (pending) return pending;

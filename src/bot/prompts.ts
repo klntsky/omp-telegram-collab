@@ -25,6 +25,7 @@ export interface PromptReceiptsDependencies {
   sessionObservation: (id: string) => SessionObservation;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
+  wakePrompts(session: TopicSession): void;
 }
 
 export class PromptReceipts {
@@ -58,6 +59,7 @@ ${content.text}`,
     content: PromptContent,
     messageId?: number,
     onStartupRejected?: () => void,
+    beforeSend?: () => void,
   ): void {
     const session = this.deps.options.store.getSession(listener.sessionId);
     if (!session) throw new Error('Session no longer exists');
@@ -70,42 +72,50 @@ ${content.text}`,
     )
       throw new Error('Session closed');
     if (listener.ompSessionId === undefined) throw new Error('OMP session is not connected');
-    const submissionId = this.deps.options.store.recordPromptSubmission(
-      session.id,
-      listener.ompSessionId,
-      `Telegram @${this.deps.bot.botInfo!.username}`,
-      content,
-      messageId,
-    );
+    this.deps.options.runtime.markPrompt(listener.sessionId);
+    const store = this.deps.options.store;
+    let submissionId: number;
+    // Queue recovery must never see intent whose transport outcome may be unknown.
+    // Commit its removal with provenance before the first possible send.
+    store.db.exec('BEGIN IMMEDIATE');
+    try {
+      submissionId = store.recordPromptSubmission(
+        session.id, listener.ompSessionId, `Telegram @${this.deps.bot.botInfo!.username}`, content, messageId,
+      );
+      beforeSend?.();
+      store.db.exec('COMMIT');
+    } catch (error) {
+      store.db.exec('ROLLBACK');
+      throw error;
+    }
     const observation: TaskObservation = { state: 'waiting for acceptance', submissionId };
     this.deps.sessionObservation(session.id).task = observation;
     const pending = { submissionId, onStartupRejected, observation };
     listener.pendingPrompts.push(pending);
-    let attempted = false;
     try {
-      this.deps.options.runtime.markPrompt(listener.sessionId);
-      attempted = true;
       listener.connection!.send({
         t: 'prompt',
         text: content.text,
         ...(content.images?.length ? { images: content.images } : {}),
       });
     } catch (error) {
-      observation.state = attempted ? 'acceptance unknown' : 'not accepted';
-      if (attempted) this.deps.options.store.markPromptSubmissionUncertain(submissionId);
-      else this.deps.options.store.rejectPromptSubmission(submissionId);
+      observation.state = 'acceptance unknown';
+      this.deps.options.store.markPromptSubmissionUncertain(submissionId);
       const index = listener.pendingPrompts.indexOf(pending);
       if (index !== -1) listener.pendingPrompts.splice(index, 1);
       throw error;
     }
   }
+  async authorizePrompt(session: TopicSession, userId: number, authorityUserId: number): Promise<void> {
+    await this.deps.authorize(session.chatId, userId);
+    if (!isAdministrator(await this.deps.bot.api.getChatMember(session.chatId, authorityUserId))) {
+      throw new AuthorizationDeniedError('Administrator access changed before prompt submission.');
+    }
+    this.deps.requireSessionAssignment(session);
+  }
   async authorizeInitial(session: TopicSession, userId: number, authorityUserId: number): Promise<void> {
     try {
-      await this.deps.authorize(session.chatId, userId);
-      if (!isAdministrator(await this.deps.bot.api.getChatMember(session.chatId, authorityUserId))) {
-        throw new AuthorizationDeniedError('Administrator access changed before initial task submission.');
-      }
-      this.deps.requireSessionAssignment(session);
+      await this.authorizePrompt(session, userId, authorityUserId);
     } catch (error) {
       if (error instanceof AuthorizationDeniedError) this.deps.options.store.cancelInitialTask(session.id);
       throw error;
@@ -232,6 +242,7 @@ ${content.text}`,
     ) {
       clearTimeout(listener.initial.timer);
       listener.initial = undefined;
+      this.deps.wakePrompts(session);
     }
     if (receipt.messageId !== undefined)
       this.acknowledgeMessage(session, receipt.messageId, listener);

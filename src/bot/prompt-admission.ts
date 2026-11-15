@@ -5,12 +5,16 @@ import type { PromptExtension } from '../telegram-commands.js';
 import { randomBytes } from 'node:crypto';
 import type { PendingSkillKey } from '../store.js';
 import { configWritable, findInstance, refreshTermination } from '../config.js';
-import { SessionCapacityError } from '../runtime/types.js';
+import { SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import type { Listener, PresetPanel, PromptProposal } from './types.js';
 import type { CapacityAdmission } from './capacity-admission.js';
 import type { PromptPreparation } from './prompt-preparation.js';
+import type { QueuedPrompt } from '../store/prompt-queue.js';
+import { AuthorizationDeniedError } from './types.js';
+import { topicDestination } from '../../shared/topic-destination.js';
+import { documentFileName } from './document-file.js';
 
 export interface PromptAdmissionDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime' | 'configWritable'>;
@@ -34,16 +38,20 @@ export interface PromptAdmissionDependencies {
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
   uploadDocuments: PromptPreparation['uploadDocuments'];
   newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
-  listen(session: TopicSession): Promise<void>;
+  listen(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<unknown>;
   listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
-  sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void): void;
+  sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void, beforeSend?: () => void): void;
   prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent>;
+  authorizeQueued(session: TopicSession, userId: number, authorityUserId: number): Promise<void>;
+  scheduleReconnect(session: TopicSession): void;
+  dropListener(sessionId: string): void;
 }
 
 export class PromptAdmission {
   private admissionEpoch = 0;
   private readonly promptProposals = new Map<string, PromptProposal>();
+  private readonly drains = new Map<string, Promise<void>>();
   constructor(private readonly deps: PromptAdmissionDependencies) {}
   get epoch(): number { return this.admissionEpoch; }
   clear(): void {
@@ -259,45 +267,63 @@ export class PromptAdmission {
   async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkills:string[]}, authority = ctx): Promise<boolean> {
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     this.deps.requireSessionAssignment(session);
-    await this.deps.listen(session);
-    await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
-    if (this.deps.listener(session.id)?.initial) {
-      await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
-      return false;
-    }
-    const uploaded = await this.deps.uploadDocuments(session, content, async () => {
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
-    }, contextDestination(ctx));
-    const prompt = await this.deps.prepareContent(session, uploaded);
-    if (content.documents?.length || prompt !== uploaded) {
-      // Upload acknowledgements and initial chat metadata await Telegram; submission is a separate mutation.
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
-    }
     const messageId = ctx.message!.message_id;
-    const restore = selected && (selected.names.length || selected.topicSkills.length) ? () => {
-      if (selected.names.length) {
-        const current = this.deps.options.store.getPendingSkills(selected.key);
-        this.deps.options.store.clearPendingSkills(selected.key);
-        for (const name of [...selected.names, ...current]) this.deps.options.store.addPendingSkill(selected.key, name);
-      }
-      if (selected.topicSkills.length) this.deps.options.store.setNewTopicSkills(session.id,selected.topicSkills);
-    } : undefined;
+    for (const document of content.documents ?? []) documentFileName(document.fileName);
+    this.deps.options.store.promptQueue.enqueue(session.id, messageId, ctx.from!.id, authority.from!.id, content);
+    for (const original of this.deps.albumContexts(ctx))
+      if (original.message && original.message.message_id !== messageId)
+        this.deps.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
     if (selected) {
       this.consumePendingSkills(selected.key,selected.names);
       if (selected.topicSkills.length) this.deps.options.store.clearNewTopicSkills(session.id);
     }
-    for (const original of this.deps.albumContexts(ctx))
-      if (original.message && original.message.message_id !== messageId)
-        this.deps.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
-    try {
-      this.deps.sendPrompt(this.deps.listener(session.id)!,prompt,messageId,restore);
-    } catch (error) {
-      restore?.();
-      throw error;
-    }
+    await this.drain(session);
     return true;
+  }
+  drain(session: TopicSession): Promise<void> {
+    const existing = this.drains.get(session.id);
+    if (existing) return existing;
+    const pending = this.drainSession(session).finally(() => this.drains.delete(session.id));
+    this.drains.set(session.id, pending);
+    return pending;
+  }
+  private async drainSession(session: TopicSession): Promise<void> {
+    const store = this.deps.options.store;
+    while (!this.deps.stopped() && !this.deps.options.config.terminated && store.promptQueue.has(session.id)) {
+      if (store.getSession(session.id)?.status !== 'open' || !this.deps.sessionAssigned(session)) return;
+      if (store.hasPendingInitialTask(session.id) || this.deps.listener(session.id)?.initial) return;
+      const queued: QueuedPrompt = store.promptQueue.list(session.id)[0]!;
+      const generation = store.getSessionGeneration(session.id);
+      const active = () => store.getSession(session.id)?.status === 'open' &&
+        store.getSessionGeneration(session.id) === generation &&
+        store.promptQueue.list(session.id).some(item => item.id === queued.id);
+      const authorize = async () => {
+        await this.deps.authorizeQueued(session, queued.userId, queued.authorityUserId);
+        if (!active() || this.deps.stopped()) throw new Error('The queued prompt was cancelled before submission.');
+      };
+      let listener: Listener | undefined;
+      try {
+        await authorize();
+        await this.deps.listen(session, authorize);
+        listener = this.deps.listener(session.id);
+        if (!listener || listener.initial) return;
+        const uploaded = await this.deps.uploadDocuments(session, queued.content, authorize,
+          topicDestination(session.chatId, session.threadId),
+          remaining => store.promptQueue.replaceContent(queued.id, remaining));
+        const prompt = await this.deps.prepareContent(session, uploaded);
+        await authorize();
+        if (this.deps.listener(session.id) !== listener) return;
+        this.deps.sendPrompt(listener, prompt, queued.messageId, undefined, () => store.promptQueue.remove(queued.id));
+      } catch (error) {
+        if (error instanceof SessionRetiringError) {
+          if (listener && this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
+          this.deps.scheduleReconnect(session);
+          return;
+        }
+        if (error instanceof AuthorizationDeniedError) store.promptQueue.remove(queued.id);
+        throw error;
+      }
+    }
   }
 }

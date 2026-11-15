@@ -32,6 +32,16 @@ const schema = `
       CREATE TABLE initial_task_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id),kind TEXT NOT NULL DEFAULT 'initial' CHECK(kind IN ('initial','fork')));
 `;
 
+const promptQueueSchema = `CREATE TABLE IF NOT EXISTS prompt_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  message_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  authority_user_id INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  UNIQUE(session_id,message_id)
+);`;
+
 export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -43,6 +53,7 @@ export function initializeDatabase(db: DatabaseSync): void {
       db.exec(schema);
       db.exec('PRAGMA user_version=8');
     }
+    db.exec(promptQueueSchema);
     db.exec('COMMIT');
   } catch (error) {
     if (db.isTransaction) db.exec('ROLLBACK');

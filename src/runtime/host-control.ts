@@ -5,6 +5,7 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { SessionTitleUnsupportedError, type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
+import { SessionRetiringError } from './types.js';
 interface HostControlDependencies {
   readonly config: AppConfig;
   list(deadline: number): Promise<RegistryHost[]>;
@@ -80,7 +81,7 @@ export function createHostControl(deps: HostControlDependencies): RuntimeHostCon
             descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 2) {
           throw new Error('OMP host identity changed during model preset control');
         }
-        if (descriptor.retiring || deps.managed.get(session.id)?.retiring) throw new Error('Session is retiring; rejoin after it settles');
+        if (descriptor.retiring || deps.managed.get(session.id)?.retiring) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
       };
       if (lifecycle.sessionId !== binding.sessionId ||
           path.dirname(lifecycle.socketPath) !== tmpdir() ||

@@ -67,6 +67,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     restoreSessions: () => recovery.restoreSessions(),
     sessionAssigned: (session) => authorization.sessionAssigned(session),
     sendInitial: (session) => receipts.sendInitial(session),
+    drainPrompts: session => admission.drain(session),
     refreshTopicStatus: (session) => activity.refreshTopicStatus(session),
     recoverExistingMirror: (session) => recovery.recoverExistingMirror(session),
     dropListener: (id) => connections.dropListener(id),
@@ -130,6 +131,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     refreshTopicStatus: activity.refreshTopicStatus.bind(activity),
     runBackground: maintenance.runBackground.bind(maintenance),
     sendInitial: (session) => receipts.sendInitial(session),
+    drainPrompts: session => admission.drain(session),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
@@ -147,6 +149,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
+    wakePrompts: session => { void maintenance.runBackground(`prompt-queue:${session.id}`, () => admission.drain(session)); },
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
@@ -381,12 +384,15 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     preparePrompt: preparation.preparePrompt.bind(preparation),
     uploadDocuments: preparation.uploadDocuments.bind(preparation),
     newSession: creation.newSession.bind(creation),
-    listen: async (session) => { await connections.listen(session); },
+    listen: (session, beforeMutation) => connections.listen(session, undefined, beforeMutation),
     listener: connections.listeners.get.bind(connections.listeners),
     // Admission is constructed before input routing; do not bind an uninitialized owner.
     albumContexts: ctx => input.albumContexts(ctx),
     sendPrompt: receipts.sendPrompt.bind(receipts),
     prepareContent: receipts.prepareContent.bind(receipts),
+    authorizeQueued: receipts.authorizePrompt.bind(receipts),
+    scheduleReconnect: recovery.scheduleReconnect.bind(recovery),
+    dropListener: connections.dropListener.bind(connections),
   });
   const status: BotStatus = new BotStatus({
     config: options.config,
