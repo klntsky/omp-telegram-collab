@@ -78,6 +78,11 @@ for (const allMessagesArePrompts of [true,false]) {
     const before = app.accepted.length;
     await app.update({ message_id:8200,message_thread_id:session.threadId,text,reply_to_message:{message_id:editor.message_id,from:{id:botId,is_bot:true,first_name:'OMP'}} });
     assert.deepEqual(app.accepted.slice(before), [{ t: 'ui-response', reqId: 82, value: text }]);
+    await eventually(() => app.deletedMessages.some(message => message.message_id === editor.message_id));
+    assert.deepEqual(app.deletedMessages.filter(message => message.message_id === editor.message_id),[
+      {chat_id:session.chatId,message_id:editor.message_id},
+    ]);
+    assert.ok(!app.deletedMessages.some(message => message.message_id === 8200));
     assert.equal(app.store.listSessions(botId).length, 1);
     assert.deepEqual(app.reactions.filter(reaction => reaction.message_id === 8200).map(reaction => reaction.reaction),[[{type:'emoji',emoji:'👀'}]]);
     app.emit({t:'ui-request-end',reqId:81});

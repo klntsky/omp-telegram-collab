@@ -148,7 +148,7 @@ interface PendingQuestion {
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];
-  answer?: {kind:'answer' | 'discussion'; text:string};
+  answer?: {kind:'answer' | 'discussion' | 'typed'; text:string};
 }
 interface CapacityRequest {
   sessionId: string;
@@ -4105,6 +4105,16 @@ export class BotService {
       question.listener.customAnswerMessage = {messageIds:question.messageIds,messageId:question.buttonIds.at(-1)!};
       return;
     }
+    if (question.answer?.kind === 'typed') {
+      question.listener.tail = question.listener.tail.then(async () => {
+        for (const messageId of question.buttonIds) {
+          await this.delivery.run(question.session.chatId,
+            () => this.bot.api.deleteMessage(question.session.chatId,messageId),
+            () => !this.stopped && this.sessionAssigned(question.session));
+        }
+      }).catch(error => { console.warn(`Could not delete custom-answer controls (${question.session.id}).`, error); });
+      return;
+    }
     const answer = question.answer?.text;
     const receiptId = answer === undefined ? undefined : question.buttonIds[0];
     for (const messageId of question.buttonIds) {
@@ -4143,9 +4153,9 @@ export class BotService {
         !this.sessionAssigned(question.session) || this.options.store.getSession(question.session.id)?.status !== 'open') return;
     this.requireSessionAssignment(question.session);
     const discussion = question.request.kind === 'select' && value === 'Chat about this';
-    question.answer = {kind:discussion ? 'discussion' : 'answer',text:discussion
+    question.answer = {kind:discussion ? 'discussion' : question.request.kind === 'editor' && value !== undefined ? 'typed' : 'answer',text:discussion
       ? 'Chat about this selected. OMP will discuss the question. Reply to this message or the question to continue the discussion.'
-      : receipt ?? (value === undefined ? 'Question cancelled.' : 'Custom answer sent.')};
+      : receipt ?? (value === undefined ? 'Question cancelled.' : value)};
     if (messageId !== undefined) question.listener.pendingAnswers.set(question.request.reqId,messageId);
     try {
       question.listener.connection!.send({t:'ui-response',reqId:question.request.reqId,value});
