@@ -170,7 +170,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 - Accepted limitation: folder button labels show only the first 100 characters of a path. Long paths can have identical labels; no disambiguation guarantee is provided.
 - Accepted limitation: folder entry identifies paths as relative to the forum instance without displaying its absolute base path, and `/status` does not show the session working directory. No extra directory confirmation is required for single-folder startup.
 - The selected execution directory persists with the session and survives service and host restarts. The forum assignment remains unchanged. Explicit and automatic worktrees start from the selected directory and then retain OMP's resulting worktree directory.
-- Manually created Telegram topics use the sole effective folder without a chooser. A missing sole folder requires explicit administrator creation consent before registering or starting a session, and continuation must use that same Telegram topic, not create another. With multiple effective folders, the bot leaves manual topics without a session and directs users to `/new`. Attached hosts retain their terminal-owned working directory.
+- Manually created Telegram topics use the sole effective folder without a chooser. With multiple effective folders, the bot asks an administrator to choose a folder inside the manually created topic before registering its session. Missing folders require explicit administrator creation consent. Selection and creation continue in that same Telegram topic, never a new one. Attached hosts retain their terminal-owned working directory.
 
 ### 1.2. Prompts and permissions
 
