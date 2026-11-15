@@ -16,6 +16,10 @@ import { registerLogicalIdentity } from './scenarios/logical-identity.js';
 import { registerTermination } from './scenarios/termination.js';
 import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
+import { registerWorktreeCleanup } from './scenarios/worktree-cleanup.js';
+import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-cleanup-authorization.js';
+import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
+import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
 import { registerProviderSetup } from './scenarios/provider-setup.js';
@@ -45,6 +49,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
       after: cleanup => { cleanups.push(cleanup); },
     }, { scenarios: [
       ...scenarios,
+      ...worktreeCleanupSafetyScenarios,
       { ...interrupted, steps: [{ type: 'await-abort' }] },
       { ...cancelledQuestion, steps: [questionStep(cancelledQuestion.name)] },
       ...questionControls,
@@ -67,6 +72,10 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
       message => context.diagnostic(message),
     );
   });
+  registerWorktreeCleanup(() => app);
+  registerWorktreeCleanupAuthorization(() => app);
+  registerWorktreeCleanupSafety(() => app);
+  registerWorktreeCleanupConfirmations(() => app);
   registerFolderSettings(() => app);
   registerForumDefaults(() => app, tasks);
   registerCompositePreparations(() => app, tasks);
