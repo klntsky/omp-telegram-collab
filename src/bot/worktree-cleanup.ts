@@ -6,6 +6,7 @@ import type { Omp, WorktreeTarget } from '../omp.js';
 import type { Store } from '../store.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { refreshTermination } from '../config.js';
+import { decodeWorktreeCleanupCallback, encodeWorktreeCleanupCallback } from './worktree-cleanup-callback.js';
 
 function contains(parent: string, child: string): boolean {
   const relative = path.relative(parent, child);
@@ -36,7 +37,7 @@ export class WorktreeCleanup {
   }
 
   private buttons(session: TopicSession) {
-    return [[{ text: '🌳 Delete worktree', callback_data: `wtcleanup:o:${session.id}` }]];
+    return [[{ text: '🌳 Delete worktree', callback_data: encodeWorktreeCleanupCallback({ action: 'offer', sessionId: session.id }) }]];
   }
 
   private signature(session: TopicSession, target: WorktreeTarget, messageId: number, adminId: number): Buffer {
@@ -62,13 +63,12 @@ export class WorktreeCleanup {
   }
 
   async callback(ctx: Context, data: string): Promise<void> {
-    const match = /^wtcleanup:(o|c|x):([A-Za-z0-9_-]{22})(?::([0-9a-z]{1,11}):([A-Za-z0-9_-]{16}))?$/.exec(data);
+    const command = decodeWorktreeCleanupCallback(data);
     const message = ctx.callbackQuery?.message;
-    if (!match || !message || !('from' in message) || message.from?.id !== this.deps.botId() ||
+    if (!command || !message || !('from' in message) || message.from?.id !== this.deps.botId() ||
         !ctx.from || ctx.from.is_bot || ctx.chat?.type !== 'supergroup' ||
         'forward_origin' in message || 'forward_date' in message) return;
-    const [, action, id, admin, mac] = match;
-    const session = this.deps.store.getSession(id!);
+    const session = this.deps.store.getSession(command.sessionId);
     if (!session || session.botId !== this.deps.botId() || message.chat.id !== session.chatId ||
         message.message_thread_id !== session.threadId || !this.active(session)) {
       await ctx.answerCallbackQuery({ text: 'Close the assigned managed topic before deleting its worktree.' });
@@ -81,7 +81,7 @@ export class WorktreeCleanup {
       await ctx.answerCallbackQuery({ text: 'Use the current buttons on this message.' });
       return;
     }
-    if ((action === 'o') !== (admin === undefined) || (admin !== undefined && admin !== ctx.from.id.toString(36))) {
+    if (command.action !== 'offer' && command.adminIdBase36 !== ctx.from.id.toString(36)) {
       await ctx.answerCallbackQuery({ text: 'Only the administrator who requested confirmation can use it.' });
       return;
     }
@@ -102,21 +102,21 @@ export class WorktreeCleanup {
         return;
       }
       const signature = this.signature(session, target, message.message_id, ctx.from.id);
-      if (action !== 'o' && (!mac || !timingSafeEqual(signature, Buffer.from(mac, 'base64url')))) {
+      if (command.action !== 'offer' && !timingSafeEqual(signature, Buffer.from(command.mac, 'base64url'))) {
         await ctx.answerCallbackQuery({ text: 'The worktree changed. Request a new confirmation.' });
         await this.edit(session, message.message_id,
           `🌳 The worktree changed. Confirm the current directory before deleting it:\n${target.path}`, this.buttons(session));
         return;
       }
       await ctx.answerCallbackQuery();
-      if (action === 'x') {
+      if (command.action === 'cancel') {
         await this.edit(session, message.message_id, `🌳 Worktree deletion cancelled.\n${target.path}`, this.buttons(session));
-      } else if (action === 'o') {
-        const suffix = `${session.id}:${ctx.from.id.toString(36)}:${signature.toString('base64url')}`;
+      } else if (command.action === 'offer') {
+        const approval = { sessionId: session.id, adminIdBase36: ctx.from.id.toString(36), mac: signature.toString('base64url') };
         await this.edit(session, message.message_id,
           `🌳 Permanently delete this entire Git worktree directory?\n${target.path}\n\nThis deletion is irreversible. Git will refuse dirty or locked worktrees. Session history will remain.`, [
-            [{ text: '🌳 Confirm deletion', callback_data: `wtcleanup:c:${suffix}` }],
-            [{ text: 'Cancel', callback_data: `wtcleanup:x:${suffix}` }],
+            [{ text: '🌳 Confirm deletion', callback_data: encodeWorktreeCleanupCallback({ action: 'confirm', ...approval }) }],
+            [{ text: '❌ Cancel', callback_data: encodeWorktreeCleanupCallback({ action: 'cancel', ...approval }) }],
           ]);
       } else {
         await this.deps.runtime.deleteWorktree(session, target, async () => {
