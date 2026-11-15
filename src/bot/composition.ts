@@ -333,6 +333,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     announce: entries.announce.bind(entries),
     listen: connections.listen.bind(connections),
     dropListener: connections.dropListener.bind(connections),
+    stripTopicStatus: titles.stripTopicStatus.bind(titles),
   });
   const detach: SessionDetach = new SessionDetach({
     options: options,

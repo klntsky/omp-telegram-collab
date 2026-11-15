@@ -19,6 +19,7 @@ export interface SessionForkDependencies {
   announce(session: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<unknown>;
   dropListener(sessionId: string): void;
+  stripTopicStatus(session: TopicSession, title: string): string;
 }
 
 export class SessionFork {
@@ -56,11 +57,13 @@ export class SessionFork {
     try {
       reservation = await this.dependencies.options.runtime.reserveSession(undefined, check);
       await check();
-      topic = await this.dependencies.bot.api.createForumTopic(source.chatId, source.name.slice(0, 128) || 'OMP session');
+      // Decorations belong to the source Git context, not the fork's human title.
+      const title = this.dependencies.stripTopicStatus(source, source.name);
+      topic = await this.dependencies.bot.api.createForumTopic(source.chatId, title.slice(0, 128) || 'OMP session');
       await check();
       destination = this.dependencies.options.store.createSession(
         {botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd},
-        source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
+        title, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
       );
       reservation.bind(destination.id);
       const destinationGeneration = this.dependencies.options.store.getSessionGeneration(destination.id);
