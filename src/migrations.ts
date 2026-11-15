@@ -38,12 +38,12 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 8) throw new Error(`Unsupported database schema version ${version}`);
+    if (version !== 0 && version !== 9) throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=8');
+      db.exec('PRAGMA user_version=9');
     }
     db.exec('COMMIT');
   } catch (error) {

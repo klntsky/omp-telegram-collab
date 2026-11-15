@@ -1,4 +1,4 @@
-import { folderAlbumContexts } from './folder-context.js';
+import { folderAlbumContexts } from './folder-requests.js';
 import { createFolderSelection } from './folder-continuation.js';
 import { BotMaintenance } from './maintenance.js';
 import { BotAuthorization } from './authorization.js';
