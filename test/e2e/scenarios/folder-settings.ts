@@ -1,10 +1,37 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readConfig } from '../../../src/config.js';
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, openPanel, replyText, waitForPanel } from '../helpers/telegram-actions.js';
 
 export function registerFolderSettings(getApp: () => CollaborationTest): void {
+  it('manual topics choose their runtime folder in the same topic', async () => {
+    const app = getApp();
+    app.setFolderOptions(['.', 'manual-selected']);
+    const start = app.apiCalls.length;
+    const topic = await app.telegram.user.client.createForumTopic({
+      chatId: app.telegram.forum.chat, title: 'Manual folder selection',
+    });
+    await app.waitForMessageHandled(topic.id);
+    const sessions = () => app.store.listSessions(app.telegram.bot.id);
+    assert.equal(sessions().some(session => session.threadId === topic.id), false);
+    const panel = await waitForPanel(app, 'folder', 'folder:', start, topic.id);
+    const selectionStart = app.apiCalls.length;
+    await clickPanel(app, panel, 1);
+    const creation = await waitForPanel(app, 'folder', 'folder:', selectionStart, topic.id);
+    assert.equal(sessions().some(session => session.threadId === topic.id), false);
+    await clickPanel(app, creation, 0);
+    await app.waitForCondition(() => sessions().some(session => session.threadId === topic.id));
+    const session = sessions().find(session => session.threadId === topic.id)!;
+    assert.equal(session.cwd, realpathSync(join(app.omp.workspace, 'manual-selected')));
+    assert.equal(session.runtime.kind, 'managed');
+    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.equal(await app.runtime.isRunning(session), false);
+    assert.equal(app.apiCalls.slice(start).some(call => call.method === 'createForumTopic'), false);
+  });
+
   it('folder entry requests native replies and saves paths without reviving retired input', async () => {
     const app = getApp();
     const panel = await openPanel(app, '/settings');
