@@ -18,6 +18,7 @@ import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
+import { registerProviderSetup } from './scenarios/provider-setup.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -80,3 +81,4 @@ describe('Telegram workflows', { concurrency: false, timeout: 900000 }, suite =>
 
 // Keep independent provisioning last to respect Telegram's forum-creation flood limits.
 registerMiniAppRecovery();
+registerProviderSetup();
