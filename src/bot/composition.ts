@@ -1,3 +1,5 @@
+import { folderAlbumContexts } from './folder-context.js';
+import { createFolderSelection } from './folder-continuation.js';
 import { BotMaintenance } from './maintenance.js';
 import { BotAuthorization } from './authorization.js';
 import { SessionConnections } from './connection.js';
@@ -10,7 +12,7 @@ import { TypingIndicators } from './typing.js';
 import { FrameProjection } from './frames.js';
 import { BotCommandMenus } from './command-menus.js';
 import { BotQuestions } from './questions.js';
-import { FolderSelection } from './folders.js';
+import type { FolderSelection } from './folders.js';
 import { SettingsPanelStore } from './settings-panel-store.js';
 import { SettingsPanels } from './settings-panels.js';
 import { BotPresets } from './presets.js';
@@ -48,14 +50,10 @@ export interface BotComponents {
   capacity: CapacityAdmission;
   entries: SessionEntries;
   admission: PromptAdmission;
+  folders: FolderSelection;
   input: BotInput;
 }
 
-/**
- * This composition root intentionally exceeds the default line budget to keep
- * lifecycle-sharing dependencies visible as one graph instead of scattered wiring.
- * Owners receive only operational dependencies; closures preserve live state.
- */
 export function createBotComponents(options: BotOptions, bot: Bot<Context>, lifecycle: LifecycleDependencies): BotComponents {
   const maintenance: BotMaintenance = new BotMaintenance({
     bot: bot,
@@ -212,15 +210,8 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     dropListener: connections.dropListener.bind(connections),
     ready: authorization.ready.bind(authorization),
   });
-  const folders: FolderSelection = new FolderSelection({
-    botId: lifecycle.id.bind(lifecycle),
-    config: options.config,
-    assignedId: authorization.assignedId.bind(authorization),
-    authorize: authorization.authorize.bind(authorization),
-    currentAdmin: authorization.currentAdmin.bind(authorization),
-    admissionEpoch: () => admission.epoch,
-    stopped: lifecycle.stopped.bind(lifecycle),
-  });
+  const folders = createFolderSelection(options,bot,lifecycle,authorization,ctx => folderAlbumContexts(ctx,input.albumContexts(ctx)),
+    () => ({options,lifecycle,authorization,admission,creation,preparation,entries,activity,skills}));
   const panelStore: SettingsPanelStore = new SettingsPanelStore({
     id: lifecycle.id.bind(lifecycle),
     api: bot.api,
@@ -312,7 +303,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     skillKey: skills.key.bind(skills),
     defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     // Input routing needs this owner first; resolve album membership only during dispatch.
-    albumContexts: ctx => input.albumContexts(ctx),
+    albumContexts: ctx => folderAlbumContexts(ctx,input.albumContexts(ctx)),
     announce: entries.announce.bind(entries),
     setTopicStatus: activity.setTopicStatus.bind(activity),
     listen: connections.listen.bind(connections),
@@ -383,7 +374,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     listen: async (session) => { await connections.listen(session); },
     listener: connections.listeners.get.bind(connections.listeners),
     // Admission is constructed before input routing; do not bind an uninitialized owner.
-    albumContexts: ctx => input.albumContexts(ctx),
+    albumContexts: ctx => folderAlbumContexts(ctx,input.albumContexts(ctx)),
     sendPrompt: receipts.sendPrompt.bind(receipts),
   });
   const status: BotStatus = new BotStatus({
@@ -400,5 +391,5 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionObservation: recovery.sessionObservation.bind(recovery),
   });
   const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts });
-  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, input };
+  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, folders, input };
 }

@@ -75,6 +75,7 @@ async applyTermination(): Promise<void> {
     if (!this.options.config.terminated) { this.termination = undefined; return; }
     this.termination ??= (async () => {
       this.components.admission.clear();
+      this.components.folders.invalidate();
       const sessions = this.options.store.listSessions();
       for (const session of sessions) {
         this.options.store.cancelInitialTask(session.id);
@@ -111,6 +112,7 @@ initialize(): Promise<void> {
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
     this.options.store.recoverInitialTaskPreparations(this.id);
+    this.components.folders.start();
     await this.components.menus.syncCommandMenus();
     await this.components.entries.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
@@ -189,6 +191,7 @@ async close(): Promise<void> {
     this.components.connections.delivery.close();
     this.components.maintenance.stopTimers();
     this.components.input.closeAlbums();
+    await this.components.folders.close();
     this.polling?.controller.abort();
     await this.polling?.done.catch(() => undefined);
     for (const timer of this.components.recovery.reconnects.values()) clearTimeout(timer);

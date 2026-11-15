@@ -9,7 +9,40 @@ import { completeWriteTask, taskInput, taskReadResult } from '../helpers/model-t
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
+function waitForFolderRetirement(app: CollaborationTest, messageId: number, start: number): Promise<void> {
+  return app.waitForCondition(() => app.apiCalls.slice(start).some(call => {
+    if (call.method !== 'editMessageText') return false;
+    const payload = call.payload as {message_id?: number; reply_markup?: {inline_keyboard?: unknown[][]}};
+    return payload.message_id === messageId && payload.reply_markup?.inline_keyboard?.length === 0;
+  }));
+}
+
 export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'documentFinalAuthority' | 'settingsReply' | 'followup' | 'general'>): void {
+  it('folder cancellation remains terminal while settings change', async () => {
+    const app = getApp();
+    app.setFolderOptions(['cancel-boundary']);
+    const sessions = app.store.listSessions(app.telegram.bot.id);
+    const start = app.apiCalls.length;
+    await app.sendAndWait(tasks.general.prompt);
+    const panel = await waitForPanel(app, 'folder', 'folder:', start);
+    let acknowledged = false;
+    app.bot.api.config.use(async (previous, method, payload, signal) => {
+      const result = await previous(method,payload,signal);
+      // Cancellation is terminal even when settings change during its acknowledgement.
+      if (method === 'answerCallbackQuery' && !acknowledged) {
+        acknowledged = true;
+        app.setFolderOptions(['.', 'another-folder']);
+      }
+      return result;
+    });
+    const cancellationStart = app.apiCalls.length;
+    await clickPanel(app, panel, panel.buttons.findIndex(data => data.endsWith(':cancel')));
+    await waitForFolderRetirement(app,panel.messageId,cancellationStart);
+    assert.equal(acknowledged,true);
+    assert.deepEqual(app.store.listSessions(app.telegram.bot.id),sessions);
+    assert.deepEqual(readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!.folder_options,['.', 'another-folder']);
+    await assert.rejects(stat(join(app.omp.workspace,'cancel-boundary')),{code:'ENOENT'});
+  });
   it('media, skills, and folders', async t => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
@@ -89,6 +122,21 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.ok(taskInput(app.omp.provider, tasks.followup).text.includes(`/skill:e2e-review\n\n${tasks.followup.prompt}`));
   
     const selectedDirectory = join(app.omp.workspace, 'selected', 'nested');
+    const assertRetiredEntryConsumed = async (messageId: number) => {
+      const config = readConfig(app.config.configPath);
+      const sessions = app.store.listSessions(app.telegram.bot.id);
+      const requests = structuredClone([...app.omp.provider.requests]);
+      const frames = structuredClone(app.guestFrames.filter(frame => frame.t === 'prompt'));
+      const skills = app.store.getPendingSkills(generalSkillKey);
+      for (const text of ['retired-folder-must-not-be-added', '/p Retired folder entry must not submit a task', '/skills clear']) {
+        await replyText(app, messageId, 1, text);
+        assert.deepEqual(readConfig(app.config.configPath), config);
+        assert.deepEqual(app.store.listSessions(app.telegram.bot.id), sessions);
+        assert.deepEqual([...app.omp.provider.requests], requests);
+        assert.deepEqual(app.guestFrames.filter(frame => frame.t === 'prompt'), frames);
+        assert.deepEqual(app.store.getPendingSkills(generalSkillKey), skills);
+      }
+    };
     app.setFolderOptions(['selected/nested']);
     await app.sendAndWait('/skill_e2e_review');
     const folderStart = app.apiCalls.length;
@@ -97,7 +145,23 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), sessionsAfterForks);
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
     await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
+    const soleCancellationStart = app.apiCalls.length;
     await clickPanel(app, folders, folders.buttons.findIndex(data => data.endsWith(':cancel')));
+    app.setFolderOptions(['.', 'another-folder']);
+    await waitForFolderRetirement(app,folders.messageId,soleCancellationStart);
+    const cancelledChoiceStart = app.apiCalls.length;
+    await app.sendAndWait(tasks.general.prompt);
+    const cancelledChoices = await waitForPanel(app, 'folder', 'folder:', cancelledChoiceStart);
+    await app.restart();
+    const cancelledEntryStart = app.apiCalls.length;
+    await clickPanel(app, cancelledChoices, cancelledChoices.buttons.findIndex(data => data.endsWith(':add')));
+    const cancelledEntry = await waitForPanel(app, 'folder', 'folder:', cancelledEntryStart);
+    await app.restart();
+    const cancellationStart = app.apiCalls.length;
+    await clickPanel(app, cancelledEntry, cancelledEntry.buttons.findIndex(data => data.endsWith(':cancel')));
+    await waitForFolderRetirement(app,cancelledEntry.messageId,cancellationStart);
+    await app.restart();
+    await assertRetiredEntryConsumed(cancelledEntry.messageId);
     await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
     assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), sessionsAfterForks);
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
@@ -108,6 +172,7 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     const initialDocumentPath = join(selectedDirectory, initialDocumentName);
     const general = await sendDocument(app, initialDocumentName, initialDocumentBytes, { caption: tasks.general.prompt });
     const choices = await waitForPanel(app, 'folder', 'folder:', confirmationStart);
+    await app.restart();
     const entryStart = app.apiCalls.length;
     await clickPanel(app, choices, choices.buttons.findIndex(data => data.endsWith(':add')));
     const entry = await waitForPanel(app, 'folder', 'folder:', entryStart);
@@ -120,6 +185,7 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(current => current.id), sessionsAfterForks);
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), ['e2e-review']);
     await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
+    await app.restart();
     const creationStart = app.apiCalls.length;
     await replyText(app, entry.messageId, 1, 'selected/nested');
     const confirmation = await waitForPanel(app, 'folder', 'folder:', creationStart);
@@ -129,6 +195,9 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     await assert.rejects(stat(selectedDirectory), { code: 'ENOENT' });
     await assert.rejects(readFile(initialDocumentPath), { code: 'ENOENT' });
     await assert.rejects(readFile(join(app.omp.workspace, initialDocumentName)), { code: 'ENOENT' });
+    await app.restart();
+    assert.deepEqual(savedChat().folder_options, ['.', 'another-folder', 'selected/nested']);
+    await assertRetiredEntryConsumed(entry.messageId);
     await clickPanel(app, confirmation, confirmation.buttons.findIndex(data => data.endsWith(':create')));
     const generalReply = await completeWriteTask(app, tasks.general, general);
     const allSessions = app.store.listSessions(app.telegram.bot.id);
@@ -152,6 +221,8 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.equal(app.store.hasPendingInitialTask(created.id), false);
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.general).text.includes(`/skill:e2e-review\n\n${tasks.general.prompt}`));
+    await app.restart();
+    await assertRetiredEntryConsumed(entry.messageId);
     app.omp.provider.assertComplete([tasks.image.name, tasks.explicitImage.name, tasks.document.name, tasks.documentOverwrite.name, tasks.documentOnly.name, tasks.settingsReply.name, tasks.followup.name, tasks.general.name]);
   });
   it('existing-session upload rechecks authority before submitting its prompt', async () => {
