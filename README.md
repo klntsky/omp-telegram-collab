@@ -46,9 +46,9 @@ Run [OMP](https://github.com/can1357/oh-my-pi) coding sessions from Telegram for
 | ❌ | Revive a parked or aborted subagent (`/hub`, `/subagents`) | No direct subagent controls. Ask the main agent through Telegram. |
 | 📱 | Inspect subagent model and usage (`/hub`, `/subagents`) | The agent rail and drawer show model, tokens, cost, tool count, and duration when the host supplies them. |
 | ❌ | Configure per-agent models, prewalk, or advisor (`/agents`) | No corresponding Mini App or bot controls. |
-| ✅ | List, save, switch, and delete model presets (`/modelpreset`) | `/model_preset` browses preset models and roles with buttons to use one in the idle topic or make it the forum default. `/model_preset <name>` switches directly; `/settings` also selects the forum default. To edit presets, ask the agent. |
+| ✅ | List, save, switch, and delete model presets (`/modelpreset`) | `/modelpreset` browses preset models and roles with buttons to use one in the idle topic or make it the forum default. `/modelpreset <name>` switches directly; `/settings` also selects the forum default. To edit presets, ask the agent. |
 | 📱 | Inspect the current model and reasoning level | Read the Mini App header and model/thinking-change markers in the transcript. |
-| ❌ | Select model and reasoning level independently (`/model`, `/models`, `/switch`, `/effort`) | No independent selectors. `/model_preset` applies predefined combinations instead. |
+| ❌ | Select model and reasoning level independently (`/model`, `/models`, `/switch`, `/effort`) | No independent selectors. `/modelpreset` applies predefined combinations instead. |
 | 📱 | Inspect context-use percentage (`/context`) | Read the Mini App header's context gauge. |
 | ❌ | Browse detailed context contents (`/context`) | No context inspector. The transcript is not a view of the complete model context. |
 | 📱 | View compaction and branch-summary markers | The Mini App transcript displays summaries and changes already made by the host. |

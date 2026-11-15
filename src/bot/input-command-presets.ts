@@ -22,7 +22,7 @@ export interface InputCommandPresetsDependencies {
 export async function inputCommandPresets(deps: InputCommandPresetsDependencies, input: CommandRouteInput): Promise<boolean> {
   const { ctx, session, destination, detached, assigned, action, arg } = input;
   const message = ctx.message;
-      if (action === 'model_preset') {
+      if (action === 'modelpreset') {
         if (!(await deps.currentAdmin(ctx))) {
           await replyTo(
             ctx,
