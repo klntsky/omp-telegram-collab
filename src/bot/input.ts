@@ -1,4 +1,4 @@
-import { HttpError, type Bot, type Context } from 'grammy';
+import { GrammyError, HttpError, type Bot, type Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
@@ -17,6 +17,7 @@ interface InputDependencies {
  sessionObservation(id: string): SessionObservation; settingsReplyPanel(ctx: Context): SettingsPanel | undefined;
  allMessagesArePrompts(chatId: number): boolean; usersCanProposePrompts(chatId: number): boolean;
  currentAdmin(ctx: Context): Promise<boolean>; handle(ctx: Context, intent: InputIntent): Promise<void>;
+ fail(error: unknown): void;
 }
 
 export class BotInput {
@@ -35,35 +36,49 @@ export class BotInput {
 
 install(): void {
     this.deps.bot.use(async (ctx) => {
+      let queued = false;
       let callbackAnswered = false;
-      const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
-      ctx.answerCallbackQuery = async (...args) => {
-        const result = await answerCallbackQuery(...args);
-        callbackAnswered = true;
-        return result;
-      };
-      if (this.collectAlbum(ctx)) return;
-      const intent = this.classifyInput(ctx);
-      const urgent = intent.kind === 'command' && intent.action === 'terminate';
-      if (++this.queuedUpdates > 256 && !urgent) {
-        this.queuedUpdates--;
-        return;
-      }
-      const received = this.receiveMessage(ctx, intent);
-      const process = async () => {
-        await received;
-        await this.deps.handle(ctx, intent);
-      };
-      const task = urgent ? process() : this.updateTail.then(process);
-      if (!urgent) this.updateTail = task.catch(() => undefined);
+      let primaryFailure: { error: unknown } | undefined;
       try {
+        const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
+        ctx.answerCallbackQuery = async (...args) => {
+          const result = await answerCallbackQuery(...args);
+          callbackAnswered = true;
+          return result;
+        };
+        if (this.collectAlbum(ctx)) return;
+        const intent = this.classifyInput(ctx);
+        const urgent = intent.kind === 'command' && intent.action === 'terminate';
+        if (++this.queuedUpdates > 256 && !urgent) {
+          this.queuedUpdates--;
+          return;
+        }
+        queued = true;
+        const received = this.receiveMessage(ctx, intent);
+        // Observe receipt failures immediately, even while an earlier update owns the queue.
+        void received.catch(() => undefined);
+        const process = async () => {
+          await received;
+          await this.deps.handle(ctx, intent);
+        };
+        const task = urgent ? process() : this.updateTail.then(process);
+        if (!urgent) this.updateTail = task.catch(() => undefined);
         await task;
       } catch (error) {
-        await this.reportError(ctx, error);
+        if (!ctx.chat || error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) {
+          primaryFailure = { error };
+          console.error('Fatal Telegram update failed.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,updateId:ctx.update.update_id});
+          throw error;
+        }
+        try { await this.reportError(ctx, error); }
+        catch (reportError) { primaryFailure = { error: reportError }; throw reportError; }
       } finally {
-        this.queuedUpdates--;
+        if (queued) this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
-          await ctx.answerCallbackQuery().catch(error => console.warn('Could not acknowledge Telegram callback.', error));
+          await ctx.answerCallbackQuery().catch(error => {
+            console.warn('Could not acknowledge Telegram callback.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'answerCallbackQuery',originalError:primaryFailure?.error});
+            if (!primaryFailure && error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+          });
       }
     });
 }
@@ -82,25 +97,28 @@ install(): void {
       action: intent?.kind === 'command' ? intent.action : undefined,
     };
     console.error('Telegram operation failed.', error, context);
-    if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
-      const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
-      if (session && this.deps.sessionAssigned(session)) this.deps.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
+    try {
+      if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
+        const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
+        if (session && this.deps.sessionAssigned(session)) this.deps.sessionObservation(session.id).failure = {operation:'Telegram operation',at:Date.now(),error};
+      }
+      if (!ctx.chat || error instanceof SessionCapacityError) return;
+      const diagnostic = error instanceof HttpError && error.error instanceof Error ? error.error : error;
+      const diagnostics = diagnostic instanceof Error
+        ? ['code','signal','killed'].flatMap(key => {
+            const value = Reflect.get(diagnostic,key);
+            return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
+          })
+        : [];
+      const prefix = `The operation could not be completed. Check the local service and try again.\n\n${diagnostics.length ? diagnostics.join('\n') + '\n\n' : ''}`;
+      const details = error instanceof Error ? error.message : String(error);
+      await replyTo(ctx, contextDestination(ctx), prefix + details, {
+        entities: [{type:'pre',offset:prefix.length,length:details.length}],
+      });
+    } catch (deliveryError) {
+      console.error('Could not report Telegram operation error.', deliveryError, { ...context, originalError:error });
+      if (deliveryError instanceof GrammyError && (deliveryError.error_code === 401 || deliveryError.error_code === 409)) throw deliveryError;
     }
-    if (!ctx.chat || error instanceof SessionCapacityError) return;
-    const diagnostic = error instanceof HttpError && error.error instanceof Error ? error.error : error;
-    const diagnostics = diagnostic instanceof Error
-      ? ['code','signal','killed'].flatMap(key => {
-          const value = Reflect.get(diagnostic,key);
-          return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
-        })
-      : [];
-    const prefix = `The operation could not be completed. Check the local service and try again.\n\n${diagnostics.length ? diagnostics.join('\n') + '\n\n' : ''}`;
-    const details = error instanceof Error ? error.message : String(error);
-    await replyTo(ctx, contextDestination(ctx), prefix + details, {
-      entities: [{type:'pre',offset:prefix.length,length:details.length}],
-    }).catch(deliveryError => {
-      console.error('Could not deliver Telegram operation error notice.', deliveryError, context);
-    });
   }
 
   private collectAlbum(ctx: Context): boolean {
@@ -126,7 +144,13 @@ install(): void {
         await this.receiveMessage(source,intent);
         await this.deps.handle(source,intent);
       });
-      this.updateTail = task.catch(error => this.reportError(ctx,error)).finally(() => { this.queuedUpdates--; });
+      this.updateTail = task.catch(error => {
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+        return this.reportError(ctx,error);
+      }).catch(error => {
+        console.error('Could not finish Telegram album operation.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'album'});
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) this.deps.fail(error);
+      }).finally(() => { this.queuedUpdates--; });
     }
     album.contexts.push(ctx);
     clearTimeout(album.timer);
@@ -174,6 +198,9 @@ install(): void {
     await this.deps.delivery.run(ctx.chat.id,
       () => this.deps.bot.api.setMessageReaction(ctx.chat!.id,message.message_id,[{type:'emoji',emoji:'👀'}]),
       () => !this.deps.stopped() && findInstance(this.deps.config,this.deps.botId(),ctx.chat!.id)?.instance.id === assigned.instance.id)
-      .catch(error => console.warn('Could not show message receipt reaction.', error));
+      .catch(error => {
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+        console.warn('Could not show message receipt reaction.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'setMessageReaction'});
+      });
   }
 }

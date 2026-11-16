@@ -8,6 +8,7 @@ import { SessionRetiringError } from './types.js';
 import { privateFile } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
+import { childEnvironment } from './environment.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
@@ -139,7 +140,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         '--extension',hostLifecyclePath,
       ], {
         cwd: pin.cwd,
-        env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
+        env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
         detached: true,
         stdio: 'ignore',
       });

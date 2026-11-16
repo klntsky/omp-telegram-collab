@@ -60,6 +60,7 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
         if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
         return undefined;
       }
+      if (pin.removedWorktree) throw new Error(`This session's worktree was deleted: ${pin.cwd}`);
     } else if (!/^[A-Za-z0-9_-]{1,128}$/.test(runtime.instanceId)) {
       throw new Error('Invalid OMP instance identifier');
     }
@@ -129,6 +130,7 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance ID is not configured');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
     const pin = await deps.readManagedBinding(session);
+    if (pin?.removedWorktree) throw new Error(`This session's worktree was deleted: ${pin.cwd}`);
     return pin ? { sessionId: pin.sessionId } : undefined;
   }
 

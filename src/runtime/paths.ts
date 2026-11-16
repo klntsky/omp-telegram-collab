@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import { findInstance } from '../config.js';
 import { type DurableBinding, type ManagedHost } from './types.js';
-import { privateFile, writeBinding, readHeader } from './files.js';
+import { privateFile, writeBinding, readHeader, hasRemovedWorktree } from './files.js';
 import { record, errno } from './values.js';
 interface PathsDependencies {
   readonly config: AppConfig;
@@ -57,7 +57,7 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
             typeof pin.sessionId !== 'string' || !pin.sessionId) throw new Error('Managed OMP binding is incompatible with this configuration');
         const header = await readHeader(pin.sessionFile);
         if (header.id !== pin.sessionId || header.cwd !== pin.cwd) throw new Error('Managed OMP history identity changed');
-        await validateCwd(pin.cwd);
+        if (!hasRemovedWorktree(pin)) await validateCwd(pin.cwd);
         session.cwd = pin.cwd;
       } catch (error) {
         console.error(`Session ${session.id} recovery failed:`, error);
@@ -76,7 +76,7 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
       if (deps.managed.get(session.id)) throw new Error('Managed OMP binding is missing');
       return undefined;
     }
-    const cwd = await validatedSessionCwd(session);
+    const cwd = hasRemovedWorktree(pin) ? session.cwd : await validatedSessionCwd(session);
     if (!record(pin) || pin.version !== 1 || typeof pin.sessionFile !== 'string' ||
         !path.isAbsolute(pin.sessionFile) || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
       throw new Error('Managed OMP binding is incompatible with this configuration');
@@ -95,7 +95,7 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
     const stat = await lstat(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Managed session directory is invalid');
     await chmod(dir, 0o700);
-    const cwd = await validatedSessionCwd(session);
+    const cwd = session.cwd;
     const sessionFile = path.join(dir, 'history.jsonl');
     let pin: DurableBinding | undefined;
     try {
@@ -105,10 +105,12 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
       if (pin.version !== 1 || typeof pin.sessionFile !== 'string' || !path.isAbsolute(pin.sessionFile) || pin.cwd !== cwd || typeof pin.sessionId !== 'string' || !pin.sessionId) {
         throw new Error('Managed OMP binding is incompatible with this configuration');
       }
+      if (hasRemovedWorktree(pin)) throw new Error(`This session's worktree was deleted: ${pin.cwd}`);
       await chmod(metadata, 0o600);
     } catch (error) {
       if (!errno(error, 'ENOENT')) throw error;
     }
+    await validateCwd(cwd);
     if (!pin) {
       let header: { id: string; cwd: string };
       try {

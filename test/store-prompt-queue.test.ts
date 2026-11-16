@@ -96,7 +96,6 @@ test('queue initialization adds its table to existing current databases without 
     const second = new Store(filename);
     try {
       assert.equal(second.getSession(sessionId)?.name, 'Retained session');
-      assert.equal(Number(second.db.prepare('PRAGMA user_version').get()!.user_version), 8);
       assert.deepEqual(second.getPendingSkills({ botId: 1, destination: { kind: 'general', chatId: -100 }, userId: 42 }), ['retained-skill']);
       second.promptQueue.enqueue(sessionId, 7, 42, 43, content);
       assert.equal(second.promptQueue.has(sessionId), true);

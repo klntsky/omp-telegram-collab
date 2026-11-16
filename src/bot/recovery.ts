@@ -46,7 +46,7 @@ export class MirrorRecovery {
       .filter(
         (existing) =>
           !this.deps.options.config.terminated &&
-          this.deps.sessionAssigned(existing) &&
+          !this.deps.stopped() &&
           !(this.deps.getListener(existing.id) !== undefined) &&
           !this.restoring.has(existing.id),
       );
@@ -55,8 +55,9 @@ export class MirrorRecovery {
       Array.from({ length: Math.min(4, sessions.length) }, async () => {
         for (let next = sessions.shift(); next; next = sessions.shift()) {
           const existing = next;
-          const generation = this.deps.options.store.getSessionGeneration(existing.id);
           await this.deps.runBackground(`restore:${existing.id}`, async (signal) => {
+            if (!this.deps.sessionAssigned(existing)) return;
+            const generation = this.deps.options.store.getSessionGeneration(existing.id);
             try {
               if (existing.status === 'open') {
                 if (this.deps.options.store.hasPendingInitialTask(existing.id)) {
@@ -80,7 +81,7 @@ export class MirrorRecovery {
           }).finally(() => this.restoring.delete(existing.id));
         }
       }),
-    );
+    ).catch(error => console.error('Could not restore sessions.', error, {botId:this.deps.id,operation:'restoreSessions'}));
   }
   recoverExistingMirror(
     session: TopicSession,
@@ -156,17 +157,17 @@ export class MirrorRecovery {
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const timer = setTimeout(
       () => {
-        this.reconnects.delete(session.id);
-        if (
-          this.deps.stopped() ||
-          !this.deps.sessionAssigned(session) ||
-          this.deps.options.store.getSessionGeneration(session.id) !== generation
-        )
-          return;
-        const active = this.deps.options.store.getSession(session.id);
-        if (active?.status !== 'open') return;
-        this.reconnecting.add(active.id);
-        void this.deps.runBackground(`reconnect:${active.id}`, async (signal) => {
+        void this.deps.runBackground(`reconnect:${session.id}`, async (signal) => {
+          this.reconnects.delete(session.id);
+          if (
+            this.deps.stopped() ||
+            !this.deps.sessionAssigned(session) ||
+            this.deps.options.store.getSessionGeneration(session.id) !== generation
+          )
+            return;
+          const active = this.deps.options.store.getSession(session.id);
+          if (active?.status !== 'open') return;
+          this.reconnecting.add(active.id);
           try {
             if (this.deps.options.store.hasPendingInitialTask(active.id)) {
               await withCancellation(this.deps.sendInitial(active), signal);
@@ -185,7 +186,10 @@ export class MirrorRecovery {
               this.scheduleReconnect(active, attempt + 1);
             throw error;
           }
-        }).finally(() => this.reconnecting.delete(active.id));
+        }).then(() => this.reconnecting.delete(session.id), error => {
+          this.reconnecting.delete(session.id);
+          console.error('Could not complete session reconnection.', error, {botId:this.deps.id,chatId:session.chatId,sessionId:session.id,operation:'reconnect'});
+        });
       },
       Math.min(1000 * 2 ** attempt, 16000),
     );

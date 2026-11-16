@@ -24,14 +24,16 @@ export function isDeadTelegramTestSession(error: unknown): boolean {
     || tl.RpcError.is(error, 'USER_DEACTIVATED_BAN');
 }
 
-export async function forkTelegramTestSession(signal: AbortSignal): Promise<TelegramTestSession> {
+export async function forkTelegramTestSession(signal: AbortSignal, seedSessions?: readonly string[]): Promise<TelegramTestSession> {
   let prepared: TelegramTestSession | undefined;
   try {
     return await withTelegramTestLock('authorization', signal, async () => withTelegramTestSessionStorage(await resolveTelegramTestEnvFile(), async storage => {
     const credentials = readTelegramApplicationCredentials(storage.env);
     const failures: unknown[] = [];
     let busy = 0;
-    for (const session of [...storage.sessions]) {
+    const seeds = seedSessions === undefined ? [...storage.sessions]
+      : storage.sessions.filter(session => seedSessions.includes(session));
+    for (const session of seeds) {
       signal.throwIfAborted();
       const releaseSeed = await acquireTelegramTestLock(telegramTestSessionLockName(session), signal, true);
       if (!releaseSeed) { busy++; continue; }

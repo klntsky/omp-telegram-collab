@@ -25,11 +25,12 @@ import { createOwnership, type RuntimeOwnership } from './runtime/ownership.js';
 import { createAdmission, type RuntimeAdmission } from './runtime/admission.js';
 import { createSessions, type RuntimeSessions } from './runtime/sessions.js';
 import { createTermination, type RuntimeTermination } from './runtime/termination.js';
+import { childEnvironment } from './runtime/environment.js';
 
 // Terminal joins launch only the native client; they must not acquire service-owned runtime resources.
 export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
   joinTerminal(executable, url) {
-    return spawn(executable, ['join', url], { stdio: 'inherit', shell: false });
+    return spawn(executable, ['join', url], { env: childEnvironment(), stdio: 'inherit', shell: false });
   },
 };
 
@@ -121,6 +122,12 @@ export class OmpRuntime implements Omp {
       shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
+      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      stopIdle: async (session) => {
+        await runtime.#termination.stopHost(session.id, 'worktree', session);
+        const host = runtime.#managed.get(session.id);
+        return !host || host.exited;
+      },
       skillProcesses: this.#skillProcesses,
     });
     this.#paths = createPaths({
@@ -235,6 +242,8 @@ export class OmpRuntime implements Omp {
     this.fork = this.#fork.fork;
     this.worktree = this.#worktree.worktree;
     this.topicTitleStatus = this.#worktree.topicTitleStatus;
+    this.inspectWorktree = this.#worktree.inspectWorktree;
+    this.deleteWorktree = this.#worktree.deleteWorktree;
     this.validateSessionPaths = this.#paths.validateSessionPaths;
     this.attach = this.#registry.attach;
     this.providerUsage = this.#settings.providerUsage;
@@ -296,6 +305,8 @@ export class OmpRuntime implements Omp {
   fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
   existingBinding: (session: TopicSession) => Promise<{sessionId: string} | undefined>;
   worktree: (session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>) => Promise<string>;
+  inspectWorktree: Omp['inspectWorktree'];
+  deleteWorktree: Omp['deleteWorktree'];
   #instanceDirectory(instanceId: number): string {
     const instance = this.#config.instances.find(instance => instance.id === instanceId);
     if (!instance) throw new Error('Instance ID is not configured');

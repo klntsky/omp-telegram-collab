@@ -41,7 +41,12 @@ export async function teardownTelegramTestResources(options: {
         const forum = await options.forumSetup;
         forumSettled = true;
         await forum?.close(signal);
-      } catch (error) { record(error); }
+      } catch (error) {
+        // A rejected setup is settled too; it cannot leave a poller running.
+        // Cancellation and the poller owner independently gate lease release.
+        forumSettled = true;
+        record(error);
+      }
       try {
         if (options.lease) {
           signal.throwIfAborted();
@@ -86,7 +91,7 @@ export async function setupTelegramTest(t: Pick<TestContext, 'after' | 'signal'>
   t.after(async () => {
     if (!user) return;
     await teardownTelegramTestResources({ user, forumSetup, lease, signal: options.cleanupSignal, cancellation,
-      canReleaseBot: () => provisionSettled && !cancellation && (options.canReleaseBot?.() ?? true) });
+      canReleaseBot: () => provisionSettled && (options.canReleaseBot?.() ?? true) });
   });
   return withTelegramTestDeadline('provisioning', telegramTestTimeouts.provision, t.signal, async signal => {
     const cancel = () => { cancellation ??= user?.cancelSetup(); void cancellation?.catch(() => undefined); };
