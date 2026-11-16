@@ -237,7 +237,13 @@ async start(onReady?: () => void): Promise<void> {
       }
       item.readers.clear();
     }
-    pending.push(cleanup(() => this.polling?.done));
+    pending.push(cleanup(async () => {
+      try { await this.polling?.done; }
+      catch (error) {
+        // The start owner already receives fatal detached-input failures; cleanup must not report them twice.
+        if (error !== this.inputFailure?.error) throw error;
+      }
+    }));
     pending.push(cleanup(() => this.components.input.completion()));
     for (const listener of listeners) {
       pending.push((async () => {
