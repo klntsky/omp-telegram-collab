@@ -40,6 +40,7 @@ export class BotService {
   private termination?: Promise<void>;
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   private inputFailure?: { error: unknown };
+  private pollingFailure?: { error: unknown };
 
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
@@ -84,7 +85,7 @@ async applyTermination(): Promise<void> {
       this.components.admission.clear();
       const sessions = this.options.store.listSessions();
       for (const session of sessions) {
-        this.options.store.cancelInitialTask(session.id);
+        this.options.store.promptQueue.cancel(session.id);
         this.options.store.advanceSessionGeneration(session.id);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
         this.components.connections.dropListener(session.id);
@@ -117,7 +118,8 @@ initialize(): Promise<void> {
 
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
-    this.options.store.recoverInitialTaskPreparations(this.id);
+    this.options.store.recoverSessionPreparations(this.id);
+    this.options.store.promptQueue.recoverSubmissions(this.id);
     await this.components.menus.syncCommandMenus();
     await this.components.entries.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
@@ -141,7 +143,11 @@ async start(onReady?: () => void): Promise<void> {
       const controller = new TelegramAbortController();
       this.polling = { controller, done: this.poll(controller, onReady) };
     }
-    await this.polling.done;
+    try { await this.polling.done; }
+    catch (error) {
+      this.pollingFailure = { error };
+      throw error;
+    }
   }
 
   private async poll(controller: TelegramAbortController, onReady?: () => void): Promise<void> {
@@ -199,43 +205,62 @@ async start(onReady?: () => void): Promise<void> {
     if (this.inputFailure) throw this.inputFailure.error;
   }
 
-async close(): Promise<void> {
-    this.telegramRetry.abort();
+  async close(): Promise<void> {
+    const errors: unknown[] = [];
+    const cleanup = async (action: () => unknown): Promise<void> => {
+      try { await action(); }
+      catch (error) { errors.push(error); }
+    };
     this.stopped = true;
-    const metadataCompletions = this.components.owners.disposeAll();
-    this.components.maintenance.background.abort(new Error('Bot background maintenance stopped'));
-    this.components.maintenance.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
-    this.apiAbort.abort();
-    this.components.connections.delivery.close();
-    this.components.maintenance.stopTimers();
-    this.components.input.closeAlbums();
-    this.polling?.controller.abort();
-    await this.polling?.done.catch(() => undefined);
+    // Start every cancellation before awaiting drains; storage stays owned until all component work settles.
+    const pending: Promise<void>[] = [];
+    pending.push(cleanup(() => this.telegramRetry.abort()));
+    pending.push(cleanup(() => this.components.maintenance.background.abort(new Error('Bot background maintenance stopped'))));
+    pending.push(cleanup(() => this.components.maintenance.catalogRefresh.abort(new Error('Bot catalog refresh stopped'))));
+    pending.push(cleanup(() => this.apiAbort.abort()));
+    pending.push(cleanup(() => this.polling?.controller.abort()));
+    pending.push(cleanup(() => this.components.worker.close()));
+    pending.push(cleanup(() => Promise.all(this.components.owners.disposeAll().map(completion => cleanup(() => completion)))));
+    pending.push(cleanup(() => this.components.connections.delivery.close()));
+    pending.push(cleanup(() => this.components.maintenance.stopTimers()));
+    pending.push(cleanup(() => this.components.input.closeAlbums()));
     for (const timer of this.components.recovery.reconnects.values()) clearTimeout(timer);
     this.components.recovery.reconnects.clear();
     this.components.owners.closedSessions.clear();
-    this.components.admission.clear();
-    this.components.questions.endAll();
+    pending.push(cleanup(() => this.components.admission.clear()));
+    pending.push(cleanup(() => this.components.questions.endAll()));
     const listeners = [...this.components.connections.listeners.values()];
+    this.components.connections.listeners.clear();
     for (const item of listeners) {
-      clearTimeout(item.initial?.timer);
       clearInterval(item.typingTimer);
-      item.feed.close();
-      item.connection?.close();
+      pending.push(cleanup(() => item.feed.close()));
+      pending.push(cleanup(() => item.connection?.close()));
       for (const reader of item.readers) {
-        reader.controller.abort(new Error('Session reader closed'));
-        reader.feed.close();
-        reader.connection?.close();
+        pending.push(cleanup(() => reader.controller.abort(new Error('Session reader closed'))));
+        pending.push(cleanup(() => reader.feed.close()));
+        pending.push(cleanup(() => reader.connection?.close()));
       }
       item.readers.clear();
     }
-    this.components.connections.listeners.clear();
-    await this.components.input.completion();
-    await Promise.all(listeners.map((listener) => listener.tail));
-    await Promise.all(listeners.map(listener => listener.history?.close()));
-    await Promise.all(this.components.maintenance.backgroundTasks);
-    await this.components.menus.completion();
-    await Promise.all(metadataCompletions);
+    pending.push(cleanup(async () => {
+      try { await this.polling?.done; }
+      catch (error) {
+        // The start owner already receives polling failures; cleanup must not report the same failure twice.
+        if (error !== this.pollingFailure?.error) throw error;
+      }
+    }));
+    pending.push(cleanup(() => this.components.input.completion()));
+    for (const listener of listeners) {
+      pending.push((async () => {
+        await cleanup(() => listener.tail);
+        await cleanup(() => listener.history?.close());
+      })());
+    }
+    for (const task of this.components.maintenance.backgroundTasks) pending.push(cleanup(() => task));
+    pending.push(cleanup(() => this.components.menus.completion()));
+    await Promise.all(pending);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
   }
 
 async reconcileConfiguration(): Promise<void> {

@@ -131,7 +131,7 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.notEqual(created.threadId, 1);
     assert.equal(generalReply.replyToMessage?.threadId, created.threadId);
     assert.equal(app.store.getTopic({ botId: app.telegram.bot.id, destination: { kind: 'general', chatId: session.chatId } }), undefined);
-    assert.equal(app.store.hasPendingInitialTask(created.id), false);
+    assert.equal(app.store.promptQueue.has(created.id), false);
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.general).text.includes(`/skill:e2e-review\n\n${tasks.general.prompt}`));
     app.omp.provider.assertComplete([tasks.image.name, tasks.explicitImage.name, tasks.document.name, tasks.documentOverwrite.name, tasks.documentOnly.name, tasks.settingsReply.name, tasks.followup.name, tasks.general.name]);

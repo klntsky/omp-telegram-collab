@@ -67,7 +67,9 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     const current = matches[0];
     if (!current || current.instanceId !== host.instanceId || current.sessionId !== host.sessionId ||
         current.generation !== host.generation || current.pid !== host.pid || current.cwd !== host.cwd) {
-      throw new Error('OMP host session changed while resolving its capability');
+      const identity = (candidate: RegistryHost) => ({ instanceId: candidate.instanceId, sessionId: candidate.sessionId,
+        generation: candidate.generation, pid: candidate.pid, cwd: candidate.cwd });
+      throw new Error(`OMP host session changed while resolving its capability\nExpected: ${JSON.stringify(identity(host))}\nObserved: ${JSON.stringify(matches.map(identity))}`);
     }
     return { instanceId: host.instanceId, sessionId: host.sessionId, generation: host.generation, url: link.url };
   }

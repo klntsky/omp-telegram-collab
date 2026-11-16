@@ -59,12 +59,13 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     const sent = await sendDocument(app, documentName, documentBytes, {
       caption: `/new ${tasks.capacityPending.prompt}`, mimeType: 'text/plain',
     });
-    await app.waitForCondition(() => app.store.listSessions(app.telegram.bot.id).some(session => app.store.hasPendingInitialTask(session.id)));
-    const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
+    await app.waitForCondition(() => app.store.listSessions(app.telegram.bot.id).some(session => app.store.promptQueue.has(session.id)));
+    const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.promptQueue.has(session.id))!;
     assert.ok(pending, 'Capacity-blocked /new must preserve its initial task');
+    assert.equal(app.store.promptQueue.first(pending.id)?.messageId, sent.id);
     const documentPath = join(pending.cwd, documentName);
     const confirmation = await waitForPanel(app, 'folder', 'capacity:approve:', start, pending.threadId);
-    const pendingContent = app.store.getPendingInitialTask(pending.id);
+    const pendingContent = app.store.promptQueue.first(pending.id)?.content;
     assert.ok(pendingContent);
     assert.ok(pendingContent.documents);
     assert.equal(pendingContent.text, tasks.capacityPending.prompt);
@@ -80,8 +81,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       const app = getApp();
       assert.equal(readConfig(app.config.configPath).omp.maxSessions, limit);
       assert.equal(app.runtime.getSessionLimit(), limit);
-      assert.equal(app.store.hasPendingInitialTask(pending.id), true);
-      assert.deepEqual(app.store.getPendingInitialTask(pending.id), pendingContent);
+      assert.equal(app.store.promptQueue.has(pending.id), true);
+      assert.deepEqual(app.store.promptQueue.first(pending.id)?.content, pendingContent);
       assert.deepEqual(app.omp.provider.requests.get(tasks.capacityPending.name), []);
       await assert.rejects(stat(join(pending.cwd, tasks.capacityPending.path)), { code: 'ENOENT' });
       await assert.rejects(stat(documentPath), { code: 'ENOENT' });
@@ -93,7 +94,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     await click(approve);
     await assertPending();
     const refreshStart = app.apiCalls.length;
-    await app.sendAndWait(`/p ${tasks.capacityPending.prompt}`, pending.threadId);
+    await app.sendAndWait('/p /modelpreset e2e-primary', pending.threadId);
     const fresh = await waitForPanel(app, 'folder', 'capacity:approve:', refreshStart, pending.threadId);
     const freshApprove = fresh.buttons.find(data => data.startsWith('capacity:approve:'))!;
     assert.notEqual(freshApprove, approve);
@@ -106,7 +107,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     await completeWriteTask(app, tasks.capacityPending, sent, pending.threadId);
     assert.equal(readConfig(app.config.configPath).omp.maxSessions, limit * 2);
     assert.equal(app.runtime.getSessionLimit(), limit * 2);
-    assert.equal(app.store.hasPendingInitialTask(pending.id), false);
+    await app.waitForCondition(() => !app.store.promptQueue.has(pending.id));
+    assert.equal(app.store.promptQueue.has(pending.id), false);
     const admitted = app.store.getSession(pending.id)!;
     await app.omp.assertWorktree(admitted);
     const admittedDocumentPath = join(admitted.cwd, documentName);
@@ -143,20 +145,20 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await app.waitForCondition(() => app.store.listSessions(app.telegram.bot.id).some(session => !previous.has(session.id)));
       const pending = app.store.listSessions(app.telegram.bot.id).find(session => !previous.has(session.id))!;
       await app.waitForCondition(() => {
-        const setup = app.store.getInitialDocumentSetup(pending.id);
-        return setup?.extensions.length === 1 && setup.extensions[0]?.kind === 'model-preset';
+        const setup = app.store.promptQueue.first(pending.id)?.preparation;
+        return setup?.extensions?.length === 1 && setup.extensions[0]?.kind === 'model-preset';
       });
       await app.waitForMessageHandled(sent.id);
       const prepared = app.store.getSession(pending.id)!;
       assert.notEqual(prepared.cwd, app.omp.workspace);
-      assert.equal(app.store.hasPendingInitialTask(pending.id), true);
+      assert.equal(app.store.promptQueue.has(pending.id), true);
       await assert.rejects(stat(join(prepared.cwd, filename)), {code:'ENOENT'});
       await writeFile(nativeSettingsPath, original);
       await app.restart();
       await completeWriteTask(app, tasks.documentPreparation, sent, prepared.threadId);
       assert.equal(app.store.getSession(pending.id)!.cwd, prepared.cwd);
       assert.deepEqual(await readFile(join(prepared.cwd, filename)), bytes);
-      assert.equal(app.store.getInitialDocumentSetup(pending.id), undefined);
+      assert.equal(app.store.promptQueue.first(pending.id), undefined);
       app.omp.provider.assertComplete([tasks.documentPreparation.name]);
     } finally {
       await writeFile(nativeSettingsPath, original);
@@ -189,7 +191,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
         caption: `/new /modelpreset e2e-alternate ${tasks.documentCancellation.prompt}`,
       });
       await app.waitForMessageHandled(sent.id);
-      const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.hasPendingInitialTask(session.id))!;
+      const pending = app.store.listSessions(app.telegram.bot.id).find(session => app.store.promptQueue.has(session.id))!;
       assert.ok(pending);
       // Foreground input is serialized. Resume an unsent task through background
       // recovery so Telegram /stop can run concurrently with the held download.
@@ -197,8 +199,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await writeFile(app.omp.agentConfigPath, nativeSettings);
       await app.waitForCondition(() => held);
       await app.sendAndWait('/stop', pending.threadId);
-      assert.equal(app.store.hasPendingInitialTask(pending.id), false);
-      const completed = waitForBackgroundCompletion(app, `initial-recovery:${pending.id}`);
+      assert.equal(app.store.promptQueue.has(pending.id), false);
+      const completed = waitForBackgroundCompletion(app, `prompt-queue:${pending.id}`);
       released.resolve();
       await completed;
       assert.deepEqual(await readFile(path), original);
@@ -252,8 +254,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       assert.equal(completed.cwd, interruptedCwd);
       await app.omp.assertWorktree(completed);
       assert.deepEqual(await readFile(join(completed.cwd, filename)), bytes);
-      assert.equal(app.store.hasPendingInitialTask(completed.id), false);
-      assert.equal(app.store.getInitialDocumentSetup(completed.id), undefined);
+      assert.equal(app.store.promptQueue.has(completed.id), false);
       app.omp.provider.assertComplete([tasks.documentAuthorization.name]);
     } finally {
       intercept = false;
