@@ -207,6 +207,7 @@ async start(onReady?: () => void): Promise<void> {
       catch (error) { errors.push(error); }
     };
     this.stopped = true;
+    // Start every cancellation before awaiting drains; storage stays owned until all component work settles.
     const pending: Promise<void>[] = [];
     pending.push(cleanup(() => this.telegramRetry.abort()));
     pending.push(cleanup(() => this.components.maintenance.background.abort(new Error('Bot background maintenance stopped'))));
