@@ -40,6 +40,7 @@ export class BotService {
   private termination?: Promise<void>;
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
   private inputFailure?: { error: unknown };
+  private pollingFailure?: { error: unknown };
 
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
@@ -142,7 +143,11 @@ async start(onReady?: () => void): Promise<void> {
       const controller = new TelegramAbortController();
       this.polling = { controller, done: this.poll(controller, onReady) };
     }
-    await this.polling.done;
+    try { await this.polling.done; }
+    catch (error) {
+      this.pollingFailure = { error };
+      throw error;
+    }
   }
 
   private async poll(controller: TelegramAbortController, onReady?: () => void): Promise<void> {
@@ -240,8 +245,8 @@ async start(onReady?: () => void): Promise<void> {
     pending.push(cleanup(async () => {
       try { await this.polling?.done; }
       catch (error) {
-        // The start owner already receives fatal detached-input failures; cleanup must not report them twice.
-        if (error !== this.inputFailure?.error) throw error;
+        // The start owner already receives polling failures; cleanup must not report the same failure twice.
+        if (error !== this.pollingFailure?.error) throw error;
       }
     }));
     pending.push(cleanup(() => this.components.input.completion()));
