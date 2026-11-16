@@ -190,7 +190,7 @@ export class FrameProjection {
         ).catch(error => logEvent('warn', 'could-not-deliver-initial-task-startup-timeout-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver initial task startup timeout notice (${session.id}).`, error}));
       } else {
         initial.timer = setTimeout(() => {
-          void this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId)
+          void Promise.resolve().then(() => this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId))
             .then(() => {
               if (
                 listener.initial !== initial ||

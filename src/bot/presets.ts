@@ -104,7 +104,7 @@ export class BotPresets {
     const panel = this.presetPanels.get(match[1]!);
     if (!panel || panel.expires <= Date.now()) {
       if (panel) this.presetPanels.delete(panel.token);
-      await ctx.answerCallbackQuery({text: 'This model preset panel expired. Open /model_preset again.'});
+      await ctx.answerCallbackQuery({text: 'This model preset panel expired. Open /modelpreset again.'});
       return;
     }
     if (ctx.chat.id !== panel.chatId || message.message_id !== panel.messageId ||
@@ -205,11 +205,12 @@ export class BotPresets {
       }, signal));
     const task = Promise.all(tasks).then(() => {});
     this.presetRefresh = task;
-    void task.finally(() => { if (this.presetRefresh === task) this.presetRefresh = undefined; });
+    const clearRefresh = () => { if (this.presetRefresh === task) this.presetRefresh = undefined; };
+    void task.then(clearRefresh, clearRefresh);
     return task;
   }
   presetDescription(instanceId: number): string {
-    let description = groupCommands.find(command => command.command === 'model_preset')!.description;
+    let description = groupCommands.find(command => command.command === 'modelpreset')!.description;
     const names = [...(this.presetCatalogs.get(instanceId) ?? [])].sort((a, b) => a.length - b.length || a.localeCompare(b));
     let separator = '. Presets: ';
     for (const name of names) {
@@ -221,7 +222,7 @@ export class BotPresets {
   }
   async replyPresetUsage(ctx: Context, instanceId: number, guidance = ''): Promise<void> {
     const names = await this.dependencies.runtime.availableModelPresets(instanceId);
-    await this.replyPresetText(ctx, `Usage: /model_preset to list presets, or /model_preset <name> to switch an idle session.\nAvailable presets:\n${names.length ? names.join('\n') : '(none configured)'}${guidance}`);
+    await this.replyPresetText(ctx, `Usage: /modelpreset to list presets, or /modelpreset <name> to switch an idle session.\nAvailable presets:\n${names.length ? names.join('\n') : '(none configured)'}${guidance}`);
   }
   async replyPresetText(ctx: Context, text: string): Promise<void> {
     for (let offset = 0; offset < text.length;) {

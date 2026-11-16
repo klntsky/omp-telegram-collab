@@ -78,6 +78,21 @@ export class BotQuestions {
         : undefined);
     }
     while (this.endedQuestionReplies.size > 512) this.endedQuestionReplies.delete(this.endedQuestionReplies.keys().next().value!);
+    if (question.request.kind === 'select' && question.answer?.kind === 'answer' &&
+        question.answer.text === 'Other (type your own)' && question.buttonIds.at(-1) !== undefined) {
+      question.listener.customAnswerMessage = {messageIds:question.messageIds,messageId:question.buttonIds.at(-1)!};
+      return;
+    }
+    if (question.answer?.kind === 'typed') {
+      question.listener.tail = question.listener.tail.then(async () => {
+        for (const messageId of question.buttonIds) {
+          await this.dependencies.delivery.run(question.session.chatId,
+            () => this.dependencies.api.deleteMessage(question.session.chatId,messageId),
+            () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(question.session));
+        }
+      }).catch(error => { logEvent('warn', 'custom-answer-controls-delete-failed', {sessionId:question.session.id,chatId:question.session.chatId,error}); });
+      return;
+    }
     const answer = question.answer?.text;
     const receiptId = answer === undefined ? undefined : question.buttonIds[0];
     for (const messageId of question.buttonIds) {
@@ -88,14 +103,7 @@ export class BotQuestions {
           .catch(error => logEvent('warn', 'could-not-retire-question-controls', {botId: question.session.botId, sessionId: question.session.id, chatId: question.session.chatId, threadId: question.session.threadId, message: `Could not retire question controls (${question.session.id}).`, error}));
       }
     }
-    // Serialize cleanup behind delivery so an invitation sent during completion is also removed.
     question.listener.tail = question.listener.tail.then(async () => {
-      if (question.replyPromptId !== undefined) {
-        await this.dependencies.delivery.run(question.session.chatId,
-          () => this.dependencies.api.deleteMessage(question.session.chatId,question.replyPromptId!),
-          () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(question.session))
-          .catch(error => logEvent('warn', 'could-not-remove-question-reply-invitation', {botId: question.session.botId, sessionId: question.session.id, chatId: question.session.chatId, threadId: question.session.threadId, message: `Could not remove question reply invitation (${question.session.id}).`, error}));
-      }
       if (answer !== undefined) {
         for (let offset = 0; offset < answer.length;) {
           if (this.dependencies.stopped() || !this.dependencies.sessionAssigned(question.session)) return;
@@ -124,9 +132,9 @@ export class BotQuestions {
         !this.dependencies.sessionAssigned(question.session) || this.dependencies.store.getSession(question.session.id)?.status !== 'open') return;
     this.dependencies.requireSessionAssignment(question.session);
     const discussion = question.request.kind === 'select' && value === 'Chat about this';
-    question.answer = {kind:discussion ? 'discussion' : 'answer',text:discussion
+    question.answer = {kind:discussion ? 'discussion' : question.request.kind === 'editor' && value !== undefined ? 'typed' : 'answer',text:discussion
       ? 'Chat about this selected. OMP will discuss the question. Reply to this message or the question to continue the discussion.'
-      : receipt ?? (value === undefined ? 'Question cancelled.' : 'Custom answer sent.')};
+      : receipt ?? (value === undefined ? 'Question cancelled.' : value)};
     if (messageId !== undefined) question.listener.pendingAnswers.set(question.request.reqId,messageId);
     try {
       question.listener.connection!.send({t:'ui-response',reqId:question.request.reqId,value});
@@ -159,7 +167,7 @@ export class BotQuestions {
           this.dependencies.listener(question.session.id) === question.listener && this.questions.get(token) === question)
         .catch(error => { logEvent('warn', 'could-not-show-question-selection-receipt', {botId: question.session.botId, sessionId: question.session.id, chatId: question.session.chatId, threadId: question.session.threadId, message: `Could not show question selection receipt (${question.session.id}).`, error}); });
       const value = typeof option === 'string' ? option : option.label;
-      this.submitAnswer(token, value, `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
+      this.submitAnswer(token, value, value === 'Other (type your own)' ? value : `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
     await ctx.answerCallbackQuery();
   }
@@ -175,6 +183,21 @@ export class BotQuestions {
         this.dependencies.listener(session.id) === listener && this.dependencies.sessionAssigned(session) &&
         this.dependencies.store.getSession(session.id)?.status === 'open';
       if (!active() || !(await this.dependencies.ready(session.chatId))) { this.endQuestion(token); return; }
+      const previous = listener.customAnswerMessage;
+      listener.customAnswerMessage = undefined;
+      if (request.kind === 'editor' && previous) {
+        question.messageIds.push(...previous.messageIds);
+        question.buttonIds.push(previous.messageId);
+        for (const messageId of previous.messageIds) this.endedQuestionReplies.delete(`${session.chatId}:${messageId}`);
+        // Bot API Client::get_reply_markup and TDLib preserve force_reply on inline keyboards.
+        // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
+        const reply_markup = {inline_keyboard:[[{text:'Cancel',callback_data:`ask:${token}:cancel`}]],force_reply:true};
+        await this.dependencies.delivery.run(session.chatId,
+          () => this.dependencies.api.editMessageText(session.chatId,previous.messageId,
+            [request.title,request.prefill,'Reply to this message with your answer. Multiline text is supported.'].filter(Boolean).join('\n\n'),
+            {reply_markup}),active);
+        return;
+      }
       const parts = [request.title];
       if (request.kind === 'select') {
         parts.push(...request.options.map((option, index) => {
@@ -206,9 +229,9 @@ export class BotQuestions {
         if (offset+80 >= buttons.length) keyboard.push([{text:'Cancel',callback_data:`ask:${token}:cancel`}]);
         const message = await this.dependencies.delivery.run(session.chatId,
           () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),
-            request.kind === 'editor' ? 'You can type a custom answer below, or cancel here.' : 'Choose an answer by number:', {
+            request.kind === 'editor' ? 'Reply to this message with your answer. Multiline text is supported.' : 'Choose an answer by number:', {
               
-              reply_markup:{inline_keyboard:keyboard},
+              reply_markup:{inline_keyboard:keyboard,...(request.kind === 'editor' ? {force_reply:true} : {})},
             }), active);
         if (!message) return;
         question.messageIds.push(message.message_id);
@@ -219,16 +242,6 @@ export class BotQuestions {
             () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(session))
             .catch(error => logEvent('warn', 'could-not-retire-inactive-question-controls', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not retire inactive question controls (${session.id}).`, error}));
         }
-      }
-      if (request.kind === 'editor' && active()) {
-        const message = await this.dependencies.delivery.run(session.chatId,
-          () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),'Reply here with your answer. Multiline text is supported.',{
-            
-            reply_markup:{force_reply:true,input_field_placeholder:'Type your custom answer'},
-          }), active);
-        if (!message) return;
-        question.messageIds.push(message.message_id);
-        question.replyPromptId = message.message_id;
       }
     }).catch(error => {
       this.endQuestion(token);

@@ -76,6 +76,7 @@ export async function createTelegramTestForum(user: TelegramTestUser, bot: Teleg
   for (let attempt = 0; !chat; attempt++) {
     signal.throwIfAborted();
     try {
+      // Forum creation includes server-directed FLOOD_WAIT delays within provisioning's deadline.
       const updates = await step('telegram.forum.create', () => user.call({
         _: 'channels.createChannel', title,
         about: 'Disposable OMP Telegram end-to-end test forum', megagroup: true, forum: true,

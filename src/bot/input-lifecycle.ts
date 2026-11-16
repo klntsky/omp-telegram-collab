@@ -25,7 +25,7 @@ export interface InputLifecycleDependencies {
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   createsTopicWorktrees(chatId: number): boolean;
   currentAdmin(ctx: Context): Promise<boolean>;
-  defaultNewTopicSkill(chatId: number): string | undefined;
+  defaultNewTopicSkills(chatId: number): string[];
   delivery: TelegramDelivery;
   dropListener(id: string, reason?: string): void;
   folderSettings(chatId: number): { instanceId: number; defaultDir: string; options: string[]; };
@@ -34,6 +34,7 @@ export interface InputLifecycleDependencies {
   metadataOwners: Map<string, SessionMetadataOwner>;
   config: BotOptions['config'];
   store: BotOptions['store'];
+  offerWorktreeCleanup(session: TopicSession): Promise<void>;
   projectTopicTitle(session: TopicSession, title: string, active: () => boolean): Promise<void>;
   refreshTopicStatus(session: TopicSession): Promise<void>;
   runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal?: AbortSignal): Promise<void>;
@@ -54,11 +55,8 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
     if (detached && topicLifecycle) return true;
     if (message.forum_topic_created && destination.kind === 'topic') {
       if (!session) {
-        if (deps.folderSettings(ctx.chat.id).options.length > 1) {
-          await replyTo(ctx,destination,'Use /new with a task to choose a runtime folder before creating a managed session.');
-          return true;
-        }
         const title = message.forum_topic_created.name;
+        const defaultSkills = deps.defaultNewTopicSkills(ctx.chat.id);
         const folderFingerprint = JSON.stringify(deps.folderSettings(ctx.chat.id));
         const epoch = deps.admissionEpoch;
         await deps.chooseFolder(ctx,undefined,async (cwd,authority) => {
@@ -84,8 +82,8 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             title,
             {kind:'managed'},
           );
-          const defaultSkill = deps.defaultNewTopicSkill(ctx.chat!.id);
-          if (defaultSkill) deps.store.setNewTopicSkill(created.id, defaultSkill);
+
+          if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
           if (deps.createsTopicWorktrees(ctx.chat!.id)) {
             await deps.authorize(ctx.chat!.id, authority.from!.id);
             if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
@@ -114,7 +112,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           deps.store.setPendingSessionTitle(session.id, title);
           const revision = ++source.revision;
           const generation = deps.store.getSessionGeneration(session.id);
-          void deps.projectTopicTitle(
+          await deps.projectTopicTitle(
             session,
             title,
             () =>
@@ -197,7 +195,10 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
       deps.store.cancelInitialTask(session.id);
       deps.invalidateSession(session.id, 'This topic is closed. Reopen it explicitly to connect.');
       deps.dropListener(session.id);
-      void deps.runBackground(`close:${session.id}`, () => deps.windDownClosedSession(session));
+      void deps.runBackground(`close:${session.id}`, async () => {
+        await deps.windDownClosedSession(session);
+        await deps.offerWorktreeCleanup(session);
+      });
       return true;
     }
     if (session && 'forum_topic_reopened' in message) {

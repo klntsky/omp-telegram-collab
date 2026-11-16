@@ -20,7 +20,7 @@ export interface TelegramWorkflow {
   waitForMessageHandled(messageId: number): Promise<void>;
 }
 export interface TelegramPanel {
-  kind: '/settings' | '/skills' | '/model_preset' | 'question' | 'folder';
+  kind: '/settings' | '/skills' | '/modelpreset' | 'question' | 'folder' | 'worktree-cleanup';
   messageId: number;
   buttons: string[];
 }
@@ -85,42 +85,59 @@ export async function createManagedTopic(
   return created[0]!;
 }
 
-export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills' | '/model_preset', threadId?: number): Promise<TelegramPanel> {
+export async function openPanel(app: TelegramWorkflow, command: '/settings' | '/skills' | '/modelpreset', threadId?: number): Promise<TelegramPanel> {
   const start = app.apiCalls.length;
   await app.sendAndWait(command, threadId);
-  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : command === '/model_preset' ? 'preset:' : 'settings:', start, threadId);
+  return waitForPanel(app, command, command === '/skills' ? 'skills:add:' : command === '/modelpreset' ? 'preset:' : 'settings:', start, threadId);
+}
+
+export function deliveredPanels(calls: TelegramWorkflow['apiCalls'], kind: TelegramPanel['kind'], prefix: string, threadId?: number): TelegramPanel[] {
+  return calls.flatMap(call => {
+    const parsed = panelCall.safeParse(call);
+    if (!parsed.success ||
+        (parsed.data.result.result.message_thread_id ?? parsed.data.payload.message_thread_id ?? 1) !== (threadId ?? 1)) return [];
+    const buttons = parsed.data.payload.reply_markup.inline_keyboard.flat().flatMap(button => button.callback_data ? [button.callback_data] : []);
+    return buttons.some(data => data.startsWith(prefix))
+      ? [{ kind, messageId: parsed.data.result.result.message_id, buttons }]
+      : [];
+  });
 }
 
 export async function waitForPanel(app: TelegramWorkflow, kind: TelegramPanel['kind'], prefix: string, start: number, threadId?: number): Promise<TelegramPanel> {
-  let panel: z.infer<typeof panelCall> | undefined;
+  let panel: TelegramPanel | undefined;
   await app.waitForCondition(() => {
-    for (const call of app.apiCalls.slice(start)) {
-      const parsed = panelCall.safeParse(call);
-      if (parsed.success && parsed.data.payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data?.startsWith(prefix))) {
-        panel = parsed.data;
-        return true;
-      }
-    }
-    return false;
+    panel = deliveredPanels(app.apiCalls.slice(start), kind, prefix, threadId)[0];
+    return panel !== undefined;
   });
-  assert.equal(panel!.result.result.message_thread_id ?? panel!.payload.message_thread_id ?? 1, threadId ?? 1);
-  return {
-    kind,
-    messageId: panel!.result.result.message_id,
-    buttons: panel!.payload.reply_markup.inline_keyboard.flat().flatMap(button => button.callback_data ? [button.callback_data] : []),
-  };
+  return panel!;
 }
 
-export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, waitForEdit = true): Promise<void> {
+export async function submitCallback(app: TelegramWorkflow, panel: TelegramPanel, data: string | Uint8Array, client = app.telegram.user.client): Promise<void> {
+  await client.getCallbackAnswer({
+    chatId: app.telegram.forum.chatId, message: panel.messageId, data,
+  });
+}
+
+export async function waitForPanelRetired(app: TelegramWorkflow, panel: TelegramPanel, start: number): Promise<void> {
+  await app.waitForCondition(() => app.apiCalls.slice(start).some(call => {
+    const parsed = panelCall.safeParse(call);
+    return parsed.success && parsed.data.method === 'editMessageText' &&
+      parsed.data.result.result.message_id === panel.messageId &&
+      parsed.data.payload.reply_markup.inline_keyboard.length === 0;
+  }));
+}
+
+export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, index: number, waitForEdit = true, client = app.telegram.user.client): Promise<void> {
   const start = app.apiCalls.length;
-  const [message] = await app.telegram.user.client.getMessages(app.telegram.forum.chat, [panel.messageId]);
+  const [message] = await client.getMessages(app.telegram.forum.chatId, [panel.messageId]);
   const markup = message?.raw._ === 'message' ? message.raw.replyMarkup : undefined;
   if (markup?._ !== 'replyInlineMarkup') throw new Error(`Telegram message ${panel.messageId} has no callback keyboard`);
   const buttons = markup.rows.flatMap(row => row.buttons.flatMap(button =>
     button.type._ === 'inlineButtonTypeCallback' ? [button.type.data] : []));
   const data = buttons.at(index)!;
-  await app.telegram.user.client.getCallbackAnswer({ chatId: app.telegram.forum.chat, message: panel.messageId, data });
-  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/model_preset') || index === -1) return;
+  assert.ok(data, `Telegram message ${panel.messageId} has no callback at index ${index}`);
+  await submitCallback(app, panel, data, client);
+  if (!waitForEdit || (panel.kind !== '/settings' && panel.kind !== '/modelpreset') || index === -1) return;
   const editedPanel = z.object({ message_id: z.literal(panel.messageId), reply_markup: replyMarkup });
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {
@@ -167,11 +184,18 @@ export async function replyText(app: TelegramWorkflow, messageId: number, thread
 }
 
 export async function waitForEditor(app: TelegramWorkflow, start: number, threadId: number): Promise<number> {
-  const editorCall = z.object({
-    method: z.literal('sendMessage'),
-    payload: z.object({ message_thread_id: z.literal(threadId), reply_markup: z.object({ force_reply: z.literal(true) }) }),
-    result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) }),
-  });
+  const editorCall = z.union([
+    z.object({
+      method: z.literal('sendMessage'),
+      payload: z.object({ message_thread_id: z.literal(threadId), reply_markup: z.object({ force_reply: z.literal(true) }) }),
+      result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) }),
+    }),
+    z.object({
+      method: z.literal('editMessageText'),
+      payload: z.object({ message_id: z.number(), reply_markup: z.object({ force_reply: z.literal(true) }) }),
+      result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number(), message_thread_id: z.literal(threadId) }) }),
+    }),
+  ]);
   let messageId: number | undefined;
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {

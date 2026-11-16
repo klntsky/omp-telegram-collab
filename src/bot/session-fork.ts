@@ -14,12 +14,13 @@ export interface SessionForkDependencies {
   authorize(chatId: number, userId: number): Promise<unknown>;
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
-  defaultNewTopicSkill(chatId: number): string | undefined;
+  defaultNewTopicSkills(chatId: number): string[];
   createsTopicWorktrees(chatId: number): boolean;
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   announce(session: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<unknown>;
   dropListener(sessionId: string): void;
+  stripTopicStatus(session: TopicSession, title: string): string;
 }
 
 export class SessionFork {
@@ -27,6 +28,7 @@ export class SessionFork {
   async forkSession(ctx: Context, source: TopicSession): Promise<void> {
     const generation = this.dependencies.options.store.getSessionGeneration(source.id);
     const epoch = this.dependencies.admissionEpoch;
+    const defaultSkills = this.dependencies.defaultNewTopicSkills(source.chatId);
     const check = async () => {
       await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.dependencies.currentAdmin(ctx))) throw new Error('Forking requires a group administrator.');
@@ -38,12 +40,12 @@ export class SessionFork {
         throw new Error('The source session changed before the fork completed');
     };
     await check();
+    const binding = await this.dependencies.options.runtime.existingBinding(source);
     let target: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'} | undefined;
     const replied = ctx.message?.reply_to_message;
     const reply = replied && !replied.forum_topic_created && replied.message_id !== source.threadId
       ? replied : undefined;
     if (reply) {
-      const binding = await this.dependencies.options.runtime.existingBinding(source);
       target = binding && this.dependencies.options.store.getMessageAnchor(source.id, binding.sessionId, source.chatId, reply.message_id);
       if (!target || reply.message_thread_id !== source.threadId)
         throw new Error('Reply to a persisted message in the current session to select a fork point.');
@@ -56,11 +58,13 @@ export class SessionFork {
     try {
       reservation = await this.dependencies.options.runtime.reserveSession(undefined, check);
       await check();
-      topic = await this.dependencies.bot.api.createForumTopic(source.chatId, source.name.slice(0, 128) || 'OMP session');
+      // Decorations belong to the source Git context, not the fork's human title.
+      const title = this.dependencies.stripTopicStatus(source, source.name);
+      topic = await this.dependencies.bot.api.createForumTopic(source.chatId, title.slice(0, 128) || 'OMP session');
       await check();
       destination = this.dependencies.options.store.createSession(
         {botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd},
-        source.name, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
+        title, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
       );
       reservation.bind(destination.id);
       const destinationGeneration = this.dependencies.options.store.getSessionGeneration(destination.id);
@@ -75,8 +79,7 @@ export class SessionFork {
       await this.dependencies.options.runtime.fork(source, destination, target, beforeMutation);
       await beforeMutation();
       this.dependencies.options.store.setSessionCwd(destination.id, destination.cwd);
-      const defaultSkill = this.dependencies.defaultNewTopicSkill(source.chatId);
-      if (defaultSkill) this.dependencies.options.store.setNewTopicSkill(destination.id, defaultSkill);
+      if (defaultSkills.length) this.dependencies.options.store.setNewTopicSkills(destination.id, defaultSkills);
       if (this.dependencies.createsTopicWorktrees(source.chatId)) {
         await this.dependencies.createTopicWorktree(destination, beforeMutation);
       }

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import type { AppConfig } from '../../shared/contracts.js';
 import { record } from './values.js';
+import { childEnvironment } from './environment.js';
 interface ForkRpcDependencies {
   readonly closed: boolean;
   readonly config: AppConfig;
@@ -21,7 +22,7 @@ export function createForkRpc(deps: ForkRpcDependencies): RuntimeForkRpc {
     const child = spawn(deps.config.omp.executable, [
       ...deps.config.omp.args, '--mode', 'rpc', '--resume', sessionFile,
       '--session-dir', path.dirname(sessionFile), '--cwd', cwd, '--config', config, '--no-title',
-    ], { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    ], { cwd, env: childEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     deps.skillProcesses.add(child);
     let buffer = '';
     let diagnostics = '';

@@ -94,14 +94,33 @@ test('forum model defaults reject names outside the native preset-name grammar',
 test('new-topic skill defaults reject whitespace, controls, backslashes, and nonstrings without normalization', t => {
   const { path, dir } = fixture(t);
   const { configPath: _configPath, ...config } = validConfig(path, dir);
-  for (const default_new_topic_skill of ['', ' Review', 'Review ', 'Two Names', 'Two\tNames', 'Two\nNames',
+  for (const invalidSkill of ['', ' Review', 'Review ', 'Two Names', 'Two\tNames', 'Two\nNames',
     'Two\u00a0Names', 'Two\u0000Names', 'Two\u001fNames', 'Two\u007fNames', 'Two\u0085Names',
     'Team\\Review', true, 1, null, [], {}]) {
     writeFileSync(path, stringify({
       ...config,
-      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_new_topic_skill }] }],
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_new_topic_skills: [invalidSkill] }] }],
     }));
-    assertInvalid(path, () => readConfig(path), `instances.0.chats.0.default_new_topic_skill`);
+    assertInvalid(path, () => readConfig(path), `instances.0.chats.0.default_new_topic_skills.0`);
+  }
+});
+
+test('new-topic defaults require unique skill arrays and preserve selection order', t => {
+  const { path, dir } = fixture(t);
+  const { configPath: _configPath, ...config } = validConfig(path, dir);
+  for (const default_new_topic_skills of ['Review', null, {}, ['Review', 'Review']]) {
+    writeFileSync(path, stringify({
+      ...config,
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_new_topic_skills }] }],
+    }));
+    assertInvalid(path, () => readConfig(path), 'instances.0.chats.0.default_new_topic_skills');
+  }
+  for (const default_new_topic_skills of [[], ['Review', 'Plan']]) {
+    writeFileSync(path, stringify({
+      ...config,
+      instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, default_new_topic_skills }] }],
+    }));
+    assert.deepEqual(readConfig(path).instances[0]!.chats[0]!.default_new_topic_skills, default_new_topic_skills);
   }
 });
 

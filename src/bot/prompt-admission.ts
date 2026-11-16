@@ -28,16 +28,17 @@ export interface PromptAdmissionDependencies {
   folderSettings(chatId: number): {instanceId: number; defaultDir: string; options: string[]};
   chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean>;
   skillKey(ctx: Context): PendingSkillKey;
-  defaultNewTopicSkill(chatId: number): string | undefined;
+  defaultNewTopicSkills(chatId: number): string[];
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
   preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
   uploadDocuments: PromptPreparation['uploadDocuments'];
-  newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkill?:string}): Promise<void>;
+  newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
   listen(session: TopicSession): Promise<void>;
   listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
   sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void): void;
+  prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent>;
 }
 
 export class PromptAdmission {
@@ -53,7 +54,7 @@ export class PromptAdmission {
   invalidateProposals(sessionId: string): void {
     for (const [token, proposal] of this.promptProposals) if (proposal.sessionId === sessionId) this.promptProposals.delete(token);
   }
-  async routePrompt(ctx: Context, content: PendingPromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkill?:string}, cwd?: string): Promise<void> {
+  async routePrompt(ctx: Context, content: PendingPromptContent, session?: TopicSession, extensions: readonly PromptExtension[] = [], worktree = false, frozenSkills?: {names:string[];topicSkills:string[]}, cwd?: string): Promise<void> {
     const epoch = this.admissionEpoch;
     const folderFingerprint = !session ? JSON.stringify(this.deps.folderSettings(ctx.chat!.id)) : undefined;
     const generation = session ? this.deps.options.store.getSessionGeneration(session.id) : undefined;
@@ -74,18 +75,18 @@ export class PromptAdmission {
     if (session?.runtime.kind === 'attached' && preparations.length) throw new Error('Attached sessions cannot run prompt preparations.');
     const skillKey = this.deps.skillKey(ctx);
     const pendingSkills = frozenSkills?.names ?? this.deps.options.store.getPendingSkills(skillKey);
-    const topicSkill = frozenSkills ? frozenSkills.topicSkill : worktree ? undefined : session ? this.deps.options.store.getNewTopicSkill(session.id) : this.deps.defaultNewTopicSkill(ctx.chat!.id);
+    const topicSkills = frozenSkills ? frozenSkills.topicSkills : session ? this.deps.options.store.getNewTopicSkills(session.id) : this.deps.defaultNewTopicSkills(ctx.chat!.id);
     const originalContent = structuredClone(content);
     const originalExtensions = structuredClone(extensions);
     if (admin && !session && cwd === undefined && await this.deps.chooseFolder(ctx,ctx,selected =>
-      this.routePrompt(ctx,originalContent,undefined,originalExtensions,worktree,{names:[...pendingSkills],topicSkill},selected))) return;
+      this.routePrompt(ctx,originalContent,undefined,originalExtensions,worktree,{names:[...pendingSkills],topicSkills},selected))) return;
     if (!admin && !session && this.deps.folderSettings(ctx.chat!.id).options.length > 1) {
-      const selectedSkills = {key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill};
+      const selectedSkills = {key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkills};
       const proposalMode = this.deps.allMessagesArePrompts(ctx.chat!.id);
       await this.deps.chooseFolder(ctx,undefined,async (selected,authority) => {
         if (!this.deps.usersCanProposePrompts(ctx.chat!.id) || this.deps.allMessagesArePrompts(ctx.chat!.id) !== proposalMode)
           throw new Error('This prompt proposal is no longer active.');
-        const names = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []),...selectedSkills.names])];
+        const names = worktree ? [] : [...new Set([...topicSkills,...selectedSkills.names])];
         const approvedContent = names.length ? {...originalContent,text:`${names.map(name => `/skill:${name}`).join(' ')}\n\n${originalContent.text}`} : originalContent;
         await this.deps.newSession(ctx,approvedContent,undefined,undefined,() => this.consumePendingSkills(skillKey,selectedSkills.names),worktree,authority,[],undefined,selected,selectedSkills);
       },() => this.deps.usersCanProposePrompts(ctx.chat!.id) && this.deps.allMessagesArePrompts(ctx.chat!.id) === proposalMode);
@@ -119,7 +120,7 @@ export class PromptAdmission {
           resume: name => this.routePrompt(ctx, originalContent, session,
             originalExtensions.map(extension => extension.kind === 'model-preset' && extension.name === undefined
               ? {...extension, name} : extension),
-            worktree, {names: [...pendingSkills], topicSkill}, cwd),
+            worktree, {names: [...pendingSkills], topicSkills}, cwd),
         },
       };
       await this.deps.renderPresetPanel(panel);
@@ -134,7 +135,7 @@ export class PromptAdmission {
         }
       }
     }
-    const mentionedSkills = worktree ? [] : [...new Set([...(topicSkill ? [topicSkill] : []), ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
+    const mentionedSkills = !hasTask || worktree ? [] : [...new Set([...topicSkills, ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
       if (admin || session) {
         const available = await this.deps.options.runtime.listSkills(instanceId, session, undefined, cwd);
@@ -179,7 +180,7 @@ export class PromptAdmission {
           this.deps.capacity.set(token, {
             sessionId:session?.id ?? '',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
             messageId:message.message_id,limit:error.limit,expires:Date.now()+300000,
-            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instanceId,epoch,generation,skills:{names:[...pendingSkills],topicSkill},cwd,folderFingerprint},
+            command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instanceId,epoch,generation,skills:{names:[...pendingSkills],topicSkills},cwd,folderFingerprint},
           });
           setTimeout(() => this.deps.capacity.delete(token),300000).unref();
           return;
@@ -189,8 +190,8 @@ export class PromptAdmission {
         await authorizeExecution();
         if (session) {
           await this.deps.preparePrompt(ctx, session, preparations);
-          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkill});
-        } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd);
+          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkills});
+        } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd, {names: [...pendingSkills], topicSkills});
       } finally { reservation?.release(); }
       return;
     }
@@ -207,7 +208,7 @@ export class PromptAdmission {
     this.promptProposals.set(token, {
       source:ctx,content:structuredClone(content),instanceId,worktree,
       ...(session ? {sessionId:session.id,generation:this.deps.options.store.getSessionGeneration(session.id)} : {folderFingerprint}),
-      skills:{key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkill},
+      skills:{key:skillKey,names:[...new Set([...pendingSkills,...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])],topicSkills},
       allMessagesArePrompts:this.deps.allMessagesArePrompts(ctx.chat!.id),messageId:message.message_id,expires:now+600000,
     });
   }
@@ -255,7 +256,7 @@ export class PromptAdmission {
     this.deps.options.store.clearPendingSkills(key);
     for (const name of remaining) this.deps.options.store.addPendingSkill(key,name);
   }
-  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkill?:string}, authority = ctx): Promise<boolean> {
+  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkills:string[]}, authority = ctx): Promise<boolean> {
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     this.deps.requireSessionAssignment(session);
     await this.deps.listen(session);
@@ -265,27 +266,28 @@ export class PromptAdmission {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
-    const prompt = await this.deps.uploadDocuments(session, content, async () => {
+    const uploaded = await this.deps.uploadDocuments(session, content, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
     }, contextDestination(ctx));
-    if (content.documents?.length) {
-      // Upload acknowledgements await Telegram; prompt submission is a separate mutation.
+    const prompt = await this.deps.prepareContent(session, uploaded);
+    if (content.documents?.length || prompt !== uploaded) {
+      // Upload acknowledgements and initial chat metadata await Telegram; submission is a separate mutation.
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
     }
     const messageId = ctx.message!.message_id;
-    const restore = selected && (selected.names.length || selected.topicSkill) ? () => {
+    const restore = selected && (selected.names.length || selected.topicSkills.length) ? () => {
       if (selected.names.length) {
         const current = this.deps.options.store.getPendingSkills(selected.key);
         this.deps.options.store.clearPendingSkills(selected.key);
         for (const name of [...selected.names, ...current]) this.deps.options.store.addPendingSkill(selected.key, name);
       }
-      if (selected.topicSkill) this.deps.options.store.setNewTopicSkill(session.id,selected.topicSkill);
+      if (selected.topicSkills.length) this.deps.options.store.setNewTopicSkills(session.id,selected.topicSkills);
     } : undefined;
     if (selected) {
       this.consumePendingSkills(selected.key,selected.names);
-      if (selected.topicSkill) this.deps.options.store.clearNewTopicSkill(session.id);
+      if (selected.topicSkills.length) this.deps.options.store.clearNewTopicSkills(session.id);
     }
     for (const original of this.deps.albumContexts(ctx))
       if (original.message && original.message.message_id !== messageId)

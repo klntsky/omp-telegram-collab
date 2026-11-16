@@ -6,6 +6,7 @@ import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
 import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
+import { WorktreeConfirmations } from './store/worktree-confirmations.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -40,12 +41,14 @@ export class Store {
   readonly db: DatabaseSync;
   private readonly prompts: PromptLedger;
   private readonly initialDocuments: InitialDocuments;
+  readonly worktreeConfirmations: WorktreeConfirmations;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     this.prompts = new PromptLedger(this.db, id => this.getSession(id));
     this.initialDocuments = new InitialDocuments(this.db);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
+    this.worktreeConfirmations = new WorktreeConfirmations(this.db);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
       initializeDatabase(this.db);
@@ -220,14 +223,14 @@ export class Store {
   advanceSessionGeneration(id: string): void {
     this.db.prepare('INSERT INTO session_generations VALUES (?,1) ON CONFLICT(session_id) DO UPDATE SET generation=generation+1').run(id);
   }
-  setNewTopicSkill(sessionId: string, name: string): void {
-    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name').run(sessionId, name);
+  setNewTopicSkills(sessionId: string, names: string[]): void {
+    this.db.prepare('INSERT INTO new_topic_skills VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET names=excluded.names').run(sessionId, JSON.stringify([...new Set(names)]));
   }
-  getNewTopicSkill(sessionId: string): string | undefined {
-    const row = this.db.prepare('SELECT name FROM new_topic_skills WHERE session_id=?').get(sessionId);
-    return row ? String(row.name) : undefined;
+  getNewTopicSkills(sessionId: string): string[] {
+    const row = this.db.prepare('SELECT names FROM new_topic_skills WHERE session_id=?').get(sessionId);
+    return row ? JSON.parse(String(row.names)) as string[] : [];
   }
-  clearNewTopicSkill(sessionId: string): void {
+  clearNewTopicSkills(sessionId: string): void {
     this.db.prepare('DELETE FROM new_topic_skills WHERE session_id=?').run(sessionId);
   }
   hasPendingInitialTask(id: string): boolean {
@@ -337,6 +340,7 @@ export class Store {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
   }
+  hasPromptHistory(sessionId: string): boolean { return this.prompts.hasPromptHistory(sessionId); }
   recordPromptSubmission(sessionId: string, ompSessionId: string, sender: string, content: PromptContent, messageId?: number): number {
     return this.prompts.recordPromptSubmission(sessionId, ompSessionId, sender, content, messageId);
   }

@@ -37,6 +37,7 @@ export async function startCollaborationProcess(
   child.on('error', fail);
   child.on('message', (message: unknown) => {
     if (typeof message !== 'object' || message === null || !('type' in message)) return;
+    options.log('application.worker.message', message);
     if (message.type === 'ready') ready.resolve();
     if (message.type === 'forkPrepared' && 'sourceId' in message && 'destinationId' in message &&
       typeof message.sourceId === 'string' && typeof message.destinationId === 'string') {

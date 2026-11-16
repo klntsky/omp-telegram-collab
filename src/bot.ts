@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError, type Context } from 'grammy';
+import { Bot, BotError, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import type { AppConfig, BotConfig, TopicSession, HostBinding } from '../shared/contracts.js';
@@ -40,6 +40,7 @@ export class BotService {
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
+  private inputFailure?: { error: unknown };
 
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
@@ -48,6 +49,12 @@ export class BotService {
     this.token = options.token;
     this.components = createBotComponents(options, this.bot, {
       id: () => this.id, stopped: () => this.stopped, apiAbort: this.apiAbort,
+      fail: error => {
+        // Albums finish after handleUpdate returns; wake the polling owner on fatal failure.
+        this.inputFailure ??= { error };
+        this.stopped = true;
+        this.polling?.controller.abort();
+      },
       applyTermination: () => this.applyTermination(),
       clearTermination: () => { this.termination = undefined; },
       invalidateSession: (id, reason) => { for (const handler of this.sessionInvalidationHandlers) handler(id, reason); },
@@ -129,6 +136,7 @@ async ensureMirroring(session: TopicSession, binding: HostBinding, beforeMutatio
 
 async start(onReady?: () => void): Promise<void> {
     await this.initialize();
+    if (this.inputFailure) throw this.inputFailure.error;
     if (this.stopped) return;
     if (!this.polling) {
       const controller = new TelegramAbortController();
@@ -155,7 +163,18 @@ async start(onReady?: () => void): Promise<void> {
           onReady = undefined;
           for (const update of updates) {
             if (controller.signal.aborted) break;
-            await this.bot.handleUpdate(update);
+            try {
+              await this.bot.handleUpdate(update);
+            } catch (error) {
+              if (!(error instanceof BotError) || !error.ctx.chat ||
+                  (error.error instanceof GrammyError && (error.error.error_code === 401 || error.error.error_code === 409))) throw error;
+              // Middleware failures belong to their chat, not the shared polling loop.
+              // grammY wraps them with their context in Bot.handleUpdate:
+              // https://github.com/grammyjs/grammY/blob/v1.46.0/src/bot.ts#L366-L408
+              console.error('Telegram chat update failed.', error.error, {
+                botId: this.id, chatId: error.ctx.chat.id, updateId: update.update_id,
+              });
+            }
             offset = update.update_id + 1;
           }
         } catch (error) {
@@ -178,6 +197,7 @@ async start(onReady?: () => void): Promise<void> {
         }
       }
     }
+    if (this.inputFailure) throw this.inputFailure.error;
   }
 
 async close(): Promise<void> {

@@ -107,11 +107,21 @@ export class SettingsPanels {
         panel.folderInput = action.input;
         panel.revision++;
         panel.choices = [{kind:'page',page:'folders'}];
-        this.deps.panels.save(panel);
         await ctx.answerCallbackQuery();
-        await this.deps.api.editMessageText(panel.chatId,panel.messageId,
+        // Telegram cannot change force_reply on an existing keyboard, so entry needs a new message.
+        // https://core.telegram.org/bots/api/types/inlinekeyboardmarkup.md
+        // TDLib dup_reply_markup retains force_reply only for sends:
+        // https://github.com/tdlib/td/blob/master/td/telegram/ReplyMarkup.cpp
+        await this.deps.api.editMessageReplyMarkup(panel.chatId,panel.messageId,{reply_markup:{inline_keyboard:[]}});
+        const prompt = await replyTo(ctx,panel.destination,
           action.input === 'append' ? 'Reply to this message with paths relative to the forum instance, one per line, to add folders.' : 'Reply to this message with paths relative to the forum instance, one per line, to replace all folders.',
-          {reply_markup:{inline_keyboard:[[{text:'Cancel',callback_data:`settings:${panel.token}:${panel.revision}:0`}]]}});
+          {reply_markup:{force_reply:true,inline_keyboard:[[{text:'Cancel',callback_data:`settings:${panel.token}:${panel.revision}:0`}]]}});
+        // Keep former folder-entry replies inactive without claiming replies
+        // to ordinary settings messages that never accepted folder input.
+        if (panel.folderInputEnded)
+          panel.retiredMessageIds = [...(panel.retiredMessageIds ?? []), panel.messageId];
+        panel.messageId = prompt.message_id;
+        this.deps.panels.save(panel);
         return;
       }
       const chat = findInstance(config,this.deps.id(),panel.chatId)!.instance.chats.find(chat => chat.botId === this.deps.id() && chat.chatId === panel.chatId)!;
@@ -149,9 +159,12 @@ export class SettingsPanels {
       return;
     }
     if (action.kind === 'page') {
+      // Catalog discovery can launch OMP, so acknowledge before waiting for it.
+      await ctx.answerCallbackQuery();
       await this.render(panel, config, action.page, action.offset);
       return;
     }
+    await ctx.answerCallbackQuery();
     await this.mutations.apply(ctx, panel, action);
   }
 }

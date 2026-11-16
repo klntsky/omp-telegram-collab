@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, createManagedTopic, openPanel, replyText, waitForEditor, waitForMessageDeleted, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
@@ -38,14 +39,17 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         const editorStart = app.apiCalls.length;
         await clickPanel(app, panel, 2);
         const editorMessageId = await waitForEditor(app, editorStart, session.threadId);
+        assert.equal(editorMessageId, panel.messageId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
         await replyText(app, editorMessageId, session.threadId, '/unknown Never treat this command as an answer');
         const answer = 'Custom destination\n  Preserve <literal> **content** and whitespace';
-        await replyText(app, editorMessageId, session.threadId, answer);
+        const submitted = await replyText(app, editorMessageId, session.threadId, answer);
+        await waitForMessageDeleted(app, editorMessageId);
+        const deletedAnswer = z.object({method:z.literal('deleteMessage'),payload:z.object({message_id:z.literal(submitted.id)})});
+        assert.ok(!app.apiCalls.slice(editorStart).some(call => deletedAnswer.safeParse(call).success));
         await completeWriteTask(app, task, instruction, session.threadId);
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === answer));
-        await waitForMessageDeleted(app, editorMessageId);
       }
     }
     const handoffStart = app.apiCalls.length;
@@ -80,6 +84,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         const editorStart = app.apiCalls.length;
         await clickPanel(app, panel, 2);
         const editorMessage = await waitForEditor(app, editorStart, session.threadId);
+        assert.equal(editorMessage, panel.messageId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
         const cancellation = await waitForPanel(app, 'question', 'ask:', editorStart, session.threadId);
@@ -87,7 +92,6 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         await clickPanel(app, cancellation, 0);
         await app.waitForCondition(() => app.hostFrames.some(frame => frame.t === 'ui-request-end' && frame.reqId === editor.request.reqId));
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === undefined));
-        await waitForMessageDeleted(app, editorMessage);
         const parent = await waitForPanel(app, 'question', 'ask:', dismissStart, session.threadId);
         const parentRequest = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(parentRequest?.t === 'ui-request' && parentRequest.request.kind === 'select');

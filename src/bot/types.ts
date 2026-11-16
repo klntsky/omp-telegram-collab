@@ -72,6 +72,7 @@ export interface Listener {
     observation: TaskObservation;
   }[];
   pendingAnswers: Map<number, number>;
+  customAnswerMessage?: {messageIds:number[]; messageId:number};
   pendingStops: number[];
   queuedMessages: number;
   typingText?: boolean;
@@ -94,8 +95,19 @@ export interface PendingQuestion {
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];
-  replyPromptId?: number;
-  answer?: {kind:'answer' | 'discussion'; text:string};
+  answer?: {
+    kind:
+      // A numbered selection or cancellation replaces the controls with a receipt.
+      // "Other (type your own)" instead reserves the last controls for the next editor.
+      | 'answer'
+      // "Chat about this" keeps a receipt whose replies become session prompts.
+      | 'discussion'
+      // A submitted editor response deletes the bot controls, not the user's answer.
+      // Delivery reactions stay on the user's message; replies to retired controls stay rejected.
+      | 'typed';
+    // Receipt text for answer/discussion; submitted content for typed, never echoed.
+    text:string;
+  };
 }
 export interface CapacityRequest {
   sessionId: string;
@@ -104,7 +116,7 @@ export interface CapacityRequest {
   messageId: number;
   limit: number;
   expires: number;
-  command?: {source: Context; content: PendingPromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkill?:string}; cwd?:string; folderFingerprint?:string};
+  command?: {source: Context; content: PendingPromptContent; extensions: readonly PromptExtension[]; worktree: boolean; instanceId: number; epoch: number; generation?: number; skills: {names:string[];topicSkills:string[]}; cwd?:string; folderFingerprint?:string};
 }
 export interface PromptProposal {
   source: Context;
@@ -117,7 +129,7 @@ export interface PromptProposal {
   allMessagesArePrompts: boolean;
   messageId: number;
   expires: number;
-  skills?: {key:PendingSkillKey;names:string[];topicSkill?:string};
+  skills?: {key:PendingSkillKey;names:string[];topicSkills:string[]};
 }
 export type SettingsKey =
   | 'prompts'
@@ -136,7 +148,7 @@ export type SettingsAction =
       field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
       value: boolean;
     }
-  | { kind: 'default'; field: 'default_new_topic_skill' | 'default_model_preset'; value?: string }
+  | { kind: 'default'; field: 'default_new_topic_skills' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
   | { kind: 'folders'; remove?: number; clear?: boolean; input?: 'append' | 'replace' }
   | { kind: 'close' };
@@ -145,6 +157,7 @@ export interface SettingsPanel {
   chatId: number;
   destination: TopicDestination;
   messageId: number;
+  retiredMessageIds?: number[];
   instanceId: number;
   revision: number;
   offset: number;

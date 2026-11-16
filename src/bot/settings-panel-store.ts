@@ -44,13 +44,23 @@ export class SettingsPanelStore {
         'forward_origin' in reply || 'forward_date' in reply ||
         'forward_origin' in message || 'forward_date' in message) return;
     const stored = this.deps.store.db.prepare(
-      "SELECT panel FROM settings_panels WHERE bot_id=? AND json_extract(panel,'$.chatId')=? AND json_extract(panel,'$.messageId')=?",
-    ).get(this.deps.id(), ctx.chat.id, reply.message_id);
+      `SELECT panel FROM settings_panels WHERE bot_id=? AND json_extract(panel,'$.chatId')=?
+       AND (json_extract(panel,'$.messageId')=? OR EXISTS (
+         SELECT 1 FROM json_each(settings_panels.panel,'$.retiredMessageIds') WHERE value=?
+       ))`,
+    ).get(this.deps.id(), ctx.chat.id, reply.message_id, reply.message_id);
     if (!stored) return;
     const decoded = JSON.parse(String(stored.panel)) as Omit<SettingsPanel, 'changes'> & {
       changes: [SettingsKey, { label: string; before: string; after: string }][];
     };
     if (!sameTopicDestination(contextDestination(ctx), decoded.destination)) return;
+    if (reply.message_id !== decoded.messageId) {
+      // Retired prompts still consume settings replies, but only the current
+      // prompt may mutate configuration, including while another input is active.
+      decoded.capacityInput = false;
+      decoded.folderInput = undefined;
+      decoded.folderInputEnded = true;
+    }
     if (!decoded.capacityInput && !decoded.folderInput &&
         (!decoded.folderInputEnded || message.text?.startsWith('/'))) return;
     return { ...decoded, changes: new Map(decoded.changes) };

@@ -64,7 +64,7 @@ const configSchema = z.object({
       folder_options: z.array(relativeFolderPath).default([]).transform(paths => [...new Set(paths)]),
       typing_indicators: z.enum(['disabled', 'streaming', 'inference']).default('disabled'),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
-      default_new_topic_skill: z.string().refine(isMentionableSkillName).optional(),
+      default_new_topic_skills: z.array(z.string().refine(isMentionableSkillName)).refine(names => new Set(names).size === names.length, 'Skill names must be unique').optional(),
     }).strict()),
   }).strict()),
   publicUrl: publicUrlSchema,
@@ -297,7 +297,10 @@ export function writeConfig(config: AppConfig): void {
 export function validateStart(config: AppConfig): void {
   const { configPath, ...value } = config;
   const checked = validate(value, configPath);
-  if (!checked.bots.length) throw failure(configPath, ['bots'], 'Configure at least one bot before starting.');
+  if (!checked.bots.length) {
+    const configOption = configPath === defaultConfigPath() ? '' : ` --config '${configPath.replaceAll("'", "'\\''")}'`;
+    throw new Error(`No bots configured yet. Create one using omp-telegram-collab${configOption} bot add`);
+  }
 }
 
 export function findInstance(config: AppConfig, botId: number, chatId: number): { instance: InstanceConfig } | undefined {
