@@ -81,7 +81,7 @@ export function registerChatIsolation(): void {
               if (method === 'setMessageReaction') {
                 const reaction = z.object({
                   chat_id: z.number(), message_id: z.number(),
-                  reaction: z.array(z.object({ type: z.literal('emoji'), emoji: z.string() })),
+                  reaction: z.array(z.object({ type: z.literal('emoji'), emoji: z.literal('👀') })),
                 }).parse(payload);
                 await invalid.raw.setMessageReaction(reaction, signal);
               } else {
