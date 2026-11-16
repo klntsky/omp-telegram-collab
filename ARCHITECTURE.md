@@ -112,6 +112,8 @@ The terminal join client uses the `joinTerminal` portion of the same contract th
 
 Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
 
+Managed capability acquisition distinguishes an omitted registry snapshot from a positively observed identity change. The startup owner may repeat read-only lookup within the original admission deadline while the process lifetime, pinned history, and working directory remain unchanged. It never accepts a mismatched returned identity or replays host creation to recover a missing observation.
+
 Passive reconnect refreshes the runtime's cached connection capability only after matching the existing host identity and operating-system process lifetime. The recovery boundary cannot transfer ownership to a replacement process. Retirement consumes that refreshed capability while retaining its independent lifecycle and process-identity checks.
 
 The runtime owns capacity reservations before composed-command execution. A reservation accounts for one logical managed-session target and remains valid across sequential host replacement; all managed admissions share that accounting boundary. The bot adapter owns interactive backpressure and the complete frozen command awaiting approval. Capacity approval rechecks the original sender, approving administrator, assignment, and target lifecycle before reserving again and executing any preparation. A rejected or expired wait cannot become an unprepared prompt submission.

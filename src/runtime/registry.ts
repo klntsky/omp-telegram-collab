@@ -18,6 +18,13 @@ export interface RuntimeRegistry {
   attach(instanceId: string, instancePath: string): Promise<HostBinding>;
 }
 
+export class HostSnapshotUnavailableError extends Error {
+  constructor() {
+    super('OMP host is absent from discovery while resolving its capability');
+    this.name = 'HostSnapshotUnavailableError';
+  }
+}
+
 export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
 
   async function json(args: string[], deadline: number): Promise<Record<string, unknown>> {
@@ -65,7 +72,10 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     const matches = (await list(deadline)).filter(candidate => candidate.instanceId === host.instanceId || candidate.sessionId === host.sessionId);
     if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
     const current = matches[0];
-    if (!current || current.instanceId !== host.instanceId || current.sessionId !== host.sessionId ||
+    // A live host can be omitted when its bounded IPC query cannot return a snapshot.
+    // https://github.com/can1357/oh-my-pi/blob/v18.20.2/packages/coding-agent/src/collab/registry.ts#L602-L630
+    if (!current) throw new HostSnapshotUnavailableError();
+    if (current.instanceId !== host.instanceId || current.sessionId !== host.sessionId ||
         current.generation !== host.generation || current.pid !== host.pid || current.cwd !== host.cwd) {
       throw new Error('OMP host session changed while resolving its capability');
     }

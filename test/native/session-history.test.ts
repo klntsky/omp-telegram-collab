@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import type { HostFrame, SessionEntry } from '@oh-my-pi/pi-wire';
 import { z } from 'zod';
@@ -114,7 +115,14 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   assert.ok(source);
   assert.equal(source.sessionId, binding.sessionId);
   const sourcePath = source.path;
-  const initialHosts = (await omp.listHosts()).filter(host => host.sessionId === binding.sessionId);
+  // Native discovery omits live hosts whose bounded IPC snapshot query times out.
+  // https://github.com/can1357/oh-my-pi/blob/v18.20.2/packages/coding-agent/src/collab/registry.ts#L602-L630
+  const discoverySignal = AbortSignal.any([t.signal, AbortSignal.timeout(config.omp.startupTimeoutMs)]);
+  let initialHosts = (await bounded(omp.listHosts(), discoverySignal)).filter(host => host.sessionId === binding.sessionId);
+  while (initialHosts.length === 0) {
+    await delay(100, undefined, { signal: discoverySignal });
+    initialHosts = (await bounded(omp.listHosts(), discoverySignal)).filter(host => host.sessionId === binding.sessionId);
+  }
   assert.equal(initialHosts.length, 1);
   const initialHost = initialHosts[0]!;
   omp.log('native.host.before', initialHost);
