@@ -77,10 +77,21 @@ export function registerChatIsolation(): void {
         owner.bot.api.config.use(async (previous, method, payload, signal) => {
           if ((mode === 'album' && method === 'setMessageReaction') ||
               (mode === 'callback' && method === 'answerCallbackQuery')) {
-            if (method === 'answerCallbackQuery')
-              callbackId = z.object({ callback_query_id: z.string() }).parse(payload).callback_query_id;
             try {
-              await invalid.raw[method](payload, signal);
+              if (method === 'setMessageReaction') {
+                const reaction = z.object({
+                  chat_id: z.number(), message_id: z.number(),
+                  reaction: z.array(z.object({ type: z.literal('emoji'), emoji: z.string() })),
+                }).parse(payload);
+                await invalid.raw.setMessageReaction(reaction, signal);
+              } else {
+                const query = z.object({
+                  callback_query_id: z.string(), text: z.string().optional(),
+                  show_alert: z.boolean().optional(), url: z.string().optional(), cache_time: z.number().optional(),
+                }).parse(payload);
+                callbackId = query.callback_query_id;
+                await invalid.raw.answerCallbackQuery(query, signal);
+              }
             } catch (error) {
               if (error instanceof GrammyError) failures.push(error);
               throw error;
