@@ -62,7 +62,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const idleSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === idleThreadId)!;
     await app.omp.assertWorktree(idleSession);
     assert.deepEqual(Array.from(app.omp.provider.requests, ([name, requests]) => [name, requests.length]), requestsBeforeManualTopic);
-    assert.equal(app.store.hasPendingInitialTask(idleSession.id), false);
+    assert.equal(app.store.promptQueue.has(idleSession.id), false);
     await clickPanel(app, manualWorktrees, 5);
     await app.waitForCondition(() => savedChat().create_topic_worktrees === false);
     await clickPanel(app, manualWorktrees, -1);

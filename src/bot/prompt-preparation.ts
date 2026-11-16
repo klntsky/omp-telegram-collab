@@ -10,7 +10,6 @@ import { documentFileName, PermanentDocumentPreparationError, saveDocument } fro
 import { join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
-import type { InitialDocumentSetup } from '../store/initial-documents.js';
 import { PromptPreparationRejectedError } from './types.js';
 
 export interface PromptPreparationDependencies {
@@ -92,27 +91,12 @@ export class PromptPreparation {
     }
     await this.prepareAuthorizedPrompt(session, extensions, authorize,
       text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text),
-      undefined, checkpoint, preset);
+      checkpoint, preset);
   }
   async reportQueuedFailure(session: TopicSession, error: Error): Promise<void> {
     await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), error.message);
   }
-  async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
-    const setup = this.deps.options.store.getInitialDocumentSetup(session.id);
-    if (!setup) return;
-    if (setup.automaticWorktree) {
-      await authorize();
-      await this.createTopicWorktree(session, authorize);
-      setup.automaticWorktree = false;
-      this.deps.options.store.setInitialDocumentSetup(session.id, setup);
-    }
-    if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(
-      session, setup.extensions, authorize,
-      text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text), setup,
-    );
-    this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
-  }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, setup?: InitialDocumentSetup, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -127,6 +111,8 @@ export class PromptPreparation {
     const applyPreset = async (name: string, applied?: () => void) => {
       const release = this.deps.options.runtime.retain(session.id);
       try {
+        await authorize();
+        checkSession();
         await this.deps.options.runtime.ensure(session);
         await authorize();
         checkSession();
@@ -135,7 +121,7 @@ export class PromptPreparation {
         await report(text);
       } finally { release(); }
     };
-    let selectedPreset = setup?.preset ?? queuedPreset;
+    let selectedPreset = queuedPreset;
     if (selectedPreset !== undefined) {
       await authorize();
       checkSession();
@@ -154,11 +140,6 @@ export class PromptPreparation {
           this.deps.dropListener(session.id);
         }
         // A later preset or delivery failure must not replay the completed native worktree switch.
-        if (setup) {
-          setup.extensions = extensions.slice(index + 1);
-          setup.preset = selectedPreset;
-          this.deps.options.store.setInitialDocumentSetup(session.id, setup);
-        }
         checkpoint?.([
           ...(selectedPreset === undefined ? [] : [{kind: 'model-preset' as const, name: selectedPreset}]),
           ...extensions.slice(index + 1),
@@ -169,11 +150,6 @@ export class PromptPreparation {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');
         await applyPreset(extension.name, () => checkpoint?.(extensions.slice(index + 1), extension.name));
         selectedPreset = extension.name;
-      }
-      if (setup) {
-        setup.extensions = extensions.slice(index + 1);
-        setup.preset = selectedPreset;
-        this.deps.options.store.setInitialDocumentSetup(session.id, setup);
       }
       await authorize();
       checkSession();

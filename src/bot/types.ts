@@ -1,6 +1,6 @@
 import type { Context } from 'grammy';
 import type { CollabUiRequest } from '@oh-my-pi/pi-wire';
-import type { TopicSession, CollabConnection, PromptContent, PendingPromptContent, TypingMode } from '../../shared/contracts.js';
+import type { TopicSession, CollabConnection, PendingPromptContent, TypingMode } from '../../shared/contracts.js';
 import type { PendingSkillKey } from '../store.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -69,7 +69,6 @@ export interface Listener {
   snapshotReplyTarget?: number;
   pendingPrompts: {
     submissionId: number;
-    onStartupRejected?: () => void;
     observation: TaskObservation;
   }[];
   pendingAnswers: Map<number, number>;
@@ -79,16 +78,6 @@ export interface Listener {
   typingText?: boolean;
   typingNextAt?: number;
   typingTimer?: NodeJS.Timeout;
-  initial?: {
-    content: PromptContent;
-    userId: number;
-    authorityUserId: number;
-    messageId?: number;
-    deadline: number;
-    retries: number;
-    phase: 'sent' | 'retrying';
-    timer?: NodeJS.Timeout;
-  };
 }
 export interface PendingQuestion {
   session: TopicSession;

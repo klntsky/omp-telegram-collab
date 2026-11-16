@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { it } from 'node:test';
 import { setupCollaborationTest } from './helpers/collaboration-fixture.js';
-import { completeWriteTask, createWriteTask, taskInput, writeScenario } from './helpers/model-tasks.js';
+import { completeWriteTask, createWriteTask, taskInput, taskReadResult, writeReadScenario, writeScenario } from './helpers/model-tasks.js';
 import { createManagedTopic, enrollForum, sendDocument } from './helpers/telegram-actions.js';
 import { holdTelegramAcknowledgement } from './helpers/telegram-acknowledgement.js';
 import { installRetirementGate } from './helpers/retirement-gate.js';
@@ -101,5 +101,59 @@ it('queued validation failures do not block a checkpointed preset after host rep
     app.omp.provider.assertComplete([seed.name, restored.name]);
   } finally {
     await chmod(destination, 0o644);
+  }
+});
+
+it('initial and subsequent tasks share durable FIFO recovery without repeating preparation', { timeout: 240000 }, async t => {
+  const initial = createWriteTask('unified-queue-initial');
+  const following = createWriteTask('unified-queue-following');
+  const app = await setupCollaborationTest(t, {
+    scenarios: [writeScenario(initial), writeReadScenario(following, initial.path)],
+  });
+  await enrollForum(app);
+  const settingsPath = app.omp.agentConfigPath;
+  const original = await readFile(settingsPath, 'utf8');
+  const invalid = JSON.parse(original);
+  invalid.modelPresets['e2e-alternate'].modelRoles.default = 'e2e/missing-model';
+  await writeFile(settingsPath, JSON.stringify(invalid));
+  try {
+    const previous = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
+    const filename = 'unified-queue-input.txt';
+    const bytes = Buffer.from('Resume both tasks after the same completed worktree preparation.');
+    const sent = await sendDocument(app, filename, bytes, {
+      caption: `/new /worktree /modelpreset e2e-alternate ${initial.prompt}`,
+    });
+    await app.waitForMessageHandled(sent.id);
+    const session = app.store.listSessions(app.telegram.bot.id).find(candidate => !previous.has(candidate.id));
+    assert.ok(session);
+    const first = app.store.promptQueue.first(session.id);
+    assert.equal(first?.messageId, sent.id);
+    assert.equal(first?.state, 'pending');
+    // Later intake also wakes recovery if the native host initially refused its idle guard.
+    const next = await app.sendAndWait(`/p ${following.prompt}`, session.threadId);
+    await app.waitForCondition(() => {
+      const extensions = app.store.promptQueue.first(session.id)?.preparation?.extensions;
+      return extensions?.length === 1 && extensions[0]?.kind === 'model-preset';
+    });
+    const prepared = app.store.getSession(session.id)!;
+    assert.notEqual(prepared.cwd, app.omp.workspace);
+    assert.deepEqual(app.store.promptQueue.list(session.id).map(item => item.messageId), [sent.id, next.id]);
+    assert.deepEqual(app.omp.provider.requests.get(initial.name), []);
+    assert.deepEqual(app.omp.provider.requests.get(following.name), []);
+    await writeFile(settingsPath, original);
+    await app.restart();
+    await completeWriteTask(app, following, next, session.threadId);
+    const recovered = app.store.getSession(session.id)!;
+    assert.equal(recovered.cwd, prepared.cwd);
+    assert.deepEqual(await readFile(join(recovered.cwd, filename)), bytes);
+    assert.deepEqual(JSON.parse(await readFile(join(recovered.cwd, initial.path), 'utf8')), initial.evidence);
+    // Reading the first task's unique file through the real tool proves execution order.
+    assert.ok(JSON.stringify(taskReadResult(app.omp.provider, following)).includes(initial.evidence.nonce));
+    assert.equal(app.guestFrames.filter(frame => frame.t === 'prompt' && frame.text.includes(initial.prompt)).length, 1);
+    assert.equal(app.guestFrames.filter(frame => frame.t === 'prompt' && frame.text.includes(following.prompt)).length, 1);
+    assert.equal(app.store.promptQueue.has(session.id), false);
+    app.omp.provider.assertComplete([initial.name, following.name]);
+  } finally {
+    await writeFile(settingsPath, original);
   }
 });

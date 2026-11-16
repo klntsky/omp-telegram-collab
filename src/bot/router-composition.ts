@@ -6,6 +6,7 @@ import type { BotOptions } from '../bot.js';
 import type { LifecycleDependencies } from './composition.js';
 import type { BotQuestions } from './questions.js';
 import type { PromptAdmission } from './prompt-admission.js';
+import type { PromptWorker } from './prompt-worker.js';
 import type { BotAuthorization } from './authorization.js';
 import type { CapacityAdmission } from './capacity-admission.js';
 import type { FolderSelection } from './folders.js';
@@ -33,6 +34,7 @@ interface RouterComponents {
  options: BotOptions; bot: Bot<Context>; lifecycle: LifecycleDependencies; skills: SkillPicker;
  questions: BotQuestions;
  admission: PromptAdmission;
+ worker: PromptWorker;
  authorization: BotAuthorization;
  capacity: CapacityAdmission;
  folders: FolderSelection;
@@ -58,7 +60,7 @@ interface RouterComponents {
 }
 
 /** Composes the ordered input pipeline without giving operations a service-wide context. */
-export function composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup }: RouterComponents) {
+export function composeInputRouter({ options, bot, lifecycle, skills, questions, admission, worker, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup }: RouterComponents) {
   const router: InputRouter = new InputRouter(
   {
     answerQuestion: questions.answerQuestion.bind(questions),
@@ -94,12 +96,12 @@ export function composeInputRouter({ options, bot, lifecycle, skills, questions,
     bot: bot,
     chooseFolder: folders.chooseFolder.bind(folders),
     closedSessions: owners.closedSessions,
-    createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
     createsTopicWorktrees: authorization.createsTopicWorktrees.bind(authorization),
     currentAdmin: authorization.currentAdmin.bind(authorization),
     defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     delivery: connections.delivery,
     dropListener: connections.dropListener.bind(connections),
+    drainPrompts: worker.drain.bind(worker),
     folderSettings: folders.folderSettings.bind(folders),
     getIconIds: owners.getIconIds.bind(owners),
     get id() { return lifecycle.id(); },

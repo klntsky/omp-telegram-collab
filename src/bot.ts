@@ -84,7 +84,6 @@ async applyTermination(): Promise<void> {
       this.components.admission.clear();
       const sessions = this.options.store.listSessions();
       for (const session of sessions) {
-        this.options.store.cancelInitialTask(session.id);
         this.options.store.promptQueue.cancel(session.id);
         this.options.store.advanceSessionGeneration(session.id);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
@@ -118,7 +117,8 @@ initialize(): Promise<void> {
 
   private async initializeOnce(): Promise<void> {
     if (!this.bot.isInited()) this.bot.botInfo = await this.bot.api.getMe(this.apiAbort.signal);
-    this.options.store.recoverInitialTaskPreparations(this.id);
+    this.options.store.recoverSessionPreparations(this.id);
+    this.options.store.promptQueue.recoverSubmissions(this.id);
     await this.components.menus.syncCommandMenus();
     await this.components.entries.syncSessionEntries();
     if (refreshTermination(this.options.config)) await this.applyTermination();
@@ -203,6 +203,7 @@ async start(onReady?: () => void): Promise<void> {
 async close(): Promise<void> {
     this.telegramRetry.abort();
     this.stopped = true;
+    this.components.worker.close();
     const metadataCompletions = this.components.owners.disposeAll();
     this.components.maintenance.background.abort(new Error('Bot background maintenance stopped'));
     this.components.maintenance.catalogRefresh.abort(new Error('Bot catalog refresh stopped'));
@@ -219,7 +220,6 @@ async close(): Promise<void> {
     this.components.questions.endAll();
     const listeners = [...this.components.connections.listeners.values()];
     for (const item of listeners) {
-      clearTimeout(item.initial?.timer);
       clearInterval(item.typingTimer);
       item.feed.close();
       item.connection?.close();

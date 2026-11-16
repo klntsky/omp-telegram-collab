@@ -5,87 +5,75 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
-function pending(store: Store, threadId: number, botId = 1) {
-  return store.createSession({ botId, chatId: -100, threadId, instanceId: 1, cwd: '/project' }, 'Preparation', { kind: 'managed' }, { text: `Task ${threadId}` });
+function pending(store: Store, threadId: number, botId = 1, preparation: 'topic' | 'fork' = 'topic') {
+  return store.createSession({ botId, chatId: -100, threadId, instanceId: 1, cwd: '/project' }, 'Preparation', undefined, {
+    prompt: { messageId: 1, userId: 7, authorityUserId: 8, content: { text: `Task ${threadId}` } },
+    preparation,
+  });
 }
 
-
-test('initial preparation persists across disk reopen and concurrent readers until bot-scoped recovery', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'initial-preparation-'));
+test('session preparation persists across readers until bot-scoped recovery detaches interrupted forks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'session-preparation-'));
   const filename = join(directory, 'store.sqlite');
   try {
     const original = new Store(filename);
     let first: string;
-    let sameBot: string;
+    let fork: string;
     let otherBot: string;
-    let submitted: string;
     try {
       first = pending(original, 10).id;
-      sameBot = pending(original, 11).id;
+      fork = pending(original, 11, 1, 'fork').id;
       otherBot = pending(original, 10, 2).id;
-      submitted = pending(original, 12).id;
-      assert.deepEqual(original.claimInitialTask(submitted), { text: 'Task 12' });
-      for (const id of [first, sameBot, otherBot, submitted]) original.beginInitialTaskPreparation(id);
       const reader = new Store(filename);
       try {
-        assert.equal(reader.claimInitialTask(first), undefined);
-        assert.throws(() => reader.beginInitialTaskPreparation(first), /UNIQUE constraint failed/);
-        assert.equal(original.claimInitialTask(first), undefined);
+        assert.equal(reader.isSessionPreparing(first), true);
+        assert.throws(() => reader.beginSessionPreparation(first), /UNIQUE constraint failed/);
+        assert.equal(original.isSessionPreparing(first), true);
       } finally { reader.close(); }
     } finally { original.close(); }
     const reopened = new Store(filename);
     try {
-      for (const id of [first!, sameBot!, otherBot!]) {
-        assert.equal(reopened.hasPendingInitialTask(id), true);
-        assert.equal(reopened.claimInitialTask(id), undefined);
-      }
-      reopened.recoverInitialTaskPreparations(999);
-      assert.equal(reopened.claimInitialTask(first!), undefined);
-      reopened.recoverInitialTaskPreparations(1);
-      assert.deepEqual(reopened.claimInitialTask(first!), { text: 'Task 10' });
-      assert.deepEqual(reopened.claimInitialTask(sameBot!), { text: 'Task 11' });
-      assert.equal(reopened.claimInitialTask(first!), undefined);
-      assert.equal(reopened.claimInitialTask(submitted!), undefined);
-      assert.equal(reopened.claimInitialTask(otherBot!), undefined);
-      assert.equal(reopened.hasPendingInitialTask(otherBot!), true);
-      reopened.recoverInitialTaskPreparations(2);
-      assert.deepEqual(reopened.claimInitialTask(otherBot!), { text: 'Task 10' });
+      assert.equal(reopened.isSessionPreparing(first!), true);
+      reopened.recoverSessionPreparations(999);
+      assert.equal(reopened.isSessionPreparing(first!), true);
+      reopened.recoverSessionPreparations(1);
+      assert.equal(reopened.isSessionPreparing(first!), false);
+      assert.equal(reopened.promptQueue.has(first!), true);
+      assert.equal(reopened.getSession(fork!)?.status, 'detached');
+      assert.equal(reopened.promptQueue.has(fork!), false);
+      assert.equal(reopened.isSessionPreparing(otherBot!), true);
+      reopened.recoverSessionPreparations(2);
+      assert.equal(reopened.isSessionPreparing(otherBot!), false);
+      assert.equal(reopened.promptQueue.has(otherBot!), true);
     } finally { reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('capacity-blocked initial document survives disk reopen until preparation and claim', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'initial-document-'));
+test('pending document preparation checkpoints survive reopen on the same queue item', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'queued-document-'));
   const filename = join(directory, 'store.sqlite');
-  const content = {
-    text: 'Complete the pending document task',
-    documents: [{ fileId: 'telegram-document-file-id', fileName: 'pending-upload.txt' }],
-  };
+  const content = { text: 'Complete the pending document task', documents: [{ fileId: 'telegram-document-file-id', fileName: 'pending-upload.txt' }] };
   try {
     const original = new Store(filename);
     let id: string;
+    let promptId: number;
     try {
-      id = original.createSession(
-        { botId: 1, chatId: -100, threadId: 10, instanceId: 1, cwd: '/project' },
-        'Pending document', { kind: 'managed' }, content, 7,
-      ).id;
-      assert.deepEqual(original.getPendingInitialTask(id), content);
+      id = original.createSession({ botId: 1, chatId: -100, threadId: 10, instanceId: 1, cwd: '/project' }, 'Pending document', undefined, {
+        prompt: { messageId: 90, userId: 7, authorityUserId: 8, content, preparation: { automaticWorktree: true, extensions: [{kind:'worktree'}] } },
+      }).id;
+      promptId = original.promptQueue.first(id)!.id;
+      original.promptQueue.replacePreparation(promptId, { automaticWorktree: false, extensions: [] });
     } finally { original.close(); }
     const reopened = new Store(filename);
     try {
-      reopened.recoverInitialTaskPreparations(1);
-      assert.equal(reopened.hasPendingInitialTask(id!), true);
-      assert.equal(reopened.getInitialAuthority(id!), 7);
-      assert.deepEqual(reopened.getPendingInitialTask(id!), content);
-      reopened.beginInitialTaskPreparation(id!);
-      assert.equal(reopened.claimInitialTask(id!), undefined);
-      assert.equal(reopened.getPendingInitialTask(id!), undefined);
+      const queued = reopened.promptQueue.first(id!)!;
+      assert.equal(queued.id, promptId!);
+      assert.equal(queued.authorityUserId, 8);
+      assert.deepEqual(queued.content, content);
+      assert.deepEqual(queued.preparation, { automaticWorktree: false, extensions: [] });
       const prepared = { text: `${content.text}\n\nDocument saved to /project/pending-upload.txt` };
-      reopened.replacePendingInitialTask(id!, prepared);
-      reopened.finishInitialTaskPreparation(id!);
-      assert.deepEqual(reopened.claimInitialTask(id!), prepared);
-      assert.equal(reopened.hasPendingInitialTask(id!), false);
-      assert.equal(reopened.getPendingInitialTask(id!), undefined);
+      reopened.promptQueue.replaceContent(queued.id, prepared);
+      assert.deepEqual(reopened.promptQueue.first(id!)?.content, prepared);
     } finally { reopened.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

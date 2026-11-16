@@ -2,11 +2,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
-import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
+import type { PromptContent, TopicKey, TopicSession } from '../shared/contracts.js';
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
-import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
-import { PromptQueue } from './store/prompt-queue.js';
+import { PromptQueue, type NewSessionPrompt } from './store/prompt-queue.js';
 import { WorktreeConfirmations } from './store/worktree-confirmations.js';
 
 type Row = Record<string, string | number | null>;
@@ -42,13 +41,11 @@ export class Store {
   readonly db: DatabaseSync;
   readonly promptQueue: PromptQueue;
   private readonly prompts: PromptLedger;
-  private readonly initialDocuments: InitialDocuments;
   readonly worktreeConfirmations: WorktreeConfirmations;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     this.prompts = new PromptLedger(this.db, id => this.getSession(id));
-    this.initialDocuments = new InitialDocuments(this.db);
     this.promptQueue = new PromptQueue(this.db);
     if (filename !== ':memory:') chmodSync(filename, 0o600);
     this.worktreeConfirmations = new WorktreeConfirmations(this.db);
@@ -98,7 +95,6 @@ export class Store {
     this.completeCloseIcon(existing.id);
     this.setPendingSessionTitle(existing.id,undefined);
     this.db.prepare('DELETE FROM session_topic_title_prefixes WHERE session_id=?').run(existing.id);
-    this.cancelInitialTask(existing.id);
     this.promptQueue.cancel(existing.id);
     if (existing.status !== 'detached') this.advanceSessionGeneration(existing.id);
   }
@@ -141,25 +137,22 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, initialTask?: PendingPromptContent, initialUserId?: number, authorityUserId = initialUserId, preparation?: 'fork'): TopicSession {
+  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, options?: { prompt?: NewSessionPrompt; preparation?: 'topic' | 'fork'; onAdmitted?: () => void }): TopicSession {
     if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new Error('A session requires a positive safe integer instance ID');
     if (!isAbsolute(key.cwd)) throw new Error('A session requires an absolute working directory');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
-    if (initialTask !== undefined && !initialTask.text.trim() && !initialTask.images?.length && !initialTask.documents?.length) throw new Error('An initial task requires text, images, or documents');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.getTopicKind(key) === 'detached') throw new Error('A detached topic cannot have a session');
-      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,initial_task,initial_state,instance_id,cwd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), initialTask?.text ?? null, initialTask === undefined ? null : 'pending', key.instanceId, key.cwd);
+      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,instance_id,cwd) VALUES (?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), key.instanceId, key.cwd);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instanceId !== key.instanceId) throw new Error('This topic history belongs to a different instance ID');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
-      if (Number(result.changes) && initialTask?.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(created.id,JSON.stringify(initialTask.images));
-      if (Number(result.changes) && initialTask?.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(created.id,JSON.stringify(initialTask.documents));
-      if (Number(result.changes) && initialTask !== undefined && initialUserId !== undefined) {
-        this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(created.id,initialUserId);
-        if (authorityUserId !== undefined) this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(created.id,authorityUserId);
+      if (Number(result.changes) && options?.prompt) {
+        const prompt = options.prompt;
+        this.promptQueue.enqueue(created.id, prompt.messageId, prompt.userId, prompt.authorityUserId, prompt.content, prompt.preparation, options.onAdmitted);
       }
-      if (Number(result.changes) && preparation) this.beginInitialTaskPreparation(created.id, preparation);
+      if (Number(result.changes) && options?.preparation) this.beginSessionPreparation(created.id, options.preparation);
       this.db.exec('COMMIT');
       return created;
     } catch (error) {
@@ -238,94 +231,28 @@ export class Store {
   clearNewTopicSkills(sessionId: string): void {
     this.db.prepare('DELETE FROM new_topic_skills WHERE session_id=?').run(sessionId);
   }
-  hasPendingInitialTask(id: string): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND initial_state='pending'").get(id));
+  isSessionPreparing(id: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM session_preparations WHERE session_id=?').get(id));
   }
-  beginInitialTaskPreparation(sessionId: string, kind: 'initial' | 'fork' = 'initial'): void {
-    this.db.prepare('INSERT INTO initial_task_preparations (session_id,kind) VALUES (?,?)').run(sessionId,kind);
+  beginSessionPreparation(sessionId: string, kind: 'topic' | 'fork' = 'topic'): void {
+    this.db.prepare('INSERT INTO session_preparations (session_id,kind) VALUES (?,?)').run(sessionId,kind);
   }
-  finishInitialTaskPreparation(sessionId: string): void {
-    this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id=?').run(sessionId);
+  finishSessionPreparation(sessionId: string): void {
+    this.db.prepare('DELETE FROM session_preparations WHERE session_id=?').run(sessionId);
   }
-  recoverInitialTaskPreparations(botId: number): void {
+  recoverSessionPreparations(botId: number): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const interrupted = this.db.prepare("SELECT s.bot_id,s.chat_id,s.thread_id FROM sessions s JOIN initial_task_preparations p ON p.session_id=s.id WHERE s.bot_id=? AND p.kind='fork'").all(botId);
+      const interrupted = this.db.prepare("SELECT s.bot_id,s.chat_id,s.thread_id FROM sessions s JOIN session_preparations p ON p.session_id=s.id WHERE s.bot_id=? AND p.kind='fork'").all(botId);
       for (const row of interrupted) this.markDetachedTopic({
         botId:Number(row.bot_id),chatId:Number(row.chat_id),threadId:Number(row.thread_id),
       });
-      this.db.prepare('DELETE FROM initial_task_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
+      this.db.prepare('DELETE FROM session_preparations WHERE session_id IN (SELECT id FROM sessions WHERE bot_id=?)').run(botId);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
-  }
-  setInitialTask(id: string, task: PendingPromptContent, userId: number, authorityUserId = userId): void {
-    if (!task.text.trim() && !task.images?.length && !task.documents?.length) throw new Error('An initial task requires text, images, or documents');
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = this.db.prepare("UPDATE sessions SET initial_task=?,initial_state='pending' WHERE id=? AND initial_state IS NULL AND status='open'").run(task.text,id);
-      if (!Number(result.changes)) throw new Error('Session cannot accept an initial task');
-      if (task.images !== undefined) this.db.prepare('INSERT INTO initial_images VALUES (?,?)').run(id,JSON.stringify(task.images));
-      if (task.documents?.length) this.db.prepare('INSERT INTO initial_documents VALUES (?,?)').run(id,JSON.stringify(task.documents));
-      this.db.prepare('INSERT INTO initial_users VALUES (?,?)').run(id,userId);
-      this.db.prepare('INSERT INTO initial_authorities VALUES (?,?)').run(id,authorityUserId);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-  getInitialDocumentSetup(id: string): InitialDocumentSetup | undefined {
-    return this.initialDocuments.getSetup(id);
-  }
-  setInitialDocumentSetup(id: string, setup: InitialDocumentSetup | undefined): void {
-    this.initialDocuments.setSetup(id, setup);
-  }
-  getPendingInitialTask(id: string): PendingPromptContent | undefined {
-    return this.initialDocuments.getPendingTask(id);
-  }
-  replacePendingInitialTask(id: string, task: PendingPromptContent): void {
-    this.initialDocuments.replacePendingTask(id, task);
-  }
-  claimInitialTask(id: string): PromptContent | undefined {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const row = this.db.prepare("UPDATE sessions SET initial_state='submitted' WHERE id=? AND initial_state='pending' AND NOT EXISTS (SELECT 1 FROM initial_task_preparations WHERE session_id=sessions.id) AND NOT EXISTS (SELECT 1 FROM initial_documents WHERE session_id=sessions.id) RETURNING initial_task").get(id) as Row | undefined;
-      let content: PromptContent | undefined;
-      if (row) {
-        const imageRow = this.db.prepare('SELECT images FROM initial_images WHERE session_id=?').get(id);
-        content = {text:String(row.initial_task),...(imageRow ? {images:JSON.parse(String(imageRow.images)) as PromptContent['images']} : {})};
-      }
-      this.db.exec('COMMIT');
-      return content;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
-  cancelInitialTask(id: string): void {
-    this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
-  }
-  getInitialAuthority(id: string): number | undefined {
-    const row = this.db.prepare('SELECT user_id FROM initial_authorities WHERE session_id=?').get(id);
-    return row ? Number(row.user_id) : undefined;
-  }
-  getInitialUser(id: string): number | undefined {
-    const row = this.db.prepare('SELECT user_id FROM initial_users WHERE session_id=?').get(id);
-    return row ? Number(row.user_id) : undefined;
-  }
-  setInitialMessage(id: string, messageId: number): void {
-    this.db
-      .prepare(
-        'INSERT INTO initial_messages VALUES (?,?) ON CONFLICT(session_id) DO UPDATE SET message_id=excluded.message_id',
-      )
-      .run(id, messageId);
-  }
-  getInitialMessage(id: string): number | undefined {
-    const row = this.db.prepare('SELECT message_id FROM initial_messages WHERE session_id=?').get(id);
-    return row ? Number(row.message_id) : undefined;
   }
   getSessionEntry(id: string): {messageId: number; markup: string} | undefined {
     const row = this.db.prepare('SELECT message_id,markup FROM session_entries WHERE session_id=?').get(id);

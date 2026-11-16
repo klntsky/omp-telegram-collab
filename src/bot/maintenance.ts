@@ -11,7 +11,6 @@ interface MaintenanceDependencies {
  bot: Bot<Context>; config: AppConfig; store: Store; runtime: Omp;
  botId(): number; stopped(): boolean; restoreSessions(): void;
  sessionAssigned(session: TopicSession): boolean;
- sendInitial(session: TopicSession): Promise<void>;
  drainPrompts(session: TopicSession): Promise<void>;
  refreshTopicStatus(session: TopicSession): Promise<void>;
  recoverExistingMirror(session: TopicSession): Promise<void>;
@@ -52,11 +51,6 @@ startBackground(): void {
                 signal.throwIfAborted();
                 await this.runBackground(`session-maintenance:${session.id}`, async () => {
                   if (this.deps.sessionAssigned(session)) {
-                    if (this.deps.store.hasPendingInitialTask(session.id)) {
-                      void this.runBackground(`initial-recovery:${session.id}`, () =>
-                        this.deps.sendInitial(session),
-                      );
-                    }
                     await Promise.all([
                       this.runBackground(`prompt-queue:${session.id}`, () => this.deps.drainPrompts(session)),
                       this.runBackground(`topic-status:${session.id}`, () =>

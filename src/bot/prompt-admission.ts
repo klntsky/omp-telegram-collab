@@ -1,19 +1,16 @@
-import type { Bot, Context } from 'grammy';
-import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
+import type { Context } from 'grammy';
+import type { PendingPromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { PromptExtension } from '../telegram-commands.js';
 import { randomBytes } from 'node:crypto';
 import type { PendingSkillKey } from '../store.js';
 import { configWritable, findInstance, refreshTermination } from '../config.js';
-import { SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
+import { SessionCapacityError } from '../runtime/types.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
-import type { Listener, PresetPanel, PromptProposal } from './types.js';
+import type { PresetPanel, PromptProposal } from './types.js';
 import type { CapacityAdmission } from './capacity-admission.js';
-import type { PromptPreparation } from './prompt-preparation.js';
-import type { QueuedPrompt, PromptPreparation as QueuedPreparation } from '../store/prompt-queue.js';
-import { AuthorizationDeniedError, PromptPreparationRejectedError } from './types.js';
-import { topicDestination } from '../../shared/topic-destination.js';
+import type { PromptPreparation as QueuedPreparation } from '../store/prompt-queue.js';
 
 export interface PromptAdmissionDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime' | 'configWritable'>;
@@ -34,24 +31,14 @@ export interface PromptAdmissionDependencies {
   defaultNewTopicSkills(chatId: number): string[];
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
-  prepareQueuedPrompt: PromptPreparation['prepareQueuedPrompt'];
-  reportQueuedFailure: PromptPreparation['reportQueuedFailure'];
-  uploadDocuments: PromptPreparation['uploadDocuments'];
+  drainPrompts(session: TopicSession): Promise<void>;
   newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
-  listen(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<unknown>;
-  listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
-  sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void, beforeSend?: () => void): void;
-  prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent>;
-  authorizeQueued(session: TopicSession, userId: number, authorityUserId: number): Promise<void>;
-  scheduleReconnect(session: TopicSession): void;
-  dropListener(sessionId: string): void;
 }
 
 export class PromptAdmission {
   private admissionEpoch = 0;
   private readonly promptProposals = new Map<string, PromptProposal>();
-  private readonly drains = new Map<string, Promise<void>>();
   constructor(private readonly deps: PromptAdmissionDependencies) {}
   get epoch(): number { return this.admissionEpoch; }
   clear(): void {
@@ -251,10 +238,7 @@ export class PromptAdmission {
         (!proposal.sessionId && proposal.folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat.id))))
       throw new Error('The prompt proposal assignment or folder settings changed before execution.');
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx, {skills:[...new Set([...(proposal.skills?.topicSkills ?? []), ...(proposal.skills?.names ?? [])])]}))) {
-        await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
-        return;
-      }
+      await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx, {skills:[...new Set([...(proposal.skills?.topicSkills ?? []), ...(proposal.skills?.names ?? [])])]});
     } else await this.deps.newSession(proposal.source,proposal.content,undefined,undefined,proposal.skills ? () => this.consumePendingSkills(proposal.skills!.key,proposal.skills!.names) : undefined,proposal.worktree,ctx,[],undefined,undefined,proposal.skills);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
@@ -277,83 +261,7 @@ export class PromptAdmission {
         if (selected.topicSkills.length) this.deps.options.store.clearNewTopicSkills(session.id);
       }
     });
-    await this.drain(session);
+    await this.deps.drainPrompts(session);
     return true;
-  }
-  drain(session: TopicSession): Promise<void> {
-    const existing = this.drains.get(session.id);
-    if (existing) return existing;
-    const pending = this.drainSession(session).finally(() => this.drains.delete(session.id));
-    this.drains.set(session.id, pending);
-    return pending;
-  }
-  private async drainSession(session: TopicSession): Promise<void> {
-    const store = this.deps.options.store;
-    while (!this.deps.stopped() && !this.deps.options.config.terminated && store.promptQueue.has(session.id)) {
-      if (store.getSession(session.id)?.status !== 'open' || !this.deps.sessionAssigned(session)) return;
-      if (store.hasPendingInitialTask(session.id) || this.deps.listener(session.id)?.initial) return;
-      const queued: QueuedPrompt = store.promptQueue.list(session.id)[0]!;
-      const generation = store.getSessionGeneration(session.id);
-      const active = () => store.getSession(session.id)?.status === 'open' &&
-        store.getSessionGeneration(session.id) === generation &&
-        store.promptQueue.contains(queued.id);
-      const cancellation = new Error('The queued prompt was cancelled before submission.');
-      const authorize = async () => {
-        await this.deps.authorizeQueued(session, queued.userId, queued.authorityUserId);
-        if (!active()) throw cancellation;
-        if (this.deps.stopped()) throw new Error('The service is stopping');
-      };
-      let listener: Listener | undefined;
-      try {
-        await authorize();
-        const preparation = queued.preparation;
-        if (preparation?.skills?.length) {
-          const available = await this.deps.options.runtime.listSkills(session.instanceId, session);
-          const missing = preparation.skills.filter(name => !available.some(skill => skill.name === name));
-          if (missing.length) throw new PromptPreparationRejectedError(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
-        }
-        if (preparation && (preparation.extensions?.length || preparation.preset !== undefined)) await this.deps.prepareQueuedPrompt(
-          session, preparation.extensions ?? [], authorize,
-          (extensions, preset) => store.promptQueue.replacePreparation(queued.id, {...preparation, extensions, preset}),
-          preparation.preset,
-        );
-        await authorize();
-        if (!queued.content.text.trim() && !queued.content.images?.length && !queued.content.documents?.length) {
-          store.promptQueue.remove(queued.id);
-          continue;
-        }
-        await this.deps.listen(session, authorize);
-        listener = this.deps.listener(session.id);
-        if (!listener || listener.initial) return;
-        const uploaded = await this.deps.uploadDocuments(session, queued.content, authorize,
-          topicDestination(session.chatId, session.threadId),
-          remaining => store.promptQueue.replaceContent(queued.id, remaining));
-        const expanded = preparation?.skills?.length
-          ? {...uploaded, text: `${preparation.skills.map(name => `/skill:${name}`).join(' ')}\n\n${uploaded.text}`}
-          : uploaded;
-        const prompt = await this.deps.prepareContent(session, expanded);
-        await authorize();
-        if (this.deps.listener(session.id) !== listener) return;
-        this.deps.sendPrompt(listener, prompt, queued.messageId, undefined, () => store.promptQueue.remove(queued.id));
-      } catch (error) {
-        if (error === cancellation) return;
-        if (error instanceof PromptPreparationRejectedError) {
-          try {
-            await this.deps.reportQueuedFailure(session, error);
-          } catch (reportError) {
-            throw new AggregateError([error, reportError], `${error.message}\n${reportError instanceof Error ? reportError.message : String(reportError)}`);
-          }
-          store.promptQueue.remove(queued.id);
-          continue;
-        }
-        if (error instanceof SessionRetiringError) {
-          if (listener && this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
-          this.deps.scheduleReconnect(session);
-          return;
-        }
-        if (error instanceof AuthorizationDeniedError) store.promptQueue.remove(queued.id);
-        throw error;
-      }
-    }
   }
 }
