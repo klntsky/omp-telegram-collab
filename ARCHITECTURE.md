@@ -18,6 +18,8 @@ The service owns the readiness boundary: mandatory runtime and history checks, i
 
 The bot adapter owns lifecycle-notice topic creation and delivery; the store preserves its per-bot, per-forum destination across restarts. The store owns durable topic detachment independently of session existence. Status-topic registration and `/detach` use the same transition, retaining history while rejecting session creation in that topic. The adapter uses that classification to exclude detached topics from prompts, session assignment, Git observation, and automatic title changes. Commands retain their normal authorization boundaries and may create separate topics, but cannot restore control of a detached destination.
 
+The bot adapter owns admission of manually created topics. Configuration selects the admission policy; durable choices bind each pending decision to its original bot message, topic, and project assignment. Input routing and receipt delivery leave unconnected topic conversations alone. The connection boundary rechecks current administrator authority, assignment, folder policy, and topic closure before registering a session. Folder selection reuses that boundary rather than creating a second topic.
+
 Each adapter owns a cancellable background task set for session restoration, status maintenance, reconnects, and catalog refreshes. Readiness initialization does not start those lifecycles. Shutdown cancels waits and scheduled retries, fences late results from storage and Telegram side effects, and drains publication and delivery work. Runtime-owned discovery processes outlive an individual consumer only while another consumer still needs them.
 
 The bot adapter enforces administrator authority using current Telegram supergroup membership. The shared predicate accepts human owners and administrators without requiring optional moderation rights. Telegram's native interface owns promotion and demotion; neither configuration nor SQLite supplies administrator grants. Local operators retain project-assignment authority. See [Product](PRODUCT.md#12-prompts-and-permissions) for command behavior.
@@ -109,6 +111,8 @@ The `OmpRuntime` coordinator and `createBotComponents` composition root exceed t
 The terminal join client uses the `joinTerminal` portion of the same contract through `terminalOmp`. It does not construct a service runtime or acquire service-owned lifecycle resources. The local control service still authorizes and resolves the host before the terminal launches OMP.
 
 Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
+
+Managed capability acquisition distinguishes an omitted registry snapshot from a positively observed identity change. The startup owner may repeat read-only lookup within the original admission deadline while the process lifetime, pinned history, and working directory remain unchanged. It never accepts a mismatched returned identity or replays host creation to recover a missing observation.
 
 Passive reconnect refreshes the runtime's cached connection capability only after matching the existing host identity and operating-system process lifetime. The recovery boundary cannot transfer ownership to a replacement process. Retirement consumes that refreshed capability while retaining its independent lifecycle and process-identity checks.
 

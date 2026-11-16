@@ -2,11 +2,11 @@ import type { Context, Bot } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { SettingsPanel, SettingsKey } from './types.js';
-import type { TypingMode } from '../../shared/contracts.js';
+import type { TypingMode, NewTopicPolicy } from '../../shared/contracts.js';
 import type { SettingsAction, SettingsPage } from './types.js';
 import { isAbsolute, normalize } from 'node:path';
 import { findInstance, writeConfig } from '../config.js';
-import { typingLabels } from './settings-rendering.js';
+import { typingLabels, newTopicPolicyLabels } from './settings-rendering.js';
 import { SettingsPanelStore } from './settings-panel-store.js';
 
 export interface SettingsMutationDependencies {
@@ -54,7 +54,7 @@ export class SettingsMutations {
     this.deps.panels.save(panel);
     await this.deps.render(panel, config, 'root');
   }
-  async apply(ctx: Context, panel: SettingsPanel, action: Extract<SettingsAction, {kind: 'set' | 'default' | 'typing'}>): Promise<void> {
+  async apply(ctx: Context, panel: SettingsPanel, action: Extract<SettingsAction, {kind: 'set' | 'default' | 'typing' | 'new-topic-policy'}>): Promise<void> {
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
@@ -75,9 +75,11 @@ export class SettingsMutations {
         (chat) => chat.botId === this.deps.id() && chat.chatId === panel.chatId,
       )!;
       const page: SettingsKey =
-        action.kind === 'typing'
-          ? 'typing'
-          : action.kind === 'default'
+        action.kind === 'new-topic-policy'
+          ? 'new-topics'
+          : action.kind === 'typing'
+            ? 'typing'
+            : action.kind === 'default'
             ? action.field === 'default_new_topic_skills'
               ? 'skills'
               : 'presets'
@@ -93,9 +95,11 @@ export class SettingsMutations {
         presets: 'Default model preset',
         worktrees: '🌳 Worktrees',
         typing: 'Typing indicators',
+        'new-topics': 'New topics',
       };
       const value = (setting: boolean | string | string[] | undefined): string => {
         if (page === 'typing') return typingLabels[(setting ?? 'disabled') as TypingMode];
+        if (page === 'new-topics') return newTopicPolicyLabels[(setting ?? 'agent') as NewTopicPolicy];
         if (action.kind === 'default')
           return page === 'skills'
             ? (setting as string[] | undefined)?.join(', ') || 'No default skills'
@@ -107,7 +111,8 @@ export class SettingsMutations {
         return setting === true ? 'Enabled' : 'Disabled';
       };
       const before = value(chat[action.field]);
-      if (action.kind === 'typing') chat.typing_indicators = action.value;
+      if (action.kind === 'new-topic-policy') chat.new_topic_policy = action.value;
+      else if (action.kind === 'typing') chat.typing_indicators = action.value;
       else if (action.kind === 'set') chat[action.field] = action.value;
       else if (action.field === 'default_new_topic_skills') {
         const selected = chat.default_new_topic_skills ?? [];
@@ -136,9 +141,11 @@ export class SettingsMutations {
       await this.deps.render(
         panel,
         current,
-        action.kind === 'typing'
-          ? 'typing'
-          : action.kind === 'set'
+        action.kind === 'new-topic-policy'
+          ? 'new-topics'
+          : action.kind === 'typing'
+            ? 'typing'
+            : action.kind === 'set'
             ? 'root'
             : action.field === 'default_new_topic_skills'
               ? 'skills'

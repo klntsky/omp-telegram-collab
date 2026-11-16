@@ -2,7 +2,8 @@ export const telegramTestTimeouts = {
   lease: 10_000,
   request: 30_000,
   authorization: 45_000,
-  provision: 90_000,
+  // Live forum creation has returned FLOOD_WAIT_334; leave room for that delay and setup.
+  provision: 600_000,
   readiness: 60_000,
   expectation: 30_000,
   cleanup: 15_000,

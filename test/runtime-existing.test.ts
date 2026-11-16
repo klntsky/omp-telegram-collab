@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { HostSnapshotUnavailableError } from '../src/runtime/registry.js';
 
 test('passive resolution adopts existing identities and never launches absent or disappearing hosts', {timeout:15000}, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'omp-existing-host-')));
@@ -81,7 +82,7 @@ else if(args[1]==='link'){
       return true;
     });
     await writeFile(statePath,JSON.stringify({hosts:[host],disappear:true}));
-    await assert.rejects(runtime.resolveExisting(session),/OMP host session changed while resolving its capability/);
+    await assert.rejects(runtime.resolveExisting(session), HostSnapshotUnavailableError);
     assert.equal(await runtime.resolveExisting(session),undefined);
     const commands = (await readFile(commandsPath,'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]);
     assert.deepEqual([...new Set(commands.map(args => args.slice(0,2).join(' ')))].sort(),['collab link','collab list']);

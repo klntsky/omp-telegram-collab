@@ -22,6 +22,7 @@ import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-clean
 import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
+import { registerNewTopicPolicy } from './scenarios/new-topic-policy.js';
 import { registerProviderSetup } from './scenarios/provider-setup.js';
 import { registerChatIsolation } from './scenarios/chat-isolation.js';
 
@@ -81,6 +82,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
   registerFolderSettings(() => app);
+  registerNewTopicPolicy(() => app);
   registerForumDefaults(() => app, tasks);
   registerCompositePreparations(() => app, tasks);
   registerCapacity(() => app, tasks);

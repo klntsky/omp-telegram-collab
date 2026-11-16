@@ -45,7 +45,7 @@ Local terminal access uses the service account's operating-system permissions. C
 | `/new <task>` | Create a topic and submit its first task. Bare `/new` asks for the task. |
 | `/worktree [branch]` | Run OMP's native worktree operation in the current topic's managed session. In General, create an empty session topic first. The optional argument is a branch name, not a task. |
 | `/fork` | Copy the current managed conversation into a new topic. Reply to an anchored request or agent answer to copy history through that entry. Requires the current supergroup owner or an administrator. |
-| Create a topic manually | Register a session. OMP starts on the first instruction or Mini App visit, or immediately when automatic topic worktrees are enabled. |
+| Create a topic manually | Follow the group's new-topic policy: connect a new agent, leave it chat-only, or ask before connecting. |
 | `/p <prompt>` | Submit a prompt in either prompt mode. In General, create a topic like `/new`. |
 | `/skills` | Pick skills to mention in your next accepted prompt in this topic. `/skills clear` clears your pending selection. |
 | `/settings` | Open interactive forum settings, defaults, and the live session count limit. Requires the current supergroup owner or an administrator. |
@@ -87,6 +87,14 @@ General never becomes a session: accepted prompts there create separate session 
 The bot does not send welcome messages or interactive initial-task requests. `/new` and General `/p` without text, quoted text, photos, or documents do nothing. Include the task in the command or send an ordinary prompt when all-message mode is enabled.
 
 New session topics get a quietly pinned OPEN AGENT message before the initial prompt. Automatic worktree creation can start OMP before that message is pinned. The bot returns a topic link in the originating conversation when `/new` or `/attach` creates a topic. For `/new` or `/p` creating a topic, it forwards any replied-to message below the pin, then the original task message, without submitting the prompt twice. This includes replied-to media without text or captions.
+
+Each forum configures manually created topics through **New topics** in `/settings`. The `new_topic_policy` setting accepts `agent`, `chat-only`, or `ask` and defaults to `agent`.
+
+- **Attach to a new agent** preserves automatic session registration. OMP starts on the first instruction or Mini App visit, or during automatic worktree preparation.
+- **Keep chat-only** leaves new manual topics untouched. The bot creates no session, pin, activity icon, or worktree.
+- **Let the user decide** sends “This topic is not yet connected to an AI agent session.” with **Connect a new agent** and **Keep this topic chat-only** buttons. Connecting uses the existing topic and normal folder selection and authorization checks. Keeping the topic chat-only creates no session.
+
+The policy does not change existing sessions. Explicit `/new`, `/attach`, `/fork`, and General task routing still create agent-connected topics.
 
 Background recovery waits for in-progress topic preparation and task forwarding before admitting the initial prompt. A service restart can recover an interrupted preparation without replaying a task already submitted or reviving a cancelled task.
 
@@ -187,7 +195,7 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 - Accepted limitation: folder button labels show only the first 100 characters of a path. Long paths can have identical labels; no disambiguation guarantee is provided.
 - Accepted limitation: folder entry identifies paths as relative to the forum instance without displaying its absolute base path, and `/status` does not show the session working directory. No extra directory confirmation is required for single-folder startup.
 - The selected execution directory persists with the session and survives service and host restarts. The forum assignment remains unchanged. Explicit and automatic worktrees start from the selected directory and then retain OMP's resulting worktree directory.
-- Manually created Telegram topics use the sole effective folder without a chooser. With multiple effective folders, the bot asks an administrator to choose a folder inside the manually created topic before registering its session. Missing folders require explicit administrator creation consent. Selection and creation continue in that same Telegram topic, never a new one. Attached hosts retain their terminal-owned working directory.
+- Connecting a manually created Telegram topic uses the sole effective folder without a chooser. With multiple effective folders, the bot asks an administrator to choose a folder inside that topic before registering its session. Missing folders require explicit administrator creation consent. Selection and creation continue in that same Telegram topic, never a new one. Chat-only topics do not select a folder. Attached hosts retain their terminal-owned working directory.
 
 ### 1.2. Prompts and permissions
 
@@ -210,6 +218,7 @@ Settings buttons do not expire with time, additional panels, or service restarts
 | `all_messages_are_prompts` | `true` | Ordinary text and images create a new session topic from General or prompt the existing session in a session topic. When `false`, use `/p <prompt>` or reply to this bot's messages. Ordinary discussion, mentions, and replies to other users or bots are ignored. |
 | `users_can_propose_prompts` | `false` | Prompts without sufficient administrator scope are ignored. When `true`, an authorized admin must approve them. Authorized admin prompts run directly. |
 | `create_topic_worktrees` | `false` | New managed session topics run native `/worktree` before their initial prompt, including manually created topics. Attached sessions and existing topics are unchanged. |
+| `new_topic_policy` | `agent` | Manually created topics connect a new agent, stay chat-only, or ask before connecting. Explicit task-creation commands are unchanged. |
 | `typing_indicators` | `disabled` | `streaming` shows typing only while assistant text is streaming; `inference` shows typing throughout an active inference run, including thinking and tool work. |
 
 Typing indicators are best effort. `/settings` offers Disabled, While typing, and While working per forum. Enabled indicators refresh at most once every four seconds per topic. At most three topics per bot/chat receive indicators concurrently; excess updates are discarded. Typing starts only when message, title, and icon delivery have no queued or in-flight work; an already-running typing request does not block newly arriving output. Typing expires after four seconds in the queue and stops refreshing when its source activity ends. A real outgoing message request discards previously queued typing for its topic. Telegram may keep an already visible indicator until it expires.

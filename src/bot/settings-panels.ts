@@ -140,7 +140,8 @@ export class SettingsPanels {
       panel,
       action.kind === 'set' ||
         action.kind === 'default' ||
-        action.kind === 'typing',
+        action.kind === 'typing' ||
+        action.kind === 'new-topic-policy',
     );
     if (action.kind === 'close') {
       const changes = [...panel.changes.values()].map(

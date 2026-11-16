@@ -1,5 +1,5 @@
 import type { Bot, Context } from 'grammy';
-import type { AppConfig, TypingMode } from '../../shared/contracts.js';
+import type { AppConfig, TypingMode, NewTopicPolicy } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { SettingsPanel, SettingsPage, SettingsAction } from './types.js';
 import { findInstance } from '../config.js';
@@ -10,6 +10,12 @@ export const typingLabels: Record<TypingMode, string> = {
   disabled: 'Disabled',
   streaming: 'While typing',
   inference: 'While working',
+};
+
+export const newTopicPolicyLabels: Record<NewTopicPolicy, string> = {
+  agent: 'Attach to a new agent',
+  'chat-only': 'Keep chat-only',
+  ask: 'Let the user decide',
 };
 
 export interface SettingsRendering {
@@ -83,6 +89,10 @@ export async function renderSettings(
         page: 'typing',
       });
       button('📁 Runtime folders', {kind:'page',page:'folders'});
+      button(`New topics: ${newTopicPolicyLabels[chat.new_topic_policy ?? 'agent']}`, {
+        kind: 'page',
+        page: 'new-topics',
+      });
     } else if (page === 'folders') {
       const folders = chat.folder_options ?? [];
       const sole = folders[0] ?? '.';
@@ -94,6 +104,15 @@ export async function renderSettings(
       button('🗑️ Clear folders',{kind:'folders',clear:true});
       button('➕ Add folder',{kind:'folders',input:'append'});
       button('✏️ Replace folders',{kind:'folders',input:'replace'});
+    } else if (page === 'new-topics') {
+      text = 'New topics\nApplies only to manually created Telegram topics.';
+      for (const value of ['agent', 'chat-only', 'ask'] as const) {
+        button(
+          newTopicPolicyLabels[value],
+          { kind: 'new-topic-policy', field: 'new_topic_policy', value },
+          (chat.new_topic_policy ?? 'agent') === value,
+        );
+      }
     } else if (page === 'typing') {
       text =
         'Typing indicators\nApplies to this group.\nBest-effort indicators may be skipped when delivery is busy.';

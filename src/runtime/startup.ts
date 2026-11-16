@@ -4,10 +4,11 @@ import path from 'node:path';
 import { hostSupervisorPath, hostLifecyclePath } from '../host-assets.js';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
-import { privateFile } from './files.js';
+import { privateFile, readHeader } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
 import { childEnvironment } from './environment.js';
+import { HostSnapshotUnavailableError } from './registry.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
@@ -60,7 +61,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           deps.assertActive();
           await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
-        const binding = await deps.resolve(host,deadline);
+        const binding = await resolveReady(session, pin, host, deadline);
         const lifecycle = await deps.lifecycle(id);
         owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
         owned.binding = binding;
@@ -160,7 +161,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           if (!await presetReady(dir, pin, host.pid)) continue;
           let binding: HostBinding;
           try {
-            binding = await deps.resolve(host,deadline);
+            binding = await resolveReady(session, pin, host, deadline);
           } catch (error) {
             if (!(error instanceof Error) || !('code' in error) || error.code !== 1 ||
                 !error.message.endsWith(`\nerror: no active Collab host matches ${host.instanceId}\n`)) throw error;
@@ -211,6 +212,33 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(deps.config.dataDir, 'sessions', id, 'terminal.log')} (previous output: terminal.log.1)`;
       }
       throw error;
+    }
+  }
+
+  async function resolveReady(session: TopicSession, pin: DurableBinding, host: RegistryHost, deadline: number): Promise<HostBinding> {
+    const identity = await procIdentity(host.pid);
+    let unavailable: HostSnapshotUnavailableError | undefined;
+    for (;;) {
+      try { return await deps.resolve(host, deadline); }
+      catch (error) {
+        if (unavailable && Date.now() >= deadline && error instanceof Error &&
+            (error.message === 'OMP discovery timed out' ||
+              ('killed' in error && error.killed === true && 'signal' in error && error.signal === 'SIGKILL'))) {
+          Object.defineProperty(unavailable, 'cause', { value: error, configurable: true });
+          throw unavailable;
+        }
+        if (!(error instanceof HostSnapshotUnavailableError) || Date.now() >= deadline) throw error;
+        unavailable = error;
+        if (deps.closed || deps.stopping.has(session.id)) throw error;
+        deps.assertActive();
+        const current = await procIdentity(host.pid);
+        if (!identity || !current || current.start !== identity.start || current.state === 'Z' || current.state === 'X') throw error;
+        const header = await readHeader(pin.sessionFile);
+        if (header.id !== pin.sessionId || header.cwd !== pin.cwd ||
+            pin.sessionId !== host.sessionId || pin.cwd !== await realpath(host.cwd)) throw error;
+        await delay(Math.min(200, Math.max(1, deadline - Date.now())));
+        if (Date.now() >= deadline) throw error;
+      }
     }
   }
 

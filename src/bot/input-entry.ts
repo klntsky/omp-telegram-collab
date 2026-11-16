@@ -10,6 +10,7 @@ import { isAdministrator } from '../auth.js';
 import { terminationMessage } from './commands.js';
 
 export interface InputEntryDependencies {
+  topicPolicyCallback(ctx: Context, data: string): Promise<void>;
   answerQuestion(ctx: Context, token: string, choice: string): Promise<void>;
   applyTermination(): Promise<void>;
   approvePrompt(ctx: Context, token: string): Promise<void>;
@@ -66,6 +67,10 @@ export async function routeEntry(deps: InputEntryDependencies, ctx: Context, int
     }
     if (ctx.callbackQuery) {
       if (ctx.callbackQuery.data === undefined || !ctx.chat || !ctx.from || ctx.from.is_bot) return undefined;
+      if (ctx.callbackQuery.data.startsWith('topic-policy:')) {
+        await deps.topicPolicyCallback(ctx, ctx.callbackQuery.data);
+        return undefined;
+      }
       if (ctx.callbackQuery.data.startsWith('wtcleanup:')) {
         await deps.worktreeCleanupCallback(ctx, ctx.callbackQuery.data);
         return undefined;

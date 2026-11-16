@@ -56,6 +56,7 @@ export class InputRouter {
     }) === 'detached';
     if (session && !detached) this.requireSessionAssignment(session);
     if (await routeLifecycle(this.lifecycle, messageContext, intent, session, destination, detached)) return;
+    if (!session && destination.kind === 'topic' && intent.kind === 'session-prompt') return;
     if (await routePrompts(this.prompts, messageContext, intent, session, destination, detached, command)) return;
     if (!command) return;
     await this.prompts.authorize(ctx.chat!.id, ctx.from!.id);
