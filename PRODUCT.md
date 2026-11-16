@@ -272,6 +272,8 @@ Agent replies target the most recent Telegram prompt accepted by OMP, not the mo
 
 Agent questions use one message for the full text and option descriptions and a second for numbered option buttons in compact rows of up to five, with Cancel separate. Oversized text and option sets may span messages to fit Telegram limits. Choosing Other reuses the last control message for the custom multiline answer instead of sending a selection receipt and additional prompts. The answer goes to the question, not the prompt queue. Cancel dismisses it. Other answered questions retain a visible number-and-label receipt after their buttons are removed, including long answer labels. Answers from the terminal close the Telegram controls too. Current group members can answer; OMP resolves competing responses. Ended or disconnected questions cannot accept answers, and recent stale text replies are rejected rather than submitted as prompts.
 
+Choice messages omit OMP's terminal keyboard help. Telegram's numbered buttons and Cancel control remain the interaction surface.
+
 After a typed answer is submitted, the bot deletes the custom-answer control message instead of showing a confirmation receipt. The user's answer remains in the topic with its delivery reactions.
 
 Numbered selections receive delivery reactions on the dialog message. 👀 means the bot received the selection. 🤝 replaces it only after OMP confirms the matching question response. Unrelated or repeated question completions do not acknowledge another selection. Typed answers use the same stages on the user's answer message.
