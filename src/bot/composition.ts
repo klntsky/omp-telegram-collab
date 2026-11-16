@@ -379,6 +379,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     id: lifecycle.id.bind(lifecycle),
     stopped: lifecycle.stopped.bind(lifecycle),
     capacity: capacity,
+    preparePrompt: preparation.preparePrompt.bind(preparation),
     currentAdmin: authorization.currentAdmin.bind(authorization),
     authorize: authorization.authorize.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),

@@ -11,6 +11,7 @@ import { sameTopicDestination } from '../../shared/topic-destination.js';
 import type { PresetPanel, PromptProposal } from './types.js';
 import type { CapacityAdmission } from './capacity-admission.js';
 import type { PromptPreparation as QueuedPreparation } from '../store/prompt-queue.js';
+import type { PromptPreparation } from './prompt-preparation.js';
 
 export interface PromptAdmissionDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime' | 'configWritable'>;
@@ -32,6 +33,7 @@ export interface PromptAdmissionDependencies {
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
   drainPrompts(session: TopicSession): Promise<void>;
+  preparePrompt: PromptPreparation['preparePrompt'];
   newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
   albumContexts(ctx: Context): readonly Context[];
 }
@@ -184,7 +186,9 @@ export class PromptAdmission {
       try {
         await authorizeExecution();
         if (session) {
-          await this.submitSessionPrompt(ctx, session, content, hasTask ? {key:skillKey,names:pendingSkills,topicSkills} : undefined, ctx, {skills:mentionedSkills,extensions:preparations});
+          // Preparation-only commands are immediate controls, not durable task intent to replay after a failure.
+          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkills}, ctx, {skills:mentionedSkills,extensions:preparations});
+          else await this.deps.preparePrompt(ctx, session, preparations);
         } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd, {names: [...pendingSkills], topicSkills});
       } finally { reservation?.release(); }
       return;
