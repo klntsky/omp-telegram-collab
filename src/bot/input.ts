@@ -17,6 +17,7 @@ interface InputDependencies {
  sessionObservation(id: string): SessionObservation; settingsReplyPanel(ctx: Context): SettingsPanel | undefined;
  allMessagesArePrompts(chatId: number): boolean; usersCanProposePrompts(chatId: number): boolean;
  currentAdmin(ctx: Context): Promise<boolean>; handle(ctx: Context, intent: InputIntent): Promise<void>;
+ fail(error: unknown): void;
 }
 
 export class BotInput {
@@ -37,6 +38,7 @@ install(): void {
     this.deps.bot.use(async (ctx) => {
       let queued = false;
       let callbackAnswered = false;
+      let primaryFailure: { error: unknown } | undefined;
       try {
         const answerCallbackQuery = ctx.answerCallbackQuery.bind(ctx);
         ctx.answerCallbackQuery = async (...args) => {
@@ -63,14 +65,19 @@ install(): void {
         if (!urgent) this.updateTail = task.catch(() => undefined);
         await task;
       } catch (error) {
-        if (!ctx.chat || error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
-        await this.reportError(ctx, error);
+        if (!ctx.chat || error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) {
+          primaryFailure = { error };
+          console.error('Fatal Telegram update failed.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,updateId:ctx.update.update_id});
+          throw error;
+        }
+        try { await this.reportError(ctx, error); }
+        catch (reportError) { primaryFailure = { error: reportError }; throw reportError; }
       } finally {
         if (queued) this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
           await ctx.answerCallbackQuery().catch(error => {
-            if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
-            console.warn('Could not acknowledge Telegram callback.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'answerCallbackQuery'});
+            console.warn('Could not acknowledge Telegram callback.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'answerCallbackQuery',originalError:primaryFailure?.error});
+            if (!primaryFailure && error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
           });
       }
     });
@@ -109,8 +116,8 @@ install(): void {
         entities: [{type:'pre',offset:prefix.length,length:details.length}],
       });
     } catch (deliveryError) {
-      if (deliveryError instanceof GrammyError && (deliveryError.error_code === 401 || deliveryError.error_code === 409)) throw deliveryError;
       console.error('Could not report Telegram operation error.', deliveryError, { ...context, originalError:error });
+      if (deliveryError instanceof GrammyError && (deliveryError.error_code === 401 || deliveryError.error_code === 409)) throw deliveryError;
     }
   }
 
@@ -137,8 +144,12 @@ install(): void {
         await this.receiveMessage(source,intent);
         await this.deps.handle(source,intent);
       });
-      this.updateTail = task.catch(error => this.reportError(ctx,error)).catch(error => {
+      this.updateTail = task.catch(error => {
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+        return this.reportError(ctx,error);
+      }).catch(error => {
         console.error('Could not finish Telegram album operation.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'album'});
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) this.deps.fail(error);
       }).finally(() => { this.queuedUpdates--; });
     }
     album.contexts.push(ctx);

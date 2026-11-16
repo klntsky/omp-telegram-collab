@@ -39,6 +39,7 @@ export class BotService {
   private initialization?: Promise<void>;
   private termination?: Promise<void>;
   private polling?: { controller: TelegramAbortController; done: Promise<void> };
+  private inputFailure?: { error: unknown };
 
   constructor(private readonly options: BotOptions) {
     this.bot = options.bot ?? new Bot(options.token);
@@ -47,6 +48,12 @@ export class BotService {
     this.token = options.token;
     this.components = createBotComponents(options, this.bot, {
       id: () => this.id, stopped: () => this.stopped, apiAbort: this.apiAbort,
+      fail: error => {
+        // Albums finish after handleUpdate returns; wake the polling owner on fatal failure.
+        this.inputFailure ??= { error };
+        this.stopped = true;
+        this.polling?.controller.abort();
+      },
       applyTermination: () => this.applyTermination(),
       clearTermination: () => { this.termination = undefined; },
       invalidateSession: (id, reason) => { for (const handler of this.sessionInvalidationHandlers) handler(id, reason); },
@@ -128,6 +135,7 @@ async ensureMirroring(session: TopicSession, binding: HostBinding, beforeMutatio
 
 async start(onReady?: () => void): Promise<void> {
     await this.initialize();
+    if (this.inputFailure) throw this.inputFailure.error;
     if (this.stopped) return;
     if (!this.polling) {
       const controller = new TelegramAbortController();
@@ -188,6 +196,7 @@ async start(onReady?: () => void): Promise<void> {
         }
       }
     }
+    if (this.inputFailure) throw this.inputFailure.error;
   }
 
 async close(): Promise<void> {
