@@ -248,9 +248,18 @@ export class PromptAdmission {
     for (const name of remaining) this.deps.options.store.addPendingSkill(key,name);
   }
   async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkills:string[]}, authority = ctx, preparation?: QueuedPreparation): Promise<boolean> {
+    const epoch = this.admissionEpoch;
+    const generation = this.deps.options.store.getSessionGeneration(session.id);
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     this.deps.requireSessionAssignment(session);
     if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
+    if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch)
+      throw new Error('The service is stopping');
+    this.deps.requireSessionAssignment(session);
+    if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
+        this.deps.options.store.getTopic({botId: this.deps.id(), destination: contextDestination(ctx)})?.id !== session.id ||
+        this.deps.options.store.getSession(session.id)?.status !== 'open')
+      throw new Error('The session changed before the prompt could run');
     const messageId = ctx.message!.message_id;
     this.deps.options.store.promptQueue.enqueue(session.id, messageId, ctx.from!.id, authority.from!.id, content, preparation, () => {
       for (const original of this.deps.albumContexts(ctx))

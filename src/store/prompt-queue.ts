@@ -127,6 +127,19 @@ export class PromptQueue {
       ON CONFLICT(prompt_id) DO UPDATE SET preparation=excluded.preparation`).run(id, JSON.stringify(preparation));
   }
 
+  replacePreparedContent(id: number, content: PendingPromptContent, preparation: PromptPreparation): void {
+    // Replaying skill expansion after a crash duplicates directives unless its checkpoint commits with it.
+    this.db.exec('SAVEPOINT prepare_prompt_content');
+    try {
+      this.replaceContent(id, content);
+      this.replacePreparation(id, preparation);
+      this.db.exec('RELEASE prepare_prompt_content');
+    } catch (error) {
+      this.db.exec('ROLLBACK TO prepare_prompt_content; RELEASE prepare_prompt_content');
+      throw error;
+    }
+  }
+
   remove(id: number): void {
     this.db.prepare('DELETE FROM prompt_queue WHERE id=?').run(id);
   }

@@ -8,6 +8,7 @@ import { topicDestination } from '../../shared/topic-destination.js';
 
 export interface PromptWorkerDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
+  shutdown: AbortSignal;
   stopped(): boolean;
   sessionAssigned(session: TopicSession): boolean;
   authorizeQueued(session: TopicSession, userId: number, authorityUserId: number): Promise<void>;
@@ -29,10 +30,14 @@ export class PromptWorker {
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private closed = false;
   constructor(private readonly deps: PromptWorkerDependencies) {}
-  close(): void {
+  async close(): Promise<void> {
     this.closed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+    const results = await Promise.allSettled(this.drains.values());
+    const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
   }
   drain(session: TopicSession): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -41,8 +46,9 @@ export class PromptWorker {
     const previousHead = this.deps.options.store.promptQueue.first(session.id)?.id;
     const pending = this.drainSession(session).finally(() => {
       this.drains.delete(session.id);
+      if (this.closed || this.deps.stopped()) return;
       const head = this.deps.options.store.promptQueue.first(session.id);
-      if (head && !this.closed && !this.deps.stopped() &&
+      if (head &&
           this.deps.options.store.getSession(session.id)?.status === 'open' &&
           this.deps.sessionAssigned(session) && !this.deps.options.store.isSessionPreparing(session.id) &&
           (head.state === 'submitted' || head.availableAt > Date.now() || head.id !== previousHead))
@@ -62,6 +68,7 @@ export class PromptWorker {
     this.timers.set(session.id, timer);
   }
   settle(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void {
+    if (this.closed) return;
     const store = this.deps.options.store;
     let availableAt = Date.now();
     store.db.exec('SAVEPOINT prompt_settlement');
@@ -96,6 +103,7 @@ export class PromptWorker {
         const listener = this.deps.listener(session.id);
         const index = listener?.pendingPrompts.findIndex(item => item.submissionId === queued.submissionId) ?? -1;
         if (listener && index !== -1) listener.pendingPrompts.splice(index, 1)[0]!.observation.state = 'acceptance unknown';
+        this.deps.dropListener(session.id);
         console.error('Prompt acceptance timeout.', new Error(`Prompt acceptance timed out after ${this.deps.options.config.omp.startupTimeoutMs}ms; delivery is uncertain.`), {sessionId: session.id, submissionId: queued.submissionId});
         this.settle(session, queued.submissionId, 'uncertain');
       }
@@ -150,9 +158,8 @@ export class PromptWorker {
       const expanded = preparation?.skills?.length
         ? {...uploaded, text: `${preparation.skills.map(name => `/skill:${name}`).join(' ')}\n\n${uploaded.text}`} : uploaded;
       if (preparation?.skills?.length) {
-        store.promptQueue.replaceContent(queued.id, expanded);
         preparation = {...preparation, skills: []};
-        store.promptQueue.replacePreparation(queued.id, preparation);
+        store.promptQueue.replacePreparedContent(queued.id, expanded, preparation);
       }
       const prompt = await this.deps.prepareContent(session, expanded);
       await authorize();
@@ -162,7 +169,8 @@ export class PromptWorker {
         store.promptQueue.markSubmitted(queued.id, submissionId, Date.now() + this.deps.options.config.omp.startupTimeoutMs);
       });
     } catch (error) {
-      if (error === cancellation) return;
+      // Maintenance cancellation may interrupt a shared native operation before authorize can observe closure.
+      if (error === cancellation || (this.deps.shutdown.aborted && error === this.deps.shutdown.reason)) return;
       if (error instanceof PromptPreparationRejectedError) {
         try { await this.deps.reportQueuedFailure(session, error); }
         catch (reportError) { throw new AggregateError([error, reportError], `${error.message}\n${reportError instanceof Error ? reportError.message : String(reportError)}`); }

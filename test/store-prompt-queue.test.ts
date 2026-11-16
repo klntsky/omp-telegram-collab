@@ -279,3 +279,24 @@ test('restart recovery consumes submitted rows without replay and preserves pend
     } finally { reopened.close(); }
   } finally { await rm(directory, {recursive:true,force:true}); }
 });
+
+test('skill expansion rolls back with its checkpoint when persistence fails', () => {
+  const store = new Store(':memory:');
+  try {
+    const session = store.createSession(key, 'Atomic preparation');
+    const original = { text: 'Task' };
+    const id = store.promptQueue.enqueue(session.id, 1, 42, 42, original, { skills: ['review'] });
+    store.db.exec(`CREATE TRIGGER fail_preparation BEFORE UPDATE ON prompt_queue_preparations
+      BEGIN SELECT RAISE(ABORT, 'preparation checkpoint unavailable'); END`);
+    assert.throws(() => store.promptQueue.replacePreparedContent(id,
+      { text: '/skill:review\n\nTask' }, { skills: [] }), /preparation checkpoint unavailable/);
+    assert.deepEqual(store.promptQueue.first(session.id)?.content, original);
+    assert.deepEqual(store.promptQueue.first(session.id)?.preparation, { skills: ['review'] });
+    store.db.exec('DROP TRIGGER fail_preparation');
+    store.promptQueue.replacePreparedContent(id, { text: '/skill:review\n\nTask' }, { skills: [] });
+    assert.deepEqual(store.promptQueue.first(session.id)?.content, { text: '/skill:review\n\nTask' });
+    assert.deepEqual(store.promptQueue.first(session.id)?.preparation, { skills: [] });
+  } finally {
+    store.close();
+  }
+});

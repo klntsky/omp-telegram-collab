@@ -358,6 +358,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
   });
   const worker: PromptWorker = new PromptWorker({
     options,
+    shutdown: maintenance.background.signal,
     stopped: lifecycle.stopped.bind(lifecycle),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     authorizeQueued: receipts.authorizePrompt.bind(receipts),
