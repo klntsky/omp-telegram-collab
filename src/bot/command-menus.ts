@@ -1,4 +1,4 @@
-import type { Bot, Context } from 'grammy';
+import { GrammyError, type Bot, type Context } from 'grammy';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
 import type { SkillCatalogEntry } from '../skill-picker.js';
@@ -13,6 +13,7 @@ interface CommandMenuDependencies {
 
 export class BotCommandMenus {
  private readonly commandMenus = new Map<number, string>();
+ private readonly commandMenuChats = new Set<number>();
  private globalCommandMenu?: string;
  readonly skillAliases = new Map<number, Map<string, SkillCatalogEntry>>();
  private menuTail: Promise<void> = Promise.resolve();
@@ -53,19 +54,36 @@ syncCommandMenus(): Promise<void> {
           this.skillAliases.set(chat.chatId, aliases);
           continue;
         }
-        await this.deps.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.deps.signal);
-        await this.deps.bot.api.setMyCommands([...instanceCommands,cliCommand,...commands.slice(instanceCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.deps.signal);
-        if (this.deps.stopped() || !this.deps.config.instances.find(current => current.id === instanceId)?.chats.some(assigned => assigned.botId === this.deps.botId() && assigned.chatId === chat.chatId)) continue;
-        this.commandMenus.set(chat.chatId, fingerprint);
-        this.skillAliases.set(chat.chatId, aliases);
+        let operation = 'setMyCommands:chat';
+        this.commandMenuChats.add(chat.chatId);
+        this.commandMenus.delete(chat.chatId);
+        try {
+          await this.deps.bot.api.setMyCommands(commands, {scope:{type:'chat',chat_id:chat.chatId}}, this.deps.signal);
+          operation = 'setMyCommands:chat_administrators';
+          await this.deps.bot.api.setMyCommands([...instanceCommands,cliCommand,...commands.slice(instanceCommands.length)].slice(0,100), {scope:{type:'chat_administrators',chat_id:chat.chatId}}, this.deps.signal);
+          if (this.deps.stopped() || !this.deps.config.instances.find(current => current.id === instanceId)?.chats.some(assigned => assigned.botId === this.deps.botId() && assigned.chatId === chat.chatId)) continue;
+          this.commandMenus.set(chat.chatId, fingerprint);
+          this.skillAliases.set(chat.chatId, aliases);
+        } catch (error) {
+          console.error(`Bot ${this.deps.botId()} chat ${chat.chatId} instance ${instanceId} ${operation} failed.`, error);
+          if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+        }
       }
     }
-    for (const chatId of this.commandMenus.keys()) {
+    for (const chatId of this.commandMenuChats) {
       if (current.has(chatId)) continue;
-      await this.deps.bot.api.deleteMyCommands({scope:{type:'chat',chat_id:chatId}}, this.deps.signal);
-      await this.deps.bot.api.deleteMyCommands({scope:{type:'chat_administrators',chat_id:chatId}}, this.deps.signal);
+      let operation = 'deleteMyCommands:chat';
       this.commandMenus.delete(chatId);
-      this.skillAliases.delete(chatId);
+      try {
+        await this.deps.bot.api.deleteMyCommands({scope:{type:'chat',chat_id:chatId}}, this.deps.signal);
+        operation = 'deleteMyCommands:chat_administrators';
+        await this.deps.bot.api.deleteMyCommands({scope:{type:'chat_administrators',chat_id:chatId}}, this.deps.signal);
+        this.skillAliases.delete(chatId);
+        this.commandMenuChats.delete(chatId);
+      } catch (error) {
+        console.error(`Bot ${this.deps.botId()} chat ${chatId} ${operation} failed.`, error);
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
+      }
     }
   }
 }

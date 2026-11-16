@@ -17,25 +17,36 @@ export class SessionEntries {
   constructor(private readonly dependencies: SessionEntryDependencies) {}
   async syncSessionEntries(): Promise<void> {
     for (const session of this.dependencies.options.store.listSessions(this.dependencies.id)) {
-      if (!this.dependencies.sessionAssigned(session)) continue;
-      const entry = this.dependencies.options.store.getSessionEntry(session.id);
-      if (!entry) continue;
-      const reply_markup = this.sessionMarkup(session);
-      const markup = JSON.stringify(reply_markup);
-      if (entry.markup === markup) continue;
+      let operation = 'sessionAssigned';
       try {
-        await this.dependencies.bot.api.editMessageReplyMarkup(session.chatId, entry.messageId, {reply_markup});
-      } catch (error) {
-        if (!(error instanceof GrammyError)) throw error;
-        if (error.description === 'Bad Request: message to edit not found') {
-          console.warn(`Pinned session entry no longer exists (${session.id}, ${entry.messageId}).`,error);
-          this.dependencies.options.store.clearSessionEntry(session.id);
-          continue;
+        if (!this.dependencies.sessionAssigned(session)) continue;
+        operation = 'getSessionEntry';
+        const entry = this.dependencies.options.store.getSessionEntry(session.id);
+        if (!entry) continue;
+        operation = 'sessionMarkup';
+        const reply_markup = this.sessionMarkup(session);
+        const markup = JSON.stringify(reply_markup);
+        if (entry.markup === markup) continue;
+        operation = 'editMessageReplyMarkup';
+        try {
+          await this.dependencies.bot.api.editMessageReplyMarkup(session.chatId, entry.messageId, {reply_markup});
+        } catch (error) {
+          if (!(error instanceof GrammyError)) throw error;
+          if (error.description === 'Bad Request: message to edit not found') {
+            console.warn(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} editMessageReplyMarkup: pinned entry ${entry.messageId} no longer exists.`, error);
+            operation = 'clearSessionEntry';
+            this.dependencies.options.store.clearSessionEntry(session.id);
+            continue;
+          }
+          if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
+          console.warn(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} editMessageReplyMarkup: pinned entry ${entry.messageId} already has the desired markup.`, error);
         }
-        if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
-        console.warn(`Pinned session entry already has the desired markup (${session.id}, ${entry.messageId}).`,error);
+        operation = 'setSessionEntry';
+        this.dependencies.options.store.setSessionEntry(session.id,entry.messageId,markup);
+      } catch (error) {
+        console.error(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} ${operation} failed.`, error);
+        if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
       }
-      this.dependencies.options.store.setSessionEntry(session.id,entry.messageId,markup);
     }
   }
   sessionMarkup(session: TopicSession) {

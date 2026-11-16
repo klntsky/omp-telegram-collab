@@ -33,6 +33,7 @@ import { WorktreeCleanup } from './worktree-cleanup.js';
 
 export interface LifecycleDependencies {
  id(): number; stopped(): boolean; apiAbort: TelegramAbortController;
+ fail(error: unknown): void;
  applyTermination(): Promise<void>; clearTermination(): void;
  invalidateSession(sessionId: string, reason?: string): void;
 }

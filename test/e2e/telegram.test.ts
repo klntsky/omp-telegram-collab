@@ -23,9 +23,11 @@ import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from '.
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
 import { registerProviderSetup } from './scenarios/provider-setup.js';
+import { registerChatIsolation } from './scenarios/chat-isolation.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
+registerChatIsolation();
 
 // Sharing the fixture avoids reprovisioning across the worktree and question workflows.
 // Their combined serial runtime exceeds 15 minutes; individual operations retain deadlines.
