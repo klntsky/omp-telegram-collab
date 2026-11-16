@@ -1,4 +1,4 @@
-import { Bot, GrammyError, HttpError, type Context } from 'grammy';
+import { Bot, BotError, GrammyError, HttpError, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import type { AppConfig, BotConfig, TopicSession, HostBinding } from '../shared/contracts.js';
@@ -154,7 +154,18 @@ async start(onReady?: () => void): Promise<void> {
           onReady = undefined;
           for (const update of updates) {
             if (controller.signal.aborted) break;
-            await this.bot.handleUpdate(update);
+            try {
+              await this.bot.handleUpdate(update);
+            } catch (error) {
+              if (!(error instanceof BotError) || !error.ctx.chat ||
+                  (error.error instanceof GrammyError && (error.error.error_code === 401 || error.error.error_code === 409))) throw error;
+              // Middleware failures belong to their chat, not the shared polling loop.
+              // grammY wraps them with their context in Bot.handleUpdate:
+              // https://github.com/grammyjs/grammY/blob/v1.46.0/src/bot.ts#L366-L408
+              console.error('Telegram chat update failed.', error.error, {
+                botId: this.id, chatId: error.ctx.chat.id, updateId: update.update_id,
+              });
+            }
             offset = update.update_id + 1;
           }
         } catch (error) {

@@ -111,7 +111,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           deps.store.setPendingSessionTitle(session.id, title);
           const revision = ++source.revision;
           const generation = deps.store.getSessionGeneration(session.id);
-          void deps.projectTopicTitle(
+          await deps.projectTopicTitle(
             session,
             title,
             () =>
