@@ -133,6 +133,9 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
       else assert.equal(fork.cwd, session.cwd);
       const instruction = await app.sendAndWait(`/p ${task.prompt}`, fork.threadId);
       await completeWriteTask(app, task, instruction, fork.threadId);
+      assert.ok(app.guestFrames.some(frame => frame.t === 'prompt' &&
+        frame.text.includes(`https://t.me/c/${internalChat}/${fork.threadId}`) &&
+        frame.text.includes(`</preamble>\n\n${task.prompt}`)));
       const modelHistory = JSON.stringify(app.omp.provider.requests.get(task.name)![0]!.messages);
       assert.ok(modelHistory.includes(tasks.initial.evidence.nonce));
       assert.equal(modelHistory.includes(tasks.worktreeRestarted.toolCallId), task === tasks.forkTip);

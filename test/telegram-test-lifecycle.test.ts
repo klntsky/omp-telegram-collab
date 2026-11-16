@@ -68,6 +68,23 @@ test('forum cleanup failure does not prevent lease release after polling has sto
   assert.deepEqual(calls, ['release', 'disconnect']);
 });
 
+test('settled provisioning rejection releases its bot lease after successful cancellation', { timeout: 15000 }, async t => {
+  const key = `rejected-provision:${randomUUID()}`;
+  const release = await acquireTelegramTestLock(key, t.signal);
+  t.after(release!);
+  const failure = new Error('Original provisioning rejection');
+  let disconnected = false;
+  await assert.rejects(teardownTelegramTestResources({
+    forumSetup: Promise.reject(failure),
+    cancellation: Promise.resolve(),
+    canReleaseBot: () => true,
+    user: { async close() { disconnected = true; } },
+    lease: { release: release! },
+  }), error => error === failure);
+  await assertOwned(key, false, t.signal);
+  assert.equal(disconnected, true);
+});
+
 test('lease ownership is retained while asynchronous forum teardown is pending', async () => {
   const entered = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();

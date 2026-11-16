@@ -9,6 +9,7 @@ import { ompArguments } from './arguments.js';
 import { privateFile } from './files.js';
 import { OmpProviderSetupError } from './provider-setup-error.js';
 import { record, errno } from './values.js';
+import { childEnvironment } from './environment.js';
 interface SkillsDependencies {
   assertActive(): void;
   readonly closed: boolean;
@@ -117,7 +118,7 @@ export function createSkills(deps: SkillsDependencies): RuntimeSkills {
       child = spawn(deps.config.omp.executable, [
         ...deps.config.omp.args, '--cwd', instancePath, '--config', config,
         '--mode', 'rpc', '--no-session', '--no-title',
-      ], { cwd: instancePath, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+      ], { cwd: instancePath, env: childEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
       deps.skillProcesses.add(child);
       const processHandle = child;
       const closed = Promise.withResolvers<void>();

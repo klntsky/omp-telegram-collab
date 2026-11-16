@@ -189,7 +189,7 @@ export class FrameProjection {
         ).catch(error => console.warn(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
       } else {
         initial.timer = setTimeout(() => {
-          void this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId)
+          void Promise.resolve().then(() => this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId))
             .then(() => {
               if (
                 listener.initial !== initial ||

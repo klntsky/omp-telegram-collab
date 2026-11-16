@@ -20,6 +20,7 @@ export interface InputEntryDependencies {
   confirmCapacity(ctx: Context, action: string, token: string): Promise<void>;
   currentAdmin(ctx: Context): Promise<boolean>;
   folderCallback(ctx: Context, data: string): Promise<void>;
+  worktreeCleanupCallback(ctx: Context, data: string): Promise<void>;
   readonly id: number;
   openSettings(ctx: Context): Promise<void>;
   config: BotOptions['config'];
@@ -68,6 +69,10 @@ export async function routeEntry(deps: InputEntryDependencies, ctx: Context, int
       if (ctx.callbackQuery.data === undefined || !ctx.chat || !ctx.from || ctx.from.is_bot) return undefined;
       if (ctx.callbackQuery.data.startsWith('topic-policy:')) {
         await deps.topicPolicyCallback(ctx, ctx.callbackQuery.data);
+        return undefined;
+      }
+      if (ctx.callbackQuery.data.startsWith('wtcleanup:')) {
+        await deps.worktreeCleanupCallback(ctx, ctx.callbackQuery.data);
         return undefined;
       }
       if (ctx.callbackQuery.data.startsWith('folder:')) {
