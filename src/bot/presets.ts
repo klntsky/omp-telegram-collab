@@ -3,6 +3,7 @@ import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { findInstance, writeConfig } from '../config.js';
 import { contextDestination, replyTo, sendTo } from '../telegram-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { withCancellation } from '../cancellation.js';
 import type { PresetAction, PresetPanel } from './types.js';
@@ -227,8 +228,9 @@ export class BotPresets {
     for (let offset = 0; offset < text.length;) {
       let end = Math.min(offset+4000,text.length);
       if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-      await replyTo(ctx, contextDestination(ctx), text.slice(offset,end),
-        code ? {entities:[{type:'code',offset:0,length:end-offset}]} : undefined);
+      const chunk = text.slice(offset,end);
+      await replyTo(ctx, contextDestination(ctx), code ? codeHtml(chunk) : chunk,
+        code ? { parse_mode: 'HTML' } : undefined);
       offset = end;
     }
   }

@@ -9,6 +9,7 @@ import { realpathSync } from 'node:fs';
 import { saveDocument } from './document-file.js';
 import { basename, join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
 import type { InitialDocumentSetup } from '../store/initial-documents.js';
 
@@ -69,11 +70,8 @@ export class PromptPreparation {
       const overwritten = saveDocument(path, bytes);
       text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
       saved?.({...prompt, text, documents: documents.slice(index + 1)});
-      const confirmation = `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`;
-      await sendTo(this.deps.bot.api, destination, confirmation, {entities: [
-        {type:'code',offset:'✅ Uploaded '.length,length:fileName.length},
-        {type:'code',offset:`✅ Uploaded ${fileName} to `.length,length:path.length},
-      ]});
+      const confirmation = `✅ Uploaded ${codeHtml(fileName)} to ${codeHtml(path)}${overwritten ? ', overwriting the old version' : ''}`;
+      await sendTo(this.deps.bot.api, destination, confirmation, { parse_mode: 'HTML' });
     }
     return {...prompt, text};
   }
@@ -98,8 +96,8 @@ export class PromptPreparation {
     }
     if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(
       session, setup.extensions, authorize,
-      (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text,
-        code ? {entities:[{type:'code',offset:0,length:text.length}]} : undefined), setup,
+      (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), code ? codeHtml(text) : text,
+        code ? { parse_mode: 'HTML' } : undefined), setup,
     );
     this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
   }

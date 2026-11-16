@@ -5,6 +5,7 @@ import type { SettingsPanel, SettingsPage, SettingsAction } from './types.js';
 import { findInstance } from '../config.js';
 import { isMentionableSkillName } from '../skill-commands.js';
 import { sendTo } from '../telegram-destination.js';
+import { codeHtml, escapeHtml } from '../telegram-html.js';
 
 export const typingLabels: Record<TypingMode, string> = {
   disabled: 'Disabled',
@@ -86,8 +87,8 @@ export async function renderSettings(
     } else if (page === 'folders') {
       const folders = chat.folder_options ?? [];
       const sole = folders[0] ?? '.';
-      const summary = folders.length > 1 ? 'Ask when starting a session.' : `Uses ${sole === '.' ? '<Default>' : sole}.`;
-      text = `Runtime folders\n${summary}\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${folders.slice(offset,offset+8).map(path => path === '.' ? '<Default>' : path.slice(0,250)).join('\n') || '(no explicit folders)'}`;
+      const summary = folders.length > 1 ? 'Ask when starting a session.' : `Uses ${sole === '.' ? escapeHtml('<Default>') : codeHtml(sole)}.`;
+      text = `Runtime folders\n${summary}\nUse Add folder to append paths, or Replace folders to explicitly replace the list.\n${folders.slice(offset,offset+8).map(path => path === '.' ? escapeHtml('<Default>') : codeHtml(path.slice(0,250))).join('\n') || '(no explicit folders)'}`;
       folders.slice(offset,offset+8).forEach((path,index) => button(`Remove ${path === '.' ? '<Default>' : path}`,{kind:'folders',remove:offset+index}));
       if (offset > 0) button('⬅️ Previous folders',{kind:'page',page:'folders',offset:Math.max(0,offset-8)});
       if (offset+8 < (chat.folder_options ?? []).length) button('➡️ Next folders',{kind:'page',page:'folders',offset:offset+8});
@@ -139,19 +140,7 @@ export async function renderSettings(
       });
     if (page !== 'capacity') button('✅ Save & exit', { kind: 'close' });
     const body = text.startsWith('Settings\n') ? text : `Settings\n${text}`;
-    const folders = chat.folder_options ?? [];
-    const displayed = folders.slice(offset,offset+8).map(path => path === '.' ? '<Default>' : path.slice(0,250));
-    const entities: NonNullable<NonNullable<Parameters<typeof deps.api.sendMessage>[2]>['entities']> = [];
-    if (page === 'folders') {
-      let position = body.length - (displayed.join('\n') || '(no explicit folders)').length;
-      displayed.forEach((path,index) => {
-        if (folders[offset+index] !== '.') entities.push({type:'code',offset:position,length:path.length});
-        position += path.length + 1;
-      });
-      if (folders.length === 1 && folders[0] !== '.')
-        entities.unshift({type:'code',offset:'Settings\nRuntime folders\nUses '.length,length:folders[0]!.length});
-    }
-    const extra = { entities, reply_markup: { inline_keyboard: rows } };
+    const extra = { ...(page === 'folders' ? {parse_mode:'HTML' as const} : {}), reply_markup: { inline_keyboard: rows } };
     if (panel.messageId === 0) {
       const message = await sendTo(deps.api, panel.destination, body, extra);
       panel.messageId = message.message_id;

@@ -3,6 +3,7 @@ import type { TopicSession, PendingPromptContent, HostBinding } from '../../shar
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { accessSync, constants, opendirSync, realpathSync } from 'node:fs';
 import { refreshTermination } from '../config.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -143,8 +144,7 @@ export class TopicCreation {
         const text = await this.dependencies.options.runtime.worktree(session, task?.text || undefined);
         this.dependencies.options.store.setSessionCwd(session.id, session.cwd);
         task = undefined;
-        const response = `🌳 ${text}`;
-        await replyTo(ctx, topicDestination(session.chatId, session.threadId), response, { entities: [{ type: 'code', offset: response.length - text.length, length: text.length }] });
+        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${codeHtml(text)}`, { parse_mode: 'HTML' });
       }
       if (worktree) {
         const sourceKey = this.dependencies.skillKey(ctx);

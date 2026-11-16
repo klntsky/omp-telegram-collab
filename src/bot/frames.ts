@@ -10,6 +10,7 @@ import { miniAppInterruptionAuthor } from '../../shared/interruption.js';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import { renderTelegramMarkdown } from '../telegram-markdown.js';
+import { escapeHtml, preHtml } from '../telegram-html.js';
 
 export interface FrameProjectionDependencies {
   acknowledgeMessage: (session: TopicSession, messageId: number, listener?: Listener) => void;
@@ -235,8 +236,8 @@ export class FrameProjection {
       void sendTo(
         this.deps.bot.api,
         topicDestination(session.chatId, session.threadId),
-        prefix + frame.message,
-        { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
+        escapeHtml(prefix) + preHtml(frame.message),
+        { parse_mode: 'HTML' },
       ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
       return;
     }
