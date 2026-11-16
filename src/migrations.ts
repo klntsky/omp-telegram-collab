@@ -41,6 +41,19 @@ const promptQueueSchema = `CREATE TABLE IF NOT EXISTS prompt_queue (
   authority_user_id INTEGER NOT NULL,
   content TEXT NOT NULL,
   UNIQUE(session_id,message_id)
+);
+-- Keep only source identity after dequeue, including session deletion; no prompt payload or session cascade belongs here.
+CREATE TABLE IF NOT EXISTS prompt_admissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL,
+  UNIQUE(session_id,message_id)
+);
+-- Existing pending rows already own their ids; admit them before allocating any new identity.
+INSERT OR IGNORE INTO prompt_admissions (id,session_id,message_id) SELECT id,session_id,message_id FROM prompt_queue;
+CREATE TABLE IF NOT EXISTS prompt_queue_preparations (
+  prompt_id INTEGER PRIMARY KEY REFERENCES prompt_queue(id) ON DELETE CASCADE,
+  preparation TEXT NOT NULL
 );`;
 
 export function initializeDatabase(db: DatabaseSync): void {

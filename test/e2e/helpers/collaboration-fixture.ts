@@ -293,7 +293,7 @@ export async function setupCollaborationTest(
     pause(): Promise<void> {
       return serializeLifecycle(() => omp.step('application.pause', pauseService));
     },
-    restart(): Promise<void> {
+    restart(beforeStart?: (bot: Bot) => void): Promise<void> {
       return serializeLifecycle(() => omp.step('application.restart', async () => {
         await pauseService();
         Object.assign(config, readConfig(config.configPath));
@@ -301,6 +301,7 @@ export async function setupCollaborationTest(
         runtime = new OmpRuntime(config);
         instrumentRuntime(runtime);
         bot = instrumentedBot();
+        beforeStart?.(bot);
         service = new BotService({ config, botConfig: config.bots[0]!, token: telegram.bot.token, store, runtime, bot, topicActivityEmojis });
         closing = false;
         await startService();
@@ -385,7 +386,7 @@ export interface CollaborationTest {
   readonly service: BotService;
   readonly bot: Bot;
   pause(): Promise<void>;
-  restart(): Promise<void>;
+  restart(beforeStart?: (bot: Bot) => void): Promise<void>;
   setFolderOptions(options: string[]): void;
   send(text: string, threadId?: number): Promise<Message>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
