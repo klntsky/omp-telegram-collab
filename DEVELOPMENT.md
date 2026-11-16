@@ -25,9 +25,9 @@ Configure model credentials for the development account through OMP. Do not reus
 
 ## Change the database schema
 
-Append ordered upgrade steps in `src/database-migrations.ts`; retain the supported baseline in `src/database-schema.ts`. Keep persisted-format transformations in the migration layer and update runtime callers to use the resulting current format. See `AGENTS.md` for the migration policy.
+Add one forward migration per pull request in `src/database-migrations.ts`; retain the deployed baseline in `src/database-schema.ts`. Keep persisted-format transformations in the migration layer and update runtime callers to use the resulting current format. See `AGENTS.md` for the migration policy.
 
-Run `pnpm test:one test/database-migrations.test.ts test/prompt-provenance.test.ts` for migration changes. Use the schema fixtures under `test/fixtures` when adding a supported historical version. Store startup performs the upgrade before runtime work, and migration failures retain the original diagnostic.
+Run `pnpm test:one test/database-migrations.test.ts test/prompt-provenance.test.ts` for migration changes. Migration tests execute the previous application's real storage code from local Git history and create databases through its public operations. Do not use copied SQL schemas, saved database samples, or fabricated historical rows. Store startup performs the upgrade before runtime work, and migration failures retain the original diagnostic.
 
 ## Modify the Mini App
 

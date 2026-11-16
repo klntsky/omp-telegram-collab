@@ -6,7 +6,7 @@ import { backupDatabase } from './database-backup.js';
 export const databaseVersion = 10;
 
 function validateVersion(db: DatabaseSync, version: number): void {
-  if (version !== 0 && (version < 7 || version > databaseVersion)) {
+  if (version !== 0 && (version < 9 || version > databaseVersion)) {
     throw new Error(`Unsupported database schema version ${version}`);
   }
   if (version === 0 && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get()) {
@@ -19,8 +19,8 @@ export function initializeDatabase(db: DatabaseSync): void {
   const initialVersion = Number(db.prepare('PRAGMA user_version').get()!.user_version);
   validateVersion(db, initialVersion);
   if (initialVersion === databaseVersion) return;
-  // Keep the backup and every version step under one writer lock; the whole chain
-  // rolls back together so no startup can observe or resume a partial upgrade.
+  // Keep backup creation and the version change under one writer lock so another
+  // startup cannot change the database between its backup and upgrade.
   // https://www.sqlite.org/lang_transaction.html
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -32,8 +32,8 @@ export function initializeDatabase(db: DatabaseSync): void {
     }
     if (version === 0) {
       db.exec(baselineSchema);
-      db.exec('PRAGMA user_version=7');
-      version = 7;
+      db.exec('PRAGMA user_version=9');
+      version = 9;
     } else {
       backupDatabase(db);
     }

@@ -9,21 +9,6 @@ export interface DatabaseMigration {
 
 export const databaseMigrations: readonly DatabaseMigration[] = [
   {
-    from: 7,
-    to: 8,
-    apply(db) {
-      db.exec(`ALTER TABLE prompt_receipts ADD COLUMN submitted_locally INTEGER CHECK(submitted_locally IN (0,1));
-        UPDATE prompt_receipts SET submitted_locally=1 WHERE message_id IS NOT NULL;`);
-    },
-  },
-  {
-    from: 8,
-    to: 9,
-    apply(db) {
-      db.exec('CREATE TABLE worktree_confirmations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,admin_id INTEGER NOT NULL,token TEXT NOT NULL,identity TEXT NOT NULL);');
-    },
-  },
-  {
     from: 9,
     to: 10,
     apply(db) {
