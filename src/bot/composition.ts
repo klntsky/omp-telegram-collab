@@ -29,9 +29,11 @@ import type { BotOptions } from '../bot.js';
 import { SkillPicker } from '../skill-picker.js';
 import { composeInputRouter } from './router-composition.js';
 import type { BotInput } from './input.js';
+import { WorktreeCleanup } from './worktree-cleanup.js';
 
 export interface LifecycleDependencies {
  id(): number; stopped(): boolean; apiAbort: TelegramAbortController;
+ fail(error: unknown): void;
  applyTermination(): Promise<void>; clearTermination(): void;
  invalidateSession(sessionId: string, reason?: string): void;
 }
@@ -333,6 +335,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     announce: entries.announce.bind(entries),
     listen: connections.listen.bind(connections),
     dropListener: connections.dropListener.bind(connections),
+    stripTopicStatus: titles.stripTopicStatus.bind(titles),
   });
   const detach: SessionDetach = new SessionDetach({
     options: options,
@@ -385,6 +388,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     // Admission is constructed before input routing; do not bind an uninitialized owner.
     albumContexts: ctx => input.albumContexts(ctx),
     sendPrompt: receipts.sendPrompt.bind(receipts),
+    prepareContent: receipts.prepareContent.bind(receipts),
   });
   const status: BotStatus = new BotStatus({
     config: options.config,
@@ -399,6 +403,12 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     assignedId: authorization.assignedId.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
   });
-  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts });
+  const cleanup = new WorktreeCleanup({
+    bot, config: options.config, store: options.store, runtime: options.runtime, delivery: connections.delivery,
+    botId: lifecycle.id.bind(lifecycle), stopped: lifecycle.stopped.bind(lifecycle),
+    sessionAssigned: authorization.sessionAssigned.bind(authorization),
+    authorizeSession: authorization.authorizeSession.bind(authorization),
+  });
+  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
   return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, input };
 }

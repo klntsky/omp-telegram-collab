@@ -60,7 +60,9 @@ test('caption-only /p photos retain distinct canonical receipts across restart',
     await waitForReactionAttempt(app, sent.id, '🤝');
     const input = taskInput(app.omp.provider, task, requestIndex);
     const prompt = app.guestFrames.filter(frame => frame.t === 'prompt').at(-1);
-    assert.equal(prompt?.text, '');
+    assert.ok(prompt);
+    // The first submission includes Telegram context; follow-ups stay image-only.
+    if (index > 0) assert.equal(prompt.text, '');
     assert.equal(input.images.length, 1);
     const image = input.images[0]!;
     assert.match(image, /^data:image\/[^;]+;base64,/);
@@ -73,7 +75,7 @@ test('caption-only /p photos retain distinct canonical receipts across restart',
     const canonical = (await readReceipts()).find(entry => entry.id === anchor.entryId);
     assert.ok(canonical);
     assert.equal(canonical.parentId, anchor.parentEntryId);
-    assert.equal(canonical.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), '');
+    assert.equal(canonical.content.filter(part => part.type === 'text').map(part => part.text).join('\n'), prompt.text);
     const images = canonical.content.filter(part => part.type === 'image');
     assert.equal(images.length, 1);
     assert.equal(imageIdentity(images[0]!.data), imageIdentity(image.slice(image.indexOf(',') + 1)));

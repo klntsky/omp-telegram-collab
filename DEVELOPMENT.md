@@ -25,9 +25,9 @@ Configure model credentials for the development account through OMP. Do not reus
 
 ## Change the database schema
 
-Keep one current schema in `src/migrations.ts`; collapse schema changes into that definition rather than appending compatibility migrations. Update fixtures and callers together. Older schemas are unsupported and must not be imported automatically.
+Append ordered upgrade steps in `src/database-migrations.ts`; retain the supported baseline in `src/database-schema.ts`. Keep persisted-format transformations in the migration layer and update runtime callers to use the resulting current format. See `AGENTS.md` for the migration policy.
 
-Store startup initializes a new database atomically and rejects unsupported schemas. Schema initialization failures preserve the original SQLite diagnostic.
+Run `pnpm test:one test/database-migrations.test.ts test/prompt-provenance.test.ts` for migration changes. Use the schema fixtures under `test/fixtures` when adding a supported historical version. Store startup performs the upgrade before runtime work, and migration failures retain the original diagnostic.
 
 ## Modify the Mini App
 
@@ -110,6 +110,8 @@ Both commands validate the token against the real test Bot API and save it in `T
 Provision one bot for each checkout that should run concurrently. With one saved token, checkouts take turns; adding tokens increases available capacity. Normal test runs only lease saved bots and never invoke provisioning, create, delete, or revoke bots.
 
 Explicit creation serializes the entire BotFather conversation across checkouts. Only BotFather's explicit “too many attempts” reply is retried after its stated delay; transport failures and ambiguous mutations are not replayed. SIGINT/SIGTERM cancels waits and closes the connection without revoking the retained session. A private `0600` recovery journal under `~/.local/state/omp-telegram-test/provisioned-bots` records the chosen username before the final creation request and the returned token before verification or saving; it is removed after successful saving. If creation fails, inspect that journal privately before retrying: the remote bot may already exist. Use `add` to recover a journaled token. Do not commit or print recovery journals.
+
+Credential saves replace the managed dotenv assignment atomically, retaining only its current array rather than appending historical copies. Existing duplicate assignments collapse to the last saved list; unrelated settings and comments remain intact. Retained test credentials are excluded from OMP and Git child environments, so a growing authorization pool cannot exceed the operating system's per-environment-string launch limit.
 
 BotFather creation limits are account-wide and still apply with independent user sessions. A long creation cooldown does not prevent tests from reusing bots already saved in the array. Use Ctrl-C to cancel provisioning; do not rerun an ambiguous creation blindly.
 

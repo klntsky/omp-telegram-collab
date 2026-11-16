@@ -283,14 +283,14 @@ test('session cwd and logical identity persist independently across database res
   }
 });
 
-test('old database schemas are rejected rather than migrated', async () => {
+test('newer database schemas are rejected rather than downgraded', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-schema-cutover-'));
   const filename = join(directory, 'store.sqlite');
   try {
     const store = new Store(filename);
-    store.db.exec('PRAGMA user_version=7');
+    store.db.exec('PRAGMA user_version=11');
     store.close();
-    assert.throws(() => new Store(filename), /Unsupported database schema version 7/);
+    assert.throws(() => new Store(filename), /Unsupported database schema version 11/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

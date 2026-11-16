@@ -1,30 +1,27 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { createHash } from 'node:crypto';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { MessageAnchor } from '../store.js';
-
-// OMP's persisted blob identities hash decoded image bytes, not their base64 encoding.
-// https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/blob-store.ts#L342-L360
-function promptFingerprint(content: PromptContent): string {
-  return createHash('sha256')
-    .update(
-      JSON.stringify([
-        content.text,
-        (content.images ?? []).map((image) => [
-          image.mimeType,
-          /^blob:sha256:[a-f0-9]{64}$/.test(image.data)
-            ? image.data.slice('blob:sha256:'.length)
-            : createHash('sha256').update(Buffer.from(image.data, 'base64')).digest('hex'),
-        ]),
-      ]),
-    )
-    .digest('hex');
-}
+import { promptFingerprint } from '../prompt-fingerprint.js';
 
 // Queries share Store's connection so receipt/anchor updates stay in one transaction.
 // Store alone owns connection initialization and closure.
 export class PromptLedger {
   constructor(private readonly db: DatabaseSync, private readonly getSession: (id: string) => TopicSession | undefined) {}
+  hasPromptHistory(sessionId: string): boolean {
+    // Decide whether to omit the first-prompt preamble from existing durable
+    // Telegram submissions, without maintaining a separate "preamble sent" flag.
+    // Pending or uncertain delivery may already have reached OMP; acceptance
+    // replaces the submission with a receipt, which survives host/service restarts.
+    // Receipt origin is independent of an exact Telegram reply anchor: OMP can
+    // shrink images in replication, making image correlation ambiguous. Inherited
+    // fork history has no local submission and must not suppress its new link.
+    // Upstream: serializeReplicatedEntry in https://github.com/klntsky/oh-my-pi/blob/b5ec5e33a5e4b9217ee8b5210e20de0abbbf4956/packages/coding-agent/src/collab/replication-shrink.ts
+    // initial_state tracks task claiming before delivery, not submission history,
+    // and ordinary prompts in manually created topics do not use that state.
+    return Boolean(this.db.prepare(
+      'SELECT 1 FROM prompt_submissions WHERE session_id=? UNION ALL SELECT 1 FROM prompt_receipts WHERE session_id=? AND submitted_locally=1 LIMIT 1',
+    ).get(sessionId, sessionId));
+  }
   recordPromptSubmission(
     sessionId: string,
     ompSessionId: string,
@@ -34,9 +31,9 @@ export class PromptLedger {
   ): number {
     const result = this.db
       .prepare(
-        "INSERT INTO prompt_submissions (session_id,omp_session_id,sender,message_id,fingerprint,state) VALUES (?,?,?,?,?,'pending')",
+        "INSERT INTO prompt_submissions (session_id,omp_session_id,sender,message_id,text,fingerprint,state) VALUES (?,?,?,?,?,?,'pending')",
       )
-      .run(sessionId, ompSessionId, sender, messageId ?? null, promptFingerprint(content));
+      .run(sessionId, ompSessionId, sender, messageId ?? null, content.text, promptFingerprint(content));
     return Number(result.lastInsertRowid);
   }
   rejectPromptSubmission(submissionId: number): void {
@@ -84,12 +81,13 @@ export class PromptLedger {
           ...(previous.message_id === null ? {} : { messageId: Number(previous.message_id) }),
         };
       }
-      const condition = 'session_id=? AND omp_session_id=? AND sender=? AND fingerprint=? AND (? IS NULL OR id<=?)';
+      const condition = 'session_id=? AND omp_session_id=? AND sender=? AND (fingerprint=? OR (fingerprint IS NULL AND text=?)) AND (? IS NULL OR id<=?)';
       const parameters = [
         sessionId,
         anchor.ompSessionId,
         sender ?? '',
         promptFingerprint(content),
+        content.text,
         snapshotBoundary ?? null,
         snapshotBoundary ?? null,
       ];
@@ -98,11 +96,14 @@ export class PromptLedger {
           ? []
           : this.db
               .prepare(
-                `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+                `SELECT id,message_id,state,fingerprint FROM prompt_submissions WHERE ${condition} ORDER BY id`,
               )
               .all(...parameters);
-      const pending = candidates[0];
-      const conflicting = candidates.length > 1 && candidates.some((row) => row.state !== 'pending');
+      // An unrecoverable identity can also explain this receipt. Keep every candidate
+      // rather than consuming one and falsely making a later identical input unique.
+      const unresolved = candidates.some(row => row.fingerprint === null);
+      const pending = unresolved ? undefined : candidates[0];
+      const conflicting = unresolved || (candidates.length > 1 && candidates.some(row => row.state !== 'pending'));
       if (conflicting)
         this.db
           .prepare(`UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`)
@@ -110,8 +111,8 @@ export class PromptLedger {
       const ambiguous = conflicting || pending?.state === 'ambiguous';
       const messageId = ambiguous ? undefined : pending?.message_id;
       this.db
-        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?)')
-        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null);
+        .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?,?)')
+        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null, pending ? 1 : unresolved ? null : 0);
       if (typeof messageId === 'number') {
         const session = this.getSession(sessionId)!;
         const aliases = this.db.prepare('SELECT message_id FROM prompt_message_aliases WHERE session_id=? AND source_message_id=?').all(sessionId, messageId);

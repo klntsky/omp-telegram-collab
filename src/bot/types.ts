@@ -74,6 +74,7 @@ export interface Listener {
     observation: TaskObservation;
   }[];
   pendingAnswers: Map<number, number>;
+  customAnswerMessage?: {messageIds:number[]; messageId:number};
   pendingStops: number[];
   queuedMessages: number;
   typingText?: boolean;
@@ -96,7 +97,19 @@ export interface PendingQuestion {
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];
-  answer?: {kind:'answer' | 'discussion'; text:string};
+  answer?: {
+    kind:
+      // A numbered selection or cancellation replaces the controls with a receipt.
+      // "Other (type your own)" instead reserves the last controls for the next editor.
+      | 'answer'
+      // "Chat about this" keeps a receipt whose replies become session prompts.
+      | 'discussion'
+      // A submitted editor response deletes the bot controls, not the user's answer.
+      // Delivery reactions stay on the user's message; replies to retired controls stay rejected.
+      | 'typed';
+    // Receipt text for answer/discussion; submitted content for typed, never echoed.
+    text:string;
+  };
 }
 export interface CapacityRequest {
   sessionId: string;

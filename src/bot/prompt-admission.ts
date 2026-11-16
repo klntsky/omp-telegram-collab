@@ -38,6 +38,7 @@ export interface PromptAdmissionDependencies {
   listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
   sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void): void;
+  prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent>;
 }
 
 export class PromptAdmission {
@@ -265,12 +266,13 @@ export class PromptAdmission {
       await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
       return false;
     }
-    const prompt = await this.deps.uploadDocuments(session, content, async () => {
+    const uploaded = await this.deps.uploadDocuments(session, content, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
     }, contextDestination(ctx));
-    if (content.documents?.length) {
-      // Upload acknowledgements await Telegram; prompt submission is a separate mutation.
+    const prompt = await this.deps.prepareContent(session, uploaded);
+    if (content.documents?.length || prompt !== uploaded) {
+      // Upload acknowledgements and initial chat metadata await Telegram; submission is a separate mutation.
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
     }

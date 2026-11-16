@@ -31,6 +31,29 @@ export interface PromptReceiptsDependencies {
 export class PromptReceipts {
   private readonly preparing = new Map<string, Promise<void>>();
   constructor(private readonly deps: PromptReceiptsDependencies) {}
+  async prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent> {
+    if (this.deps.options.store.hasPromptHistory(session.id)) return content;
+    const chat = await this.deps.bot.api.getChat(session.chatId);
+    if (chat.type !== 'supergroup') throw new Error('Agent session requires a Telegram supergroup');
+    return {
+      ...content,
+      text: `<preamble>
+This agent session (a.k.a. conversation) is running via omp-telegram-collab: a tool that provides a Telegram <-> OMP.sh bridge.
+
+You (the assistant) should acknowledge this fact whenever it is relevant.
+
+Agent's responses are sent to the user via Telegram, and the user can send messages to OMP by replying in a telegram chat.
+
+Agent sessions are tied to a telegram topic in a chat titled "${chat.title}". The link to this session's topic is: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}
+
+omp-telegram-collab wraps OMP from the outside, so it does not require any changes in the way the agent communicates with the harness.
+
+This preamble will be sent to you once. It is relevant only within the context of this conversation. It does not need your response or acknowledgment now.
+</preamble>
+
+${content.text}`,
+    };
+  }
   sendPrompt(
     listener: Listener,
     content: PromptContent,
@@ -144,11 +167,16 @@ export class PromptReceipts {
       this.deps.options.store.replacePendingInitialTask(session.id, task);
       await this.authorizeInitial(session, userId, authorityUserId);
     }
+    const pendingTask = this.deps.options.store.getPendingInitialTask(session.id);
+    if (!pendingTask) return;
+    const prepared = await this.prepareContent(session, pendingTask);
+    await this.authorizeInitial(session, userId, authorityUserId);
     if (this.deps.getListener(session.id) !== listener ||
         listener.generation !== this.deps.options.store.getSessionGeneration(session.id)) throw new Error('Session closed');
     this.deps.options.runtime.markPrompt(session.id);
-    const task = this.deps.options.store.claimInitialTask(session.id);
-    if (task === undefined) return;
+    const claimed = this.deps.options.store.claimInitialTask(session.id);
+    if (claimed === undefined) return;
+    const task = { ...claimed, text: prepared.text };
     const messageId = this.deps.options.store.getInitialMessage(session.id);
     listener.initial = {content:task,userId,authorityUserId,messageId,deadline:Date.now()+this.deps.options.config.omp.startupTimeoutMs,retries:0,phase:'sent'};
     listener.initial.timer = setTimeout(() => { listener.initial = undefined; },this.deps.options.config.omp.startupTimeoutMs);

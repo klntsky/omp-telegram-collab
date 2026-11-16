@@ -55,6 +55,7 @@ test('append and dedup preserve dotenv bytes, all sessions and unrelated setting
   const contents = await readFile(filename, 'utf8');
   assert(contents.startsWith(original));
   assert.deepEqual(new Set(await pool(filename)), new Set([first, second]));
+  assert.equal(contents.match(/^TELEGRAM_TEST_BOT_TOKENS=/gm)?.length, 1);
   assert.equal((await stat(filename)).mode & 0o777, 0o600);
   await appendTelegramTestBotToken(filename, first, signal());
   assert.equal(await readFile(filename, 'utf8'), contents);
@@ -69,6 +70,7 @@ test('creates private storage and replaces credentials in place without dropping
   const replacement = first.replace(/a/g, 'b');
   await appendTelegramTestBotToken(filename, replacement, signal());
   assert.deepEqual(await pool(filename), [replacement, other]);
+  assert.equal((await readFile(filename, 'utf8')).match(/^TELEGRAM_TEST_BOT_TOKENS=/gm)?.length, 1);
 });
 
 test('duplicate token import secures existing storage without changing retained credentials', async t => {
@@ -137,7 +139,9 @@ test('cross-process append serializes with session writers on the authorization 
     assert.equal((await saved)[0], 'saved');
     assert.equal((await exited)[0], 0);
     const contents = await readFile(filename, 'utf8');
-    assert(contents.startsWith(original));
+    assert(contents.startsWith('UNRELATED=preserve\n'));
+    assert.equal(contents.match(/^TELEGRAM_TEST_SESSIONS=/gm)?.length, 1);
+    assert.equal(contents.match(/^TELEGRAM_TEST_BOT_TOKENS=/gm)?.length, 1);
     assert.deepEqual(JSON.parse(parseEnv(contents).TELEGRAM_TEST_SESSIONS!), [session(3), session(4)]);
     assert.deepEqual(new Set(await pool(filename)), new Set([first, second]));
   } finally {
@@ -177,4 +181,18 @@ test('cross-process replacement waits for an active bot lease and cancellation l
     child.kill('SIGKILL');
     await release!();
   }
+});
+
+test('saving collapses historical bot lists and keeps only credentials in the current list', async t => {
+  const { filename } = await fixture(t);
+  const removed = token(); const retained = token(); const added = token();
+  const prefix = '# preserved\nMULTILINE=`first\nTELEGRAM_TEST_BOT_TOKENS=inside-value\nlast`\n';
+  const original = `${prefix}TELEGRAM_TEST_BOT_TOKENS='${JSON.stringify([removed, retained])}' # historical\nexport TELEGRAM_TEST_BOT_TOKENS='${JSON.stringify([retained])}' # current\n`;
+  await writeFile(filename, original);
+  await appendTelegramTestBotToken(filename, added, signal());
+  const expected = `${prefix} # historical\nTELEGRAM_TEST_BOT_TOKENS='${JSON.stringify([retained, added])}' # current\n`;
+  assert.equal(await readFile(filename, 'utf8'), expected);
+  assert.deepEqual(await pool(filename), [retained, added]);
+  await appendTelegramTestBotToken(filename, retained, signal());
+  assert.equal(await readFile(filename, 'utf8'), expected);
 });

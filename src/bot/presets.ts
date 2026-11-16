@@ -205,7 +205,8 @@ export class BotPresets {
       }, signal));
     const task = Promise.all(tasks).then(() => {});
     this.presetRefresh = task;
-    void task.finally(() => { if (this.presetRefresh === task) this.presetRefresh = undefined; });
+    const clearRefresh = () => { if (this.presetRefresh === task) this.presetRefresh = undefined; };
+    void task.then(clearRefresh, clearRefresh);
     return task;
   }
   presetDescription(instanceId: number): string {

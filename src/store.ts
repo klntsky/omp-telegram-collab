@@ -6,6 +6,7 @@ import type { PendingPromptContent, PromptContent, TopicKey, TopicSession } from
 import { topicDestination, type TopicDestination } from '../shared/topic-destination.js';
 import { initializeDatabase } from './migrations.js';
 import { InitialDocuments, type InitialDocumentSetup } from './store/initial-documents.js';
+import { WorktreeConfirmations } from './store/worktree-confirmations.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -40,17 +41,25 @@ export class Store {
   readonly db: DatabaseSync;
   private readonly prompts: PromptLedger;
   private readonly initialDocuments: InitialDocuments;
+  readonly worktreeConfirmations: WorktreeConfirmations;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
-    this.prompts = new PromptLedger(this.db, id => this.getSession(id));
-    this.initialDocuments = new InitialDocuments(this.db);
-    if (filename !== ':memory:') chmodSync(filename, 0o600);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
+      this.db.exec('PRAGMA foreign_keys=ON;');
       initializeDatabase(this.db);
+      if (filename !== ':memory:') chmodSync(filename, 0o600);
+      this.db.exec('PRAGMA journal_mode=WAL;');
+      this.prompts = new PromptLedger(this.db, id => this.getSession(id));
+      this.initialDocuments = new InitialDocuments(this.db);
+      this.worktreeConfirmations = new WorktreeConfirmations(this.db);
     } catch (error) {
-      this.db.close();
+      try { this.db.close(); }
+      catch (closeError) {
+        throw new AggregateError([error, closeError],
+          `${error instanceof Error ? error.message : String(error)}\nClosing database after initialization failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+          { cause: error });
+      }
       throw error;
     }
     for (const row of this.db
@@ -337,6 +346,7 @@ export class Store {
     const row = this.db.prepare('SELECT message_id FROM reply_targets WHERE session_id=?').get(id);
     return row ? Number(row.message_id) : undefined;
   }
+  hasPromptHistory(sessionId: string): boolean { return this.prompts.hasPromptHistory(sessionId); }
   recordPromptSubmission(sessionId: string, ompSessionId: string, sender: string, content: PromptContent, messageId?: number): number {
     return this.prompts.recordPromptSubmission(sessionId, ompSessionId, sender, content, messageId);
   }
