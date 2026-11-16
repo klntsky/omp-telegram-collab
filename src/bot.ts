@@ -85,6 +85,7 @@ async applyTermination(): Promise<void> {
       const sessions = this.options.store.listSessions();
       for (const session of sessions) {
         this.options.store.cancelInitialTask(session.id);
+        this.options.store.promptQueue.cancel(session.id);
         this.options.store.advanceSessionGeneration(session.id);
         for (const handler of this.sessionInvalidationHandlers) handler(session.id);
         this.components.connections.dropListener(session.id);

@@ -195,6 +195,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
         deps.store.advanceSessionGeneration(session.id);
       }
       deps.store.cancelInitialTask(session.id);
+      deps.store.promptQueue.cancel(session.id);
       deps.invalidateSession(session.id, 'This topic is closed. Reopen it explicitly to connect.');
       deps.dropListener(session.id);
       void deps.runBackground(`close:${session.id}`, async () => {

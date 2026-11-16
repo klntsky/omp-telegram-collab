@@ -99,6 +99,7 @@ export class Store {
     this.setPendingSessionTitle(existing.id,undefined);
     this.db.prepare('DELETE FROM session_topic_title_prefixes WHERE session_id=?').run(existing.id);
     this.cancelInitialTask(existing.id);
+    this.promptQueue.cancel(existing.id);
     if (existing.status !== 'detached') this.advanceSessionGeneration(existing.id);
   }
   setBotStatusTopic(botId: number, chatId: number, threadId: number): void {
@@ -306,7 +307,6 @@ export class Store {
   }
   cancelInitialTask(id: string): void {
     this.db.prepare("UPDATE sessions SET initial_state='cancelled' WHERE id=? AND initial_state='pending'").run(id);
-    this.db.prepare('DELETE FROM prompt_queue WHERE session_id=?').run(id);
   }
   getInitialAuthority(id: string): number | undefined {
     const row = this.db.prepare('SELECT user_id FROM initial_authorities WHERE session_id=?').get(id);

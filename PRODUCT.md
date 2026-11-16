@@ -364,6 +364,8 @@ Automatic retirement requires the host to confirm that it is idle and has no pen
 
 Admission identity survives delivery, rejection, and cancellation, so Telegram redelivery cannot recreate the same prompt. Existing-session skill checks and composed preparations run after durable admission. Completed preparations are checkpointed before later steps, and a saved model preset is restored after host replacement. Permanent preparation or attachment validation failures report their original diagnostic and reject only that prompt; later queued prompts continue.
 
+Loss of authority for an initial task cancels only that task. Independently authorized queued prompts remain pending and undergo their own permission checks before execution.
+
 If retirement cannot free capacity, the current supergroup owner or an administrator can approve a prompt to double the shared service-wide limit. Approval saves the new limit and retries the pending initial task once. Queued ordinary prompts resume when capacity becomes available. Protected configuration requires an operator CLI update instead. Expired or replayed confirmations cannot increase capacity.
 
 OMP's Collab protocol has no prompt admission acknowledgement or idempotency key. Durable pending prompts remain recoverable until transport admission. Recording submission provenance and removing queued intent share one database transaction before sending. A crash after that transaction can leave delivery uncertain; the bot never automatically replays possibly executed instructions. An initial task is marked submitted before sending and retries only explicit startup rejection.

@@ -43,6 +43,7 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           return true;
         }
         deps.store.cancelInitialTask(session.id);
+        deps.store.promptQueue.cancel(session.id);
         const listener = deps.listeners.get(session.id);
         clearTimeout(listener?.initial?.timer);
         if (listener) listener.initial = undefined;

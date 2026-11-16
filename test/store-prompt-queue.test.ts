@@ -187,6 +187,22 @@ test('session closure, detachment, and deletion cancel queued prompts without af
   }
 });
 
+test('cancelling an initial task preserves independently authorized queued prompts', () => {
+  const store = new Store(':memory:');
+  try {
+    const session = store.createSession(key, 'Session', undefined, {text: 'Initial task'}, 42);
+    store.promptQueue.enqueue(session.id, 7, 43, 43, content);
+    const pending = store.promptQueue.list(session.id);
+    store.cancelInitialTask(session.id);
+    assert.equal(store.hasPendingInitialTask(session.id), false);
+    assert.equal(store.claimInitialTask(session.id), undefined);
+    assert.deepEqual(store.promptQueue.list(session.id), pending);
+    assert.equal(store.getSession(session.id)?.status, 'open');
+  } finally {
+    store.close();
+  }
+});
+
 test('admission consumes selected skills atomically and redelivery preserves newer selections', () => {
   const store = new Store(':memory:');
   try {
