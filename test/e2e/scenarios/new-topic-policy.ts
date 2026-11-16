@@ -28,16 +28,24 @@ export function registerNewTopicPolicy(getApp: () => CollaborationTest): void {
       await app.waitForMessageHandled(topic.id);
       return topic.id;
     };
+    const topicWrites = (start: number, threadId: number, messageId?: number) => app.apiCalls.slice(start).filter(call => {
+      if (!['sendMessage', 'createForumTopic', 'editForumTopic', 'setMessageReaction'].includes(call.method)) return false;
+      const payload = call.payload as { chat_id?: number; message_thread_id?: number; message_id?: number; reply_parameters?: { message_id?: number } };
+      if (payload.chat_id !== chatId) return false;
+      // Shared-fixture restart also restores older topics; their maintenance is unrelated.
+      return call.method === 'createForumTopic' || payload.message_thread_id === threadId ||
+        (messageId !== undefined && (payload.message_id === messageId || payload.reply_parameters?.message_id === messageId));
+    });
     const quiet = async (threadId: number) => {
       const calls = app.apiCalls.length;
       const frames = app.guestFrames.length;
       const sessions = app.store.listSessions(botId).map(session => session.id);
       const hosts = await app.omp.listHosts();
-      await app.sendAndWait('An ordinary disconnected conversation', threadId);
+      const sent = await app.sendAndWait('An ordinary disconnected conversation', threadId);
       assert.deepEqual(app.store.listSessions(botId).map(session => session.id), sessions);
       assert.deepEqual(app.guestFrames.slice(frames).filter(frame => frame.t === 'prompt'), []);
       assert.deepEqual(await app.omp.listHosts(), hosts);
-      assert.equal(app.apiCalls.slice(calls).some(call => ['sendMessage', 'createForumTopic', 'editForumTopic', 'setMessageReaction'].includes(call.method)), false);
+      assert.deepEqual(topicWrites(calls, threadId, sent.id), []);
       assert.equal(topicSession(threadId), undefined);
       assert.notEqual(app.store.getTopicKind({ botId, chatId, threadId }), 'detached');
     };
@@ -49,7 +57,7 @@ export function registerNewTopicPolicy(getApp: () => CollaborationTest): void {
     await clickPanel(app, settings, -1);
     const silentStart = app.apiCalls.length;
     const silent = await create();
-    assert.equal(app.apiCalls.slice(silentStart).some(call => ['sendMessage', 'editForumTopic'].includes(call.method)), false);
+    assert.deepEqual(topicWrites(silentStart, silent), []);
     await quiet(silent);
     await app.restart();
     await quiet(silent);
