@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, createManagedTopic, openPanel, replyText, waitForEditor, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
@@ -38,11 +39,20 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         const editorStart = app.apiCalls.length;
         await clickPanel(app, panel, 2);
         const editorMessageId = await waitForEditor(app, editorStart, session.threadId);
+        assert.equal(editorMessageId, panel.messageId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
         await replyText(app, editorMessageId, session.threadId, '/unknown Never treat this command as an answer');
         const answer = 'Custom destination\n  Preserve <literal> **content** and whitespace';
-        await replyText(app, editorMessageId, session.threadId, answer);
+        const submitted = await replyText(app, editorMessageId, session.threadId, answer);
+        const deletedControl = z.object({
+          method:z.literal('deleteMessage'),
+          payload:z.object({message_id:z.literal(editorMessageId)}),
+          result:z.object({ok:z.literal(true)}),
+        });
+        await app.waitForCondition(() => app.apiCalls.slice(editorStart).some(call => deletedControl.safeParse(call).success));
+        const deletedAnswer = z.object({method:z.literal('deleteMessage'),payload:z.object({message_id:z.literal(submitted.id)})});
+        assert.ok(!app.apiCalls.slice(editorStart).some(call => deletedAnswer.safeParse(call).success));
         await completeWriteTask(app, task, instruction, session.threadId);
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === answer));
       }

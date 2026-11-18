@@ -34,7 +34,9 @@ const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(
   { botId: 123, chatId: -100123, threadId: 7, instanceId: 1, cwd: selectedFolder },
-  'Local smoke', { kind: 'managed' }, {text:'Preserved pending instruction'},
+  'Local smoke', { kind: 'managed' }, {
+    prompt: {messageId: 1, userId: 42, authorityUserId: 42, content: {text:'Preserved pending instruction'}},
+  },
 );
 initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();
@@ -162,13 +164,13 @@ try {
     await runtime.validateSessionPaths(reopenedStore.listSessions());
     const preserved = reopenedStore.getTopic({botId: session.botId, destination: topicDestination(session.chatId, session.threadId)})!;
     assert.deepEqual(preserved, session);
-    assert.equal(reopenedStore.hasPendingInitialTask(session.id), true);
+    assert.equal(reopenedStore.promptQueue.has(session.id), true);
     assert.equal(reopenedStore.isEnrolled(session.botId, session.chatId), true);
     const recovered = await runtime.ensure(preserved);
     assert.equal(recovered.sessionId, resumed.sessionId);
     assert.equal(recovered.instanceId, resumed.instanceId, 'a current store/config reopen must recover the protected live host');
     await assertProcessCwd(preserved.id, selectedFolder);
-    assert.equal(reopenedStore.hasPendingInitialTask(session.id), true, 'recovery must not submit or claim the pending instruction');
+    assert.equal(reopenedStore.promptQueue.has(session.id), true, 'recovery must not submit or claim the pending instruction');
     assert.deepEqual(await readFile(historyPath), historyBeforeReopen);
     runtime.observeFrame(session.id, { t: 'event', event: { type: 'agent_end' } });
   } finally {

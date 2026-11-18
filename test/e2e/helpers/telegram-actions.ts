@@ -184,11 +184,18 @@ export async function replyText(app: TelegramWorkflow, messageId: number, thread
 }
 
 export async function waitForEditor(app: TelegramWorkflow, start: number, threadId: number): Promise<number> {
-  const editorCall = z.object({
-    method: z.literal('sendMessage'),
-    payload: z.object({ message_thread_id: z.literal(threadId), reply_markup: z.object({ force_reply: z.literal(true) }) }),
-    result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) }),
-  });
+  const editorCall = z.union([
+    z.object({
+      method: z.literal('sendMessage'),
+      payload: z.object({ message_thread_id: z.literal(threadId), reply_markup: z.object({ force_reply: z.literal(true) }) }),
+      result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) }),
+    }),
+    z.object({
+      method: z.literal('editMessageText'),
+      payload: z.object({ message_id: z.number(), reply_markup: z.object({ force_reply: z.literal(true) }) }),
+      result: z.object({ ok: z.literal(true), result: z.object({ message_id: z.number(), message_thread_id: z.literal(threadId) }) }),
+    }),
+  ]);
   let messageId: number | undefined;
   await app.waitForCondition(() => {
     for (const call of app.apiCalls.slice(start)) {

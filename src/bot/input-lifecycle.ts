@@ -21,12 +21,12 @@ export interface InputLifecycleDependencies {
   bot: Bot<Context>;
   chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean>;
   closedSessions: Map<string, { generation: number; settled: boolean; pending?: Promise<void>; }>;
-  createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   createsTopicWorktrees(chatId: number): boolean;
   currentAdmin(ctx: Context): Promise<boolean>;
   defaultNewTopicSkills(chatId: number): string[];
   delivery: TelegramDelivery;
   dropListener(id: string, reason?: string): void;
+  drainPrompts(session: TopicSession): Promise<void>;
   folderSettings(chatId: number): { instanceId: number; defaultDir: string; options: string[]; };
   getIconIds(): Promise<Record<KnownTopicActivity, string>>;
   readonly id: number;
@@ -80,16 +80,22 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             },
             title,
             {kind:'managed'},
+            {
+              preparation: 'topic',
+              prompt: deps.createsTopicWorktrees(ctx.chat!.id)
+                ? {messageId: message.message_id, userId: ctx.from!.id, authorityUserId: authority.from!.id, content: {text:''}, preparation: {automaticWorktree:true}}
+                : undefined,
+            },
           );
 
-          if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
-          if (deps.createsTopicWorktrees(ctx.chat!.id)) {
-            await deps.authorize(ctx.chat!.id, authority.from!.id);
-            if (!(await deps.currentAdmin(authority))) throw new Error('Administrator access changed before worktree creation.');
-            await deps.createTopicWorktree(created);
+          try {
+            if (defaultSkills.length) deps.store.setNewTopicSkills(created.id, defaultSkills);
+            await deps.announce(created);
+            await deps.refreshTopicStatus(created);
+          } finally {
+            deps.store.finishSessionPreparation(created.id);
           }
-          await deps.announce(created);
-          await deps.refreshTopicStatus(created);
+          await deps.drainPrompts(created);
         });
       }
       return true;
@@ -111,7 +117,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
           deps.store.setPendingSessionTitle(session.id, title);
           const revision = ++source.revision;
           const generation = deps.store.getSessionGeneration(session.id);
-          void deps.projectTopicTitle(
+          await deps.projectTopicTitle(
             session,
             title,
             () =>
@@ -194,7 +200,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
         deps.store.updateSession(session.id, { status: 'closed' });
         deps.store.advanceSessionGeneration(session.id);
       }
-      deps.store.cancelInitialTask(session.id);
+      deps.store.promptQueue.cancel(session.id);
       deps.invalidateSession(session.id, 'This topic is closed. Reopen it explicitly to connect.');
       deps.dropListener(session.id);
       void deps.runBackground(`close:${session.id}`, async () => {

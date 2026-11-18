@@ -92,9 +92,9 @@ async showStatus(ctx: Context): Promise<void> {
       }
       lines.push(`Host: ${host}`);
       lines.push(`Mirroring: ${listener?.connection ? 'connected' : listener?.promise ? 'connecting' : observation.mirrored || host === 'running' ? 'disconnected' : 'not attached'}`);
-      const task = observation.task?.state ?? (this.deps.store.hasPendingInitialTask(session.id) ? 'waiting for host; not submitted' : 'unknown (no task observed in this process)');
+      const task = observation.task?.state ?? (this.deps.store.promptQueue.has(session.id) ? 'waiting for host; not submitted' : 'unknown (no task observed in this process)');
       lines.push(`Latest task: ${task}`);
-      const recovery = listener?.initial?.phase === 'retrying' ? 'initial task retry scheduled' : this.deps.recovery.restoring.has(session.id) ? 'restoring' : this.deps.recovery.reconnecting.has(session.id) ? 'reconnecting' : this.deps.recovery.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
+      const recovery = this.deps.recovery.restoring.has(session.id) ? 'restoring' : this.deps.recovery.reconnecting.has(session.id) ? 'reconnecting' : this.deps.recovery.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
       lines.push(`Recovery: ${recovery}`);
       if (observation.failure) failures.push(observation.failure);
     } else lines.push(detached ? 'Session: detached; this topic is conversation-only' : destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');

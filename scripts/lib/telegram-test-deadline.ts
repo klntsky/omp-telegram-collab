@@ -2,7 +2,9 @@ export const telegramTestTimeouts = {
   lease: 10_000,
   request: 30_000,
   authorization: 45_000,
-  provision: 90_000,
+  // Real test-network forum allocation returns FLOOD_WAIT_191; leave room to honor it plus authorization.
+  // This remains one bounded provisioning operation; ordinary API calls retain their shorter deadline.
+  provision: 300_000,
   readiness: 60_000,
   expectation: 30_000,
   cleanup: 15_000,

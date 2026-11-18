@@ -28,7 +28,7 @@ export function registerFolderSettings(getApp: () => CollaborationTest): void {
     const session = sessions().find(session => session.threadId === topic.id)!;
     assert.equal(session.cwd, realpathSync(join(app.omp.workspace, folder)));
     assert.equal(session.runtime.kind, 'managed');
-    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.equal(app.store.promptQueue.has(session.id), false);
     assert.equal(await app.runtime.isRunning(session), false);
     assert.equal(app.apiCalls.slice(start).some(call => call.method === 'createForumTopic'), false);
   });

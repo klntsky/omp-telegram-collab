@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { type RegistryHost } from './types.js';
+import { childEnvironment } from './environment.js';
 interface RegistryDependencies {
   readonly config: AppConfig;
   assertActive(): void;
@@ -25,7 +26,7 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     const output = await new Promise<string>((resolve, reject) => {
       execFile(deps.config.omp.executable, args, {
         cwd: deps.config.dataDir,
-        env: process.env,
+        env: childEnvironment(),
         timeout: Math.min(remaining, 5_000),
         killSignal: 'SIGKILL',
         maxBuffer: 2 * 1024 * 1024,
@@ -66,7 +67,9 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     const current = matches[0];
     if (!current || current.instanceId !== host.instanceId || current.sessionId !== host.sessionId ||
         current.generation !== host.generation || current.pid !== host.pid || current.cwd !== host.cwd) {
-      throw new Error('OMP host session changed while resolving its capability');
+      const identity = (candidate: RegistryHost) => ({ instanceId: candidate.instanceId, sessionId: candidate.sessionId,
+        generation: candidate.generation, pid: candidate.pid, cwd: candidate.cwd });
+      throw new Error(`OMP host session changed while resolving its capability\nExpected: ${JSON.stringify(identity(host))}\nObserved: ${JSON.stringify(matches.map(identity))}`);
     }
     return { instanceId: host.instanceId, sessionId: host.sessionId, generation: host.generation, url: link.url };
   }

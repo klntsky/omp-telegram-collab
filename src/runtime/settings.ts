@@ -5,6 +5,7 @@ import { findInstance } from '../config.js';
 import { formatUsage } from '../usage.js';
 import { PRESET_MODEL_ARGS, ompArguments } from './arguments.js';
 import { record } from './values.js';
+import { childEnvironment } from './environment.js';
 interface SettingsDependencies {
   assertActive(): void;
   readonly config: AppConfig;
@@ -36,7 +37,7 @@ export function createSettings(deps: SettingsDependencies): RuntimeSettings {
     const { promise, resolve, reject } = Promise.withResolvers<string>();
     execFile(deps.config.omp.executable, args, {
       cwd: instancePath,
-      env: { ...process.env, ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
+      env: { ...childEnvironment(), ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
       timeout: deps.config.omp.startupTimeoutMs,
       killSignal: 'SIGKILL',
       maxBuffer: 2 * 1024 * 1024,
@@ -65,7 +66,7 @@ export function createSettings(deps: SettingsDependencies): RuntimeSettings {
     const { promise, resolve, reject } = Promise.withResolvers<string>();
     execFile(deps.config.omp.executable, args, {
       cwd: instancePath,
-      env: { ...process.env, ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
+      env: { ...childEnvironment(), ...(configFiles.length ? { PI_CONFIG_FILES: configFiles.join(path.delimiter) } : {}) },
       timeout: deps.config.omp.startupTimeoutMs, killSignal: 'SIGKILL',
       maxBuffer: 2 * 1024 * 1024, encoding: 'utf8',
     }, (error, stdout) => error ? reject(error) : resolve(stdout));
