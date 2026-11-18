@@ -101,7 +101,7 @@ export class TopicActivityMonitor {
         session,
         state.isStreaming ||
           state.queuedMessageCount > 0 ||
-          this.deps.options.store.hasPendingInitialTask(session.id)
+          this.deps.options.store.promptQueue.has(session.id)
           ? 'running'
           : 'finished',
       );
@@ -186,7 +186,7 @@ export class TopicActivityMonitor {
     if (!state || state.generation !== generation) {
       state = { generation, settled: false };
       this.owners.closedSessions.set(session.id, state);
-      this.deps.options.store.cancelInitialTask(session.id);
+      this.deps.options.store.promptQueue.cancel(session.id);
       this.owners.invalidateActivity(session.id);
       this.activity.dropListener(session.id);
       this.activity.clearSessionRequests(session.id);

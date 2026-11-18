@@ -6,11 +6,12 @@ import type { ImageContent } from '@oh-my-pi/pi-wire';
 import type { TelegramImage } from '../telegram-input.js';
 import { findInstance, refreshTermination } from '../config.js';
 import { realpathSync } from 'node:fs';
-import { saveDocument } from './document-file.js';
-import { basename, join } from 'node:path';
+import { documentFileName, PermanentDocumentPreparationError, saveDocument } from './document-file.js';
+import { join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
-import type { InitialDocumentSetup } from '../store/initial-documents.js';
+import { PromptPreparationRejectedError } from './types.js';
 
 export interface PromptPreparationDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -22,7 +23,7 @@ export interface PromptPreparationDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   dropListener(sessionId: string): void;
-  replyPresetText(ctx: Context, text: string): Promise<void>;
+  replyPresetText(ctx: Context, text: string, code?: boolean): Promise<void>;
 }
 
 export class PromptPreparation {
@@ -52,9 +53,7 @@ export class PromptPreparation {
     };
     let text = prompt.text;
     for (const [index, document] of documents.entries()) {
-      const fileName = basename(document.fileName.replaceAll('\\', '/'));
-      if (!fileName || fileName === '.' || fileName === '..' || /[\x00-\x1f\x7f]/.test(fileName))
-        throw new Error('The document filename is unsafe.');
+      const fileName = documentFileName(document.fileName);
       await check();
       const file = await this.deps.bot.api.getFile(document.fileId);
       if (!file.file_path) throw new Error('Telegram document file path is unavailable');
@@ -64,12 +63,13 @@ export class PromptPreparation {
       const bytes = Buffer.from(await response.arrayBuffer());
       await check();
       const cwd = session.cwd;
-      if (realpathSync(cwd) !== cwd) throw new Error('Session working directory identity changed');
+      if (realpathSync(cwd) !== cwd) throw new PermanentDocumentPreparationError('Session working directory identity changed');
       const path = join(cwd, fileName);
       const overwritten = saveDocument(path, bytes);
       text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
       saved?.({...prompt, text, documents: documents.slice(index + 1)});
-      await sendTo(this.deps.bot.api, destination, `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`);
+      const confirmation = `✅ Uploaded ${codeHtml(fileName)} to ${codeHtml(path)}${overwritten ? ', overwriting the old version' : ''}`;
+      await sendTo(this.deps.bot.api, destination, confirmation, { parse_mode: 'HTML' });
     }
     return {...prompt, text};
   }
@@ -81,24 +81,25 @@ export class PromptPreparation {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
-    }, text => this.deps.replyPresetText(ctx, text));
+    }, (text, code) => this.deps.replyPresetText(ctx, text, code));
   }
-  async prepareInitialDocuments(session: TopicSession, authorize: () => Promise<void>): Promise<void> {
-    const setup = this.deps.options.store.getInitialDocumentSetup(session.id);
-    if (!setup) return;
-    if (setup.automaticWorktree) {
-      await authorize();
-      await this.createTopicWorktree(session, authorize);
-      setup.automaticWorktree = false;
-      this.deps.options.store.setInitialDocumentSetup(session.id, setup);
+  async prepareQueuedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, checkpoint: (remaining: PromptExtension[], preset?: string) => void, preset?: string): Promise<void> {
+    const requested = extensions.flatMap(extension => extension.kind === 'model-preset' && extension.name !== undefined ? [extension.name] : []);
+    if (preset !== undefined) requested.push(preset);
+    if (requested.length) {
+      const names = await this.deps.options.runtime.availableModelPresets(session.instanceId, session.cwd);
+      const missing = requested.find(name => !names.includes(name));
+      if (missing !== undefined) throw new PromptPreparationRejectedError(`Unknown model preset: ${missing}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
     }
-    if (setup.extensions.length || setup.preset !== undefined) await this.prepareAuthorizedPrompt(
-      session, setup.extensions, authorize,
-      text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text), setup,
-    );
-    this.deps.options.store.setInitialDocumentSetup(session.id, undefined);
+    await this.prepareAuthorizedPrompt(session, extensions, authorize,
+      (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), code ? codeHtml(text) : text,
+        code ? { parse_mode: 'HTML' } : undefined),
+      checkpoint, preset);
   }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, setup?: InitialDocumentSetup): Promise<void> {
+  async reportQueuedFailure(session: TopicSession, error: Error): Promise<void> {
+    await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), codeHtml(error.message), { parse_mode: 'HTML' });
+  }
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string, code?: boolean) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -110,17 +111,20 @@ export class PromptPreparation {
         throw new Error('The session changed before prompt preparation could finish');
       }
     };
-    const applyPreset = async (name: string) => {
+    const applyPreset = async (name: string, applied?: () => void) => {
       const release = this.deps.options.runtime.retain(session.id);
       try {
+        await authorize();
+        checkSession();
         await this.deps.options.runtime.ensure(session);
         await authorize();
         checkSession();
         const text = await this.deps.options.runtime.modelPresets(session, name);
+        applied?.();
         await report(text);
       } finally { release(); }
     };
-    let selectedPreset = setup?.preset;
+    let selectedPreset = queuedPreset;
     if (selectedPreset !== undefined) {
       await authorize();
       checkSession();
@@ -134,28 +138,21 @@ export class PromptPreparation {
         let text: string;
         try {
           text = await this.deps.options.runtime.worktree(session, undefined, authorize);
-          checkSession();
           this.deps.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.deps.dropListener(session.id);
         }
         // A later preset or delivery failure must not replay the completed native worktree switch.
-        if (setup) {
-          setup.extensions = extensions.slice(index + 1);
-          setup.preset = selectedPreset;
-          this.deps.options.store.setInitialDocumentSetup(session.id, setup);
-        }
-        await report(`🌳 ${text}`);
-        if (selectedPreset !== undefined) await applyPreset(selectedPreset);
+        checkpoint?.([
+          ...(selectedPreset === undefined ? [] : [{kind: 'model-preset' as const, name: selectedPreset}]),
+          ...extensions.slice(index + 1),
+        ], selectedPreset);
+        await report(`🌳 ${text}`, true);
+        if (selectedPreset !== undefined) await applyPreset(selectedPreset, () => checkpoint?.(extensions.slice(index + 1), selectedPreset));
       } else {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');
-        await applyPreset(extension.name);
+        await applyPreset(extension.name, () => checkpoint?.(extensions.slice(index + 1), extension.name));
         selectedPreset = extension.name;
-      }
-      if (setup) {
-        setup.extensions = extensions.slice(index + 1);
-        setup.preset = selectedPreset;
-        this.deps.options.store.setInitialDocumentSetup(session.id, setup);
       }
       await authorize();
       checkSession();

@@ -3,6 +3,7 @@ import type { TopicSession, PendingPromptContent, HostBinding } from '../../shar
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { accessSync, constants, opendirSync, realpathSync } from 'node:fs';
 import { refreshTermination } from '../config.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -22,16 +23,13 @@ export interface TopicCreationDependencies {
   chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>): Promise<boolean>;
   getIconIds(): Promise<Record<'running' | 'finished', string>>;
   createsTopicWorktrees(chatId: number): boolean;
-  createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
-  requireSessionAssignment(session: TopicSession): void;
-  preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority: Context): Promise<void>;
   skillKey(ctx: Context): PendingSkillKey;
   defaultNewTopicSkills(chatId: number): string[];
   albumContexts(ctx: Context): readonly Context[];
   announce(session: TopicSession): Promise<void>;
   setTopicStatus(session: TopicSession, activity: TopicActivity): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<unknown>;
-  sendInitial(session: TopicSession): Promise<void>;
+  drainPrompts(session: TopicSession): Promise<void>;
 }
 
 export class TopicCreation {
@@ -102,48 +100,27 @@ export class TopicCreation {
       attached
         ? { kind: 'attached', instanceId: attached.hostId, sessionId: attached.sessionId }
         : { kind: 'managed' },
-      worktree || ((attached || automaticWorktree || extensions.length) && !task?.documents?.length) ? undefined : task,
-      ctx.from!.id,
-      authority.from!.id,
+      {
+        preparation: 'topic',
+        onAdmitted: !worktree && task !== undefined ? accepted : undefined,
+        prompt: !worktree && (task !== undefined || automaticWorktree || extensions.length)
+          ? {
+              messageId: ctx.message!.message_id,
+              userId: ctx.from!.id,
+              authorityUserId: authority.from!.id,
+              content: task ?? { text: '' },
+              preparation: { automaticWorktree, extensions: [...extensions] },
+            }
+          : undefined,
+      },
     );
-    this.dependencies.options.store.beginInitialTaskPreparation(session.id);
-    const durableDocumentSetup = Boolean(task?.documents?.length && !worktree && (automaticWorktree || extensions.length));
-    if (durableDocumentSetup) this.dependencies.options.store.setInitialDocumentSetup(session.id, {automaticWorktree, extensions:[...extensions]});
     try {
       reservation?.bind(session.id);
-      if (automaticWorktree && !durableDocumentSetup) {
-        await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-        if (!(await this.dependencies.currentAdmin(authority)))
-          throw new Error('Administrator access changed before worktree creation.');
-        await this.dependencies.createTopicWorktree(session);
-        if (task !== undefined && !extensions.length && !task.documents?.length) {
-          await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
-          this.dependencies.requireSessionAssignment(session);
-          this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
-        }
-      }
-      if (extensions.length && !durableDocumentSetup) {
-        try {
-          await this.dependencies.preparePrompt(ctx, session, extensions, authority);
-        } catch (error) {
-          await replyTo(ctx, contextDestination(ctx), `Topic created: https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`).catch(deliveryError => {
-            console.error('Could not deliver the created topic link after prompt preparation failed.', deliveryError);
-          });
-          throw error;
-        }
-        if (task !== undefined && !task.documents?.length) {
-          await this.dependencies.authorize(ctx.chat!.id, ctx.from!.id);
-          if (!(await this.dependencies.currentAdmin(authority))) throw new Error('Administrator access changed before initial task submission.');
-          this.dependencies.requireSessionAssignment(session);
-          this.dependencies.options.store.setInitialTask(session.id, task, ctx.from!.id, authority.from!.id);
-        }
-      }
       if (worktree) {
         const text = await this.dependencies.options.runtime.worktree(session, task?.text || undefined);
         this.dependencies.options.store.setSessionCwd(session.id, session.cwd);
         task = undefined;
-        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${text}`);
+        await replyTo(ctx, topicDestination(session.chatId, session.threadId), `🌳 ${codeHtml(text)}`, { parse_mode: 'HTML' });
       }
       if (worktree) {
         const sourceKey = this.dependencies.skillKey(ctx);
@@ -157,9 +134,6 @@ export class TopicCreation {
       }
       if (!attached && task === undefined && proposedSkills.topicSkills.length)
         this.dependencies.options.store.setNewTopicSkills(session.id, proposedSkills.topicSkills);
-      accepted?.();
-      if (task !== undefined && ctx.message)
-        this.dependencies.options.store.setInitialMessage(session.id, ctx.message.message_id);
       if (task !== undefined && ctx.message)
         for (const original of this.dependencies.albumContexts(ctx))
           if (original.message && original.message.message_id !== ctx.message.message_id)
@@ -202,10 +176,10 @@ export class TopicCreation {
           this.dependencies.options.store.recordPromptMessageAlias(session.id, source!.message_id, forwarded.message_id);
         }
       await this.dependencies.setTopicStatus(session, task !== undefined ? 'running' : 'unknown');
-      if (!durableDocumentSetup) await this.dependencies.listen(session);
+      if (!this.dependencies.options.store.promptQueue.has(session.id)) await this.dependencies.listen(session);
     } finally {
-      this.dependencies.options.store.finishInitialTaskPreparation(session.id);
+      this.dependencies.options.store.finishSessionPreparation(session.id);
     }
-    await this.dependencies.sendInitial(session);
+    await this.dependencies.drainPrompts(session);
   }
 }

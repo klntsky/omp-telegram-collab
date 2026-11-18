@@ -11,7 +11,7 @@ interface MaintenanceDependencies {
  bot: Bot<Context>; config: AppConfig; store: Store; runtime: Omp;
  botId(): number; stopped(): boolean; restoreSessions(): void;
  sessionAssigned(session: TopicSession): boolean;
- sendInitial(session: TopicSession): Promise<void>;
+ drainPrompts(session: TopicSession): Promise<void>;
  refreshTopicStatus(session: TopicSession): Promise<void>;
  recoverExistingMirror(session: TopicSession): Promise<void>;
  dropListener(id: string): void; refreshPresetCatalogs(): Promise<void>;
@@ -49,21 +49,19 @@ startBackground(): void {
               for (let next = sessions.shift(); next; next = sessions.shift()) {
                 const session = next;
                 signal.throwIfAborted();
-                if (this.deps.sessionAssigned(session)) {
-                  if (this.deps.store.hasPendingInitialTask(session.id)) {
-                    void this.runBackground(`initial-recovery:${session.id}`, () =>
-                      this.deps.sendInitial(session),
-                    );
-                  }
-                  await Promise.all([
-                    this.runBackground(`topic-status:${session.id}`, () =>
-                      this.deps.refreshTopicStatus(session),
-                    ),
-                    this.runBackground(`mirror-recovery:${session.id}`, () =>
-                      this.deps.recoverExistingMirror(session),
-                    ),
-                  ]);
-                } else this.deps.dropListener(session.id);
+                await this.runBackground(`session-maintenance:${session.id}`, async () => {
+                  if (this.deps.sessionAssigned(session)) {
+                    await Promise.all([
+                      this.runBackground(`prompt-queue:${session.id}`, () => this.deps.drainPrompts(session)),
+                      this.runBackground(`topic-status:${session.id}`, () =>
+                        this.deps.refreshTopicStatus(session),
+                      ),
+                      this.runBackground(`mirror-recovery:${session.id}`, () =>
+                        this.deps.recoverExistingMirror(session),
+                      ),
+                    ]);
+                  } else this.deps.dropListener(session.id);
+                });
               }
             }),
           );
@@ -73,11 +71,13 @@ startBackground(): void {
       });
     }, 30000);
     this.statusTimer.unref();
-    void this.refreshSkillCatalogs();
-    void this.deps.refreshPresetCatalogs();
+    void this.runBackground('catalog-refresh', async () => {
+      await Promise.all([this.refreshSkillCatalogs(), this.deps.refreshPresetCatalogs()]);
+    });
     this.menuTimer ??= setInterval(() => {
-      void this.refreshSkillCatalogs();
-      void this.deps.refreshPresetCatalogs();
+      void this.runBackground('catalog-refresh', async () => {
+        await Promise.all([this.refreshSkillCatalogs(), this.deps.refreshPresetCatalogs()]);
+      });
     }, 60000);
     this.menuTimer.unref();
   }
@@ -85,8 +85,9 @@ startBackground(): void {
 runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, signal = this.background.signal): Promise<void> {
     if (signal.aborted || this.deps.stopped()) return Promise.resolve();
     const startedAt = performance.now();
-    const task = operation(signal).catch(error => {
+    const task = Promise.resolve().then(() => operation(signal)).catch(error => {
       if (error !== signal.reason) {
+        console.error(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
         const failure = {operation:phase,at:Date.now(),error};
         if (phase.startsWith('skills:')) {
           const path = Number(phase.slice('skills:'.length));
@@ -94,8 +95,14 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
           observation.failure = failure;
           observation.failed = true;
           this.catalogObservations.set(path,observation);
-        } else if (phase.includes(':')) this.deps.sessionObservation(phase.slice(phase.indexOf(':')+1)).failure = failure;
-        console.error(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
+        } else if (phase.includes(':')) {
+          const sessionId = phase.slice(phase.indexOf(':')+1);
+          try {
+            this.deps.sessionObservation(sessionId).failure = failure;
+          } catch (reportError) {
+            console.error('Could not record background operation failure.', reportError, {botId:this.deps.botId(),phase,sessionId,originalError:error});
+          }
+        }
       }
     }).finally(() => {
       this.backgroundTasks.delete(task);

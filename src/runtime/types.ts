@@ -1,5 +1,12 @@
 import { type ChildProcess } from 'node:child_process';
 import type { HostBinding } from '../../shared/contracts.js';
+export class SessionRetiringError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionRetiringError';
+  }
+}
+
 export class SessionCapacityError extends Error {
   constructor(readonly limit: number) {
     super(`OMP session limit (${limit}) reached. Ask in the topic to approve more capacity, then rejoin.`);

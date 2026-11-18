@@ -1,5 +1,5 @@
-import type { Bot, Context } from 'grammy';
-import type { PendingPromptContent, PromptContent, TopicSession } from '../../shared/contracts.js';
+import type { Context } from 'grammy';
+import type { PendingPromptContent, TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { PromptExtension } from '../telegram-commands.js';
 import { randomBytes } from 'node:crypto';
@@ -8,8 +8,9 @@ import { configWritable, findInstance, refreshTermination } from '../config.js';
 import { SessionCapacityError } from '../runtime/types.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
-import type { Listener, PresetPanel, PromptProposal } from './types.js';
+import type { PresetPanel, PromptProposal } from './types.js';
 import type { CapacityAdmission } from './capacity-admission.js';
+import type { PromptPreparation as QueuedPreparation } from '../store/prompt-queue.js';
 import type { PromptPreparation } from './prompt-preparation.js';
 
 export interface PromptAdmissionDependencies {
@@ -31,14 +32,10 @@ export interface PromptAdmissionDependencies {
   defaultNewTopicSkills(chatId: number): string[];
   renderPresetPanel(panel: PresetPanel): Promise<void>;
   replyPresetText(ctx: Context, text: string): Promise<void>;
-  preparePrompt(ctx: Context, session: TopicSession, extensions: readonly PromptExtension[], authority?: Context): Promise<void>;
-  uploadDocuments: PromptPreparation['uploadDocuments'];
+  drainPrompts(session: TopicSession): Promise<void>;
+  preparePrompt: PromptPreparation['preparePrompt'];
   newSession(ctx: Context, task?: PendingPromptContent, attached?: {hostId:string;sessionId:string;instanceId:number;cwd:string}, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: {bind(id:string):void}, cwd?: string, proposedSkills?: {names:string[];topicSkills:string[]}): Promise<void>;
-  listen(session: TopicSession): Promise<void>;
-  listener(sessionId: string): Listener | undefined;
   albumContexts(ctx: Context): readonly Context[];
-  sendPrompt(listener: Listener, content: PromptContent, messageId: number, restore?: () => void): void;
-  prepareContent(session: TopicSession, content: PromptContent): Promise<PromptContent>;
 }
 
 export class PromptAdmission {
@@ -126,8 +123,8 @@ export class PromptAdmission {
       await this.deps.renderPresetPanel(panel);
       return;
     }
-    if (extensions.some(extension => extension.kind === 'model-preset')) {
-      const names = await this.deps.options.runtime.availableModelPresets(instanceId, cwd ?? session?.cwd);
+    if (!session && extensions.some(extension => extension.kind === 'model-preset')) {
+      const names = await this.deps.options.runtime.availableModelPresets(instanceId, cwd);
       for (const extension of extensions) {
         if (extension.kind === 'model-preset' && (extension.name === undefined || !names.includes(extension.name))) {
           await this.deps.replyPresetText(ctx, `Unknown model preset: ${extension.name}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
@@ -137,12 +134,12 @@ export class PromptAdmission {
     }
     const mentionedSkills = !hasTask || worktree ? [] : [...new Set([...topicSkills, ...pendingSkills, ...extensions.flatMap(extension => extension.kind === 'skill' ? [extension.name] : [])])];
     if (mentionedSkills.length) {
-      if (admin || session) {
+      if (!session && admin) {
         const available = await this.deps.options.runtime.listSkills(instanceId, session, undefined, cwd);
         const missing = mentionedSkills.filter(name => !available.some(skill => skill.name === name));
         if (missing.length) throw new Error(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
       }
-      content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
+      if (!session) content = {...content,text:`${mentionedSkills.map(name => `/skill:${name}`).join(' ')}\n\n${content.text}`};
     }
     if (this.deps.assignedId(ctx.chat!.id) !== instanceId) throw new Error('The group instance assignment changed');
     if (session && (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
@@ -157,9 +154,9 @@ export class PromptAdmission {
         if (session && (this.deps.options.store.getSessionGeneration(session.id) !== generation || this.deps.options.store.getSession(session.id)?.status !== 'open')) throw new Error('The session changed before execution.');
       };
       let reservation: {bind(id:string):void;release():void} | undefined;
-      if (extensions.length && session?.runtime.kind !== 'attached') {
+      if (extensions.length && !session) {
         try {
-          reservation = await this.deps.options.runtime.reserveSession(session?.id, authorizeExecution);
+          reservation = await this.deps.options.runtime.reserveSession(undefined, authorizeExecution);
         } catch (error) {
           if (!(error instanceof SessionCapacityError)) throw error;
           if (!(this.deps.options.configWritable?.() ?? configWritable(this.deps.options.config.configPath))) {
@@ -178,7 +175,7 @@ export class PromptAdmission {
           if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch ||
               (folderFingerprint !== undefined && folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat!.id)))) return;
           this.deps.capacity.set(token, {
-            sessionId:session?.id ?? '',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
+            sessionId:'',chatId:ctx.chat!.id,threadId:ctx.message?.message_thread_id ?? 1,
             messageId:message.message_id,limit:error.limit,expires:Date.now()+300000,
             command:{source:ctx,content:originalContent,extensions:structuredClone(extensions),worktree,instanceId,epoch,generation,skills:{names:[...pendingSkills],topicSkills},cwd,folderFingerprint},
           });
@@ -189,8 +186,9 @@ export class PromptAdmission {
       try {
         await authorizeExecution();
         if (session) {
-          await this.deps.preparePrompt(ctx, session, preparations);
-          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkills});
+          // Preparation-only commands are immediate controls, not durable task intent to replay after a failure.
+          if (hasTask) await this.submitSessionPrompt(ctx, session, content, {key:skillKey,names:pendingSkills,topicSkills}, ctx, {skills:mentionedSkills,extensions:preparations});
+          else await this.deps.preparePrompt(ctx, session, preparations);
         } else await this.deps.newSession(ctx, hasTask ? content : undefined, undefined, undefined, hasTask && !worktree ? () => this.consumePendingSkills(skillKey,pendingSkills) : undefined, worktree, ctx, preparations, reservation, cwd, {names: [...pendingSkills], topicSkills});
       } finally { reservation?.release(); }
       return;
@@ -244,10 +242,7 @@ export class PromptAdmission {
         (!proposal.sessionId && proposal.folderFingerprint !== JSON.stringify(this.deps.folderSettings(ctx.chat.id))))
       throw new Error('The prompt proposal assignment or folder settings changed before execution.');
     if (session) {
-      if (!(await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx))) {
-        await ctx.editMessageText('Prompt not submitted: the initial task is still being admitted. Propose it again after startup.');
-        return;
-      }
+      await this.submitSessionPrompt(proposal.source,session,proposal.content,proposal.skills,ctx, {skills:[...new Set([...(proposal.skills?.topicSkills ?? []), ...(proposal.skills?.names ?? [])])]});
     } else await this.deps.newSession(proposal.source,proposal.content,undefined,undefined,proposal.skills ? () => this.consumePendingSkills(proposal.skills!.key,proposal.skills!.names) : undefined,proposal.worktree,ctx,[],undefined,undefined,proposal.skills);
     await ctx.editMessageText('Prompt approved.',{reply_markup:{inline_keyboard:[]}});
   }
@@ -256,48 +251,30 @@ export class PromptAdmission {
     this.deps.options.store.clearPendingSkills(key);
     for (const name of remaining) this.deps.options.store.addPendingSkill(key,name);
   }
-  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkills:string[]}, authority = ctx): Promise<boolean> {
+  async submitSessionPrompt(ctx: Context, session: TopicSession, content: PendingPromptContent, selected?: {key:PendingSkillKey;names:string[];topicSkills:string[]}, authority = ctx, preparation?: QueuedPreparation): Promise<boolean> {
+    const epoch = this.admissionEpoch;
+    const generation = this.deps.options.store.getSessionGeneration(session.id);
     await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     this.deps.requireSessionAssignment(session);
-    await this.deps.listen(session);
-    await this.deps.authorize(ctx.chat!.id,ctx.from!.id);
     if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
-    if (this.deps.listener(session.id)?.initial) {
-      await replyTo(ctx, contextDestination(ctx), 'The initial task is still being admitted. Wait for the host to start before sending another instruction.');
-      return false;
-    }
-    const uploaded = await this.deps.uploadDocuments(session, content, async () => {
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before document upload.');
-    }, contextDestination(ctx));
-    const prompt = await this.deps.prepareContent(session, uploaded);
-    if (content.documents?.length || prompt !== uploaded) {
-      // Upload acknowledgements and initial chat metadata await Telegram; submission is a separate mutation.
-      await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
-      if (!(await this.deps.currentAdmin(authority))) throw new Error('Administrator access changed before prompt submission.');
-    }
+    if (this.deps.stopped() || refreshTermination(this.deps.options.config) || epoch !== this.admissionEpoch)
+      throw new Error('The service is stopping');
+    this.deps.requireSessionAssignment(session);
+    if (this.deps.options.store.getSessionGeneration(session.id) !== generation ||
+        this.deps.options.store.getTopic({botId: this.deps.id(), destination: contextDestination(ctx)})?.id !== session.id ||
+        this.deps.options.store.getSession(session.id)?.status !== 'open')
+      throw new Error('The session changed before the prompt could run');
     const messageId = ctx.message!.message_id;
-    const restore = selected && (selected.names.length || selected.topicSkills.length) ? () => {
-      if (selected.names.length) {
-        const current = this.deps.options.store.getPendingSkills(selected.key);
-        this.deps.options.store.clearPendingSkills(selected.key);
-        for (const name of [...selected.names, ...current]) this.deps.options.store.addPendingSkill(selected.key, name);
+    this.deps.options.store.promptQueue.enqueue(session.id, messageId, ctx.from!.id, authority.from!.id, content, preparation, () => {
+      for (const original of this.deps.albumContexts(ctx))
+        if (original.message && original.message.message_id !== messageId)
+          this.deps.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
+      if (selected) {
+        this.consumePendingSkills(selected.key,selected.names);
+        if (selected.topicSkills.length) this.deps.options.store.clearNewTopicSkills(session.id);
       }
-      if (selected.topicSkills.length) this.deps.options.store.setNewTopicSkills(session.id,selected.topicSkills);
-    } : undefined;
-    if (selected) {
-      this.consumePendingSkills(selected.key,selected.names);
-      if (selected.topicSkills.length) this.deps.options.store.clearNewTopicSkills(session.id);
-    }
-    for (const original of this.deps.albumContexts(ctx))
-      if (original.message && original.message.message_id !== messageId)
-        this.deps.options.store.recordPromptMessageAlias(session.id, messageId, original.message.message_id);
-    try {
-      this.deps.sendPrompt(this.deps.listener(session.id)!,prompt,messageId,restore);
-    } catch (error) {
-      restore?.();
-      throw error;
-    }
+    });
+    await this.deps.drainPrompts(session);
     return true;
   }
 }
