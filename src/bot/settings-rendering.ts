@@ -47,7 +47,7 @@ export async function renderSettings(
     let text = 'Settings\nApplies to this group unless marked service-wide.';
     if (page === 'root') {
       button(
-        `💬 Message handling: ${chat.all_messages_are_prompts === false ? 'Commands and replies only' : 'All messages'}`,
+        `💬 Message handling: ${chat.all_messages_are_prompts === false ? '/p <prompt>, mentions, and replies only' : 'All messages'}`,
         {
           kind: 'set',
           field: 'all_messages_are_prompts',
