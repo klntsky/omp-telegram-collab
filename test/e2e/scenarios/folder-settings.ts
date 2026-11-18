@@ -9,7 +9,8 @@ import { clickPanel, openPanel, replyText, waitForPanel } from '../helpers/teleg
 export function registerFolderSettings(getApp: () => CollaborationTest): void {
   it('manual topics choose their runtime folder in the same topic', async () => {
     const app = getApp();
-    app.setFolderOptions(['.', 'manual-selected']);
+    const folder = 'manual-selected & <code> "😀`';
+    app.setFolderOptions(['.', folder]);
     const start = app.apiCalls.length;
     const topic = await app.telegram.user.client.createForumTopic({
       chatId: app.telegram.forum.chat, title: 'Manual folder selection',
@@ -25,7 +26,7 @@ export function registerFolderSettings(getApp: () => CollaborationTest): void {
     await clickPanel(app, creation, 0);
     await app.waitForCondition(() => sessions().some(session => session.threadId === topic.id));
     const session = sessions().find(session => session.threadId === topic.id)!;
-    assert.equal(session.cwd, realpathSync(join(app.omp.workspace, 'manual-selected')));
+    assert.equal(session.cwd, realpathSync(join(app.omp.workspace, folder)));
     assert.equal(session.runtime.kind, 'managed');
     assert.equal(app.store.promptQueue.has(session.id), false);
     assert.equal(await app.runtime.isRunning(session), false);
@@ -78,8 +79,8 @@ export function registerFolderSettings(getApp: () => CollaborationTest): void {
       // including after the service reloads its panel history from SQLite.
       await ignoreRetired();
       const start = app.apiCalls.length;
-      await replyText(app, panel.messageId, 1, input === 'append' ? 'first\nsecond' : 'replacement');
-      assert.deepEqual(savedFolders(), input === 'append' ? ['first', 'second'] : ['replacement']);
+      await replyText(app, panel.messageId, 1, input === 'append' ? 'first & <code>\nsecond' : 'replacement');
+      assert.deepEqual(savedFolders(), input === 'append' ? ['first & <code>', 'second'] : ['replacement']);
       entries.push(panel.messageId);
       Object.assign(panel, await waitForPanel(app, '/settings', 'settings:', start));
     }

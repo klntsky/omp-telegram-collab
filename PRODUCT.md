@@ -37,6 +37,8 @@ Local terminal access uses the service account's operating-system permissions. C
 
 ## 1. Telegram sessions
 
+Bot-generated Telegram messages display file and directory paths as inline code, including folder selection, folder settings, uploaded filenames and destinations, and worktree lifecycle messages. Original diagnostics remain unchanged. Telegram button labels remain plain text because buttons do not support code entities.
+
 
 ### 1.1. Sessions and commands
 

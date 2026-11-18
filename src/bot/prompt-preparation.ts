@@ -9,6 +9,7 @@ import { realpathSync } from 'node:fs';
 import { documentFileName, PermanentDocumentPreparationError, saveDocument } from './document-file.js';
 import { join } from 'node:path';
 import { sendTo } from '../telegram-destination.js';
+import { codeHtml } from '../telegram-html.js';
 import { topicDestination, type TopicDestination } from '../../shared/topic-destination.js';
 import { PromptPreparationRejectedError } from './types.js';
 
@@ -22,7 +23,7 @@ export interface PromptPreparationDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   dropListener(sessionId: string): void;
-  replyPresetText(ctx: Context, text: string): Promise<void>;
+  replyPresetText(ctx: Context, text: string, code?: boolean): Promise<void>;
 }
 
 export class PromptPreparation {
@@ -67,7 +68,8 @@ export class PromptPreparation {
       const overwritten = saveDocument(path, bytes);
       text = [text, `Attachment: ${JSON.stringify(fileName)} at ${JSON.stringify(path)}`].filter(Boolean).join('\n\n');
       saved?.({...prompt, text, documents: documents.slice(index + 1)});
-      await sendTo(this.deps.bot.api, destination, `✅ Uploaded ${fileName} to ${path}${overwritten ? ', overwriting the old version' : ''}`);
+      const confirmation = `✅ Uploaded ${codeHtml(fileName)} to ${codeHtml(path)}${overwritten ? ', overwriting the old version' : ''}`;
+      await sendTo(this.deps.bot.api, destination, confirmation, { parse_mode: 'HTML' });
     }
     return {...prompt, text};
   }
@@ -79,7 +81,7 @@ export class PromptPreparation {
     return this.prepareAuthorizedPrompt(session, extensions, async () => {
       await this.deps.authorize(ctx.chat!.id, ctx.from!.id);
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
-    }, text => this.deps.replyPresetText(ctx, text));
+    }, (text, code) => this.deps.replyPresetText(ctx, text, code));
   }
   async prepareQueuedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, checkpoint: (remaining: PromptExtension[], preset?: string) => void, preset?: string): Promise<void> {
     const requested = extensions.flatMap(extension => extension.kind === 'model-preset' && extension.name !== undefined ? [extension.name] : []);
@@ -90,13 +92,14 @@ export class PromptPreparation {
       if (missing !== undefined) throw new PromptPreparationRejectedError(`Unknown model preset: ${missing}. Available presets: ${names.join(', ') || '(none)'}\nPlease refine your request with an available preset.`);
     }
     await this.prepareAuthorizedPrompt(session, extensions, authorize,
-      text => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), text),
+      (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), code ? codeHtml(text) : text,
+        code ? { parse_mode: 'HTML' } : undefined),
       checkpoint, preset);
   }
   async reportQueuedFailure(session: TopicSession, error: Error): Promise<void> {
-    await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), error.message);
+    await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), codeHtml(error.message), { parse_mode: 'HTML' });
   }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string, code?: boolean) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -144,7 +147,7 @@ export class PromptPreparation {
           ...(selectedPreset === undefined ? [] : [{kind: 'model-preset' as const, name: selectedPreset}]),
           ...extensions.slice(index + 1),
         ], selectedPreset);
-        await report(`🌳 ${text}`);
+        await report(`🌳 ${text}`, true);
         if (selectedPreset !== undefined) await applyPreset(selectedPreset, () => checkpoint?.(extensions.slice(index + 1), selectedPreset));
       } else {
         if (extension.name === undefined) throw new Error('Choose a model preset before preparing the prompt.');
