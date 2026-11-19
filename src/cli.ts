@@ -34,14 +34,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.once('SIGTERM', shutdown);
   };
   program.action(start);
-  program.command('start').description('Run the service in the foreground. Use Ctrl+C to shut it down.').action(start);
+  program.command('start').description('Start the bot').action(start);
   program.command('reload').description('Ask the running service to apply saved configuration.').action(async () => {
     const path = configPath();
     await notifyReload(readConfig(path));
     stdout.write(`Reload requested for ${path}\n`);
   });
   program.command('session').description('Connect a local terminal to a topic session.')
-    .command('join').description('Join a session through the running service on this computer.')
+    .command('join').description('Continue a session in your terminal')
     .addOption(new Option('--chat <CHAT_ID>', 'Telegram supergroup ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
       if (previous !== undefined) throw new InvalidArgumentError('Specify --chat only once');
       const id = Number(value);

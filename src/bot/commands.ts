@@ -97,27 +97,27 @@ Stop all agents across the service and suspend further work. Resuming requires c
 List this group’s owner and administrators.${admin ? '' : `
 Ask them to change group settings, choose model presets, manage topic connections, or grant you an administrator role if you need those controls.`}`;
 }
-export const cliCommand = {command:'cli',description:'Copy a terminal command to join this topic’s agent (group admin)'};
+export const cliCommand = {command:'cli',description:'Continue in your terminal'};
 
 export const terminationMessage = 'The service got terminated, only admin can resume it (remove terminated: true from the config)';
 export const groupCommands = [
   { command: 'new', description: 'Start work in a new topic' },
-  { command: 'fork', description: 'Copy this conversation or a replied message to a new topic (group admin)' },
-  { command: 'worktree', description: '🌳 Use a separate Git working directory; new topic in General' },
-  { command: 'p', description: 'New topic in General; send instructions in an existing topic' },
+  { command: 'fork', description: 'Branch out this conversation' },
+  { command: 'worktree', description: 'Switch to a new git worktree' },
+  { command: 'p', description: 'Give the agent a task' },
   { command: 'skills', description: 'Select or clear skills for your next prompt' },
-  { command: 'settings', description: 'Group defaults and limit on running agents (group admin)' },
-  { command: 'setup', description: 'Request or enroll this forum, then open settings' },
+  { command: 'settings', description: 'Change settings' },
+  { command: 'setup', description: 'Start using the bot in this group' },
   { command: 'list_admins', description: 'List current human group owner and administrators' },
-  { command: 'attach', description: 'Connect a topic to a running agent on the agent’s computer (group admin)' },
-  { command: 'detach', description: 'Make this topic conversation-only (group admin)' },
+  { command: 'attach', description: 'Continue an existing session here' },
+  { command: 'detach', description: 'Detach the agent session from this topic' },
   { command: 'agent', description: 'Open this topic’s transcript and tool details' },
-  { command: 'status', description: 'Show host, mirroring, recovery and skill diagnostics' },
-  { command: 'usage', description: 'Show provider plan usage, remaining quotas and resets' },
+  { command: 'status', description: 'Check status' },
+  { command: 'usage', description: 'Check remaining usage' },
   { command: 'stop', description: 'Interrupt the current task in this topic' },
-  { command: 'kill', description: 'Force-stop this topic’s agent; preserve history' },
-  { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
-  { command: 'modelpreset', description: 'Choose a model preset for an idle topic or set the group default' },
+  { command: 'kill', description: 'Shut down this agent' },
+  { command: 'terminate', description: 'Stop all work and terminate the service' },
+  { command: 'modelpreset', description: 'Choose a model preset' },
   { command: 'help', description: 'Show commands and prompt settings' },
   { command: 'start', description: 'Show bot setup and command guidance' },
 ];

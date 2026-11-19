@@ -70,7 +70,7 @@ export async function renderSettings(
         kind: 'page',
         page: 'presets',
       });
-      button(`⚡ Maximum live sessions: ${config.omp.maxSessions} (service-wide)`, {
+      button('Limit simultaneous agents', {
         kind: 'page',
         page: 'capacity',
       });
