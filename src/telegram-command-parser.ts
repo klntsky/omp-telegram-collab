@@ -3,15 +3,15 @@ import {LRParser} from "@lezer/lr"
 import {commandTokenizer, commandContext} from "./telegram-command-tokens.js"
 export const parser = LRParser.deserialize({
   version: 14,
-  states: "$[OVQROOO$TQRO'#CaO$[QRO'#CcO$cQRO'#CdO$jQRO'#CeO$qQRO'#CfO$xQRO'#CgO%PQRO'#ChO%WQRO'#CiO%_QRO'#CjO%fQRO'#CkQOQQOOOOQP'#Cb'#CbOOQP'#Cl'#ClO%mQRO,58{O%tQRO,58}O%{QRO,59OO&SQRO,59PO&ZQRO,59QO&bQRO,59RO&iQRO,59SO&pQRO,59TO&wQRO,59UO'OQRO,59VOOQP-E6j-E6j",
-  stateData: "'V~OwOS~OPQObPOcPOdWOeWOfYOgXOhSOiSOjROkTOlROmROnROoTOpTOqTOrTOsUOtVOuRO~OP[OQ[OR[Ob[Oc[Od[Oe[Of[Og[Oh[Oi[Oj[Ok[Ol[Om[On[Oo[Op[Oq[Or[Os[Ot[Ou[O~OaTX~P!jOaVX~P!jOaWX~P!jOaXX~P!jOaYX~P!jOaZX~P!jOa[X~P!jOa]X~P!jOa^X~P!jOa_X~P!jOaTa~P!jOaVa~P!jOaWa~P!jOaXa~P!jOaYa~P!jOaZa~P!jOa[a~P!jOa]a~P!jOa^a~P!jOa_a~P!jO",
+  states: "$[OVQROOO$ZQRO'#CaO$bQRO'#CcO$iQRO'#CdO$pQRO'#CeO$wQRO'#CfO%OQRO'#CgO%VQRO'#ChO%^QRO'#CiO%eQRO'#CjO%lQRO'#CkQOQQOOOOQP'#Cb'#CbOOQP'#Cl'#ClO%sQRO,58{O%zQRO,58}O&RQRO,59OO&YQRO,59PO&aQRO,59QO&hQRO,59RO&oQRO,59SO&vQRO,59TO&}QRO,59UO'UQRO,59VOOQP-E6j-E6j",
+  stateData: "']~OxOS~OPQObPOcPOdWOeWOfYOgXOhSOiSOjROkTOlROmROnROoTOpTOqTOrTOsTOtUOuVOvRO~OP[OQ[OR[Ob[Oc[Od[Oe[Of[Og[Oh[Oi[Oj[Ok[Ol[Om[On[Oo[Op[Oq[Or[Os[Ot[Ou[Ov[O~OaTX~P!mOaVX~P!mOaWX~P!mOaXX~P!mOaYX~P!mOaZX~P!mOa[X~P!mOa]X~P!mOa^X~P!mOa_X~P!mOaTa~P!mOaVa~P!mOaWa~P!mOaXa~P!mOaYa~P!mOaZa~P!mOa[a~P!mOa]a~P!mOa^a~P!mOa_a~P!mO",
   goto: "!waPPPPPbebbbbbbbbb{RZOy]PQRSTUVWXY^_`abcdefgQ^PQ_QQ`RQaSQbTQcUQdVQeWQfXQgYeh^_`abcdefg",
   nodeNames: "⚠ SkillToken UnknownToken TextToken Request Prompt Any SkillPrompt Inspection Configuration Lifecycle Guidance Start OptionalArgument Attach Skills",
-  maxTerm: 39,
+  maxTerm: 40,
   context: commandContext,
   skippedNodes: [0],
   repeatNodeCount: 1,
-  tokenData: "!l~RZX^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt~yZw~X^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt",
+  tokenData: "!l~RZX^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt~yZx~X^tpqt#y#zt$f$gt#BY#BZt$IS$I_t$I|$JOt$JT$JUt$KV$KWt&FU&FVt?HT?HUt",
   tokenizers: [commandTokenizer, 0],
   topRules: {"Request":[0,4]},
   tokenPrec: 0

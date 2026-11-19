@@ -9,6 +9,7 @@ import type { CommandRouteInput } from './input-router.js';
 export interface InputCommandControlDependencies {
   acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void;
   authorize(chatId: number, userId: number, statusOnly?: boolean): Promise<void>;
+  drainPrompts(session: TopicSession): Promise<void>;
   invalidateCapacity(sessionId: string): void;
   dropListener(id: string, reason?: string): void;
   invalidateActivity(id: string): void;
@@ -22,9 +23,9 @@ export interface InputCommandControlDependencies {
 }
 
 export async function inputCommandControl(deps: InputCommandControlDependencies, input: CommandRouteInput): Promise<boolean> {
-  const { ctx, session, destination, detached, assigned, action, arg } = input;
+  const { ctx, session, destination, action } = input;
   const message = ctx.message;
-      if (action === 'stop' || action === 'kill') {
+      if (action === 'stop' || action === 'kill' || action === 'continue') {
         if (destination.kind === 'general' || !session) {
           await replyTo(
             ctx,
@@ -34,7 +35,7 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           return true;
         }
         deps.requireSessionAssignment(session);
-        if (action === 'stop' && session.status !== 'open') {
+        if (action !== 'kill' && session.status !== 'open') {
           await replyTo(
             ctx,
             contextDestination(ctx),
@@ -42,7 +43,16 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           );
           return true;
         }
-        deps.store.promptQueue.cancel(session.id);
+        await deps.authorize(ctx.chat.id, ctx.from.id);
+        deps.requireSessionAssignment(session);
+        if (action === 'continue') {
+          deps.store.promptQueue.resume(session.id);
+          await deps.drainPrompts(session);
+          deps.acknowledgeMessage(session, message.message_id);
+          return true;
+        }
+        if (action === 'stop') deps.store.promptQueue.pause(session.id);
+        else deps.store.promptQueue.cancel(session.id);
         deps.invalidateActivity(session.id);
         deps.invalidateCapacity(session.id);
         if (action === 'kill') {
@@ -62,7 +72,10 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
         if (!(await deps.runtime.isRunning(session))) {
           deps.dropListener(session.id);
           await deps.setTopicStatus(session, 'finished');
-          await replyTo(ctx, contextDestination(ctx), 'Session is not running.');
+          deps.acknowledgeMessage(session, message.message_id);
+          const count = deps.store.promptQueue.count(session.id);
+          if (count > 0) await replyTo(ctx, contextDestination(ctx),
+            `Run /continue to proceed with the ${count} messages in the queue`);
           return true;
         }
         const connection = await deps.listen(session);
@@ -84,6 +97,9 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           if (index !== -1) activeListener.pendingStops.splice(index, 1);
           throw error;
         }
+        const count = deps.store.promptQueue.count(session.id);
+        if (count > 0) await replyTo(ctx, contextDestination(ctx),
+          `Run /continue to proceed with the ${count} messages in the queue`);
         return true;
       }
   return false;

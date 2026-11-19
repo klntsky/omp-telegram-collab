@@ -162,7 +162,7 @@ export class SessionConnections {
     this.deps.refreshTyping(session, listener);
     void this.deps.setTopicStatus(
       session,
-      this.deps.options.store.promptQueue.has(session.id) ? 'running' : 'unknown',
+      this.deps.options.store.promptQueue.has(session.id) && !this.deps.options.store.promptQueue.isPaused(session.id) ? 'running' : 'unknown',
     );
     const active = () =>
       !this.deps.stopped() &&

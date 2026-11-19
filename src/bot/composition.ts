@@ -165,6 +165,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     acknowledgeMessage: receipts.acknowledgeMessage.bind(receipts),
     activityObservation: owners.activityObservation.bind(owners),
     settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
+    drainPrompts: session => worker.drain(session),
     background: maintenance.background.signal,
     bot: bot,
     delivery: connections.delivery,

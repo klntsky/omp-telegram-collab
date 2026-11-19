@@ -9,6 +9,112 @@ import { holdTelegramAcknowledgement } from '../helpers/telegram-acknowledgement
 import { installRetirementGate } from '../helpers/retirement-gate.js';
 
 export function registerPromptQueue(): void {
+  it('native pre-dispatch refusals release the queue for later prompts', { timeout: 240000 }, async t => {
+    const seed = createWriteTask('queue-cost-seed');
+    const app = await setupCollaborationTest(t, { scenarios: [writeScenario(seed)] });
+    await enrollForum(app);
+    const modelsPath = join(app.omp.agentConfigPath, '..', 'models.yml');
+    const models = JSON.parse(await readFile(modelsPath, 'utf8'));
+    for (const model of models.providers.e2e.models)
+      model.cost = { input: 1000000, output: 1000000, cacheRead: 0, cacheWrite: 0 };
+    await writeFile(modelsPath, JSON.stringify(models));
+    const session = await createManagedTopic(app);
+    const started = await app.sendAndWait(`/p ${seed.prompt}`, session.threadId);
+    await completeWriteTask(app, seed, started, session.threadId);
+    const settings = JSON.parse(await readFile(app.omp.agentConfigPath, 'utf8'));
+    settings.session = { ...settings.session, maxCost: 0.001 };
+    await writeFile(app.omp.agentConfigPath, JSON.stringify(settings));
+    await app.runtime.kill(session);
+    await app.restart();
+    const start = app.hostFrames.length;
+    for (const text of ['First capped task', 'Second capped task']) {
+      const sent = await app.sendAndWait(`/p ${text}`, session.threadId);
+      await app.waitForCondition(() => Boolean(app.store.db.prepare(
+        "SELECT 1 FROM prompt_submissions WHERE session_id=? AND message_id=? AND state='uncertain'",
+      ).get(session.id, sent.id)));
+      assert.equal(app.store.promptQueue.has(session.id), false);
+    }
+    assert.equal(app.hostFrames.slice(start).some(frame => frame.t === 'event' && frame.event.type === 'agent_start'), false);
+    assert.equal(app.omp.provider.requests.get(seed.name)!.length, 2);
+    app.omp.provider.assertComplete([seed.name]);
+  });
+
+  it('stop preserves FIFO prompts across restart and continue resumes messages admitted while paused', { timeout: 360000 }, async t => {
+    const seed = createWriteTask('queue-stop-seed');
+    const first = createWriteTask('queue-stop-first');
+    const second = createWriteTask('queue-stop-second');
+    const paused = createWriteTask('queue-stop-paused');
+    const empty = createWriteTask('queue-stop-empty');
+    const app = await setupCollaborationTest(t, { scenarios: [
+      { name: seed.name, prompt: seed.prompt, steps: [{ type: 'await-abort' }] },
+      writeScenario(first),
+      writeReadScenario(second, first.path),
+      writeReadScenario(paused, second.path),
+      writeScenario(empty),
+    ] });
+    await enrollForum(app);
+    const session = await createManagedTopic(app);
+    const start = app.hostFrames.length;
+    await app.sendAndWait(`/p ${seed.prompt}`, session.threadId);
+    await app.waitForTaskStarted(seed.name);
+    const firstMessage = await app.sendAndWait(`/p ${first.prompt}`, session.threadId);
+    const secondMessage = await app.sendAndWait(`/p ${second.prompt}`, session.threadId);
+    assert.equal(app.store.promptQueue.count(session.id), 2);
+    const pending = app.store.promptQueue.list(session.id).filter(item => item.state === 'pending');
+    assert.deepEqual(pending.map(item => item.messageId), [firstMessage.id, secondMessage.id]);
+    await app.sendAndWait('/stop', session.threadId);
+    await app.omp.provider.waitForAbort(seed.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
+    await app.waitForCondition(() => app.hostFrames.slice(start).some(frame =>
+      frame.t === 'event' && frame.event.type === 'agent_end'));
+    assert.equal(app.store.promptQueue.isPaused(session.id), true);
+    assert.deepEqual(app.store.promptQueue.list(session.id), pending);
+    await app.sendAndWait('/stop', session.threadId);
+    assert.deepEqual(app.store.promptQueue.list(session.id), pending);
+    assert.equal(await app.runtime.isRunning(session), true);
+
+    await app.restart();
+    assert.equal(app.store.promptQueue.isPaused(session.id), true);
+    assert.deepEqual(app.store.promptQueue.list(session.id), pending);
+    const pausedMessage = await app.sendAndWait(`/p ${paused.prompt}`, session.threadId);
+    assert.deepEqual(app.store.promptQueue.list(session.id).map(item => item.messageId),
+      [firstMessage.id, secondMessage.id, pausedMessage.id]);
+    for (const task of [first, second, paused]) {
+      assert.deepEqual(app.omp.provider.requests.get(task.name), []);
+      assert.equal(app.guestFrames.some(frame => frame.t === 'prompt' && frame.text.includes(task.prompt)), false);
+      await assert.rejects(readFile(join(session.cwd, task.path)), { code: 'ENOENT' });
+    }
+    await app.sendAndWait('/continue', session.threadId);
+    await app.sendAndWait('/continue', session.threadId);
+    await completeWriteTask(app, first, firstMessage, session.threadId);
+    await completeWriteTask(app, second, secondMessage, session.threadId);
+    await completeWriteTask(app, paused, pausedMessage, session.threadId);
+    assert.ok(JSON.stringify(taskReadResult(app.omp.provider, second)).includes(first.evidence.nonce));
+    assert.ok(JSON.stringify(taskReadResult(app.omp.provider, paused)).includes(second.evidence.nonce));
+    await app.waitForCondition(() => !app.store.promptQueue.has(session.id));
+    assert.equal(app.store.promptQueue.isPaused(session.id), false);
+    assert.deepEqual(app.guestFrames.flatMap(frame => {
+      if (frame.t !== 'prompt') return [];
+      const task = [first, second, paused].find(candidate => frame.text.includes(candidate.prompt));
+      return task ? [task.name] : [];
+    }), [first.name, second.name, paused.name]);
+
+    await app.sendAndWait('/stop', session.threadId);
+    await app.sendAndWait('/stop', session.threadId);
+    assert.equal(app.store.promptQueue.count(session.id), 0);
+    assert.equal(app.store.promptQueue.isPaused(session.id), true);
+    const emptyMessage = await app.sendAndWait(`/p ${empty.prompt}`, session.threadId);
+    assert.equal(app.store.promptQueue.count(session.id), 1);
+    assert.deepEqual(app.omp.provider.requests.get(empty.name), []);
+    await app.sendAndWait('/continue', session.threadId);
+    await completeWriteTask(app, empty, emptyMessage, session.threadId);
+    await app.waitForCondition(() => !app.store.promptQueue.has(session.id));
+    const prompts = app.guestFrames.filter(frame => frame.t === 'prompt').length;
+    await app.sendAndWait('/continue', session.threadId);
+    assert.equal(app.store.promptQueue.isPaused(session.id), false);
+    assert.equal(app.guestFrames.filter(frame => frame.t === 'prompt').length, prompts);
+    app.omp.provider.assertComplete([seed.name, first.name, second.name, paused.name, empty.name]);
+  });
+
   it('durable queue survives real Telegram redelivery, deferred preparations, and a rejected attachment', { timeout: 360000 }, async t => {
     const seed = createWriteTask('queue-seed');
     const queued = createWriteTask('queue-recovered');

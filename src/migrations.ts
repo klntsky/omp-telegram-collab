@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS prompt_admissions (
   message_id INTEGER NOT NULL,
   UNIQUE(session_id,message_id)
 );
+CREATE TABLE IF NOT EXISTS prompt_queue_pauses (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS prompt_queue_preparations (
   prompt_id INTEGER PRIMARY KEY REFERENCES prompt_queue(id) ON DELETE CASCADE,
   preparation TEXT NOT NULL

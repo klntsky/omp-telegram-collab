@@ -175,6 +175,7 @@ export function composeInputRouter({ options, bot, lifecycle, skills, questions,
   {
     acknowledgeMessage: receipts.acknowledgeMessage.bind(receipts),
     authorize: authorization.authorize.bind(authorization),
+    drainPrompts: worker.drain.bind(worker),
     invalidateCapacity: capacity.invalidateSession.bind(capacity),
     dropListener: connections.dropListener.bind(connections),
     invalidateActivity: owners.invalidateActivity.bind(owners),

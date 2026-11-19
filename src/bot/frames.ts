@@ -16,6 +16,7 @@ export interface FrameProjectionDependencies {
   acknowledgeMessage: (session: TopicSession, messageId: number, listener?: Listener) => void;
   activityObservation: (session: TopicSession) => HostActivityObservation;
   settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
+  drainPrompts(session: TopicSession): Promise<void>;
   background: AbortSignal;
   bot: Bot<Context>;
   delivery: TelegramDelivery;
@@ -119,18 +120,28 @@ export class FrameProjection {
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
+      listener.nativeStreaming = frame.state.isStreaming;
       void this.deps.setTopicStatus(
         session,
-        this.deps.options.store.promptQueue.has(session.id) ||
+        (this.deps.options.store.promptQueue.has(session.id) && !this.deps.options.store.promptQueue.isPaused(session.id)) ||
           frame.state.isStreaming ||
           listener.queuedMessages > 0
           ? 'running'
           : 'finished',
       );
     } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
+      listener.nativeStreaming = true;
       void this.deps.setTopicStatus(session, 'running');
     } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
+      listener.nativeStreaming = false;
       void this.deps.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
+    }
+    if (!replay && listener.nativeStreaming === false && listener.queuedMessages === 0 &&
+        (frame.t === 'welcome' || frame.t === 'state' || (frame.t === 'event' && frame.event.type === 'agent_end'))) {
+      void this.deps.drainPrompts(session).catch(error => {
+        this.deps.sessionObservation(session.id).failure = {operation: 'Resume queued prompt', at: Date.now(), error};
+        console.error(`Could not resume queued prompt (${session.id}).`, error);
+      });
     }
     if (frame.t === 'event') {
       const event = frame.event;
@@ -172,11 +183,15 @@ export class FrameProjection {
       };
       if (pending) this.deps.settlePrompt(session, pending.submissionId, isStartupRejection(frame) ? 'startup-rejected' : 'uncertain');
       if (pending && isStartupRejection(frame)) {
+        listener.nativeStreaming = false;
         console.warn('OMP startup rejected prompt.', frame.message, {sessionId: session.id, submissionId: pending.submissionId});
         listener.pendingAnswers.clear();
         listener.pendingStops.length = 0;
         return;
       }
+      // Pre-dispatch failures may have no agent_end; reconnect for authoritative idle state.
+      // https://github.com/can1357/oh-my-pi/blob/v18.20.2/packages/coding-agent/src/collab/host.ts (#handlePrompt)
+      if (pending) this.deps.dropListener(session.id);
     }
     if (
       frame.t === 'entry' &&

@@ -199,7 +199,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await writeFile(app.omp.agentConfigPath, nativeSettings);
       await app.waitForCondition(() => held);
       await app.sendAndWait('/stop', pending.threadId);
-      assert.equal(app.store.promptQueue.has(pending.id), false);
+      assert.equal(app.store.promptQueue.has(pending.id), true);
+      assert.equal(app.store.promptQueue.isPaused(pending.id), true);
       const completed = waitForBackgroundCompletion(app, `prompt-queue:${pending.id}`);
       released.resolve();
       await completed;

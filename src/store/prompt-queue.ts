@@ -35,6 +35,7 @@ export interface QueuedPrompt {
 }
 
 export class PromptQueue {
+  private readonly pauseGenerations = new Map<string, number>();
   constructor(private readonly db: DatabaseSync) {}
 
   enqueue(sessionId: string, messageId: number, userId: number, authorityUserId: number, content: PendingPromptContent, preparation?: PromptPreparation, onAdmitted?: () => void): number {
@@ -78,6 +79,28 @@ export class PromptQueue {
 
   list(sessionId: string): QueuedPrompt[] { return this.read(sessionId, false); }
   first(sessionId: string): QueuedPrompt | undefined { return this.read(sessionId, true)[0]; }
+
+  pause(sessionId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO prompt_queue_pauses(session_id) VALUES (?)').run(sessionId);
+    this.pauseGenerations.set(sessionId, this.pauseGeneration(sessionId) + 1);
+  }
+
+  resume(sessionId: string): void {
+    this.db.prepare('DELETE FROM prompt_queue_pauses WHERE session_id=?').run(sessionId);
+  }
+
+  isPaused(sessionId: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM prompt_queue_pauses WHERE session_id=?').get(sessionId));
+  }
+
+  // Fence an await spanning pause followed by resume, even when the row is already unpaused.
+  pauseGeneration(sessionId: string): number {
+    return this.pauseGenerations.get(sessionId) ?? 0;
+  }
+
+  count(sessionId: string): number {
+    return Number(this.db.prepare("SELECT COUNT(*) AS count FROM prompt_queue WHERE session_id=? AND state='pending'").get(sessionId)!.count);
+  }
 
   markSubmitted(id: number, submissionId: number, deadline: number): void {
     this.db.prepare("UPDATE prompt_queue SET state='submitted',submission_id=?,acceptance_deadline=? WHERE id=? AND state='pending'").run(submissionId, deadline, id);
@@ -146,6 +169,7 @@ export class PromptQueue {
 
   cancel(sessionId: string): void {
     this.db.prepare('DELETE FROM prompt_queue WHERE session_id=?').run(sessionId);
+    this.resume(sessionId);
   }
 
   contains(id: number): boolean {

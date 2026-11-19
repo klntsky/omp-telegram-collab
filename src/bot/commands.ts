@@ -43,7 +43,10 @@ Member task proposals are ${options.proposals ? 'enabled and require administrat
 <b>${++section}. Stop work</b> · Inside a topic
 
 <code>/stop</code>
-Interrupt the current task without killing the agent process.
+Interrupt the current task
+
+<code>/continue</code>
+Resume queued messages after /stop.
 
 <code>/kill</code>
 Force-stop this topic’s agent process if it is stuck. In-flight work may be lost.
@@ -114,7 +117,8 @@ export const groupCommands = [
   { command: 'agent', description: 'Open this topic’s transcript and tool details' },
   { command: 'status', description: 'Check status' },
   { command: 'usage', description: 'Check remaining usage' },
-  { command: 'stop', description: 'Interrupt the current task in this topic' },
+  { command: 'stop', description: 'Interrupt the current task' },
+  { command: 'continue', description: 'Resume queued messages after /stop' },
   { command: 'kill', description: 'Shut down this agent' },
   { command: 'terminate', description: 'Stop all work and terminate the service' },
   { command: 'modelpreset', description: 'Choose a model preset' },
