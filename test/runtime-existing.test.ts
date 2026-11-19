@@ -7,8 +7,10 @@ import { test } from 'node:test';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { beginLaunch, recordLaunchHost } from '../src/runtime/launch-record.js';
+import { procIdentity } from '../src/runtime/process.js';
 
-test('passive resolution adopts existing identities and never launches absent or disappearing hosts', {timeout:15000}, async () => {
+test('passive resolution requires durable managed ownership and never launches absent or disappearing hosts', {timeout:15000}, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'omp-existing-host-')));
   const statePath = join(directory,'registry.json');
   const commandsPath = join(directory,'commands.jsonl');
@@ -60,6 +62,16 @@ else if(args[1]==='link'){
     await writeFile(metadata,JSON.stringify({version:1,sessionId:host.sessionId,sessionFile:history,cwd:directory}));
     assert.equal(await runtime.resolveExisting(session),undefined);
     await writeFile(statePath,JSON.stringify({hosts:[host]}));
+    assert.equal(await runtime.resolveExisting(session),undefined, 'registry identity alone cannot establish managed ownership');
+    const sessionDir = join(directory,'sessions',session.id);
+    const launchDir = await beginLaunch(sessionDir,host.sessionId,directory);
+    const identity = await procIdentity(host.pid);
+    assert.ok(identity);
+    await writeFile(join(launchDir,'supervisor.json'),JSON.stringify({
+      pid:host.pid,start:identity.start,
+      child:{pid:host.pid,start:identity.start,group:identity.group},
+    }));
+    await recordLaunchHost(sessionDir,host);
     assert.deepEqual(await runtime.resolveExisting(session),{
       instanceId:host.instanceId,sessionId:host.sessionId,generation:host.generation,url,
     });
@@ -82,14 +94,16 @@ else if(args[1]==='link'){
     });
     await writeFile(statePath,JSON.stringify({hosts:[host],disappear:true}));
     await assert.rejects(runtime.resolveExisting(session),/OMP host session changed while resolving its capability/);
-    assert.equal(await runtime.resolveExisting(session),undefined);
+    await assert.rejects(runtime.resolveExisting(session),/launch ownership remains unresolved/);
+    assert.equal(await runtime.resolveExisting(attached),undefined);
     const commands = (await readFile(commandsPath,'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]);
     assert.deepEqual([...new Set(commands.map(args => args.slice(0,2).join(' ')))].sort(),['collab link','collab list']);
-    await assert.rejects(stat(join(directory,'runtime-lock.sqlite')),{code:'ENOENT'});
+    await rm(join(sessionDir,'active-launch.json'));
     await writeFile(join(directory,'sessions',session.id,'lifecycle.json'),JSON.stringify({
       pid:host.pid,sessionId:host.sessionId,socketPath:join(directory,'lifecycle.sock'),
     }));
-    await assert.rejects(runtime.stop(session),/does not support safe retirement/);
+    await assert.rejects(runtime.stop(session),/Untracked managed OMP launch/);
+    await rm(join(sessionDir, 'lifecycle.json'));
   } finally { await runtime.close(); await rm(directory,{recursive:true,force:true}); }
 });
 

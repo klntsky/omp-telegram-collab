@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { procIdentity } from '../src/runtime/process.js';
 
 const execute = promisify(execFile);
 type RetirementMode = 'busy' | 'uncertain' | 'accepted' | 'delayed' | 'never-received' | 'cancel-failure';
@@ -19,8 +20,8 @@ export interface RetirementRequest {
 
 export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-retirement-')));
-  const fixtureProcess = mode === 'cancel-failure' && pid === process.pid
-    ? spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] })
+  const fixtureProcess = pid === process.pid
+    ? spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd: directory, detached: true, stdio: ['pipe', 'ignore', 'ignore'] })
     : undefined;
   const fixtureExited = fixtureProcess ? once(fixtureProcess, 'exit') : undefined;
   if (fixtureProcess) {
@@ -28,21 +29,37 @@ export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, 
     assert.ok(fixtureProcess.pid);
     pid = fixtureProcess.pid;
   }
-  const supervisor = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const supervisor = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
   const supervisorExited = once(supervisor, 'exit');
   await once(supervisor, 'spawn');
   assert.ok(supervisor.pid);
+  const supervisorIdentity = await procIdentity(supervisor.pid);
+  assert.ok(supervisorIdentity);
+  supervisor.kill();
   await supervisorExited;
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
   await mkdir(sessionDir, { recursive: true });
+  const launchId = randomUUID();
+  const launchDir = join(sessionDir, 'launches', launchId);
+  await mkdir(launchDir, { recursive: true, mode: 0o700 });
+  const identity = await procIdentity(pid);
+  assert.ok(identity);
+  await writeFile(join(sessionDir, 'active-launch.json'), JSON.stringify({
+    version: 1, id: launchId, sessionId: 'fixture-session', cwd: directory,
+    host: { pid, start: identity.start, instanceId: 'fixture-host' },
+  }));
+  await writeFile(join(launchDir, 'supervisor.json'), JSON.stringify({
+    pid: supervisor.pid, start: supervisorIdentity.start, spawnFailed: true,
+  }));
   const executable = join(directory, 'omp');
   const statePath = join(directory, 'registry.json');
   const startedPidPath = join(directory, 'started.pid');
   const commandsPath = join(directory, 'commands.jsonl');
   await writeFile(commandsPath, '');
-  const socketPath = join(directory, 'host.sock');
-  const lifecyclePath = join(sessionDir, 'lifecycle.json');
+  const socketPath = join(tmpdir(), `omp-tg-${randomUUID().replaceAll('-', '').slice(0, 24)}.sock`);
+  const startupSocketPath = join(tmpdir(), `omp-tg-${randomUUID().replaceAll('-', '').slice(0, 24)}.sock`);
+  const lifecyclePath = join(launchDir, 'lifecycle.json');
   const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
     pid, cwd: directory, access: 'control', relayConnected: true, busy: false };
   const url = `wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
@@ -59,7 +76,7 @@ if (process.argv[2] !== 'collab') {
   if (!state.startupHost) throw new Error('Unexpected managed host startup');
   if (state.host) throw new Error('Managed host startup requires an empty host registry');
   const host = { ...state.startupHost, pid: process.pid };
-  const socketPath = ${JSON.stringify(join(directory, 'started.sock'))};
+  const socketPath = ${JSON.stringify(startupSocketPath)};
   const descriptor = {pid:process.pid,supervisorPid:Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
     sessionId:host.sessionId,socketPath,retiring:false,worktree:true,retirement:1};
   const server = net.createServer(socket => {
@@ -79,9 +96,10 @@ if (process.argv[2] !== 'collab') {
     });
   });
   server.listen(socketPath, () => {
+    fs.chmodSync(socketPath, 0o600);
     fs.writeFileSync(${JSON.stringify(startedPidPath)}, String(process.pid));
     const publish = () => {
-      fs.writeFileSync(process.env.OMP_TELEGRAM_SESSION_DIR+'/lifecycle.json', JSON.stringify(descriptor));
+      fs.writeFileSync(process.env.OMP_TELEGRAM_SESSION_DIR+'/lifecycle.json', JSON.stringify(descriptor), {mode:0o600});
       fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
     };
     if (!state.holdStartup) publish();
@@ -102,7 +120,7 @@ if (process.argv[2] !== 'collab') {
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
   const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
     pid, supervisorPid: supervisor.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
-  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor));
+  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor), { mode: 0o600 });
   await persistLifecycle();
   const requests: RetirementRequest[] = [];
   const delayed = Promise.withResolvers<void>();
@@ -111,7 +129,7 @@ if (process.argv[2] !== 'collab') {
   let startupControl: Socket | undefined;
   const handled: Promise<void>[] = [];
   const failures: unknown[] = [];
-  const grantPath = (requestId: string) => join(sessionDir, `retirement-${requestId}.request`);
+  const grantPath = (requestId: string) => join(launchDir, `retirement-${requestId}.request`);
   async function accept(request: RetirementRequest): Promise<boolean> {
     if (request.sessionId !== descriptor.sessionId || request.pid !== descriptor.pid || Date.now() >= request.deadline) return false;
     const next = { ...descriptor, retiring: true };
@@ -129,7 +147,11 @@ if (process.argv[2] !== 'collab') {
   const handleConnection = (socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
-    socket.on('error', () => {});
+    socket.on('error', error => {
+      // These scenarios deliberately abandon the client while its request remains pending.
+      if (['delayed', 'uncertain', 'never-received', 'cancel-failure'].includes(mode) && ['ECONNRESET', 'EPIPE'].includes((error as NodeJS.ErrnoException).code ?? '')) return;
+      failures.push(error);
+    });
     if (mode === 'never-received') { socket.pause(); return; }
     let input = '';
     socket.on('data', data => {
@@ -168,6 +190,7 @@ if (process.argv[2] !== 'collab') {
   server.once('error', listening.reject);
   server.listen(socketPath, listening.resolve);
   await listening.promise;
+  await chmod(socketPath, 0o600);
   const config: AppConfig = { bots: [], instances: [{id: 1, defaultDir: directory, chats: []}],
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir,
@@ -177,13 +200,20 @@ if (process.argv[2] !== 'collab') {
   const session: TopicSession = { id: 'topic', botId: 1, chatId: -100, threadId: 2,
     instanceId: 1, cwd: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
   return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
+    launchDir,
+    async resetLaunch() { await rm(join(sessionDir, 'active-launch.json'), { force: true }); },
+    async exitHost() {
+      assert.ok(fixtureProcess);
+      fixtureProcess.kill();
+      await fixtureExited;
+    },
     async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
     async removeHost() { state.host = undefined; await persistRegistry(); },
     async rotateConnection() { host.generation++; await persistRegistry(); },
     waitForStartup() { return startup.promise; },
     async publishStartup() { assert.ok(startupControl); startupControl.end('publish\n'); },
     async release() { delayed.resolve(); await Promise.all(handled); assert.deepEqual(failures, []); },
-    async grants() { return (await readdir(sessionDir)).filter(name => /^retirement-.*\.request$/.test(name)); },
+    async grants() { return (await readdir(launchDir)).filter(name => /^retirement-.*\.request$/.test(name)); },
     async failLink(value: boolean) { state.failLink = value; await persistRegistry(); },
     async prepareHostStartup(holdStartup = false) {
       state.holdStartup = holdStartup;
@@ -196,7 +226,7 @@ if (process.argv[2] !== 'collab') {
       host.instanceId = 'replacement-host';
       host.generation++;
       descriptor.pid = pid;
-      descriptor.socketPath = join(directory, `replacement-${randomUUID()}.sock`);
+      descriptor.socketPath = join(tmpdir(), `omp-tg-${randomUUID().replaceAll('-', '').slice(0, 24)}.sock`);
       descriptor.retiring = false;
       const replacement = createServer(handleConnection);
       servers.push(replacement);
@@ -204,6 +234,7 @@ if (process.argv[2] !== 'collab') {
       replacement.once('error', listening.reject);
       replacement.listen(descriptor.socketPath, listening.resolve);
       await listening.promise;
+      await chmod(descriptor.socketPath, 0o600);
       await persistLifecycle();
       state.host = host;
       state.failLink = false;
@@ -238,6 +269,7 @@ if (process.argv[2] !== 'collab') {
         server.close(() => closed.resolve());
         return closed.promise;
       }));
+      await rm(startupSocketPath, { force: true });
       await rm(directory, { recursive: true, force: true });
       assert.deepEqual(failures, []);
     },

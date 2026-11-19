@@ -1,4 +1,3 @@
-import { type ChildProcess } from 'node:child_process';
 import type { HostBinding } from '../../shared/contracts.js';
 export class ConversationTransitionPendingError extends Error {
   constructor(message: string) {
@@ -62,11 +61,9 @@ export interface DurableBinding {
 }
 
 export interface ManagedHost {
-  process?: ChildProcess;
   binding?: HostBinding;
   sessionId: string;
   cwd?: string;
-  identity?: { pid: number; start: string };
   exited: boolean;
   retiring: boolean;
   failure?: string;

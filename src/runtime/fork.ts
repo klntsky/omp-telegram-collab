@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
-import { type ForkTarget, type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
+import { type ForkTarget, type RegistryHost, type DurableBinding, type HostActivity } from './types.js';
 import { privateFile, writeBinding, readHeader } from './files.js';
 import { record, errno } from './values.js';
+import { launchUnresolved } from './launch-record.js';
 interface ForkDependencies {
   assertActive(): void;
   readonly closed: boolean;
@@ -15,7 +16,6 @@ interface ForkDependencies {
   readonly reservations: Map<symbol, string>;
   acquire(): Promise<void>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;
-  readonly managed: Map<string, ManagedHost | null>;
   validatedSessionCwd(session: TopicSession): Promise<string>;
   list(deadline: number): Promise<RegistryHost[]>;
   forkRpc(sessionFile: string, cwd: string, config: string, command: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -60,7 +60,7 @@ export function createFork(deps: ForkDependencies): RuntimeFork {
           throw new Error('Unpinned managed histories require explicit recovery');
         } catch (error) { if (!errno(error, 'ENOENT')) throw error; }
       }
-      if (await deps.readManagedBinding(destination) || deps.managed.get(destination.id)) throw new Error('Fork destination already has an OMP conversation');
+      if (await deps.readManagedBinding(destination) || await launchUnresolved(path.join(deps.config.dataDir, 'sessions', destination.id))) throw new Error('Fork destination already has an OMP conversation');
       const cwd = pin?.cwd ?? await deps.validatedSessionCwd(source);
       if (pin) {
         const hosts = (await deps.list(Date.now() + deps.config.omp.startupTimeoutMs)).filter(host => host.sessionId === pin.sessionId);

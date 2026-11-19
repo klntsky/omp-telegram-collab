@@ -11,6 +11,7 @@ test('stop fences pending admission before it can launch a managed supervisor', 
   t.after(() => app.close());
   await app.prepareHostStartup();
   await rm(app.lifecyclePath);
+  await app.resetLaunch();
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   let callbacks = 0;
@@ -34,6 +35,7 @@ test('managed startup refreshes mutation authorization after admission and prese
   t.after(() => app.close());
   await app.prepareHostStartup();
   await rm(app.lifecyclePath);
+  await app.resetLaunch();
   const denied = new Error('Session closed while starting');
   let callbacks = 0;
   await assert.rejects(app.runtime.ensure(app.session, async () => {
@@ -49,6 +51,7 @@ test('stop during managed startup waits for lifecycle publication and retires th
   t.after(() => app.close());
   await app.prepareHostStartup(true);
   await rm(app.lifecyclePath);
+  await app.resetLaunch();
   const starting = app.runtime.ensure(app.session);
   const rejected = assert.rejects(starting, /stopping/);
   const { pid, supervisorPid } = await app.waitForStartup();
@@ -88,6 +91,7 @@ test('reservations serialize competing targets without spawning and share an exi
   t.after(() => app.close());
   await app.removeHost();
   await rm(app.lifecyclePath);
+  await app.resetLaunch();
   const results = await Promise.allSettled([app.runtime.reserveSession('first'),app.runtime.reserveSession('second')]);
   assert.equal(results.filter(result => result.status === 'fulfilled').length,1);
   assert.equal(results.filter(result => result.status === 'rejected').length,1);
@@ -140,6 +144,7 @@ test('an unresolved launch blocks a duplicate even without lifecycle or registry
   t.after(() => app.close());
   await app.removeHost();
   await rm(app.lifecyclePath);
+  await app.resetLaunch();
   await beginLaunch(app.sessionDir, app.host.sessionId, app.session.cwd);
   const launch = await readLaunch(app.sessionDir);
   await assert.rejects(app.runtime.ensure(app.session));
@@ -150,8 +155,11 @@ test('an unresolved launch blocks a duplicate even without lifecycle or registry
 test('host discovery waits for exact supervisor child evidence publication', async t => {
   const app = await fixture();
   t.after(() => app.close());
+  await app.resetLaunch();
   const directory = await beginLaunch(app.sessionDir, app.host.sessionId, app.session.cwd);
   const identity = await procIdentity(process.pid);
+  const hostIdentity = await procIdentity(app.host.pid);
+  assert.ok(hostIdentity);
   assert.ok(identity);
   const evidence = { pid: process.pid, start: identity.start };
   await writeFile(`${directory}/supervisor.json`, JSON.stringify(evidence));
@@ -164,6 +172,6 @@ test('host discovery waits for exact supervisor child evidence publication', asy
   await rename(`${directory}/supervisor.json.tmp`, `${directory}/supervisor.json`);
   await recording;
   assert.deepEqual((await readLaunch(app.sessionDir))?.host, {
-    pid: process.pid, start: identity.start, instanceId: app.host.instanceId,
+    pid: app.host.pid, start: hostIdentity.start, instanceId: app.host.instanceId,
   });
 });

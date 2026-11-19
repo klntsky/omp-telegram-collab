@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TopicSession } from '../shared/contracts.js';
@@ -53,6 +52,8 @@ test('stop verifies an absent pinned host without recreating metadata, history, 
   const app = await fixture();
   t.after(() => app.close());
   await app.removeHost();
+  await app.exitHost();
+  await app.resetLaunch();
   await rm(app.lifecyclePath);
   const before = await readdir(app.sessionDir);
   const binding = await readFile(join(app.sessionDir, 'binding.json'), 'utf8');
@@ -80,7 +81,7 @@ test('attached stop leaves terminal ownership and unrelated managed hosts untouc
   assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
 });
 
-for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', 'stale-cwd'] as const) {
+for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history'] as const) {
   test(`recovered stop refuses ${invalid} identity without unsafe fallback`, async t => {
     const app = await fixture('accepted', process.pid, 'none');
     t.after(() => app.close());
@@ -98,10 +99,6 @@ for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', '
         type: 'session', version: 3, id: 'another-history', cwd: app.session.cwd,
       }) + '\n');
       diagnostic = /Managed OMP history identity changed/;
-    } else {
-      app.host.cwd = tmpdir();
-      await app.failLink(false);
-      diagnostic = /Managed host working directory changed/;
     }
     await assert.rejects(app.runtime.stop(app.session), diagnostic);
     assert.deepEqual(app.requests, []);

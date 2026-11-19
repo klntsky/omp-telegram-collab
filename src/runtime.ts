@@ -2,13 +2,16 @@ import { createConversation, type RuntimeConversation } from './runtime/conversa
 import { createActivity, type RuntimeActivity } from './runtime/activity.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { unresolvedLaunches } from './runtime/launch-record.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { AppConfig, HostBinding, TopicSession } from '../shared/contracts.js';
 import { refreshTermination } from './config.js';
 import { HistoryWatch } from './history-watch.js';
 import { connectCollab, readCollabState } from './collab.js';
 import type { Omp } from './omp.js';
-import { SessionRetiringError, type ForkTarget, type ManagedHost } from './runtime/types.js';
+import { SessionRetiringError, type DurableBinding, type ForkTarget, type ManagedHost } from './runtime/types.js';
 import { FORBIDDEN_ARGS } from './runtime/arguments.js';
 import { record } from './runtime/values.js';
 import { createFork, type RuntimeFork } from './runtime/fork.js';
@@ -35,8 +38,8 @@ export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
   },
 };
 
-// The facade owns the native-host ledger: admission, leases and operation fencing
-// must observe the same identities. Domain owners receive only their required capabilities.
+// Runtime caches coordinate operations; only durable launch evidence establishes
+// managed-process ownership. Registry entries describe connection capabilities.
 export class OmpRuntime implements Omp {
   readonly #activity: RuntimeActivity;
   observeFrame: (id: string, frame: HostFrame) => void;
@@ -73,7 +76,7 @@ export class OmpRuntime implements Omp {
   #closing?: Promise<void>;
   readonly #idleTimer: NodeJS.Timeout;
   #sessionLimit: number;
-  constructor(config: AppConfig, beforeConversationChange?: (session: TopicSession) => void) {
+  constructor(config: AppConfig, beforeConversationChange?: (id: string) => void) {
     if (!Number.isInteger(config.omp.maxSessions) || config.omp.maxSessions < 1 || !Number.isFinite(config.omp.startupTimeoutMs) || config.omp.startupTimeoutMs < 1) {
       throw new Error('Invalid OMP runtime limits');
     }
@@ -99,7 +102,6 @@ export class OmpRuntime implements Omp {
       reservations: this.#reservations,
       acquire: () => runtime.#ownership.acquire(),
       readManagedBinding: session => runtime.#readManagedBinding(session),
-      managed: this.#managed,
       validatedSessionCwd: (session) => runtime.#paths.validatedSessionCwd(session),
       list: (deadline) => runtime.#registry.list(deadline),
       forkRpc: (sessionFile, cwd, config, command) => runtime.#forkRpc.forkRpc(sessionFile, cwd, config, command),
@@ -134,7 +136,6 @@ export class OmpRuntime implements Omp {
     });
     this.#paths = createPaths({
       config: this.#config,
-      managed: this.#managed,
     });
     this.#registry = createRegistry({
       config: this.#config,
@@ -155,8 +156,6 @@ export class OmpRuntime implements Omp {
     });
     this.#hostControl = createHostControl({
       config: this.#config,
-      list: (deadline) => runtime.#registry.list(deadline),
-      resolve: (host, deadline) => runtime.#registry.resolve(host, deadline),
       assertActive: () => runtime.#assertActive(),
       get closed() { return runtime.#closed; },
       stopping: this.#stopping,
@@ -190,21 +189,18 @@ export class OmpRuntime implements Omp {
       lifecycle: (id) => runtime.#ownership.lifecycle(id),
       presetLaunch: (session) => runtime.#settings.presetLaunch(session),
       killing: this.#killing,
-      shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
     });
     this.#processKill = createProcessKill({
       config: this.#config,
       managed: this.#managed,
       forgetActivity: id => runtime.#activity.forget(id),
       list: (deadline) => runtime.#registry.list(deadline),
-      lifecycle: (id) => runtime.#ownership.lifecycle(id),
     });
     this.#retirement = createRetirement({
       managed: this.#managed,
       forgetActivity: id => runtime.#activity.forget(id),
       killing: this.#killing,
       lifecycle: (id) => runtime.#ownership.lifecycle(id),
-      list: (deadline) => runtime.#registry.list(deadline),
       config: this.#config,
     });
     this.#ownership = createOwnership({
@@ -213,17 +209,12 @@ export class OmpRuntime implements Omp {
     });
     this.#admission = createAdmission({
       config: this.#config,
-      lifecycle: (id) => runtime.#ownership.lifecycle(id),
       managed: this.#managed,
       hostActivity: (id) => runtime.#activity.hostActivity(id),
       assertActive: () => runtime.#assertActive(),
       get closed() { return runtime.#closed; },
       acquire: () => runtime.#ownership.acquire(),
-      list: (deadline) => runtime.#registry.list(deadline),
-      pending: this.#pending,
-      forgetActivity: id => runtime.#activity.forget(id),
       reservations: this.#reservations,
-      capacityUsed: () => runtime.#capacityUsed(),
       get sessionLimit() { return runtime.#sessionLimit; },
       retireIdle: (idleMs) => runtime.retireIdle(idleMs),
     });
@@ -237,7 +228,6 @@ export class OmpRuntime implements Omp {
       stopping: this.#stopping,
       readManagedBinding: session => runtime.#readManagedBinding(session),
       resolve: (host, deadline) => runtime.#registry.resolve(host, deadline),
-      managed: this.#managed,
       hostActivity: (id) => runtime.#activity.hostActivity(id),
     });
     this.#termination = createTermination({
@@ -312,9 +302,6 @@ export class OmpRuntime implements Omp {
       release: () => { this.#reservations.delete(token); },
     };
   }
-  #capacityUsed(): number {
-    return new Set([...this.#managed.keys(), ...this.#reservations.values()]).size;
-  }
   topicTitleStatus: (session: TopicSession) => Promise<{ worktree: boolean; branch?: string }>;
   fork: (source: TopicSession, destination: TopicSession, target?: ForkTarget, beforeMutation?: () => Promise<void>) => Promise<void>;
   existingBinding: (session: TopicSession) => Promise<{sessionId: string} | undefined>;
@@ -328,11 +315,31 @@ export class OmpRuntime implements Omp {
   }
   validateSessionPaths: (sessions: TopicSession[], config?: AppConfig) => Promise<void>;
   async retireIdle(idleMs = 300000): Promise<number> {
+    if (this.#closed && !this.#ownership.acquired) return 0;
+    await this.#ownership.acquire();
     let retired = 0;
-    const candidates = [...this.#managed.entries()].sort(([a],[b]) => this.#activity.hostActivity(a).lastUsed-this.#activity.hostActivity(b).lastUsed);
-    for (const [id,host] of candidates) {
+    const launches = await unresolvedLaunches(this.#config.dataDir);
+    const candidates = [...new Set([...launches.keys(), ...this.#managed.keys()])]
+      .sort((a, b) => this.#activity.hostActivity(a).lastUsed - this.#activity.hostActivity(b).lastUsed);
+    for (const id of candidates) {
+      const launch = launches.get(id);
       const activity = this.#activity.hostActivity(id);
-      if (!host || this.#pending.has(id) || [...this.#reservations.values()].includes(id) || (!host.retiring && (activity.busy || activity.leases || Date.now()-activity.lastUsed < idleMs))) continue;
+      let host = this.#managed.get(id);
+      if (this.#pending.has(id) || [...this.#reservations.values()].includes(id)) continue;
+      if (!launch) {
+        if (host) {
+          await this.#termination.stopHost(id, 'idle');
+          if (host.exited) retired++;
+        }
+        continue;
+      }
+      if (!host?.retiring && (activity.busy || activity.leases || Date.now() - activity.lastUsed < idleMs)) continue;
+      if (!host) {
+        const pin = JSON.parse(await readFile(path.join(this.#config.dataDir, 'sessions', id, 'binding.json'), 'utf8')) as DurableBinding;
+        host = { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
+        this.#managed.set(id, host);
+      }
+      if (!this.#closed) await this.#conversation.refresh({ id, cwd: host.cwd ?? launch.cwd, runtime: { kind: 'managed' } });
       await this.#termination.stopHost(id, 'idle');
       if (host.exited) retired++;
     }

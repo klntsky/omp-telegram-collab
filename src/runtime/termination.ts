@@ -1,5 +1,5 @@
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
-import { type DurableBinding, type ManagedHost } from './types.js';
+import { SessionRetiringError, type DurableBinding, type ManagedHost } from './types.js';
 interface TerminationDependencies {
   readonly config: AppConfig;
   readonly managed: Map<string, ManagedHost | null>;
@@ -34,9 +34,10 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
 
   function stopHost(id: string, guard?: 'idle' | 'worktree', session?: TopicSession): Promise<void> {
     const pending = deps.stopping.get(id);
-    if (pending) return session ? pending.then(() => stopHost(id, guard, session)) : pending;
+    if (pending) return pending;
     const operation = (async () => {
-      await deps.pending.get(id)?.catch(() => undefined);
+      try { await deps.pending.get(id); }
+      catch (error) { if (!(error instanceof SessionRetiringError)) throw error; }
       let host = deps.managed.get(id);
       if (session) {
         const pin = await deps.readManagedBinding(session);
@@ -58,27 +59,30 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
     if (deps.closed) return Promise.reject(new Error('OMP runtime is stopping'));
     const pending = deps.killing.get(session.id);
     if (pending) return pending;
-    const ids = new Set([session.id]);
-    const sessionId = session.runtime.kind === 'attached' ? session.runtime.sessionId : deps.managed.get(session.id)?.sessionId;
-    if (sessionId) {
-      for (const [id, host] of deps.managed) {
-        if (host?.sessionId === sessionId) ids.add(id);
-      }
-    }
+    const id = session.id;
+    const stopping = deps.stopping.get(id);
     const operation = Promise.resolve().then(async () => {
-      await Promise.allSettled([...ids].map(id => deps.pending.get(id)));
-      await deps.acquire();
-      await deps.killSession(session);
-    }).finally(() => {
-      for (const id of ids) {
-        if (deps.killing.get(id) === operation) deps.killing.delete(id);
-        if (deps.stopping.get(id) === operation) deps.stopping.delete(id);
+      const results = await Promise.allSettled([deps.pending.get(id), stopping]);
+      const failures = results.filter((result): result is PromiseRejectedResult =>
+        result.status === 'rejected' && !(result.reason instanceof SessionRetiringError));
+      try {
+        await deps.acquire();
+        await deps.killSession(session);
+      } catch (error) {
+        if (failures.length) {
+          const errors = [...failures.map(result => result.reason), error];
+          throw new AggregateError(errors, errors.map(value => value instanceof Error ? value.message : String(value)).join('\n'));
+        }
+        throw error;
       }
+      if (failures.length === 1) throw failures[0]!.reason;
+      if (failures.length > 1) throw new AggregateError(failures.map(result => result.reason), failures.map(result => result.reason instanceof Error ? result.reason.message : String(result.reason)).join('\n'));
+    }).finally(() => {
+      if (deps.killing.get(id) === operation) deps.killing.delete(id);
+      if (deps.stopping.get(id) === operation) deps.stopping.delete(id);
     });
-    for (const id of ids) {
-      deps.killing.set(id, operation);
-      deps.stopping.set(id, operation);
-    }
+    deps.killing.set(id, operation);
+    deps.stopping.set(id, operation);
     return operation;
   }
 

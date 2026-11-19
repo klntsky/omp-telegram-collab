@@ -1,10 +1,8 @@
-import { launchUnresolved } from './launch-record.js';
-import { readFile, realpath } from 'node:fs/promises';
+import { launchProcess, readLaunch, launchUnresolved } from './launch-record.js';
+import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
-import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
-import { procIdentity } from './process.js';
-import { errno } from './values.js';
+import { type RegistryHost, type DurableBinding, type HostActivity } from './types.js';
 interface SessionsDependencies {
   assertActive(): void;
   readonly closed: boolean;
@@ -15,7 +13,6 @@ interface SessionsDependencies {
   readonly stopping: Map<string, Promise<void>>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;
   resolve(host: RegistryHost, deadline: number): Promise<HostBinding>;
-  readonly managed: Map<string, ManagedHost | null>;
   hostActivity(id: string): HostActivity;
 }
 
@@ -35,28 +32,11 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     if (deps.pending.has(session.id)) return true;
     if (session.runtime.kind === 'managed') await deps.acquire();
     if (session.runtime.kind === 'managed') {
-      if (await launchUnresolved(path.join(deps.config.dataDir, 'sessions', session.id))) return true;
-      const owned = deps.managed.get(session.id);
-      if (owned?.identity) {
-        const identity = await procIdentity(owned.identity.pid);
-        if (identity?.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') return true;
-      }
-      if (owned?.process?.pid && !owned.exited) {
-        const identity = await procIdentity(owned.process.pid);
-        if (identity && identity.state !== 'Z' && identity.state !== 'X') return true;
-      }
+      return launchUnresolved(path.join(deps.config.dataDir, 'sessions', session.id));
     }
     const hosts = await deps.list(Date.now() + deps.config.omp.startupTimeoutMs);
     const runtime = session.runtime;
-    if (runtime.kind === 'attached') return hosts.some(host => host.instanceId === runtime.instanceId && host.sessionId === runtime.sessionId && host.cwd === session.cwd);
-    let pin: DurableBinding;
-    try {
-      pin = JSON.parse(await readFile(path.join(deps.config.dataDir,'sessions',session.id,'binding.json'),'utf8')) as DurableBinding;
-    } catch (error) {
-      if (errno(error,'ENOENT')) return false;
-      throw error;
-    }
-    return pin.cwd === session.cwd && hosts.some(host => host.sessionId === pin.sessionId && host.cwd === pin.cwd);
+    return hosts.some(host => host.instanceId === runtime.instanceId && host.sessionId === runtime.sessionId && host.cwd === session.cwd);
   }
 
   async function resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
@@ -70,6 +50,9 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
       pin = await deps.readManagedBinding(session);
       if (!pin) {
         deps.assertActive();
+        if (await launchUnresolved(path.join(deps.config.dataDir, 'sessions', session.id))) {
+          throw new Error('OMP host is not registered; launch ownership remains unresolved');
+        }
         if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
         return undefined;
       }
@@ -78,12 +61,14 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
       throw new Error('Invalid OMP instance identifier');
     }
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
+    const root = path.join(deps.config.dataDir, 'sessions', session.id);
+    const launch = runtime.kind === 'managed' ? await readLaunch(root) : undefined;
     const hosts = await deps.list(deadline);
     deps.assertActive();
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     const matches = hosts.filter(host => runtime.kind === 'attached'
       ? host.instanceId === runtime.instanceId
-      : host.sessionId === pin!.sessionId);
+      : launch && !launch.resolved && launch.host && host.pid === launch.host.pid && host.instanceId === launch.host.instanceId);
     if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
     const host = matches[0];
     if (!host) {
@@ -97,33 +82,17 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
       if (await realpath(session.cwd) !== session.cwd || await realpath(host.cwd) !== session.cwd) {
         throw new Error('Attached host does not belong to this instance path');
       }
-    } else if (await realpath(host.cwd) !== pin!.cwd) {
-      throw new Error('Managed host working directory changed');
+    } else {
+      if (await realpath(host.cwd) !== pin!.cwd) throw new Error('Managed host working directory changed');
+      if (host.sessionId !== pin!.sessionId || !await launchProcess(root, host.pid)) {
+        throw new Error('OMP host is not registered; launch ownership remains unresolved');
+      }
     }
     const binding = await deps.resolve(host, deadline);
     deps.assertActive();
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (runtime.kind === 'managed') {
-      const owned = deps.managed.get(session.id);
-      if (!owned || owned.exited) {
-        const identity = await procIdentity(host.pid);
-        deps.managed.set(session.id,{sessionId:pin!.sessionId,cwd:pin!.cwd,binding,exited:false,retiring:false,
-          ...(identity ? { identity: { pid: host.pid, start: identity.start } } : {})});
-        deps.hostActivity(session.id).busy = host.busy !== false;
-      } else if (owned.binding?.instanceId === binding.instanceId && owned.binding.sessionId === binding.sessionId &&
-          owned.binding.generation !== binding.generation && owned.identity?.pid === host.pid) {
-        const previous = owned.binding;
-        const previousIdentity = owned.identity;
-        const identity = await procIdentity(host.pid);
-        deps.assertActive();
-        if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-        // Passive reconnect must refresh retirement's room identity without
-        // granting ownership of a replacement process or overwriting a newer lookup.
-        if (identity && identity.start === previousIdentity.start && identity.state !== 'Z' && identity.state !== 'X' &&
-            deps.managed.get(session.id) === owned && owned.binding === previous && owned.identity === previousIdentity && !owned.exited) {
-          owned.binding = binding;
-        }
-      }
+      deps.hostActivity(session.id).busy = host.busy !== false;
     }
     return binding;
   }

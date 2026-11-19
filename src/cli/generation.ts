@@ -63,10 +63,10 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
   if (initialLaunch) stdout.write(`Service timing process-start-to-launch bootstrap/dependencies/config: ${launchAt.toFixed(1)} ms\n`);
   const restartMarker = join(config.dataDir, 'restart-timing.json');
   let store: Store | undefined;
-  const runtime = new OmpRuntime(config, session => {
+  const runtime = new OmpRuntime(config, id => {
     if (!store) throw new Error('Conversation changed before the session store was opened');
-    store.setPendingSessionTitle(session.id, undefined);
-    store.setReplyTarget(session.id, undefined);
+    store.setPendingSessionTitle(id, undefined);
+    store.setReplyTarget(id, undefined);
   });
   const bots: BotService[] = [];
   let server: GatewayServer | undefined;

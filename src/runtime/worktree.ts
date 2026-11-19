@@ -1,7 +1,7 @@
-import { activeLaunchDir } from './launch-record.js';
+import { activeLaunchDir, unresolvedLaunches } from './launch-record.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
-import { chmod, lstat, realpath } from 'node:fs/promises';
+import { chmod, lstat, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import type { WorktreeTarget } from '../omp.js';
@@ -138,16 +138,16 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
           throw new Error('An OMP host still uses this worktree');
         }
       }
-      await beforeMutation();
-      assertBoundary(operation);
-      for (const [id, host] of deps.managed) {
-        if (!host || host.exited) continue;
-        if (id === session.id || host.sessionId === target.sessionId) throw new Error('OMP host has not stopped; worktree cleanup refused');
-        if (host.cwd) {
-          const cwd = realpathSync(host.cwd);
+      for (const [id, launch] of await unresolvedLaunches(deps.config.dataDir)) {
+        const binding = JSON.parse(await readFile(path.join(deps.config.dataDir, 'sessions', id, 'binding.json'), 'utf8')) as DurableBinding;
+        if (id === session.id || binding.sessionId === target.sessionId) throw new Error('OMP host has not stopped; worktree cleanup refused');
+        for (const directory of new Set([launch.cwd, binding.cwd])) {
+          const cwd = await realpath(directory);
           if (contains(target.path, cwd) || contains(cwd, target.path)) throw new Error('Another managed OMP host uses this worktree');
         }
       }
+      await beforeMutation();
+      assertBoundary(operation);
       const directory = lstatSync(target.path);
       if (!directory.isDirectory() || directory.isSymbolicLink() || realpathSync(target.path) !== target.path ||
           directory.dev !== target.dev || directory.ino !== target.ino) throw new Error(`Worktree directory identity changed: ${target.path}`);
@@ -182,9 +182,8 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     await deps.ensure(session, beforeMutation);
     const host = deps.managed.get(session.id);
     if (!host) throw new Error('Managed OMP host is not available');
-    const registered = (await deps.list(Date.now() + deps.config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-    if (deps.hostActivity(session.id).busy || deps.hostActivity(session.id).leases || registered?.busy === true) {
+    if (deps.hostActivity(session.id).busy || deps.hostActivity(session.id).leases) {
       throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
     }
     const operation = (async () => {

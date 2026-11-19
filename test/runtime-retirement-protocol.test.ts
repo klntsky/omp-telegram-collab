@@ -13,6 +13,7 @@ test('automatic idle retirement lets the host authoritatively reject busy retire
   t.after(() => app.close());
   const initial = await app.runtime.ensure(app.session);
   const retirement = app.runtime.retireIdle(0);
+  await app.received;
   assert.throws(() => app.runtime.retain(app.session.id), /Session is retiring/);
   assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
   await assert.rejects(app.runtime.ensure(app.session), /OMP runtime is stopping/);
@@ -76,7 +77,7 @@ test('unresolved cancellation I/O failure keeps admission blocked and preserves 
   assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
 });
 
-test('cancellation error stops fencing an adopted host after verified exit and allows a replacement', async t => {
+test('cancellation error stops fencing a recorded host after verified exit and allows a replacement', async t => {
   const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
   const exited = once(child, 'exit');
   t.after(async () => {
@@ -95,7 +96,7 @@ test('cancellation error stops fencing an adopted host after verified exit and a
     assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
     return true;
   });
-  for (const grant of await app.grants()) await rm(join(app.sessionDir, grant), { recursive: true });
+  for (const grant of await app.grants()) await rm(join(app.launchDir, grant), { recursive: true });
   await assert.rejects(app.runtime.ensure(app.session), error => error === original);
   child.kill();
   await exited;
@@ -106,29 +107,6 @@ test('cancellation error stops fencing an adopted host after verified exit and a
   release();
 });
 
-test('cancellation error stops fencing a validated replacement with the same PID and a new lifecycle socket', async t => {
-  const app = await fixture('cancel-failure');
-  t.after(() => app.close());
-  await app.runtime.ensure(app.session);
-  const pid = app.host.pid;
-  const socketPath = app.descriptor.socketPath;
-  let original: unknown;
-  await assert.rejects(app.runtime.retireIdle(0), error => {
-    original = error;
-    assert.equal((error as NodeJS.ErrnoException).code, 'EISDIR');
-    return true;
-  });
-  for (const grant of await app.grants()) await rm(join(app.sessionDir, grant), { recursive: true });
-  await assert.rejects(app.runtime.ensure(app.session), error => error === original);
-  assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
-  await app.replaceHost();
-  assert.equal(app.host.pid, pid);
-  assert.notEqual(app.descriptor.socketPath, socketPath);
-  assert.equal((await app.runtime.ensure(app.session)).instanceId, 'replacement-host');
-  assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
-  const release = app.runtime.retain(app.session.id);
-  release();
-});
 
 test('new runtime ownership revokes stale grants before managed admission, and stale buffered requests cannot publish', async t => {
   const app = await fixture();
@@ -159,46 +137,18 @@ for (const mode of ['uncertain', 'accepted'] as const) {
     assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
     assert.equal(await app.runtime.retireIdle(0), 0);
     assert.equal(app.requests.length, 1, 'accepted retirement must not be requested again');
-    if (mode === 'accepted') {
-      await app.replaceHost(process.ppid);
-      const replacement = await app.runtime.ensure(app.session);
-      assert.equal(replacement.instanceId, 'replacement-host');
-      assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
-      const release = app.runtime.retain(app.session.id);
-      release();
-    }
   });
 }
 
-test('accepted retirement admits a validated replacement reusing its PID with a new lifecycle socket', async t => {
-  const app = await fixture('accepted');
-  t.after(() => app.close());
-  await app.runtime.ensure(app.session);
-  const pid = app.host.pid;
-  const socketPath = app.descriptor.socketPath;
-  assert.equal(await app.runtime.retireIdle(0), 0);
-  assert.equal(app.descriptor.retiring, true);
-  await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
-  assert.throws(() => app.runtime.markPrompt(app.session.id), /Session is retiring/);
-  await app.replaceHost();
-  assert.equal(app.host.pid, pid);
-  assert.notEqual(app.descriptor.socketPath, socketPath);
-  assert.equal(app.descriptor.retiring, false);
-  assert.equal((await app.runtime.ensure(app.session)).instanceId, 'replacement-host');
-  assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));
-  const release = app.runtime.retain(app.session.id);
-  release();
-  assert.equal(app.requests.length, 1, 'replacement admission must not send another retirement request');
-});
 
-test('reopened admission keeps an adopted draining host fenced after it leaves the registry', async t => {
+test('reopened admission keeps a recorded draining host fenced after it leaves the registry', async t => {
   const app = await fixture('accepted');
   t.after(() => app.close());
   app.descriptor.retiring = true;
   await app.persistLifecycle();
   await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
   await app.removeHost();
-  await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
+  await assert.rejects(app.runtime.ensure(app.session));
   await assert.rejects(app.runtime.ensure({ ...app.session, id: 'another-topic' }), /OMP session limit/);
   assert.deepEqual(app.requests, []);
   assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename } from 'node:fs/promises';
+import { access, mkdir, open, readFile, readdir, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { privateFile } from './files.js';
 import { belongsTo, procIdentity } from './process.js';
@@ -20,12 +20,20 @@ async function durable(dir: string, name: string, value: unknown): Promise<void>
 }
 export async function readLaunch(dir: string): Promise<LaunchRecord | undefined> {
   const value = await json<LaunchRecord>(path.join(dir, 'active-launch.json'));
+  if (!value) {
+    for (const file of ['runtime.yml', 'lifecycle.json']) {
+      try { await access(path.join(dir, file)); }
+      catch (error) { if (errno(error, 'ENOENT')) continue; throw error; }
+      throw new Error('Untracked managed OMP launch; reconcile its processes before starting this runtime');
+    }
+  }
   if (value && (value.version !== 1 || !/^[a-f0-9-]{36}$/.test(value.id) || typeof value.sessionId !== 'string' || typeof value.cwd !== 'string')) throw new Error('Invalid managed OMP launch record');
   return value;
 }
 export async function activeLaunchDir(dir: string): Promise<string> {
   const launch = await readLaunch(dir);
-  return launch ? path.join(dir, 'launches', launch.id) : dir;
+  if (!launch) throw new Error('Managed OMP launch is not recorded');
+  return path.join(dir, 'launches', launch.id);
 }
 export async function beginLaunch(dir: string, sessionId: string, cwd: string): Promise<string> {
   if (await launchUnresolved(dir)) throw new Error('OMP launch ownership is unresolved; cannot safely start another process');
@@ -41,22 +49,28 @@ export async function cancelUnspawnedLaunch(dir: string): Promise<void> {
   const launch = await readLaunch(dir);
   if (launch) await durable(dir, 'active-launch.json', { ...launch, resolved: true });
 }
+export async function launchProcess(dir: string, pid: number): Promise<{ pid: number; start: string } | undefined> {
+  const launch = await readLaunch(dir);
+  if (!launch || launch.resolved) return undefined;
+  const identity = await procIdentity(pid);
+  if (!identity || identity.state === 'Z' || identity.state === 'X') return undefined;
+  if (launch.host) return launch.host.pid === pid && launch.host.start === identity.start ? { pid, start: identity.start } : undefined;
+  const evidence = await json<Evidence>(path.join(await activeLaunchDir(dir), 'supervisor.json'));
+  if (!evidence?.child || !await alive(evidence.child.pid, evidence.child.start) || !await belongsTo(pid, evidence.child.pid)) return undefined;
+  return { pid, start: identity.start };
+}
 export async function recordLaunchHost(dir: string, host: { pid: number; instanceId: string }): Promise<void> {
   const launch = await readLaunch(dir);
-  const identity = await procIdentity(host.pid);
-  if (launch) {
-    const evidencePath = path.join(await activeLaunchDir(dir), 'supervisor.json');
-    let evidence = await json<Evidence>(evidencePath);
-    const deadline = Date.now() + 1000;
-    while (!evidence?.child && !evidence?.spawnFailed && !evidence?.childExited && Date.now() < deadline) {
-      if (evidence && !await alive(evidence.pid, evidence.start)) break;
-      await delay(10);
-      evidence = await json<Evidence>(evidencePath);
-    }
-    if (!evidence?.child || !await belongsTo(host.pid, evidence.child.pid) ||
-        !await alive(evidence.child.pid, evidence.child.start)) throw new Error('Managed OMP launch host identity changed');
+  if (!launch) throw new Error('Managed OMP launch is not recorded');
+  const deadline = Date.now() + 1000;
+  let identity = await launchProcess(dir, host.pid);
+  while (!identity && Date.now() < deadline && !await settleLaunch(dir)) {
+    await delay(10);
+    identity = await launchProcess(dir, host.pid);
   }
-  if (launch && identity) await durable(dir, 'active-launch.json', { ...launch, host: { pid: host.pid, start: identity.start, instanceId: host.instanceId } });
+  if (!identity || (launch.host && launch.host.instanceId !== host.instanceId)) throw new Error('Managed OMP launch host identity changed');
+  if (launch.host) return;
+  await durable(dir, 'active-launch.json', { ...launch, host: { ...identity, instanceId: host.instanceId } });
 }
 async function alive(pid: number, start: string): Promise<boolean> {
   const identity = await procIdentity(pid);
@@ -84,6 +98,20 @@ export async function settleLaunch(dir: string): Promise<boolean> {
   return true;
 }
 export async function launchUnresolved(dir: string): Promise<boolean> { return !await settleLaunch(dir); }
+export async function unresolvedLaunches(dataDir: string): Promise<Map<string, LaunchRecord>> {
+  const result = new Map<string, LaunchRecord>();
+  const root = path.join(dataDir, 'sessions');
+  let entries;
+  try { entries = await readdir(root, { withFileTypes: true }); }
+  catch (error) { if (errno(error, 'ENOENT')) return result; throw error; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
+    const dir = path.join(root, entry.name);
+    const launch = await readLaunch(dir);
+    if (launch && !await settleLaunch(dir)) result.set(entry.name, launch);
+  }
+  return result;
+}
 export async function launchFailure(dir: string, error: unknown): Promise<void> {
   if (await readLaunch(dir)) await durable(await activeLaunchDir(dir), 'cleanup-error.json', { error: error instanceof Error ? error.message : String(error), at: new Date().toISOString() });
 }
@@ -93,26 +121,25 @@ export async function cleanupLaunch(dir: string): Promise<void> {
 export async function killLaunch(dir: string): Promise<void> {
   if (!await readLaunch(dir) || await settleLaunch(dir)) return;
   try {
-    const evidence = await json<Evidence>(path.join(await activeLaunchDir(dir), 'supervisor.json'));
-    const launch = await readLaunch(dir);
-    if (launch?.host && await alive(launch.host.pid, launch.host.start)) {
-      if (launch.host.pid <= 1 || launch.host.pid === process.pid) throw new Error('Invalid managed OMP launch host identity');
-      try { process.kill(launch.host.pid, 'SIGKILL'); }
-      catch (error) { if (!errno(error, 'ESRCH')) throw error; }
-    }
-    if (evidence?.child && await alive(evidence.child.pid, evidence.child.start)) {
-      if (evidence.child.pid <= 1 || evidence.child.pid === process.pid) throw new Error('Invalid managed OMP launch child identity');
-      try { process.kill(evidence.child.pid, 'SIGKILL'); }
-      catch (error) { if (!errno(error, 'ESRCH')) throw error; }
-    }
     const deadline = Date.now() + 5000;
+    // Cancellation can beat the supervisor's first publication; keep reading
+    // this launch's evidence rather than assuming the first empty read means no child.
     while (Date.now() < deadline) {
+      const evidence = await json<Evidence>(path.join(await activeLaunchDir(dir), 'supervisor.json'));
+      const launch = await readLaunch(dir);
+      for (const target of [launch?.host, evidence?.child]) {
+        if (!target || !await alive(target.pid, target.start)) continue;
+        if (target.pid <= 1 || target.pid === process.pid) throw new Error('Invalid managed OMP launch process identity');
+        try { process.kill(target.pid, 'SIGKILL'); }
+        catch (error) { if (!errno(error, 'ESRCH')) throw error; }
+      }
       if (await settleLaunch(dir)) return;
       await delay(100);
     }
     await cleanupLaunch(dir);
   } catch (error) {
     try { await launchFailure(dir, error); } catch (persistError) {
+      console.error('Managed OMP cleanup diagnostic persistence failed:', persistError);
       if (error instanceof Error) Object.defineProperty(error, 'persistenceError', { value: persistError, configurable: true });
     }
     throw error;

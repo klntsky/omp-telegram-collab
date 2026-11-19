@@ -6,10 +6,9 @@ import type { AppConfig, HostBinding, TopicSession } from '../../shared/contract
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
 import { SessionRetiringError } from './types.js';
 import { privateFile } from './files.js';
-import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
 import { childEnvironment } from './environment.js';
-import { activeLaunchDir, beginLaunch, cancelUnspawnedLaunch, readLaunch, launchUnresolved, launchFailure, recordLaunchHost, killLaunch } from './launch-record.js';
+import { activeLaunchDir, beginLaunch, cancelUnspawnedLaunch, readLaunch, launchUnresolved, launchFailure, launchProcess, recordLaunchHost, killLaunch } from './launch-record.js';
 import { ControlRoomUnavailableError } from './registry.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
@@ -25,7 +24,6 @@ interface StartupDependencies {
   lifecycle(id: string): Promise<HostLifecycle | undefined>;
   presetLaunch(session: TopicSession): Promise<{ overlay: Record<string, unknown>; args: string[]; preset?: string }>;
   readonly killing: Map<string, Promise<void>>;
-  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void>;
 }
 
 // This owner keeps the complete startup transaction and its cleanup together.
@@ -39,7 +37,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     await deps.refreshConversation(session);
     const id = session.id;
     let owned = deps.managed.get(id);
-    let spawned: ManagedHost | undefined;
+    let spawned = false;
     let discoveryFailure: Error | undefined;
     let launchPrepared = false;
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
@@ -52,22 +50,23 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     try {
       await deps.acquire();
       const { dir: root, pin } = prepared;
-      let dir = await activeLaunchDir(root);
-      const launchPin = { ...pin, sessionId: (await readLaunch(root))?.sessionId ?? pin.sessionId };
+      const existing = await readLaunch(root);
+      let dir = existing ? await activeLaunchDir(root) : root;
+      const launchPin = { ...pin, sessionId: existing?.sessionId ?? pin.sessionId };
       if (deps.closed) throw new Error('OMP runtime is stopping');
       if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       deps.assertActive();
       let hosts = await deps.list(deadline);
-      const matches = hosts.filter(host => host.sessionId === pin.sessionId);
+      const matches = existing && !existing.resolved && existing.host
+        ? hosts.filter(host => host.pid === existing.host!.pid && host.instanceId === existing.host!.instanceId)
+        : [];
       if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
       if (matches.length === 1) {
         const host = matches[0]!;
         if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
-        await recordLaunchHost(root, host);
+        if (host.sessionId !== pin.sessionId || !await launchProcess(root, host.pid)) throw new Error('OMP launch ownership is unresolved; cannot safely start another process');
+        if (owned?.retirement?.error !== undefined) throw owned.retirement.error;
         owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
-        const observedIdentity = await procIdentity(host.pid);
-        if (observedIdentity) owned.identity = { pid: host.pid, start: observedIdentity.start };
-        deps.managed.set(id, owned);
         while (!await presetReady(dir, launchPin, host.pid)) {
           if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
           if (deps.closed) throw new Error('OMP runtime is stopping');
@@ -80,23 +79,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
         owned.binding = binding;
         owned.cwd = pin.cwd;
-        const identity = await procIdentity(host.pid);
-        owned.identity = identity ? { pid: host.pid, start: identity.start } : undefined;
         const currentLifecycle = lifecycle?.pid === host.pid && lifecycle.sessionId === pin.sessionId;
-        if (owned.retirement) {
-          const identity = await procIdentity(owned.retirement.pid);
-          if (!identity || identity.start !== owned.retirement.start || identity.state === 'Z' || identity.state === 'X' ||
-              (currentLifecycle && (owned.retirement.pid !== host.pid || owned.retirement.socketPath !== lifecycle.socketPath))) {
-            delete owned.retirement;
-          }
-        }
-        if (!owned.retirement && currentLifecycle && lifecycle.retiring === true) {
-          if (identity && identity.state !== 'Z' && identity.state !== 'X') {
-            owned.retirement = { pid: host.pid, start: identity.start, socketPath: lifecycle.socketPath };
-          }
-        }
-        if (owned.retirement?.error !== undefined) throw owned.retirement.error;
-        owned.retiring = owned.retirement !== undefined || (currentLifecycle && lifecycle.retiring === true);
+        owned.retiring = currentLifecycle === true && lifecycle.retiring === true;
         deps.managed.set(id,owned);
         if (owned.retiring) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
         deps.assertActive();
@@ -106,40 +90,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       }
       if (deps.closed) throw new Error('OMP runtime is stopping');
       if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
-      if (owned?.retirement) {
-        const identity = await procIdentity(owned.retirement.pid);
-        if (identity && identity.start === owned.retirement.start && identity.state !== 'Z' && identity.state !== 'X') {
-          if (owned.retirement.error !== undefined) throw owned.retirement.error;
-          throw new SessionRetiringError('Session is retiring; rejoin after it settles');
-        }
-        delete owned.retirement;
-        owned.retiring = false;
-      }
       if (await launchUnresolved(root)) throw new Error('OMP launch ownership is unresolved; cannot safely start another process');
-      if (!await readLaunch(root) && !await deps.lifecycle(id)) {
-        let legacyLaunch = false;
-        try { await readFile(path.join(root, 'runtime.yml')); legacyLaunch = true; }
-        catch (error) { if (!errno(error, 'ENOENT')) throw error; }
-        if (legacyLaunch) throw new Error('Legacy OMP launch ownership is unresolved; cannot safely start another process');
-      }
-      const previousLifecycle = await deps.lifecycle(id);
-      if (previousLifecycle) {
-        const identity = await procIdentity(previousLifecycle.pid);
-        if (identity && identity.state !== 'Z' && identity.state !== 'X') throw new Error('OMP host is not registered; cannot safely start another process');
-        const supervisor = await procIdentity(previousLifecycle.supervisorPid);
-        if (supervisor && supervisor.state !== 'Z' && supervisor.state !== 'X') throw new Error('OMP supervisor is still alive; cannot safely start another process');
-      }
-      if (owned?.process?.pid && !owned.exited) {
-        const identity = await procIdentity(owned.process.pid);
-        if (identity && identity.state !== 'Z' && identity.state !== 'X') throw new Error('OMP supervisor is still alive; cannot safely start another process');
-      }
-      if (owned?.identity) {
-        const identity = await procIdentity(owned.identity.pid);
-        if (identity && identity.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') {
-          throw new Error('OMP host is not registered; cannot safely start another process');
-        }
-        delete owned.identity;
-      }
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
       dir = await beginLaunch(root, pin.sessionId, pin.cwd);
@@ -177,11 +128,15 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         stdio: 'ignore',
       });
       child.unref();
-      owned = { process: child, sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
-      spawned = owned;
+      owned = { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
+      spawned = true;
       deps.managed.set(id,owned);
-      const record = owned;
-      child.once('error',error => { record.failure = error.message; record.exited = true; });
+      const record: { failure?: Error; exited: boolean } = { exited: false };
+      child.once('error', error => {
+        record.failure = error;
+        record.exited = true;
+        if (!child.pid) spawned = false;
+      });
       child.once('exit',() => {
         record.exited = true;
       });
@@ -189,15 +144,13 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (deps.closed) throw new Error('OMP runtime is stopping');
         if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
         deps.assertActive();
-        if (record.failure) throw new Error(record.failure);
+        if (record.failure) throw record.failure;
         if (launch.preset !== undefined) await presetReady(dir, pin);
         if (record.exited || !child.pid) throw new Error('Managed OMP process exited before its host was available');
         for (const host of hosts) {
-          if (!await belongsTo(host.pid,child.pid)) continue;
+          if (!await launchProcess(root, host.pid)) continue;
           if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new Error('Managed OMP process switched its pinned session');
           if (!await presetReady(dir, pin, host.pid)) continue;
-          const identity = await procIdentity(host.pid);
-          if (identity) record.identity = { pid: host.pid, start: identity.start };
           await recordLaunchHost(root, host);
           let binding: HostBinding;
           try {
@@ -208,8 +161,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
             discoveryFailure = error;
             continue;
           }
-          record.binding = binding;
-          await recordLaunchHost(root, host);
+          owned.binding = binding;
           deps.assertActive();
           if (deps.closed) throw new Error('OMP runtime is stopping');
           if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
@@ -257,7 +209,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         }
       }
       if (!owned && deps.managed.get(id) === owned) deps.managed.delete(id);
-      if (spawned?.process && error instanceof Error) {
+      if (spawned && error instanceof Error) {
         error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(await activeLaunchDir(prepared.dir), 'terminal.log')} (previous output: terminal.log.1)`;
       }
       throw error;

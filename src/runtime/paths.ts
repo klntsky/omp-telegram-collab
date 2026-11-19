@@ -3,12 +3,12 @@ import { access, chmod, constants, lstat, mkdir, opendir, readFile, readdir, rea
 import path from 'node:path';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import { findInstance } from '../config.js';
-import { type DurableBinding, type ManagedHost } from './types.js';
+import { type DurableBinding } from './types.js';
 import { privateFile, writeBinding, readHeader, hasRemovedWorktree } from './files.js';
 import { record, errno } from './values.js';
+import { readLaunch } from './launch-record.js';
 interface PathsDependencies {
   readonly config: AppConfig;
-  readonly managed: Map<string, ManagedHost | null>;
 }
 
 // This owner keeps the complete paths transaction and its cleanup together.
@@ -66,14 +66,15 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
   }
 
   async function readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined> {
-    const metadata = path.join(deps.config.dataDir, 'sessions', session.id, 'binding.json');
+    const root = path.join(deps.config.dataDir, 'sessions', session.id);
+    const metadata = path.join(root, 'binding.json');
     let pin: DurableBinding;
     try {
       if (!(await lstat(metadata)).isFile()) throw new Error('Invalid managed binding metadata');
       pin = JSON.parse(await readFile(metadata, 'utf8')) as DurableBinding;
     } catch (error) {
       if (!errno(error, 'ENOENT')) throw error;
-      if (deps.managed.get(session.id)) throw new Error('Managed OMP binding is missing');
+      if (await readLaunch(root)) throw new Error('Managed OMP binding is missing');
       return undefined;
     }
     const cwd = hasRemovedWorktree(pin) ? session.cwd : await validatedSessionCwd(session);
@@ -82,8 +83,7 @@ export function createPaths(deps: PathsDependencies): RuntimePaths {
       throw new Error('Managed OMP binding is incompatible with this configuration');
     }
     const header = await readHeader(pin.sessionFile);
-    const owned = deps.managed.get(session.id);
-    if (header.id !== pin.sessionId || header.cwd !== pin.cwd || (owned && owned.sessionId !== pin.sessionId)) {
+    if (header.id !== pin.sessionId || header.cwd !== pin.cwd) {
       throw new Error('Managed OMP history identity changed');
     }
     return pin;
