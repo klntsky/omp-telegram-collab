@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { it } from 'node:test';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
@@ -11,6 +12,45 @@ import { applicationErrors, closeForConfirmation, createCleanupWorktree, request
 import { bounded } from '../helpers/async.js';
 
 export function registerWorktreeCleanupConfirmations(getApp: () => CollaborationTest): void {
+  it('clean remote branch deletes from the offer while local dirty and stale remote branches require confirmation', async t => {
+    const app = getApp();
+    const { session, target } = await createCleanupWorktree(app);
+    const remote = await mkdtemp(join(tmpdir(), 'cleanup-remote-'));
+    const name = `cleanup-${session.id}`;
+    t.after(() => rm(remote, { recursive: true, force: true }));
+    t.after(() => app.omp.git(target.commonDir, 'remote', 'remove', name));
+    await app.omp.git(remote, 'init', '--bare');
+    await app.omp.git(target.path, 'remote', 'add', name, remote);
+    const branch = await app.omp.git(target.path, 'branch', '--show-current');
+    assert.equal((await app.runtime.inspectWorktree(session))!.skipConfirmation, false);
+    await app.omp.git(target.path, 'push', name, `HEAD:refs/heads/${branch.trim()}`);
+    const dirty = join(target.path, 'untracked-cleanup-file');
+    await writeFile(dirty, 'retain this');
+    assert.equal((await app.runtime.inspectWorktree(session))!.skipConfirmation, false);
+    await unlink(dirty);
+    assert.equal((await app.runtime.inspectWorktree(session))!.skipConfirmation, true);
+    await app.omp.git(remote, 'update-ref', '-d', `refs/heads/${branch.trim()}`);
+    assert.equal((await app.runtime.inspectWorktree(session))!.skipConfirmation, false);
+    await app.omp.git(target.path, 'push', name, `HEAD:refs/heads/${branch.trim()}`);
+    const start = app.apiCalls.length;
+    await setTopicClosed(app, session, true);
+    const offer = await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
+    const closed = app.store.getSession(session.id)!;
+    const stale = await app.runtime.inspectWorktree(closed);
+    assert.ok(stale?.skipConfirmation);
+    await app.omp.git(remote, 'update-ref', '-d', `refs/heads/${branch.trim()}`);
+    await assert.rejects(app.runtime.deleteWorktree(closed, stale, async () => {}),
+      /Worktree is no longer clean with a branch on a remote/);
+    assert.equal(existsSync(target.path), true);
+    await app.omp.git(target.path, 'push', name, `HEAD:refs/heads/${branch.trim()}`);
+    const removalStart = app.apiCalls.length;
+    await clickPanel(app, offer, 0);
+    await waitForPanelRetired(app, offer, removalStart);
+    assert.equal(existsSync(target.path), false);
+    const binding = JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8'));
+    assert.equal(binding.removedWorktree, true);
+  });
+
   it('worktree cleanup queued Confirm stays revoked after Cancel and fresh confirmation across restart', { timeout: 120000 }, async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);

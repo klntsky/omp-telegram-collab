@@ -47,7 +47,7 @@ export class WorktreeCleanup {
     if (!target) return;
     // Manage Topics permits outgoing messages in closed topics. Do not reopen to send.
     // https://github.com/tdlib/td/blob/master/td/telegram/ForumTopicManager.cpp (can_send_message_to_forum_topic)
-    const text = `🌳 This topic used this Git worktree:\n${codeHtml(target.path)}\n\nA group administrator can delete it after explicit confirmation. Session history is kept.`;
+    const text = `🌳 This topic used this Git worktree:\n${codeHtml(target.path)}\n\nA group administrator can delete it. Clean worktrees whose branch exists on a remote need no additional confirmation. Session history is kept.`;
     await this.deps.delivery.run(session.chatId, () => this.deps.bot.api.sendMessage(session.chatId,
       text, {
         parse_mode: 'HTML', message_thread_id: session.threadId, reply_markup: { inline_keyboard: this.buttons(session) },
@@ -117,7 +117,7 @@ export class WorktreeCleanup {
       if (command.action === 'cancel') {
         confirmations.invalidate(session.id, command.token);
         await this.edit(session, message.message_id, `🌳 Worktree deletion cancelled.\n${codeHtml(target.path)}`, this.buttons(session));
-      } else if (command.action === 'offer') {
+      } else if (command.action === 'offer' && !target.skipConfirmation) {
         const token = confirmations.issue(session, message.message_id, ctx.from.id, target);
         const nextApproval = { sessionId: session.id, token };
         await this.edit(session, message.message_id,
@@ -126,7 +126,7 @@ export class WorktreeCleanup {
             [{ text: '❌ Cancel', callback_data: encodeWorktreeCleanupCallback({ action: 'cancel', ...nextApproval }) }],
           ]);
       } else {
-        await this.deps.runtime.deleteWorktree(session, target, async () => {
+        await this.deps.runtime.deleteWorktree(session, { ...target, skipConfirmation: command.action === 'offer' }, async () => {
           if (!(await this.deps.authorizeSession(session, ctx.from!.id))) throw new Error('Administrator access changed before worktree deletion.');
           if (!this.active(session)) throw new Error('Worktree cleanup requires the assigned topic to remain closed.');
           for (const other of this.deps.store.listSessions()) {
@@ -135,7 +135,7 @@ export class WorktreeCleanup {
             }
           }
         });
-        confirmations.invalidate(session.id, command.token);
+        if (command.action === 'confirm') confirmations.invalidate(session.id, command.token);
         await this.edit(session, message.message_id,
           `🌳 Deleted Git worktree:\n${codeHtml(target.path)}\n\nSession history has been kept. Reopening this topic will not recreate the directory.`);
       }
