@@ -102,13 +102,27 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     return target;
   }
 
+  async function canSkipConfirmation(cwd: string): Promise<boolean> {
+    if (await git(cwd, ['status', '--porcelain', '--untracked-files=all'])) return false;
+    const branch = await git(cwd, ['branch', '--show-current']);
+    if (!branch) return false;
+    const remotes = (await git(cwd, ['remote']))!.split('\n').filter(Boolean);
+    // Query the server because remote-tracking refs can outlive a deleted remote branch.
+    for (const remote of remotes) {
+      const heads = await git(cwd, ['ls-remote', '--heads', '--refs', remote, `refs/heads/${branch}`]);
+      if (heads!.split('\n').some(line => line.split('\t')[1] === `refs/heads/${branch}`)) return true;
+    }
+    return false;
+  }
+
   async function inspectWorktree(session: TopicSession): Promise<WorktreeTarget | undefined> {
     deps.assertActive();
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (session.runtime.kind !== 'managed') return undefined;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
     const pin = await deps.readManagedBinding(session);
-    return pin ? inspectBinding(pin) : undefined;
+    const target = pin && await inspectBinding(pin);
+    return target ? { ...target, skipConfirmation: await canSkipConfirmation(target.path) } : undefined;
   }
 
   async function deleteWorktree(session: TopicSession, target: WorktreeTarget, beforeMutation: () => Promise<void>): Promise<void> {
@@ -136,6 +150,9 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         if (host.sessionId === target.sessionId || contains(target.path, cwd) || contains(cwd, target.path)) {
           throw new Error('An OMP host still uses this worktree');
         }
+      }
+      if (target.skipConfirmation && !await canSkipConfirmation(target.path)) {
+        throw new Error('Worktree is no longer clean with a branch on a remote. Request deletion again to confirm.');
       }
       await beforeMutation();
       assertBoundary(operation);
