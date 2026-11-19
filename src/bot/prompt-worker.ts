@@ -116,6 +116,8 @@ export class PromptWorker {
     const active = () => !this.closed && store.getSession(session.id)?.status === 'open' &&
       store.getSessionGeneration(session.id) === generation && store.promptQueue.contains(queued.id);
     let expectedSessionId = queued.preparation?.nativeSessionId;
+    // Nested preparation guards its saved target; its worktree transaction can
+    // retire the host and relocate history before the outer binding is readable.
     let preparing = false;
     const authorize = async () => {
       if (!active()) throw cancellation;
