@@ -171,6 +171,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     // Scripted turns exclude OMP's skill-description model calls, not explicit skill invocation.
     // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/session/settings.ts#L437-L448
     skillful: false,
+    // Composer predictions create unrelated model turns outside the scripted task.
+    // https://github.com/klntsky/oh-my-pi/blob/main/packages/coding-agent/src/modes/controllers/composer-prediction-controller.ts#L75-L110
+    composer: { predictions: false },
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
     ...(options.compaction ? { compaction: options.compaction } : {}),
     modelPresets: {
