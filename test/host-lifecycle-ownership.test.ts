@@ -44,7 +44,10 @@ test('the main host still removes its own lifecycle descriptor and socket on shu
         watcher.close();
         ready.resolve();
       });
-      await handlers.get('session_start')({}, {agent:{kind:'main'},cwd:directory,sessionManager:{getSessionId:()=> 'main-host'}});
+      await handlers.get('session_start')({}, {agent:{kind:'main'},cwd:directory,sessionManager:{
+        getSessionId:()=> 'main-host', getSessionFile:()=> join(directory,'main-host.jsonl'),
+        getHeader:()=> ({id:'main-host',cwd:directory}), getCwd:()=> directory,
+      }});
       await ready.promise;
       const descriptor = JSON.parse(readFileSync(filename,'utf8'));
       handlers.get('session_shutdown')();
@@ -79,7 +82,10 @@ test('title control invokes the persistent native API and preserves rename diagn
         watcher.close();
         ready.resolve();
       });
-      await handlers.get('session_start')({}, {agent:{kind:'main'},cwd:directory,sessionManager:{getSessionId:()=> 'main-host'}});
+      await handlers.get('session_start')({}, {agent:{kind:'main'},cwd:directory,sessionManager:{
+        getSessionId:()=> 'main-host', getSessionFile:()=> join(directory,'main-host.jsonl'),
+        getHeader:()=> ({id:'main-host',cwd:directory}), getCwd:()=> directory,
+      }});
       await ready.promise;
       const descriptor = JSON.parse(readFileSync(filename,'utf8'));
       async function rename(name, sessionId = 'main-host') {

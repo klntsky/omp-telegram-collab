@@ -51,7 +51,10 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
     await lifecycle({on:(name, handler)=>handlers.set(name, handler)});
     await handlers.get('session_start')({}, {
       agent:{kind:'main'}, cwd:directory,
-      sessionManager:{getSessionId:()=> 'protocol-session'},
+      sessionManager:{
+        getSessionId:()=> 'protocol-session', getSessionFile:()=> join(directory,'protocol-session.jsonl'),
+        getHeader:()=> ({id:'protocol-session',cwd:directory}), getCwd:()=> directory,
+      },
       isIdle:()=> ${!options.busy}, hasPendingMessages:()=> false,
       setInterval:(callback, interval)=> {const timer=setInterval(callback,interval);intervals.push(timer);return timer;},
       shutdown:()=> {fs.writeFileSync(join(directory,'shutdowns'),String(++shutdowns));},

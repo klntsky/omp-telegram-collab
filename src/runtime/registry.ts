@@ -4,6 +4,13 @@ import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { type RegistryHost } from './types.js';
 import { childEnvironment } from './environment.js';
+export class ControlRoomUnavailableError extends Error {
+  constructor() {
+    super('OMP host does not publish a connected control room');
+    this.name = 'ControlRoomUnavailableError';
+  }
+}
+
 interface RegistryDependencies {
   readonly config: AppConfig;
   assertActive(): void;
@@ -55,7 +62,8 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
 
   async function resolve(host: RegistryHost, deadline: number): Promise<HostBinding> {
     deps.assertActive();
-    if (host.access !== 'control' || !host.relayConnected) throw new Error('OMP host does not publish a connected control room');
+    if (host.access !== 'control') throw new Error('OMP host does not publish a connected control room');
+    if (!host.relayConnected) throw new ControlRoomUnavailableError();
     const link = await json(['collab', 'link', host.instanceId, '--json'], deadline);
     if (link.version !== 1 || link.instanceId !== host.instanceId || link.generation !== host.generation || link.access !== 'control' || typeof link.url !== 'string') {
       throw new Error('OMP host changed while resolving its capability');

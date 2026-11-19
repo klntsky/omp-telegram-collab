@@ -6,8 +6,9 @@ import type { Listener, SessionObservation, TopicActivity } from './types.js';
 import { TelegramDelivery as Delivery } from '../telegram-delivery.js';
 import { SessionFeed, type SessionFeedHandlers, type SessionFeedSubscription } from '../session-feed.js';
 import { SessionHistory } from '../session-history.js';
-import { SessionCapacityError } from '../runtime/types.js';
+import { ConversationConflictError, ConversationTransitionPendingError, SessionCapacityError } from '../runtime/types.js';
 import { refreshTermination } from '../config.js';
+import { ControlRoomUnavailableError } from '../runtime/registry.js';
 
 export interface SessionConnectionsDependencies {
   applySessionTitle: (session: TopicSession) => Promise<void>;
@@ -35,6 +36,9 @@ export class SessionConnections {
   readonly delivery = new Delivery();
   constructor(private readonly deps: SessionConnectionsDependencies) {}
   async subscribeSessionFeed(session: TopicSession, handlers: SessionFeedHandlers): Promise<SessionFeedSubscription> {
+    const binding = await this.deps.options.runtime.resolveExisting(session);
+    if (!binding) throw new Error('Session closed');
+    await this.listen(session, binding, undefined, true);
     const listener = this.listeners.get(session.id);
     if (!listener?.connection) throw new Error('Session closed');
     this.requireFeedListener(session, listener);
@@ -70,6 +74,11 @@ export class SessionConnections {
     const binding = await this.deps.options.runtime.resolveExisting(session);
     this.requireFeedListener(session, listener);
     if (!binding) throw new Error('Session closed');
+    if (binding.sessionId !== listener.ompSessionId) {
+      this.dropListener(session.id, 'Native conversation changed');
+      this.deps.scheduleReconnect(session);
+      throw new Error('The native conversation changed. Reopen the history view.');
+    }
     const reader: {feed: SessionFeed; connection?: CollabConnection; controller: AbortController} = {
       controller: new AbortController(),
       feed: new SessionFeed(frame => {
@@ -138,7 +147,25 @@ export class SessionConnections {
       return Promise.reject(new Error('This topic is closed. Reopen it before connecting.'));
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const existing = this.listeners.get(session.id);
-    if (existing?.promise && existing.generation === generation) return existing.promise;
+    if (existing?.promise && existing.generation === generation) {
+      return existing.promise.then(() => binding ?? this.deps.options.runtime.resolveExisting(session)).then(current => {
+        this.deps.requireSessionAssignment(session);
+        if (current && this.deps.options.store.getSession(session.id)?.cwd !== session.cwd)
+          this.deps.options.store.setSessionCwd(session.id, session.cwd);
+        if (this.listeners.get(session.id) === existing && current &&
+            existing.ompSessionId === current.sessionId) return existing.promise!;
+        if (this.listeners.get(session.id) === existing && current && existing.ompSessionId !== current.sessionId)
+          this.deps.options.store.setPendingSessionTitle(session.id, undefined);
+        if (this.listeners.get(session.id) === existing) this.dropListener(session.id, 'Native conversation changed');
+        return this.listen(session, this.listeners.has(session.id) ? undefined : current, beforeMutation, existingOnly, recoverClosed);
+      }).catch(error => {
+        if (this.listeners.get(session.id) === existing) {
+          this.dropListener(session.id, 'Could not verify native conversation');
+          if (!(error instanceof ConversationConflictError)) this.deps.scheduleReconnect(session);
+        }
+        throw error;
+      });
+    }
     if (existing) this.dropListener(session.id);
     const listener: Listener = {
       sessionId: session.id,
@@ -177,6 +204,8 @@ export class SessionConnections {
     )
       .then(async (binding) => {
         if (!active()) throw closed;
+        if (this.deps.options.store.getSession(session.id)?.cwd !== session.cwd)
+          this.deps.options.store.setSessionCwd(session.id, session.cwd);
         await beforeMutation?.();
         if (!active()) throw closed;
         await this.deps.applySessionTitle(session);
@@ -200,7 +229,7 @@ export class SessionConnections {
           binding,
           `Telegram @${this.deps.bot.botInfo!.username}`,
           {
-            onFrame: (frame) => this.deps.onFrame(session, listener, frame),
+            onFrame: (frame) => { if (active()) this.deps.onFrame(session, listener, frame); },
             onClose: (reason) => {
               if (!active()) return;
               console.warn(JSON.stringify({
@@ -263,8 +292,12 @@ export class SessionConnections {
           )
             throw error;
         } finally {
+          const reconnect = !existingOnly && active() &&
+            (error instanceof ControlRoomUnavailableError || error instanceof ConversationTransitionPendingError ||
+              (listener.ompSessionId !== undefined && error !== closed && !(error instanceof ConversationConflictError)));
           if (this.listeners.get(session.id) === listener)
             this.dropListener(session.id, error instanceof Error ? error.message : String(error));
+          if (reconnect) this.deps.scheduleReconnect(session);
         }
         return this.listen(session, undefined, beforeMutation, false, false);
       });

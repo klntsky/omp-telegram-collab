@@ -1,5 +1,19 @@
 import { type ChildProcess } from 'node:child_process';
 import type { HostBinding } from '../../shared/contracts.js';
+export class ConversationTransitionPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConversationTransitionPendingError';
+  }
+}
+
+export class ConversationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConversationConflictError';
+  }
+}
+
 export class SessionRetiringError extends Error {
   constructor(message: string) {
     super(message);
@@ -61,4 +75,4 @@ export interface ManagedHost {
 
 export interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
 
-export interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; sessionTitles?: boolean; retirement?: 1 }
+export interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; sessionTitles?: boolean; retirement?: 1; conversations?: 1 }

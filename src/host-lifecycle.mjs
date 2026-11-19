@@ -16,6 +16,40 @@ export default async function hostLifecycle(pi) {
   let settingsError;
   let getActiveSkills;
   let skillsError;
+  let activeContext;
+  let context;
+  let candidate;
+  let sequence = 0;
+  const launchId = process.env.OMP_TELEGRAM_LAUNCH_ID;
+  const snapshot = () => ({
+    sessionId: activeContext.sessionManager.getSessionId(),
+    sessionFile: activeContext.sessionManager.getSessionFile(),
+    cwd: activeContext.cwd,
+    continuationOf: activeContext.sessionManager.getHeader()?.continuationOf,
+  });
+  const publishDescriptor = () => {
+    if (!descriptor) return;
+    descriptor = { ...descriptor, ...snapshot(), candidate };
+    const filename = join(directory, 'lifecycle.json');
+    const temporary = `${filename}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(descriptor), { mode: 0o600 });
+    renameSync(temporary, filename);
+  };
+  for (const eventName of ['session_switch', 'session_branch']) {
+    pi.on(eventName, async (event, nextContext) => {
+      if (nextContext.agent.kind !== 'main') return;
+      context = activeContext = nextContext;
+      const previousSessionFiles = candidate?.sessionFile === event.previousSessionFile
+        ? [...candidate.previousSessionFiles, event.previousSessionFile]
+        : [event.previousSessionFile];
+      candidate = { ...snapshot(), sequence: ++sequence, reason: event.reason, previousSessionFile: event.previousSessionFile, previousSessionFiles };
+      // Empty native successors must be resumable before the bot can bind them.
+      // Capture intent first: a conflict-induced move during persistence is not intentional.
+      // https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/session/session-manager.ts#L2795-L2804
+      await activeContext.sessionManager.ensureOnDisk();
+      publishDescriptor();
+    });
+  }
   try {
     ({ getActiveSkills } = await import('@oh-my-pi/pi-coding-agent/extensibility/skills'));
   } catch (error) {
@@ -27,8 +61,9 @@ export default async function hostLifecycle(pi) {
   } catch (error) {
     settingsError = error;
   }
-  pi.on('session_start', async (_event, context) => {
-    if (context.agent.kind !== 'main' || server) return;
+  pi.on('session_start', async (_event, initialContext) => {
+    if (initialContext.agent.kind !== 'main' || server) return;
+    context = activeContext = initialContext;
     const settings = findScopedSettings?.(context.cwd);
     const sessionId = context.sessionManager.getSessionId();
     const startupPreset = process.env.OMP_TELEGRAM_DEFAULT_PRESET;
@@ -37,7 +72,7 @@ export default async function hostLifecycle(pi) {
       const publish = result => {
         const filename = join(directory, 'startup-preset.json');
         const temporary = `${filename}.${process.pid}.tmp`;
-        writeFileSync(temporary, JSON.stringify({ sessionId, pid: process.pid, preset: startupPreset, ...result }), { mode: 0o600 });
+        writeFileSync(temporary, JSON.stringify({ sessionId, launchId, pid: process.pid, preset: startupPreset, ...result }), { mode: 0o600 });
         renameSync(temporary, filename);
       };
       try {
@@ -94,13 +129,14 @@ export default async function hostLifecycle(pi) {
       }
     }
     const assertAvailable = request => {
-      if (request.sessionId !== sessionId || context.sessionManager.getSessionId() !== sessionId) {
+      if (request.sessionId !== activeContext.sessionManager.getSessionId()) {
         throw new Error('OMP session identity changed during model preset control');
       }
       if (descriptor?.retiring) throw new Error('OMP host is retiring');
       if (Date.now() >= request.deadline) throw new Error('OMP model preset request expired before execution');
     };
     const runPresets = async request => {
+      const settings = findScopedSettings?.(context.cwd);
       assertAvailable(request);
       if (settingsError) throw settingsError;
       if (!settings) throw new Error('OMP host scoped settings are unavailable; restart this managed host');
@@ -190,11 +226,30 @@ export default async function hostLifecycle(pi) {
         let request;
         const respond = result => {
           if (socket.destroyed) return;
-          const response = JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, ...result });
-          socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ requestId: request?.requestId, sessionId, pid: process.pid, error: 'OMP model preset response is too large' })}\n`);
+          const current = { requestId: request?.requestId, sessionId: activeContext.sessionManager.getSessionId(), pid: process.pid };
+          const response = JSON.stringify({ ...current, ...result });
+          socket.end(Buffer.byteLength(response) <= 262143 ? `${response}\n` : `${JSON.stringify({ ...current, error: 'OMP model preset response is too large' })}\n`);
         };
         try {
           request = JSON.parse(input.trim());
+          if (request?.type === 'status') {
+            if (typeof request.requestId !== 'string' || request.requestId.length > 128 ||
+                !Number.isSafeInteger(request.deadline) || request.deadline <= Date.now() ||
+                request.deadline > Date.now() + 15000) throw new Error('Invalid OMP lifecycle status request');
+            if (typeof request.acknowledgedSessionFile === 'string' && candidate) {
+              const index = candidate.previousSessionFiles.indexOf(request.acknowledgedSessionFile);
+              const remaining = request.acknowledgedSessionFile === candidate.sessionFile ? [] :
+                index >= 0 ? candidate.previousSessionFiles.slice(index) : candidate.previousSessionFiles;
+              if (remaining.length !== candidate.previousSessionFiles.length) {
+                candidate = { ...candidate, previousSessionFiles: remaining };
+                publishDescriptor();
+              }
+            }
+            const current = snapshot();
+            if (descriptor.sessionId !== current.sessionId || descriptor.sessionFile !== current.sessionFile || descriptor.cwd !== current.cwd) publishDescriptor();
+            respond({ ...snapshot(), launchId, supervisorPid: descriptor?.supervisorPid, candidate });
+            return;
+          }
           if (request?.type === 'retire') {
             if (typeof request.requestId !== 'string' ||
                 !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.requestId) ||
@@ -204,7 +259,7 @@ export default async function hostLifecycle(pi) {
               throw new Error('Invalid OMP retirement request');
             }
             const retirementResponse = outcome => respond({ sessionId: request.sessionId, pid: request.pid, outcome });
-            if (request.sessionId !== sessionId || context.sessionManager.getSessionId() !== sessionId ||
+            if (request.sessionId !== activeContext.sessionManager.getSessionId() ||
                 request.pid !== process.pid || Date.now() >= request.deadline) {
               retirementResponse('expired');
               return;
@@ -213,7 +268,7 @@ export default async function hostLifecycle(pi) {
               retirementResponse('busy');
               return;
             }
-            const nextDescriptor = { ...descriptor, retiring: true };
+            const nextDescriptor = { ...descriptor, ...snapshot(), candidate, retiring: true };
             const grant = join(directory, `retirement-${request.requestId}.request`);
             try {
               writeFileSync(grant, JSON.stringify(nextDescriptor), { flag: 'r+', mode: 0o600 });
@@ -274,6 +329,8 @@ export default async function hostLifecycle(pi) {
     server.listen(socketPath, () => {
       chmodSync(socketPath, 0o600);
       descriptor = {
+        launchId,
+        conversations: 1,
         pid: process.pid,
         supervisorPid: Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
         sessionId: context.sessionManager.getSessionId(),
@@ -284,7 +341,7 @@ export default async function hostLifecycle(pi) {
         sessionTitles: typeof pi.setSessionName === 'function',
         retirement: 1,
       };
-      writeFileSync(join(directory, 'lifecycle.json'), JSON.stringify(descriptor), { mode: 0o600 });
+      publishDescriptor();
       startupReady?.();
     });
   });

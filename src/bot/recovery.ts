@@ -99,7 +99,6 @@ export class MirrorRecovery {
       this.deps.currentMetadataOwner(session.id)?.activity === owner;
     if (
       !active() ||
-      this.deps.options.store.promptQueue.has(session.id) ||
       (this.deps.getListener(session.id) !== undefined)
     )
       return Promise.resolve();
@@ -165,9 +164,7 @@ export class MirrorRecovery {
           if (active?.status !== 'open') return;
           this.reconnecting.add(active.id);
           try {
-            if (!this.deps.options.store.promptQueue.has(active.id)) {
-              await this.recoverExistingMirror(active, signal);
-            }
+            await this.recoverExistingMirror(active, signal);
             await withCancellation(this.deps.drainPrompts(active), signal);
             await withCancellation(this.deps.refreshTopicStatus(active), signal);
           } catch (error) {

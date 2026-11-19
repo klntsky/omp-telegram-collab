@@ -1,3 +1,4 @@
+import { activeLaunchDir } from '../src/runtime/launch-record.js';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -79,13 +80,14 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
   try {
     const first = await runtime.ensure(managed);
     const managedDirectory = join(directory, 'sessions', managed.id);
-    await waitFor(() => exists(join(managedDirectory, 'lifecycle.json')), 'Managed lifecycle descriptor was not published');
-    const lifecycle = JSON.parse(await readFile(join(managedDirectory, 'lifecycle.json'), 'utf8')) as { pid: number };
+    await waitFor(async () => exists(join(await activeLaunchDir(managedDirectory), 'lifecycle.json')), 'Managed lifecycle descriptor was not published');
+    const lifecycle = JSON.parse(await readFile(join(await activeLaunchDir(managedDirectory), 'lifecycle.json'), 'utf8')) as { pid: number };
     const historyBefore = await readFile(join(managedDirectory, 'history.jsonl'), 'utf8');
     runtime.markPrompt(managed.id);
     await runtime.ensure(gracefulSession);
     const gracefulDirectory = join(directory, 'sessions', gracefulSession.id);
-    const gracefulLifecycle = JSON.parse(await readFile(join(gracefulDirectory, 'lifecycle.json'), 'utf8')) as { pid: number };
+    await waitFor(async () => exists(join(await activeLaunchDir(gracefulDirectory), 'lifecycle.json')), 'Graceful lifecycle descriptor was not published');
+    const gracefulLifecycle = JSON.parse(await readFile(join(await activeLaunchDir(gracefulDirectory), 'lifecycle.json'), 'utf8')) as { pid: number };
     const gracefulHistory = await readFile(join(gracefulDirectory, 'history.jsonl'), 'utf8');
     const gracefulBinding = await readFile(join(gracefulDirectory, 'binding.json'), 'utf8');
     runtime.markPrompt(gracefulSession.id);
@@ -111,8 +113,8 @@ export default pi=>pi.registerCommand('kill-hold',{description:'Hold a local com
       onClose() {},
     });
     guest.close();
-    await waitFor(() => exists(join(managedDirectory, 'lifecycle.json')), 'Resumed lifecycle descriptor was not published');
-    const resumedLifecycle = JSON.parse(await readFile(join(managedDirectory, 'lifecycle.json'), 'utf8')) as { pid: number };
+    await waitFor(async () => exists(join(await activeLaunchDir(managedDirectory), 'lifecycle.json')), 'Resumed lifecycle descriptor was not published');
+    const resumedLifecycle = JSON.parse(await readFile(join(await activeLaunchDir(managedDirectory), 'lifecycle.json'), 'utf8')) as { pid: number };
 
     terminal = pty.spawn(executable, [
       '--cwd', directory, '--session-dir', directory, '--resume', history, '--config', overlay,

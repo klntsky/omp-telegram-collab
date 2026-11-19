@@ -28,6 +28,22 @@ export interface PromptPreparationDependencies {
 
 export class PromptPreparation {
   constructor(private readonly deps: PromptPreparationDependencies) {}
+  private async bindConversation(session: TopicSession, authorize: () => Promise<void>, expectedSessionId?: string): Promise<() => Promise<void>> {
+    await authorize();
+    const expected = await this.deps.options.runtime.ensure(session, authorize);
+    if (expectedSessionId !== undefined && expected.sessionId !== expectedSessionId)
+      throw new PromptPreparationRejectedError('The native conversation changed before prompt preparation.');
+    if (this.deps.options.store.getSession(session.id)?.cwd !== session.cwd)
+      this.deps.options.store.setSessionCwd(session.id, session.cwd);
+    return async () => {
+      await authorize();
+      const current = await this.deps.options.runtime.existingBinding(session);
+      if (!current || current.sessionId !== expected.sessionId)
+        throw new PromptPreparationRejectedError('The native conversation changed during prompt preparation. Submit the prepared request again.');
+      if (this.deps.options.store.getSession(session.id)?.cwd !== session.cwd)
+        this.deps.options.store.setSessionCwd(session.id, session.cwd);
+    };
+  }
   async promptImages(attachments: TelegramImage[]): Promise<ImageContent[]> {
     return Promise.all(attachments.map(async ({fileId,mimeType}): Promise<ImageContent> => {
       if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mimeType)) throw new Error(`Unsupported image type: ${mimeType}`);
@@ -42,6 +58,7 @@ export class PromptPreparation {
   async uploadDocuments(session: TopicSession, content: PendingPromptContent, authorize: () => Promise<void>, destination: TopicDestination, saved?: (remaining: PendingPromptContent) => void): Promise<PromptContent> {
     const {documents, ...prompt} = content;
     if (!documents?.length) return prompt;
+    authorize = await this.bindConversation(session, authorize);
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const check = async () => {
       await authorize();
@@ -83,7 +100,8 @@ export class PromptPreparation {
       if (!(await this.deps.currentAdmin(authority))) throw new Error('Prompt preparations require a group administrator.');
     }, (text, code) => this.deps.replyPresetText(ctx, text, code));
   }
-  async prepareQueuedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, checkpoint: (remaining: PromptExtension[], preset?: string) => void, preset?: string): Promise<void> {
+  async prepareQueuedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, checkpoint: (remaining: PromptExtension[], preset?: string) => void, preset?: string, expectedSessionId?: string): Promise<void> {
+    await authorize();
     const requested = extensions.flatMap(extension => extension.kind === 'model-preset' && extension.name !== undefined ? [extension.name] : []);
     if (preset !== undefined) requested.push(preset);
     if (requested.length) {
@@ -94,14 +112,17 @@ export class PromptPreparation {
     await this.prepareAuthorizedPrompt(session, extensions, authorize,
       (text, code) => sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), code ? codeHtml(text) : text,
         code ? { parse_mode: 'HTML' } : undefined),
-      checkpoint, preset);
+      checkpoint, preset, expectedSessionId);
   }
   async reportQueuedFailure(session: TopicSession, error: Error): Promise<void> {
     await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId), codeHtml(error.message), { parse_mode: 'HTML' });
   }
-  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string, code?: boolean) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string): Promise<void> {
+  private async prepareAuthorizedPrompt(session: TopicSession, extensions: readonly PromptExtension[], authorize: () => Promise<void>, report: (text: string, code?: boolean) => Promise<unknown>, checkpoint?: (remaining: PromptExtension[], preset?: string) => void, queuedPreset?: string, expectedSessionId?: string): Promise<void> {
     if (extensions.some(extension => extension.kind === 'model-preset' && extension.name === undefined))
       throw new Error('Choose a model preset before preparing the prompt.');
+    if (!extensions.some(extension => extension.kind !== 'skill') && queuedPreset === undefined) return;
+    const mutationAuthorization = authorize;
+    authorize = await this.bindConversation(session, authorize, expectedSessionId);
     const generation = this.deps.options.store.getSessionGeneration(session.id);
     const checkSession = () => {
       if (this.deps.stopped() || refreshTermination(this.deps.options.config)) throw new Error('The service is stopping');
@@ -137,7 +158,9 @@ export class PromptPreparation {
       if (extension.kind === 'worktree') {
         let text: string;
         try {
-          text = await this.deps.options.runtime.worktree(session, undefined, authorize);
+          // Worktree owns the stop/move transaction; probing its old binding
+          // inside that transaction would reject the operation's own retirement.
+          text = await this.deps.options.runtime.worktree(session, undefined, mutationAuthorization);
           this.deps.options.store.setSessionCwd(session.id, session.cwd);
         } finally {
           this.deps.dropListener(session.id);

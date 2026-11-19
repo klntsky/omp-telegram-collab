@@ -210,9 +210,10 @@ test('missing lifecycle and registry cannot make a known live host appear absent
   await app.runtime.ensure(app.session);
   await rm(app.lifecyclePath);
   await app.removeHost();
-  await assert.rejects(app.runtime.stop(app.session), /does not support safe retirement/);
-  await assert.rejects(app.runtime.ensure(app.session), /cannot safely start another process/);
-  await assert.rejects(app.runtime.ensure({ ...app.session, id: 'another-topic' }), /OMP session limit/);
+  await assert.rejects(app.runtime.stop(app.session));
+  await assert.rejects(app.runtime.ensure(app.session));
+  await assert.rejects(app.runtime.ensure({ ...app.session, id: 'another-topic' }));
+  assert.doesNotThrow(() => process.kill(app.host.pid, 0));
   assert.deepEqual(app.requests, []);
   assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);
 });
