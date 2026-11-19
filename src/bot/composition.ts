@@ -191,7 +191,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     signal: lifecycle.apiAbort.signal,
     botId: lifecycle.id.bind(lifecycle),
     stopped: lifecycle.stopped.bind(lifecycle),
-    presetDescription: (instanceId) => presets.presetDescription(instanceId),
   });
   const skills: SkillPicker = new SkillPicker({
     store: options.store, botId: lifecycle.id.bind(lifecycle), username: () => bot.botInfo!.username,

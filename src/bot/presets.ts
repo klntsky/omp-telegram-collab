@@ -7,7 +7,6 @@ import { codeHtml } from '../telegram-html.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { withCancellation } from '../cancellation.js';
 import type { PresetAction, PresetPanel } from './types.js';
-import { groupCommands } from './commands.js';
 
 export interface PresetDependencies {
   botId: number;
@@ -209,17 +208,6 @@ export class BotPresets {
     const clearRefresh = () => { if (this.presetRefresh === task) this.presetRefresh = undefined; };
     void task.then(clearRefresh, clearRefresh);
     return task;
-  }
-  presetDescription(instanceId: number): string {
-    let description = groupCommands.find(command => command.command === 'modelpreset')!.description;
-    const names = [...(this.presetCatalogs.get(instanceId) ?? [])].sort((a, b) => a.length - b.length || a.localeCompare(b));
-    let separator = '. Presets: ';
-    for (const name of names) {
-      if (description.length + separator.length + name.length > 256) break;
-      description += separator + name;
-      separator = ', ';
-    }
-    return description;
   }
   async replyPresetUsage(ctx: Context, instanceId: number, guidance = ''): Promise<void> {
     const names = await this.dependencies.runtime.availableModelPresets(instanceId);

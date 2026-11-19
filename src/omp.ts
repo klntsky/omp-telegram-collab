@@ -10,6 +10,7 @@ export interface WorktreeTarget {
   sessionId: string;
   dev: number;
   ino: number;
+  skipConfirmation?: boolean;
 }
 
 export interface Omp {
