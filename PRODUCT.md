@@ -193,13 +193,15 @@ While terminated, prompts, callbacks, Mini App agent access, and commands other 
 
 ### 1.2. Prompts and permissions
 
-Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values. Choice buttons mark saved selections with ✅, including skills, model presets, and typing options. Settings categories and navigation buttons use icons. Message handling distinguishes “All messages” from “/p <prompt>, mentions, and replies only”. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
+Each bot/chat assignment has two prompt-policy settings. `/settings` opens the same group-wide controls from General or any topic. Overview buttons include their current values except the capacity action. Choice buttons mark saved selections with ✅, including skills, model presets, and typing options. Settings categories and navigation buttons use icons except the capacity action. Message handling distinguishes “All messages” from “/p <prompt>, mentions, and replies only”. “Who can send prompts” distinguishes admins only from members with admin approval. Automatic worktrees distinguish creating a separate worktree from using the instance directory.
 
 The settings overview arrives with its controls in the initial message, without a loading placeholder.
 
-Settings overview labels separate names and values with a colon. The default selectors are named “Default skills” and “Default model preset”. Message handling, request permissions, and worktrees toggle immediately when their overview button is pressed, without opening a submenu. Worktrees show “Enabled” or “Disabled” in the overview and saved-change summary.
+Action labels describe the user's intended goal without implementation details or elaboration. The model-preset command description does not append the preset catalog. The theme control is labeled “Switch theme”.
 
-Worktree mentions in bot controls, command descriptions, help, and successful operation messages use 🌳, matching the topic-title prefix. Original failure diagnostics remain unchanged.
+Settings overview labels separate names and values with a colon, except the capacity action labeled “Limit simultaneous agents”. The default selectors are named “Default skills” and “Default model preset”. Message handling, request permissions, and worktrees toggle immediately when their overview button is pressed, without opening a submenu. Worktrees show “Enabled” or “Disabled” in the overview and saved-change summary.
+
+Worktree mentions in bot controls, help, and successful operation messages use 🌳, matching the topic-title prefix. The `/worktree` command-menu description is “Switch to a new git worktree”. Original failure diagnostics remain unchanged.
 
 Saving a default keeps the same choice screen and catalog page open with saved selections marked. Each skill button independently adds or removes that skill, and a separate control clears all default skills. Toggles save immediately and keep the overview open with the updated value. Back to settings returns to the overview. The ✅ Save & exit button removes the controls and leaves a summary of changes saved through that panel, showing each setting's previous and final values. Repeated edits collapse into one entry; reverting a setting to its original value removes the entry. Failed saves are excluded. Closing without net changes says that no settings changed. Changes edit the existing panel except when folder entry needs a new forced-reply message. Group controls state their scope and when defaults take effect.
 
