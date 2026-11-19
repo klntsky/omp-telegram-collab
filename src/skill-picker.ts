@@ -5,6 +5,7 @@ import type { Store, PendingSkillKey } from './store.js';
 import { sameTopicDestination } from '../shared/topic-destination.js';
 import { contextDestination, replyTo } from './telegram-destination.js';
 import { isMentionableSkillName } from './skill-commands.js';
+import { escapeHtml } from './telegram-html.js';
 
 export interface SkillCatalogEntry { name: string; description: string }
 interface Picker {
@@ -93,8 +94,8 @@ export class SkillPicker {
       const text = `/skill:${skill.name}`;
       return [{ type: 'article' as const, id: `${match![1]}:${index}`, title: text,
         description: skill.description.slice(0, 256), input_message_content: {
-          message_text: text, entities: [{ type: 'text_link' as const, offset: 0, length: text.length,
-            url: `https://t.me/${this.options.username()}?start=skill_${match![1]}_${index}` }],
+          message_text: `<a href="${escapeHtml(`https://t.me/${this.options.username()}?start=skill_${match![1]}_${index}`)}">${escapeHtml(text)}</a>`,
+          parse_mode: 'HTML' as const,
         } }];
     }).slice(0, 50), { cache_time: 0, is_personal: true });
   }

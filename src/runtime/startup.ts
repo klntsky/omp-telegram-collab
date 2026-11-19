@@ -4,6 +4,7 @@ import path from 'node:path';
 import { hostSupervisorPath, hostLifecyclePath } from '../host-assets.js';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
+import { SessionRetiringError } from './types.js';
 import { privateFile } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
@@ -46,7 +47,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     try {
       await deps.acquire();
       const { dir, pin } = prepared;
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       deps.assertActive();
       let hosts = await deps.list(deadline);
       const matches = hosts.filter(host => host.sessionId === pin.sessionId);
@@ -56,7 +58,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
         while (!await presetReady(dir, pin, host.pid)) {
           if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (deps.closed) throw new Error('OMP runtime is stopping');
+          if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
           deps.assertActive();
           await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
@@ -83,17 +86,19 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (owned.retirement?.error !== undefined) throw owned.retirement.error;
         owned.retiring = owned.retirement !== undefined || (currentLifecycle && lifecycle.retiring === true);
         deps.managed.set(id,owned);
-        if (owned.retiring) throw new Error('Session is retiring; rejoin after it settles');
+        if (owned.retiring) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
         deps.assertActive();
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed) throw new Error('OMP runtime is stopping');
+        if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
         return binding;
       }
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       if (owned?.retirement) {
         const identity = await procIdentity(owned.retirement.pid);
         if (identity && identity.start === owned.retirement.start && identity.state !== 'Z' && identity.state !== 'X') {
           if (owned.retirement.error !== undefined) throw owned.retirement.error;
-          throw new Error('Session is retiring; rejoin after it settles');
+          throw new SessionRetiringError('Session is retiring; rejoin after it settles');
         }
         delete owned.retirement;
         owned.retiring = false;
@@ -121,7 +126,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       }
       await beforeMutation?.();
       deps.assertActive();
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       const child = spawn(process.execPath, [
         hostSupervisorPath,
         deps.config.omp.executable,
@@ -149,7 +155,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (deps.managed.get(id) === record) deps.managed.delete(id);
       });
       while (Date.now() < deadline) {
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed) throw new Error('OMP runtime is stopping');
+        if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
         deps.assertActive();
         if (record.failure) throw new Error(record.failure);
         if (launch.preset !== undefined) await presetReady(dir, pin);
@@ -171,7 +178,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           const identity = await procIdentity(host.pid);
           if (identity) record.identity = { pid: host.pid, start: identity.start };
           deps.assertActive();
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (deps.closed) throw new Error('OMP runtime is stopping');
+          if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
           return binding;
         }
         await delay(Math.min(200,Math.max(1,deadline-Date.now())));

@@ -12,9 +12,9 @@ import { initializeDatabase } from '../src/migrations.js';
 import { Store } from '../src/store.js';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
-// Execute the schema-9 application's actual Store instead of maintaining a second
+// Execute the schema-10 application's actual Store instead of maintaining a second
 // schema definition or manufacturing historical database rows in this test.
-const previousRevision = '52a5d1b483d0d1423eb6045ce9b0866b23bb5688';
+const previousRevision = '198e38f25927ec5b00e96fd81e805bb2693ab076';
 let previousSource: string;
 let PreviousStore: typeof Store;
 let target: WorktreeTarget;
@@ -57,7 +57,7 @@ function oldDatabase(t: TestContext, name = 'store.sqlite') {
   });
   const previous = new PreviousStore(filename);
   connections.push(previous.db);
-  assert.equal(previous.db.prepare('PRAGMA user_version').get()!.user_version, 9);
+  assert.equal(previous.db.prepare('PRAGMA user_version').get()!.user_version, 10);
   return { directory, filename, previous, track(store: Store) { connections.push(store.db); return store; } };
 }
 
@@ -65,11 +65,13 @@ function createOldState(store: Store) {
   store.enrollGroup(1, -100);
   const pending = { ...image, text: 'Inspect the upload', documents: [{ fileId: 'pending-document', fileName: 'notes.txt' }] };
   const session = store.createSession({ botId: 1, chatId: -100, threadId: 17, instanceId: 2, cwd: repository },
-    'Pending task', { kind: 'managed' }, pending, 41, 42);
+    'Pending task', { kind: 'managed' }, {
+      prompt: { messageId: 40, userId: 41, authorityUserId: 42, content: pending,
+        preparation: { automaticWorktree: true, extensions: [{ kind: 'skill', name: 'review' }] } },
+      preparation: 'topic',
+    });
   const attached = store.createSession({ botId: 1, chatId: -100, threadId: 18, instanceId: 2, cwd: repository },
     'Attached', { kind: 'attached', instanceId: 'native-host', sessionId: target.sessionId });
-  store.setInitialMessage(session.id, 40);
-  store.setInitialDocumentSetup(session.id, { automaticWorktree: true, extensions: [{ kind: 'skill', name: 'review' }] });
   store.addPendingSkill({ botId: 1, destination: { kind: 'topic', chatId: -100, threadId: 17 }, userId: 41 }, 'review');
   store.setNewTopicSkills(session.id, ['review']);
   store.recordPromptSubmission(session.id, target.sessionId, sender, { text: 'Accepted task' }, 100);
@@ -81,6 +83,8 @@ function createOldState(store: Store) {
   const textId = store.recordPromptSubmission(session.id, target.sessionId, sender, { text: 'Pending text' }, 200);
   const imageId = store.recordPromptSubmission(session.id, target.sessionId, sender, image, 201);
   store.markPromptSubmissionUncertain(imageId);
+  const queuedImage = store.promptQueue.enqueue(session.id, 201, 41, 42, image);
+  store.promptQueue.markSubmitted(queuedImage, imageId, Date.now() + 60000);
   const mixed = { ...image, text: 'Repeated image task' };
   const interrupted = store.recordPromptSubmission(session.id, target.sessionId, sender, mixed, 202);
   store.markPromptSubmissionUncertain(interrupted);
@@ -89,7 +93,7 @@ function createOldState(store: Store) {
   const discardedId = store.recordPromptSubmission(session.id, target.sessionId, sender, { text: 'Rejected' }, 204);
   store.rejectPromptSubmission(discardedId);
   const token = store.worktreeConfirmations.issue(session, 300, 42, target);
-  return { session, attached, pending, textId, imageId, discardedId, token };
+  return { session, attached, queued: store.promptQueue.list(session.id), textId, imageId, discardedId, token };
 }
 
 function snapshot(db: DatabaseSync) {
@@ -103,14 +107,14 @@ function backupFiles(directory: string): string[] {
     .flatMap(entry => readdirSync(join(directory, entry.name)).map(name => join(directory, entry.name, name)));
 }
 
-test('the real schema-9 application upgrades once with pending work and a private WAL-aware backup intact', t => {
+test('the real schema-10 application upgrades once with pending work and a private WAL-aware backup intact', t => {
   const context = oldDatabase(t);
   const old = createOldState(context.previous);
   const before = snapshot(context.previous.db);
   const originalSubmissions = before.get('prompt_submissions')!;
   assert.ok(statSync(`${context.filename}-wal`).size > 0);
   const current = context.track(new Store(context.filename));
-  assert.equal(current.db.prepare('PRAGMA user_version').get()!.user_version, 10);
+  assert.equal(current.db.prepare('PRAGMA user_version').get()!.user_version, 11);
   const migrated = snapshot(current.db);
   for (const [table, rows] of before) {
     if (table !== 'prompt_submissions') assert.deepEqual(migrated.get(table), rows);
@@ -125,10 +129,8 @@ test('the real schema-9 application upgrades once with pending work and a privat
   }
   assert.deepEqual(current.getSession(old.session.id), old.session);
   assert.deepEqual(current.getSession(old.attached.id), old.attached);
-  assert.deepEqual(current.getPendingInitialTask(old.session.id), old.pending);
-  assert.equal(current.getInitialUser(old.session.id), 41);
-  assert.equal(current.getInitialAuthority(old.session.id), 42);
-  assert.equal(current.getInitialMessage(old.session.id), 40);
+  assert.deepEqual(current.promptQueue.list(old.session.id), old.queued);
+  assert.equal(current.isSessionPreparing(old.session.id), true);
   assert.ok(current.worktreeConfirmations.matches(current.worktreeConfirmations.get(old.session.id, 300, old.token)!, old.session, target));
   const backups = backupFiles(context.directory);
   assert.equal(backups.length, 1);
@@ -136,7 +138,7 @@ test('the real schema-9 application upgrades once with pending work and a privat
   assert.equal(statSync(dirname(backups[0]!)).mode & 0o777, 0o700);
   const backup = new DatabaseSync(backups[0]!, { readOnly: true });
   try {
-    assert.equal(backup.prepare('PRAGMA user_version').get()!.user_version, 9);
+    assert.equal(backup.prepare('PRAGMA user_version').get()!.user_version, 10);
     assert.deepEqual(snapshot(backup), before);
     assert.equal(backup.prepare('PRAGMA integrity_check').get()!.integrity_check, 'ok');
   } finally { backup.close(); }
@@ -149,11 +151,20 @@ test('the real schema-9 application upgrades once with pending work and a privat
   current.close();
   context.previous.close();
   const reopened = context.track(new Store(context.filename));
-  assert.deepEqual(reopened.getPendingInitialTask(old.session.id), old.pending);
+  assert.deepEqual(reopened.promptQueue.list(old.session.id), old.queued);
   assert.equal(reopened.getMessageAnchor(old.session.id, target.sessionId, -100, 101)?.entryId, 'accepted');
   assert.equal(backupFiles(context.directory).length, 1);
   const fresh = context.track(new Store(':memory:'));
-  const schema = (db: DatabaseSync) => db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+  const schema = (db: DatabaseSync) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+    .map(({ name }) => ({
+      name,
+      columns: db.prepare('SELECT * FROM pragma_table_info(?)').all(name!),
+      foreignKeys: db.prepare('SELECT * FROM pragma_foreign_key_list(?)').all(name!),
+      indexes: db.prepare('SELECT name, "unique", origin, partial FROM pragma_index_list(?)').all(name!)
+        .map(({ name: index, ...properties }) => ({
+          ...properties, columns: db.prepare('SELECT * FROM pragma_index_info(?)').all(index!),
+        })),
+    }));
   assert.deepEqual(schema(reopened.db), schema(fresh.db));
 });
 
@@ -166,12 +177,12 @@ test('a real SQLite authorization failure rolls back the single migration and re
   assert.throws(() => initializeDatabase(context.previous.db), /not authorized/);
   context.previous.db.setAuthorizer(null);
   assert.equal(context.previous.db.isTransaction, false);
-  assert.equal(context.previous.db.prepare('PRAGMA user_version').get()!.user_version, 9);
+  assert.equal(context.previous.db.prepare('PRAGMA user_version').get()!.user_version, 10);
   assert.deepEqual(snapshot(context.previous.db), before);
   assert.equal(backupFiles(context.directory).length, 1);
   context.previous.close();
   const upgraded = context.track(new Store(context.filename));
-  assert.equal(upgraded.db.prepare('PRAGMA user_version').get()!.user_version, 10);
+  assert.equal(upgraded.db.prepare('PRAGMA user_version').get()!.user_version, 11);
 });
 
 test('a real backup path failure leaves the previous application database unchanged', t => {
@@ -182,7 +193,7 @@ test('a real backup path failure leaves the previous application database unchan
   assert.throws(() => new Store(context.filename),
     (error: unknown) => error instanceof Error && 'code' in error && error.code === 'ENAMETOOLONG');
   const previous = context.track(new PreviousStore(context.filename));
-  assert.equal(previous.db.prepare('PRAGMA user_version').get()!.user_version, 9);
+  assert.equal(previous.db.prepare('PRAGMA user_version').get()!.user_version, 10);
   assert.deepEqual(snapshot(previous.db), before);
   assert.deepEqual(backupFiles(context.directory), []);
 });
@@ -192,12 +203,12 @@ test('unsupported future-version metadata is rejected without changing the actua
   createOldState(context.previous);
   context.previous.close();
   const current = context.track(new Store(context.filename));
-  current.db.exec('PRAGMA user_version=11');
+  current.db.exec('PRAGMA user_version=12');
   current.close();
   chmodSync(context.filename, 0o640);
   const before = readFileSync(context.filename);
   const files = readdirSync(context.directory);
-  assert.throws(() => new Store(context.filename), /Unsupported database schema version 11/);
+  assert.throws(() => new Store(context.filename), /Unsupported database schema version 12/);
   assert.deepEqual(readFileSync(context.filename), before);
   assert.equal(statSync(context.filename).mode & 0o777, 0o640);
   assert.deepEqual(readdirSync(context.directory), files);
@@ -238,10 +249,10 @@ test('two real Store processes serialize one upgrade and create one backup', { t
     const entering = children.map(child => receive(child, 'entering'));
     for (const child of children) child.send('initialize');
     await Promise.all(entering);
-    assert.equal(lock.prepare('PRAGMA user_version').get()!.user_version, 9);
+    assert.equal(lock.prepare('PRAGMA user_version').get()!.user_version, 10);
     lock.exec('COMMIT');
     await Promise.all(children.map(child => receive(child, 'finished')));
-    assert.equal(lock.prepare('PRAGMA user_version').get()!.user_version, 10);
+    assert.equal(lock.prepare('PRAGMA user_version').get()!.user_version, 11);
     assert.equal(backupFiles(context.directory).length, 1);
   } finally {
     if (lock.isTransaction) lock.exec('ROLLBACK');

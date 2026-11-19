@@ -1,5 +1,5 @@
 import type { Bot, Context } from 'grammy';
-import type { TopicSession, PromptContent } from '../../shared/contracts.js';
+import type { TopicSession } from '../../shared/contracts.js';
 import type { HostFrame, CollabUiRequest, CustomMessageEntry } from '@oh-my-pi/pi-wire';
 import type { BotOptions } from '../bot.js';
 import type { Listener, SessionObservation, SessionMetadataOwner, HostActivityObservation, TopicActivity } from './types.js';
@@ -10,11 +10,12 @@ import { miniAppInterruptionAuthor } from '../../shared/interruption.js';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
 import { renderTelegramMarkdown } from '../telegram-markdown.js';
+import { escapeHtml, preHtml } from '../telegram-html.js';
 
 export interface FrameProjectionDependencies {
   acknowledgeMessage: (session: TopicSession, messageId: number, listener?: Listener) => void;
   activityObservation: (session: TopicSession) => HostActivityObservation;
-  authorizeInitial: (session: TopicSession, userId: number, authorityUserId: number) => Promise<void>;
+  settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
   background: AbortSignal;
   bot: Bot<Context>;
   delivery: TelegramDelivery;
@@ -22,12 +23,10 @@ export interface FrameProjectionDependencies {
   getListener: (id: string) => Listener | undefined;
   currentMetadataOwner: (id: string) => SessionMetadataOwner | undefined;
   endRequestQuestions: (listener: Listener, reqId: number) => void;
-  promptHelp: (chatId: number) => string;
   ready: (chatId: number) => Promise<boolean>;
   reconcilePromptReceipt: (session: TopicSession, listener: Listener, entry: CustomMessageEntry, replay: boolean, ompSessionId: string) => void;
   refreshTyping: (session: TopicSession, listener: Listener) => void;
   relayQuestion: (session: TopicSession, listener: Listener, request: CollabUiRequest) => void;
-  sendPrompt: (listener: Listener, content: PromptContent, messageId?: number, onStartupRejected?: () => void) => void;
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
   setTopicStatus: (session: TopicSession, status: TopicActivity, completed?: boolean) => void | Promise<void>;
@@ -122,7 +121,7 @@ export class FrameProjection {
       listener.queuedMessages = frame.state.queuedMessageCount;
       void this.deps.setTopicStatus(
         session,
-        this.deps.options.store.hasPendingInitialTask(session.id) ||
+        this.deps.options.store.promptQueue.has(session.id) ||
           frame.state.isStreaming ||
           listener.queuedMessages > 0
           ? 'running'
@@ -161,10 +160,8 @@ export class FrameProjection {
       const pending = listener.pendingPrompts.shift();
       if (pending) {
         if (isStartupRejection(frame)) {
-          this.deps.options.store.rejectPromptSubmission(pending.submissionId);
           pending.observation.state = 'not accepted';
         } else {
-          this.deps.options.store.markPromptSubmissionUncertain(pending.submissionId);
           pending.observation.state = 'acceptance unknown';
         }
       }
@@ -173,52 +170,13 @@ export class FrameProjection {
         at: Date.now(),
         error: frame.message,
       };
-      if (isStartupRejection(frame)) pending?.onStartupRejected?.();
-    }
-    if (isStartupRejection(frame) && listener.initial) {
-      const initial = listener.initial;
-      initial.phase = 'retrying';
-      clearTimeout(initial.timer);
-      const delay = Math.min(1000, 250 * ++initial.retries);
-      if (Date.now() + delay >= initial.deadline) {
-        listener.initial = undefined;
-        void sendTo(
-          this.deps.bot.api,
-          topicDestination(session.chatId, session.threadId),
-          `The host is still starting. The initial task was not admitted; send your task again after startup. ${this.deps.promptHelp(session.chatId)}`,
-        ).catch(error => console.warn(`Could not deliver initial task startup timeout notice (${session.id}).`, error));
-      } else {
-        initial.timer = setTimeout(() => {
-          void Promise.resolve().then(() => this.deps.authorizeInitial(session, initial.userId, initial.authorityUserId))
-            .then(() => {
-              if (
-                listener.initial !== initial ||
-                this.deps.stopped() ||
-                !this.deps.sessionAssigned(session) ||
-                !listener.connection
-              )
-                return;
-              if (Date.now() >= initial.deadline) {
-                listener.initial = undefined;
-                return;
-              }
-              initial.timer = setTimeout(() => {
-                listener.initial = undefined;
-              }, initial.deadline - Date.now());
-              initial.timer.unref();
-              initial.phase = 'sent';
-              this.deps.sendPrompt(listener, initial.content, initial.messageId);
-            })
-            .catch(error => {
-              if (!this.deps.stopped() && error !== this.deps.background.reason)
-                console.warn(`Could not retry initial task submission (${session.id}).`, error);
-              clearTimeout(initial.timer);
-              if (listener.initial === initial) listener.initial = undefined;
-            });
-        }, delay);
-        initial.timer.unref();
+      if (pending) this.deps.settlePrompt(session, pending.submissionId, isStartupRejection(frame) ? 'startup-rejected' : 'uncertain');
+      if (pending && isStartupRejection(frame)) {
+        console.warn('OMP startup rejected prompt.', frame.message, {sessionId: session.id, submissionId: pending.submissionId});
+        listener.pendingAnswers.clear();
+        listener.pendingStops.length = 0;
+        return;
       }
-      return;
     }
     if (
       frame.t === 'entry' &&
@@ -235,8 +193,8 @@ export class FrameProjection {
       void sendTo(
         this.deps.bot.api,
         topicDestination(session.chatId, session.threadId),
-        prefix + frame.message,
-        { entities: [{ type: 'pre', offset: prefix.length, length: frame.message.length }] },
+        escapeHtml(prefix) + preHtml(frame.message),
+        { parse_mode: 'HTML' },
       ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
       return;
     }

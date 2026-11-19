@@ -5,6 +5,7 @@ import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-dest
 import { topicDestination } from '../../shared/topic-destination.js';
 import { defaultConfigPath, findInstance } from '../config.js';
 import { isActiveMember } from '../auth.js';
+import { codeHtml, escapeHtml } from '../telegram-html.js';
 export interface ForumSetupDependencies {
   options: BotOptions;
   bot: Bot<Context>;
@@ -40,7 +41,7 @@ export class ForumSetup {
       const quotedInstancePath = "'" + process.cwd().replaceAll("'", "'\\''") + "'";
       const command = `${this.localCliCommand()} approve ${request.code} --path ${quotedInstancePath}`;
       const prefix = "Setup requested. On the agent's computer, approve within 10 minutes:\n";
-      await replyTo(ctx, contextDestination(ctx), `${prefix}${command}\nThe project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.`, { entities: [{ type: 'code', offset: prefix.length, length: command.length }] });
+      await replyTo(ctx, contextDestination(ctx), `${escapeHtml(prefix)}${codeHtml(command)}\nThe project directory defaults to the bot's working directory. Change --path to the project directory where OMP should run. Leave the bot running and use a second terminal.`, { parse_mode: 'HTML' });
       return;
     }
     if (!(await this.dependencies.currentAdmin(ctx))) {

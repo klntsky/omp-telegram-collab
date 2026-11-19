@@ -9,6 +9,7 @@ import { classifyMessage, normalizeMessage, type InputIntent } from '../telegram
 import type { SkillCatalogEntry } from '../skill-picker.js';
 import type { BotQuestions } from './questions.js';
 import type { SessionObservation, SettingsPanel } from './types.js';
+import { escapeHtml, preHtml } from '../telegram-html.js';
 
 interface InputDependencies {
  bot: Bot<Context>; config: AppConfig; store: Store; delivery: TelegramDelivery; questions: BotQuestions;
@@ -112,8 +113,8 @@ install(): void {
         : [];
       const prefix = `The operation could not be completed. Check the local service and try again.\n\n${diagnostics.length ? diagnostics.join('\n') + '\n\n' : ''}`;
       const details = error instanceof Error ? error.message : String(error);
-      await replyTo(ctx, contextDestination(ctx), prefix + details, {
-        entities: [{type:'pre',offset:prefix.length,length:details.length}],
+      await replyTo(ctx, contextDestination(ctx), escapeHtml(prefix) + preHtml(details), {
+        parse_mode: 'HTML',
       });
     } catch (deliveryError) {
       console.error('Could not report Telegram operation error.', deliveryError, { ...context, originalError:error });
@@ -176,7 +177,7 @@ install(): void {
       skillAliases:this.deps.skillAliases.get(ctx.chat.id) ?? new Map(),
       question,
       endedQuestion:replyKey !== undefined && this.deps.questions.hasEndedReply(replyKey) && !canDiscuss,
-    });
+    },messages);
     this.inputIntents.set(ctx,intent);
     return intent;
   }

@@ -9,8 +9,8 @@ export interface DatabaseMigration {
 
 export const databaseMigrations: readonly DatabaseMigration[] = [
   {
-    from: 9,
-    to: 10,
+    from: 10,
+    to: 11,
     apply(db) {
       db.exec(`
         CREATE TEMP TABLE submission_sequence AS SELECT seq FROM sqlite_sequence WHERE name='prompt_submissions';

@@ -3,9 +3,10 @@ import { StringDecoder } from 'node:string_decoder';
 import type { CustomMessageEntry } from '@oh-my-pi/pi-wire';
 import type { HistorySource } from './history-watch.js';
 
-// Resolve canonical content synchronously so later frames cannot overtake receipt routing.
-// OMP's SessionManager.#recordEntry calls append before notifying subscribers:
-// https://github.com/can1357/oh-my-pi/blob/v16.3.6/packages/coding-agent/src/session/session-manager.ts#L791-L796
+// Resolve synchronously so later frames cannot overtake receipt routing. Normal appends
+// precede notification, but fenced atomic rewrites can defer persistence; missing entries
+// deliberately fail rather than introducing waiting or receipt recovery state.
+// https://github.com/can1357/oh-my-pi/blob/v16.3.6/packages/coding-agent/src/session/session-manager.ts
 export function readPromptReceipt(source: HistorySource, entryId: string): CustomMessageEntry {
   const fd = openSync(source.path, 'r');
   let failed = false;

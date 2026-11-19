@@ -3,16 +3,17 @@ import { baselineSchema } from './database-schema.js';
 import { databaseMigrations } from './database-migrations.js';
 import { backupDatabase } from './database-backup.js';
 
-export const databaseVersion = 10;
+export const databaseVersion = 11;
 
 function validateVersion(db: DatabaseSync, version: number): void {
-  if (version !== 0 && (version < 9 || version > databaseVersion)) {
+  if (version !== 0 && version !== 10 && version !== databaseVersion) {
     throw new Error(`Unsupported database schema version ${version}`);
   }
   if (version === 0 && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get()) {
     throw new Error('Unsupported existing database');
   }
 }
+
 
 export function initializeDatabase(db: DatabaseSync): void {
   db.exec('PRAGMA busy_timeout=5000');
@@ -32,8 +33,8 @@ export function initializeDatabase(db: DatabaseSync): void {
     }
     if (version === 0) {
       db.exec(baselineSchema);
-      db.exec('PRAGMA user_version=9');
-      version = 9;
+      db.exec('PRAGMA user_version=10');
+      version = 10;
     } else {
       backupDatabase(db);
     }

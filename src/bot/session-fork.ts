@@ -19,6 +19,7 @@ export interface SessionForkDependencies {
   announce(session: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<unknown>;
   dropListener(sessionId: string): void;
+  drainPrompts(session: TopicSession): Promise<void>;
   stripTopicStatus(session: TopicSession, title: string): string;
 }
 
@@ -63,7 +64,7 @@ export class SessionFork {
       await check();
       destination = this.dependencies.options.store.createSession(
         {botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd},
-        title, {kind:'managed'}, undefined, ctx.from!.id, ctx.from!.id, 'fork',
+        title, {kind:'managed'}, {preparation:'fork'},
       );
       reservation.bind(destination.id);
       const destinationGeneration = this.dependencies.options.store.getSessionGeneration(destination.id);
@@ -83,7 +84,6 @@ export class SessionFork {
         await this.dependencies.createTopicWorktree(destination, beforeMutation);
       }
       await beforeMutation();
-      this.dependencies.options.store.finishInitialTaskPreparation(destination.id);
       prepared = true;
       await sendTo(this.dependencies.bot.api, topicDestination(destination.chatId, destination.threadId),
         `Forked from: https://t.me/c/${String(source.chatId).replace(/^-100/, '')}/${reply?.message_id ?? ctx.message!.message_id}?thread=${source.threadId}`,
@@ -102,9 +102,10 @@ export class SessionFork {
       }
       throw error;
     } finally {
-      if (destination) this.dependencies.options.store.finishInitialTaskPreparation(destination.id);
+      if (destination) this.dependencies.options.store.finishSessionPreparation(destination.id);
       releaseSource();
       reservation?.release();
     }
+    if (destination) await this.dependencies.drainPrompts(destination);
   }
 }

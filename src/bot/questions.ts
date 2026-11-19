@@ -204,7 +204,8 @@ export class BotQuestions {
           const marker = request.checkedIndices?.includes(index) ? '[x] ' : '';
           return `${optionMarker(index)} ${marker}${label}${typeof option !== 'string' && option.description ? `\n${option.description}` : ''}`;
         }));
-        if (request.helpText) parts.push(request.helpText);
+        // OMP's ask.selectOption helpText describes terminal keys, not Telegram controls.
+        // https://github.com/klntsky/oh-my-pi/blob/main/packages/coding-agent/src/tools/ask.ts
       } else if (request.prefill) parts.push(request.prefill);
       const body = parts.join('\n\n');
       for (let offset = 0; offset < body.length;) {

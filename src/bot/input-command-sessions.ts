@@ -1,4 +1,5 @@
 import { contextDestination, replyTo } from '../telegram-destination.js';
+import { codeHtml, preHtml } from '../telegram-html.js';
 import type { Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
 import type { PromptExtension } from '../telegram-commands.js';
@@ -63,7 +64,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
           deps.dropListener(session.id);
         }
         await deps.listen(session);
-        await replyTo(ctx, destination, `🌳 ${text}`);
+        await replyTo(ctx, destination, `🌳 ${codeHtml(text)}`, { parse_mode: 'HTML' });
         return true;
       }
       if (action === 'attach') {
@@ -116,7 +117,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         deps.requireSessionAssignment(session);
         if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return true; }
         const command = `omp-telegram-collab session join --chat ${destination.chatId} --topic ${destination.threadId}`;
-        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n<pre>${command}</pre>`, {
+        await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n${preHtml(command)}`, {
           parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
         });
         return true;

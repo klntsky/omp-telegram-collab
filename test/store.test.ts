@@ -122,13 +122,12 @@ test('initial task message provenance survives restart without acknowledging it'
   let store = new Store(filename);
   try {
     const task = { text: 'Initial task awaiting admission' };
-    const session = store.createSession(topic, 'Pending task', { kind: 'managed' }, task, 42);
-    store.setInitialMessage(session.id, 7101);
+    const session = store.createSession(topic, 'Pending task', { kind: 'managed' }, { prompt: { messageId: 7101, userId: 42, authorityUserId: 42, content: task } });
     store.close();
     store = new Store(filename);
-    assert.equal(store.getInitialMessage(session.id), 7101);
+    assert.equal(store.promptQueue.first(session.id)?.messageId, 7101);
     assert.equal(store.getReplyTarget(session.id), undefined);
-    assert.deepEqual(store.claimInitialTask(session.id), task);
+    assert.deepEqual(store.promptQueue.first(session.id)?.content, task);
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -143,25 +142,23 @@ test('image-only initial content survives reopening storage and stays session-sc
     const first = new Store(filename);
     let id: string;
     try {
-      id = first.createSession(topic,'Image task',{kind:'managed'},{text:'',images},42).id;
-      first.createSession({...topic,threadId:18},'Unrelated',{kind:'managed'},{text:'Other task'},43,44);
+      id = first.createSession(topic,'Image task',{kind:'managed'},{prompt:{messageId:1,userId:42,authorityUserId:42,content:{text:'',images}}}).id;
+      first.createSession({...topic,threadId:18},'Unrelated',{kind:'managed'},{prompt:{messageId:2,userId:43,authorityUserId:44,content:{text:'Other task'}}});
     } finally {
       first.close();
     }
     const restored = new Store(filename);
     try {
-      assert.equal(restored.hasPendingInitialTask(id),true);
-      assert.equal(restored.getInitialUser(id),42);
-      assert.equal(restored.getInitialAuthority(id),42);
+      const queued = restored.promptQueue.first(id)!;
+      assert.equal(queued.userId,42);
+      assert.equal(queued.authorityUserId,42);
+      assert.deepEqual(queued.content,{text:'',images});
+      restored.promptQueue.remove(queued.id);
+      assert.equal(restored.promptQueue.has(id),false);
       const unrelated = restored.getTopic({botId: topic.botId, destination: topicDestination(topic.chatId, 18)})!;
-      assert.deepEqual(restored.claimInitialTask(id),{text:'',images});
-      assert.equal(restored.hasPendingInitialTask(id),false);
-      assert.equal(restored.db.prepare('SELECT initial_state FROM sessions WHERE id=?').get(id)?.initial_state,'submitted');
-      assert.equal(restored.claimInitialTask(id),undefined);
-      assert.equal(restored.hasPendingInitialTask(unrelated.id),true);
-      assert.equal(restored.getInitialUser(unrelated.id),43);
-      assert.equal(restored.getInitialAuthority(unrelated.id),44);
-      assert.deepEqual(restored.claimInitialTask(unrelated.id),{text:'Other task'});
+      assert.equal(restored.promptQueue.first(unrelated.id)?.userId,43);
+      assert.equal(restored.promptQueue.first(unrelated.id)?.authorityUserId,44);
+      assert.deepEqual(restored.promptQueue.first(unrelated.id)?.content,{text:'Other task'});
     } finally {
       restored.close();
     }
@@ -197,7 +194,7 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   const filename = join(directory, 'telegram.sqlite');
   let store = new Store(filename);
   try {
-    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, {text:'Pending instruction'}, 123, 456);
+    const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, {prompt:{messageId:1,userId:123,authorityUserId:456,content:{text:'Pending instruction'}}});
     store.markSnapshot(original.id);
     store.rememberReply(original.id, 'omp-session', 'saved-reply');
     store.advanceSessionGeneration(original.id);
@@ -206,16 +203,17 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     store = new Store(filename);
     assert.deepEqual(store.getSession(original.id), original);
     assert.equal(store.getSessionGeneration(original.id), 1);
-    assert.equal(store.hasPendingInitialTask(original.id), true);
-    assert.equal(store.getInitialUser(original.id), 123);
-    assert.equal(store.getInitialAuthority(original.id), 456);
+    assert.equal(store.promptQueue.has(original.id), true);
+    assert.equal(store.promptQueue.first(original.id)?.userId, 123);
+    assert.equal(store.promptQueue.first(original.id)?.authorityUserId, 456);
     assert.equal(store.hasSnapshot(original.id), true);
     assert.equal(store.rememberReply(original.id, 'omp-session', 'saved-reply'), false);
     assert.equal(store.getReplyTarget(original.id), 77);
     assert.throws(() => store.createSession({ ...topic, instanceId: 2, cwd: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
-    assert.deepEqual(store.claimInitialTask(original.id), {text:'Pending instruction'});
-    assert.equal(store.claimInitialTask(original.id), undefined);
+    assert.deepEqual(store.promptQueue.first(original.id)?.content, {text:'Pending instruction'});
+    store.promptQueue.remove(store.promptQueue.first(original.id)!.id);
+    assert.equal(store.promptQueue.first(original.id), undefined);
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -288,9 +286,9 @@ test('newer database schemas are rejected rather than downgraded', async () => {
   const filename = join(directory, 'store.sqlite');
   try {
     const store = new Store(filename);
-    store.db.exec('PRAGMA user_version=11');
+    store.db.exec('PRAGMA user_version=12');
     store.close();
-    assert.throws(() => new Store(filename), /Unsupported database schema version 11/);
+    assert.throws(() => new Store(filename), /Unsupported database schema version 12/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
