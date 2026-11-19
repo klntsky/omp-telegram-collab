@@ -110,11 +110,15 @@ The runtime manager owns host discovery, startup, attachment, capacity, activity
 
 The runtime coordinator retains the shared host ledger, admission reservations, operation fences, and shutdown ordering. Dedicated owners execute complete startup, retirement, termination, fork, and worktree transactions against that ledger through narrow capabilities. Registry and path owners validate process, binding, and history identity; native settings, controls, and skill discovery retain their own subprocess and cache lifetimes. Activity and admission consume the same ledger, so separating operations cannot independently count capacity or bypass a retirement fence.
 
+The launch owner durably excludes replacement before process creation. Supervisor evidence and operating-system process lifetimes establish exit independently of Collab publication; absence from discovery is never process-death evidence. A failed or ambiguous cleanup retains ownership and capacity. Each launch owns its configuration, lifecycle endpoint, preset acknowledgement, and logs, so late publishers cannot modify a successor's state.
+
+The conversation owner follows the current conversation only within the verified owned process and Collab instance. Native lifecycle hooks provide a candidate, not a commit receipt. Collab's settled room publication and a matching live lifecycle snapshot jointly authorize the binding change; history validation remains at that boundary. Unexpected changes are retained as launch-scoped conflicts. Bot listeners and history feeds are replaced rather than transferring in-flight work to a new conversation.
+
 The `OmpRuntime` coordinator and `createBotComponents` composition root exceed the default 400-line limit to retain one shared operation ledger and one dependency-wiring point. Splitting their wiring would obscure which owners share admission fences and live lifecycle state. Worktree creation and removal share the existing worktree owner.
 
 The terminal join client uses the `joinTerminal` portion of the same contract through `terminalOmp`. It does not construct a service runtime or acquire service-owned lifecycle resources. The local control service still authorizes and resolves the host before the terminal launches OMP.
 
-Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running; startup rollback may retire only the host created by that acquisition attempt.
+Host lifetime is separate from guest connection acquisition. Failed acquisition leaves an existing managed host running, and a retryable relay failure leaves a newly launched host owned for reconnection. Startup rollback can target only its own launch. Connection recovery discovers and reconnects the existing host; it never authorizes process creation. Context-dependent preparation binds to its selected native conversation before effects, while submitted work retains its original provenance.
 
 Passive reconnect refreshes the runtime's cached connection capability only after matching the existing host identity and operating-system process lifetime. The recovery boundary cannot transfer ownership to a replacement process. Retirement consumes that refreshed capability while retaining its independent lifecycle and process-identity checks.
 

@@ -3,8 +3,9 @@ import type { BotOptions } from '../bot.js';
 import type { PromptPreparation } from './prompt-preparation.js';
 import type { Listener } from './types.js';
 import { AuthorizationDeniedError, PromptPreparationRejectedError } from './types.js';
-import { SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
+import { ConversationConflictError, ConversationTransitionPendingError, SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
 import { topicDestination } from '../../shared/topic-destination.js';
+import { ControlRoomUnavailableError } from '../runtime/registry.js';
 
 export interface PromptWorkerDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -114,33 +115,54 @@ export class PromptWorker {
     const cancellation = new Error('The queued prompt was cancelled before submission.');
     const active = () => !this.closed && store.getSession(session.id)?.status === 'open' &&
       store.getSessionGeneration(session.id) === generation && store.promptQueue.contains(queued.id);
+    let expectedSessionId = queued.preparation?.nativeSessionId;
+    let preparing = false;
     const authorize = async () => {
       if (!active()) throw cancellation;
       await this.deps.authorizeQueued(session, queued.userId, queued.authorityUserId);
       if (!active()) throw cancellation;
       if (this.deps.stopped()) throw new Error('The service is stopping');
+      if (expectedSessionId !== undefined && !preparing) {
+        const binding = await this.deps.options.runtime.existingBinding(session);
+        if (!binding || binding.sessionId !== expectedSessionId)
+          throw new PromptPreparationRejectedError('The native conversation changed during prompt preparation. Submit the prepared request again.');
+        if (!active()) throw cancellation;
+      }
     };
     let listener: Listener | undefined;
     try {
       await authorize();
       let preparation = queued.preparation;
+      if (expectedSessionId === undefined && (preparation?.automaticWorktree || preparation?.extensions?.length ||
+          preparation?.preset !== undefined || preparation?.skills?.length || queued.content.documents?.length)) {
+        const binding = await this.deps.options.runtime.ensure(session, authorize);
+        expectedSessionId = binding.sessionId;
+        preparation = {...preparation, nativeSessionId: expectedSessionId};
+        store.promptQueue.replacePreparation(queued.id, preparation);
+        await authorize();
+      }
       if (preparation?.skills?.length) {
         const available = await this.deps.options.runtime.listSkills(session.instanceId, session);
         const missing = preparation.skills.filter(name => !available.some(skill => skill.name === name));
         if (missing.length) throw new PromptPreparationRejectedError(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
       }
       if (preparation?.automaticWorktree) {
-        await this.deps.createTopicWorktree(session, authorize);
+        preparing = true;
+        try { await this.deps.createTopicWorktree(session, authorize); }
+        finally { preparing = false; }
         preparation = {...preparation, automaticWorktree: false};
         store.promptQueue.replacePreparation(queued.id, preparation);
         this.deps.dropListener(session.id);
       }
       if (preparation && (preparation.extensions?.length || preparation.preset !== undefined)) {
-        await this.deps.prepareQueuedPrompt(session, preparation.extensions ?? [], authorize,
-          (extensions, preset) => {
-            preparation = {...preparation, extensions, preset};
-            store.promptQueue.replacePreparation(queued.id, preparation);
-          }, preparation.preset);
+        preparing = true;
+        try {
+          await this.deps.prepareQueuedPrompt(session, preparation.extensions ?? [], authorize,
+            (extensions, preset) => {
+              preparation = {...preparation, extensions, preset};
+              store.promptQueue.replacePreparation(queued.id, preparation);
+            }, preparation.preset, expectedSessionId);
+        } finally { preparing = false; }
         preparation = {...preparation, extensions: []};
         store.promptQueue.replacePreparation(queued.id, preparation);
       }
@@ -161,9 +183,25 @@ export class PromptWorker {
         preparation = {...preparation, skills: []};
         store.promptQueue.replacePreparedContent(queued.id, expanded, preparation);
       }
+      const preparedCwd = session.cwd;
       const prompt = await this.deps.prepareContent(session, expanded);
       await authorize();
-      if (this.deps.listener(session.id) !== listener) return;
+      const current = await this.deps.options.runtime.resolveExisting(session);
+      if (session.cwd !== preparedCwd) {
+        this.schedule(session, Date.now());
+        return;
+      }
+      if (!current || listener.ompSessionId !== current.sessionId) {
+        if (expectedSessionId !== undefined)
+          throw new PromptPreparationRejectedError('The native conversation changed during prompt preparation. Submit the prepared request again.');
+        if (this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
+        this.schedule(session, Date.now());
+        return;
+      }
+      if (this.deps.listener(session.id) !== listener) {
+        this.schedule(session, Date.now());
+        return;
+      }
       this.deps.sendPrompt(listener, prompt, queued.messageId, submissionId => {
         if (!active()) throw cancellation;
         store.promptQueue.markSubmitted(queued.id, submissionId, Date.now() + this.deps.options.config.omp.startupTimeoutMs);
@@ -171,6 +209,13 @@ export class PromptWorker {
     } catch (error) {
       // Maintenance cancellation may interrupt a shared native operation before authorize can observe closure.
       if (error === cancellation || (this.deps.shutdown.aborted && error === this.deps.shutdown.reason)) return;
+      if (error instanceof ControlRoomUnavailableError || error instanceof ConversationTransitionPendingError) {
+        if (listener && this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
+        this.deps.scheduleReconnect(session);
+        return;
+      }
+      if (error instanceof ConversationConflictError && expectedSessionId !== undefined)
+        error = new PromptPreparationRejectedError(error.message, { cause: error });
       if (error instanceof PromptPreparationRejectedError) {
         try { await this.deps.reportQueuedFailure(session, error); }
         catch (reportError) { throw new AggregateError([error, reportError], `${error.message}\n${reportError instanceof Error ? reportError.message : String(reportError)}`); }

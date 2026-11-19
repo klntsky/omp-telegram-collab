@@ -4,6 +4,7 @@ import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { SessionCapacityError, type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity, type HostLifecycle } from './types.js';
 import { procIdentity } from './process.js';
 import { errno } from './values.js';
+import { launchUnresolved } from './launch-record.js';
 interface AdmissionDependencies {
   readonly config: AppConfig;
   lifecycle(id: string): Promise<HostLifecycle | undefined>;
@@ -44,10 +45,14 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
       try { pin = JSON.parse(await readFile(path.join(root,entry.name,'binding.json'),'utf8')) as DurableBinding; }
       catch (error) { if (errno(error,'ENOENT')) continue; throw error; }
       const host = hosts.find(value => value.sessionId === pin.sessionId && value.cwd === pin.cwd);
-      if (!host) continue;
       const lifecycle = await deps.lifecycle(entry.name);
+      const identity = lifecycle ? await procIdentity(lifecycle.pid) : null;
+      const supervisor = lifecycle ? await procIdentity(lifecycle.supervisorPid) : null;
+      if (!host && !await launchUnresolved(path.join(root, entry.name)) &&
+          (!identity || identity.state === 'Z' || identity.state === 'X') &&
+          (!supervisor || supervisor.state === 'Z' || supervisor.state === 'X')) continue;
       deps.managed.set(entry.name,{sessionId:pin.sessionId,exited:false,retiring:lifecycle?.retiring===true});
-      deps.hostActivity(entry.name).busy = host.busy !== false;
+      deps.hostActivity(entry.name).busy = host?.busy !== false;
     }
     discovered = true;
   }
@@ -65,6 +70,14 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
       await discoverManaged(hosts);
       for (const [other,host] of deps.managed) {
         if (host && !deps.pending.has(other) && !hosts.some(value => value.sessionId === host.sessionId)) {
+          if (await launchUnresolved(path.join(deps.config.dataDir, 'sessions', other))) continue;
+          const observed = await deps.lifecycle(other);
+          if (observed) {
+            const identity = await procIdentity(observed.pid);
+            if (identity && identity.state !== 'Z' && identity.state !== 'X') continue;
+            const supervisor = await procIdentity(observed.supervisorPid);
+            if (supervisor && supervisor.state !== 'Z' && supervisor.state !== 'X') continue;
+          }
           if (host.retiring && !host.retirement) {
             const lifecycle = await deps.lifecycle(other);
             if (!lifecycle || lifecycle.sessionId !== host.sessionId) continue;

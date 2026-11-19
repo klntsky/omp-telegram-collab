@@ -1,3 +1,4 @@
+import { activeLaunchDir } from './launch-record.js';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
 import { chmod, lstat, realpath } from 'node:fs/promises';
@@ -217,9 +218,10 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
   }
 
   async function worktreeRpc(dir: string, pin: DurableBinding, branch?: string): Promise<{ text: string; state: Record<string, unknown> }> {
+    const launchDir = await activeLaunchDir(dir);
     const child = spawn(deps.config.omp.executable, [
       ...deps.config.omp.args, '--mode', 'rpc', '--resume', pin.sessionFile,
-      '--cwd', pin.cwd, '--config', path.join(dir, 'runtime.yml'), '--no-title',
+      '--cwd', pin.cwd, '--config', path.join(launchDir, 'runtime.yml'), '--no-title',
     ], { cwd: pin.cwd, env: childEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     deps.skillProcesses.add(child);
     let buffer = '';

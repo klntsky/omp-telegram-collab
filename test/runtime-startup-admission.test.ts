@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fixture } from './runtime-retirement-fixture.js';
+import { beginLaunch, readLaunch, recordLaunchHost } from '../src/runtime/launch-record.js';
+import { procIdentity } from '../src/runtime/process.js';
 
 test('stop fences pending admission before it can launch a managed supervisor', async t => {
   const app = await fixture();
@@ -84,6 +87,7 @@ test('reservations serialize competing targets without spawning and share an exi
   const app = await fixture();
   t.after(() => app.close());
   await app.removeHost();
+  await rm(app.lifecyclePath);
   const results = await Promise.allSettled([app.runtime.reserveSession('first'),app.runtime.reserveSession('second')]);
   assert.equal(results.filter(result => result.status === 'fulfilled').length,1);
   assert.equal(results.filter(result => result.status === 'rejected').length,1);
@@ -129,4 +133,37 @@ test('denied admission authorization cannot retire another managed session', asy
   }),error => error === denied);
   assert.deepEqual(app.requests,[]);
   assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length,0);
+});
+
+test('an unresolved launch blocks a duplicate even without lifecycle or registry publication', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  await app.removeHost();
+  await rm(app.lifecyclePath);
+  await beginLaunch(app.sessionDir, app.host.sessionId, app.session.cwd);
+  const launch = await readLaunch(app.sessionDir);
+  await assert.rejects(app.runtime.ensure(app.session));
+  assert.deepEqual(await readLaunch(app.sessionDir), launch);
+  assert.equal((await app.commands()).filter(args => args[0] !== 'collab').length, 0);
+});
+
+test('host discovery waits for exact supervisor child evidence publication', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  const directory = await beginLaunch(app.sessionDir, app.host.sessionId, app.session.cwd);
+  const identity = await procIdentity(process.pid);
+  assert.ok(identity);
+  const evidence = { pid: process.pid, start: identity.start };
+  await writeFile(`${directory}/supervisor.json`, JSON.stringify(evidence));
+  const recording = recordLaunchHost(app.sessionDir, app.host);
+  // Exercise cross-process publication against the real filesystem and retry clock.
+  await delay(30);
+  await writeFile(`${directory}/supervisor.json.tmp`, JSON.stringify({
+    ...evidence, child: { pid: process.pid, start: identity.start, group: identity.group },
+  }));
+  await rename(`${directory}/supervisor.json.tmp`, `${directory}/supervisor.json`);
+  await recording;
+  assert.deepEqual((await readLaunch(app.sessionDir))?.host, {
+    pid: process.pid, start: identity.start, instanceId: app.host.instanceId,
+  });
 });

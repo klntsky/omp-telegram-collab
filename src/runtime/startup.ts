@@ -9,10 +9,13 @@ import { privateFile } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
 import { childEnvironment } from './environment.js';
+import { activeLaunchDir, beginLaunch, cancelUnspawnedLaunch, readLaunch, launchUnresolved, launchFailure, recordLaunchHost, killLaunch } from './launch-record.js';
+import { ControlRoomUnavailableError } from './registry.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
   prepare(session: TopicSession): Promise<{ dir: string; pin: DurableBinding }>;
+  refreshConversation(session: TopicSession): Promise<void>;
   acquire(): Promise<void>;
   readonly closed: boolean;
   readonly stopping: Map<string, Promise<void>>;
@@ -33,10 +36,12 @@ export interface RuntimeStartup {
 export function createStartup(deps: StartupDependencies): RuntimeStartup {
 
   async function ensureManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
+    await deps.refreshConversation(session);
     const id = session.id;
     let owned = deps.managed.get(id);
     let spawned: ManagedHost | undefined;
     let discoveryFailure: Error | undefined;
+    let launchPrepared = false;
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
     let prepared: { dir: string; pin: DurableBinding };
     try { prepared = await deps.prepare(session); }
@@ -46,7 +51,9 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     }
     try {
       await deps.acquire();
-      const { dir, pin } = prepared;
+      const { dir: root, pin } = prepared;
+      let dir = await activeLaunchDir(root);
+      const launchPin = { ...pin, sessionId: (await readLaunch(root))?.sessionId ?? pin.sessionId };
       if (deps.closed) throw new Error('OMP runtime is stopping');
       if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       deps.assertActive();
@@ -56,7 +63,12 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       if (matches.length === 1) {
         const host = matches[0]!;
         if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
-        while (!await presetReady(dir, pin, host.pid)) {
+        await recordLaunchHost(root, host);
+        owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
+        const observedIdentity = await procIdentity(host.pid);
+        if (observedIdentity) owned.identity = { pid: host.pid, start: observedIdentity.start };
+        deps.managed.set(id, owned);
+        while (!await presetReady(dir, launchPin, host.pid)) {
           if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
           if (deps.closed) throw new Error('OMP runtime is stopping');
           if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
@@ -103,6 +115,24 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         delete owned.retirement;
         owned.retiring = false;
       }
+      if (await launchUnresolved(root)) throw new Error('OMP launch ownership is unresolved; cannot safely start another process');
+      if (!await readLaunch(root) && !await deps.lifecycle(id)) {
+        let legacyLaunch = false;
+        try { await readFile(path.join(root, 'runtime.yml')); legacyLaunch = true; }
+        catch (error) { if (!errno(error, 'ENOENT')) throw error; }
+        if (legacyLaunch) throw new Error('Legacy OMP launch ownership is unresolved; cannot safely start another process');
+      }
+      const previousLifecycle = await deps.lifecycle(id);
+      if (previousLifecycle) {
+        const identity = await procIdentity(previousLifecycle.pid);
+        if (identity && identity.state !== 'Z' && identity.state !== 'X') throw new Error('OMP host is not registered; cannot safely start another process');
+        const supervisor = await procIdentity(previousLifecycle.supervisorPid);
+        if (supervisor && supervisor.state !== 'Z' && supervisor.state !== 'X') throw new Error('OMP supervisor is still alive; cannot safely start another process');
+      }
+      if (owned?.process?.pid && !owned.exited) {
+        const identity = await procIdentity(owned.process.pid);
+        if (identity && identity.state !== 'Z' && identity.state !== 'X') throw new Error('OMP supervisor is still alive; cannot safely start another process');
+      }
       if (owned?.identity) {
         const identity = await procIdentity(owned.identity.pid);
         if (identity && identity.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') {
@@ -112,6 +142,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       }
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
+      dir = await beginLaunch(root, pin.sessionId, pin.cwd);
+      launchPrepared = true;
       const overlay = {
         collab: { autoStart: 'control', ...(deps.config.omp.relayUrl ? { relayUrl: deps.config.omp.relayUrl } : {}) },
         startup: { checkUpdate: false, setupWizard: false },
@@ -140,7 +172,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         '--extension',hostLifecyclePath,
       ], {
         cwd: pin.cwd,
-        env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
+        env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: dir, OMP_TELEGRAM_LAUNCH_ID: path.basename(dir), OMP_TELEGRAM_DEFAULT_PRESET: launch.preset ?? '' },
         detached: true,
         stdio: 'ignore',
       });
@@ -152,7 +184,6 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       child.once('error',error => { record.failure = error.message; record.exited = true; });
       child.once('exit',() => {
         record.exited = true;
-        if (deps.managed.get(id) === record) deps.managed.delete(id);
       });
       while (Date.now() < deadline) {
         if (deps.closed) throw new Error('OMP runtime is stopping');
@@ -165,6 +196,9 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           if (!await belongsTo(host.pid,child.pid)) continue;
           if (host.sessionId !== pin.sessionId || await realpath(host.cwd) !== pin.cwd) throw new Error('Managed OMP process switched its pinned session');
           if (!await presetReady(dir, pin, host.pid)) continue;
+          const identity = await procIdentity(host.pid);
+          if (identity) record.identity = { pid: host.pid, start: identity.start };
+          await recordLaunchHost(root, host);
           let binding: HostBinding;
           try {
             binding = await deps.resolve(host,deadline);
@@ -175,8 +209,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
             continue;
           }
           record.binding = binding;
-          const identity = await procIdentity(host.pid);
-          if (identity) record.identity = { pid: host.pid, start: identity.start };
+          await recordLaunchHost(root, host);
           deps.assertActive();
           if (deps.closed) throw new Error('OMP runtime is stopping');
           if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
@@ -187,11 +220,16 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       }
       throw discoveryFailure ?? new Error('Managed OMP startup timed out');
     } catch (error) {
+      if (launchPrepared && !spawned) {
+        try { await cancelUnspawnedLaunch(prepared.dir); }
+        catch (cleanupError) {
+          if (error instanceof Error) Object.defineProperty(error, 'cleanupError', { value: cleanupError, configurable: true });
+        }
+      }
       if (
         discoveryFailure &&
         error instanceof Error &&
         error !== discoveryFailure &&
-        Date.now() >= deadline &&
         (error.message === 'OMP discovery timed out' ||
           ('killed' in error && error.killed === true &&
             'code' in error && error.code === null &&
@@ -200,11 +238,15 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         Object.defineProperty(discoveryFailure, 'cause', { value: error, configurable: true });
         error = discoveryFailure;
       }
-      if (spawned && !spawned.exited && !deps.killing.has(id)) {
-        const cleanup = deps.shutdown(id, spawned);
+      if (spawned && !deps.killing.has(id) && !(error instanceof ControlRoomUnavailableError)) {
+        const cleanup = killLaunch(prepared.dir);
         if (!deps.stopping.has(id)) deps.stopping.set(id, cleanup);
         try { await cleanup; }
         catch (cleanupError) {
+          try { await launchFailure(prepared.dir, cleanupError); }
+          catch (persistenceError) {
+            if (cleanupError instanceof Error) Object.defineProperty(cleanupError, 'persistenceError', { value: persistenceError, configurable: true });
+          }
           if (error instanceof Error) {
             Object.defineProperty(error, 'cleanupError', { value: cleanupError, configurable: true });
             error.message += `\nOMP startup cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
@@ -214,9 +256,9 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           if (deps.stopping.get(id) === cleanup) deps.stopping.delete(id);
         }
       }
-      if ((!owned || owned.exited) && deps.managed.get(id) === owned) deps.managed.delete(id);
+      if (!owned && deps.managed.get(id) === owned) deps.managed.delete(id);
       if (spawned?.process && error instanceof Error) {
-        error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(deps.config.dataDir, 'sessions', id, 'terminal.log')} (previous output: terminal.log.1)`;
+        error.message += `\nOMP terminal diagnostics (private; may contain session content): ${path.join(await activeLaunchDir(prepared.dir), 'terminal.log')} (previous output: terminal.log.1)`;
       }
       throw error;
     }

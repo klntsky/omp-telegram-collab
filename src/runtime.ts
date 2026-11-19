@@ -1,3 +1,4 @@
+import { createConversation, type RuntimeConversation } from './runtime/conversation.js';
 import { createActivity, type RuntimeActivity } from './runtime/activity.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -53,6 +54,7 @@ export class OmpRuntime implements Omp {
   readonly #processKill: RuntimeProcessKill;
   readonly #retirement: RuntimeRetirement;
   readonly #ownership: RuntimeOwnership;
+  readonly #conversation: RuntimeConversation;
   readonly #admission: RuntimeAdmission;
   readonly #sessions: RuntimeSessions;
   readonly #termination: RuntimeTermination;
@@ -71,7 +73,7 @@ export class OmpRuntime implements Omp {
   #closing?: Promise<void>;
   readonly #idleTimer: NodeJS.Timeout;
   #sessionLimit: number;
-  constructor(config: AppConfig) {
+  constructor(config: AppConfig, beforeConversationChange?: (session: TopicSession) => void) {
     if (!Number.isInteger(config.omp.maxSessions) || config.omp.maxSessions < 1 || !Number.isFinite(config.omp.startupTimeoutMs) || config.omp.startupTimeoutMs < 1) {
       throw new Error('Invalid OMP runtime limits');
     }
@@ -96,7 +98,7 @@ export class OmpRuntime implements Omp {
       stopping: this.#stopping,
       reservations: this.#reservations,
       acquire: () => runtime.#ownership.acquire(),
-      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      readManagedBinding: session => runtime.#readManagedBinding(session),
       managed: this.#managed,
       validatedSessionCwd: (session) => runtime.#paths.validatedSessionCwd(session),
       list: (deadline) => runtime.#registry.list(deadline),
@@ -122,7 +124,7 @@ export class OmpRuntime implements Omp {
       shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
-      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      readManagedBinding: session => runtime.#readManagedBinding(session),
       stopIdle: async (session) => {
         await runtime.#termination.stopHost(session.id, 'worktree', session);
         const host = runtime.#managed.get(session.id);
@@ -163,10 +165,21 @@ export class OmpRuntime implements Omp {
       ensure: (session, beforeMutation) => runtime.ensure(session, beforeMutation),
       lifecycle: (id) => runtime.#ownership.lifecycle(id),
       managed: this.#managed,
+      refreshConversation: session => runtime.#conversation.refresh(session),
+    });
+    this.#conversation = createConversation({
+      config: this.#config,
+      managed: this.#managed,
+      acquire: () => runtime.#ownership.acquire(),
+      lifecycle: id => runtime.#ownership.lifecycle(id),
+      list: deadline => runtime.#registry.list(deadline),
+      assertActive: () => runtime.#assertActive(),
+      beforeChange: beforeConversationChange,
     });
     this.#startup = createStartup({
       managed: this.#managed,
       config: this.#config,
+      refreshConversation: session => runtime.#conversation.refresh(session),
       prepare: (session) => runtime.#paths.prepare(session),
       acquire: () => runtime.#ownership.acquire(),
       get closed() { return runtime.#closed; },
@@ -222,7 +235,7 @@ export class OmpRuntime implements Omp {
       list: (deadline) => runtime.#registry.list(deadline),
       config: this.#config,
       stopping: this.#stopping,
-      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      readManagedBinding: session => runtime.#readManagedBinding(session),
       resolve: (host, deadline) => runtime.#registry.resolve(host, deadline),
       managed: this.#managed,
       hostActivity: (id) => runtime.#activity.hostActivity(id),
@@ -232,7 +245,8 @@ export class OmpRuntime implements Omp {
       managed: this.#managed,
       stopping: this.#stopping,
       pending: this.#pending,
-      readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
+      // Stop uses the accepted binding without opening a socket that concurrent kill can destroy.
+      readManagedBinding: session => runtime.#paths.readManagedBinding(session),
       shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
       get closed() { return runtime.#closed; },
       killing: this.#killing,
@@ -323,6 +337,10 @@ export class OmpRuntime implements Omp {
       if (host.exited) retired++;
     }
     return retired;
+  }
+  async #readManagedBinding(session: TopicSession) {
+    await this.#conversation.refresh(session);
+    return this.#paths.readManagedBinding(session);
   }
   async #admitManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
     await this.#admission.claimManaged(session.id, beforeMutation);

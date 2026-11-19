@@ -6,6 +6,7 @@ import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLife
 import { readHeader } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { errno, delay } from './values.js';
+import { activeLaunchDir, readLaunch, killLaunch } from './launch-record.js';
 interface ProcessKillDependencies {
   readonly config: AppConfig;
   readonly managed: Map<string, ManagedHost | null>;
@@ -91,6 +92,14 @@ export function createProcessKill(deps: ProcessKillDependencies): RuntimeProcess
         throw new Error('Managed OMP history identity changed');
       }
     }
+    const root = path.join(deps.config.dataDir, 'sessions', id);
+    if (pin && await readLaunch(root)) {
+      await killLaunch(root);
+      if (owned) { owned.exited = true; owned.retiring = false; }
+      deps.managed.delete(id);
+      deps.forgetActivity(id);
+      return;
+    }
     const target = session.runtime;
     const hosts = await deps.list(Date.now() + deps.config.omp.startupTimeoutMs);
     const matches = hosts.filter(host => target.kind === 'attached'
@@ -158,7 +167,7 @@ export function createProcessKill(deps: ProcessKillDependencies): RuntimeProcess
     if (lifecycle) {
       const current = await deps.lifecycle(id);
       if (current?.pid === lifecycle.pid && current.sessionId === lifecycle.sessionId && current.socketPath === lifecycle.socketPath) {
-        await unlink(path.join(deps.config.dataDir, 'sessions', id, 'lifecycle.json')).catch(error => {
+        await unlink(path.join(await activeLaunchDir(path.join(deps.config.dataDir, 'sessions', id)), 'lifecycle.json')).catch(error => {
           if (!errno(error, 'ENOENT')) throw error;
         });
         if (path.dirname(lifecycle.socketPath) === tmpdir() && /^omp-tg-[a-f0-9]{24}\.sock$/.test(path.basename(lifecycle.socketPath))) {

@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from '../../shared/contracts.js';
 import { type HostLifecycle } from './types.js';
 import { errno, RETIREMENT_GRANT } from './values.js';
+import { activeLaunchDir } from './launch-record.js';
 interface OwnershipDependencies {
   readonly closed: boolean;
   readonly config: AppConfig;
@@ -54,7 +55,7 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
     catch (error) { if (errno(error, 'ENOENT')) return; throw error; }
     for (const entry of entries) {
       if (!entry.isDirectory() || !/^[A-Za-z0-9_-]{1,128}$/.test(entry.name)) continue;
-      const directory = path.join(root, entry.name);
+      const directory = await activeLaunchDir(path.join(root, entry.name));
       const stat = await lstat(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 ||
           (process.getuid && stat.uid !== process.getuid())) continue;
@@ -74,7 +75,8 @@ export function createOwnership(deps: OwnershipDependencies): RuntimeOwnership {
   async function lifecycle(id: string): Promise<HostLifecycle | undefined> {
     await acquire();
     try {
-      const value = JSON.parse(await readFile(path.join(deps.config.dataDir,'sessions',id,'lifecycle.json'),'utf8')) as HostLifecycle;
+      const dir = await activeLaunchDir(path.join(deps.config.dataDir, 'sessions', id));
+      const value = JSON.parse(await readFile(path.join(dir,'lifecycle.json'),'utf8')) as HostLifecycle;
       if (!Number.isSafeInteger(value.pid) || value.pid <= 1 || typeof value.socketPath !== 'string' || typeof value.sessionId !== 'string') return undefined;
       return value;
     } catch (error) {

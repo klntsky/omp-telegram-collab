@@ -28,6 +28,11 @@ export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, 
     assert.ok(fixtureProcess.pid);
     pid = fixtureProcess.pid;
   }
+  const supervisor = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const supervisorExited = once(supervisor, 'exit');
+  await once(supervisor, 'spawn');
+  assert.ok(supervisor.pid);
+  await supervisorExited;
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
   await mkdir(sessionDir, { recursive: true });
@@ -66,9 +71,9 @@ if (process.argv[2] !== 'collab') {
       if (request.type !== 'retire' || request.guard !== 'none' || request.pid !== process.pid ||
           request.sessionId !== host.sessionId) throw new Error('Unexpected startup retirement request');
       descriptor.retiring = true;
-      const grant = ${JSON.stringify(sessionDir)}+'/retirement-'+request.requestId+'.request';
+      const grant = process.env.OMP_TELEGRAM_SESSION_DIR+'/retirement-'+request.requestId+'.request';
       fs.writeFileSync(grant, JSON.stringify(descriptor), {flag:'r+'});
-      fs.renameSync(grant, ${JSON.stringify(lifecyclePath)});
+      fs.renameSync(grant, process.env.OMP_TELEGRAM_SESSION_DIR+'/lifecycle.json');
       socket.end(JSON.stringify({requestId:request.requestId,sessionId:host.sessionId,pid:process.pid,outcome:'requested'})+'\\n');
       server.close(() => process.exit(0));
     });
@@ -76,7 +81,7 @@ if (process.argv[2] !== 'collab') {
   server.listen(socketPath, () => {
     fs.writeFileSync(${JSON.stringify(startedPidPath)}, String(process.pid));
     const publish = () => {
-      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor));
+      fs.writeFileSync(process.env.OMP_TELEGRAM_SESSION_DIR+'/lifecycle.json', JSON.stringify(descriptor));
       fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
     };
     if (!state.holdStartup) publish();
@@ -96,7 +101,7 @@ if (process.argv[2] !== 'collab') {
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: host.sessionId, cwd: directory }) + '\n');
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
   const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
-    pid, supervisorPid: process.ppid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
+    pid, supervisorPid: supervisor.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
   const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor));
   await persistLifecycle();
   const requests: RetirementRequest[] = [];

@@ -1,3 +1,4 @@
+import { activeLaunchDir } from '../src/runtime/launch-record.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -49,7 +50,7 @@ try {
   assert.equal(same.sessionId, first.sessionId);
   assert.equal(same.instanceId, first.instanceId);
   const assertProcessCwd = async (id: string, expected: string) => {
-    const lifecycle = JSON.parse(await readFile(join(dir, 'sessions', id, 'lifecycle.json'), 'utf8')) as { pid: number };
+    const lifecycle = JSON.parse(await readFile(join(await activeLaunchDir(join(dir, 'sessions', id)), 'lifecycle.json'), 'utf8')) as { pid: number };
     assert.equal(execFileSync('pwd', { cwd: `/proc/${lifecycle.pid}/cwd`, encoding: 'utf8', timeout: 5000 }).trim(), expected);
   };
   await assertProcessCwd(session.id, selectedFolder);

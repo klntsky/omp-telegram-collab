@@ -7,6 +7,7 @@ export interface PromptPreparation {
   extensions?: PromptExtension[];
   preset?: string;
   automaticWorktree?: boolean;
+  nativeSessionId?: string;
 }
 
 export interface NewSessionPrompt {

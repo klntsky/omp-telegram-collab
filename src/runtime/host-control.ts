@@ -1,3 +1,4 @@
+import { activeLaunchDir } from './launch-record.js';
 import { randomUUID } from 'node:crypto';
 import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,6 +19,7 @@ interface HostControlDependencies {
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
   lifecycle(id: string): Promise<HostLifecycle | undefined>;
   readonly managed: Map<string, ManagedHost | null>;
+  refreshConversation(session: TopicSession): Promise<void>;
 }
 
 // This owner keeps the complete host control transaction and its cleanup together.
@@ -30,6 +32,7 @@ export interface RuntimeHostControl {
 export function createHostControl(deps: HostControlDependencies): RuntimeHostControl {
 
   async function runningTitleBinding(session: TopicSession): Promise<HostBinding> {
+    await deps.refreshConversation(session);
     const pin = JSON.parse(await readFile(path.join(deps.config.dataDir, 'sessions', session.id, 'binding.json'), 'utf8')) as DurableBinding;
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
     const hosts = (await deps.list(deadline)).filter(host => host.sessionId === pin.sessionId && host.cwd === session.cwd);
@@ -88,7 +91,8 @@ export function createHostControl(deps: HostControlDependencies): RuntimeHostCon
           !/^omp-tg-[a-f0-9]{24}\.sock$/.test(path.basename(lifecycle.socketPath))) {
         throw new Error('Invalid OMP model preset control descriptor');
       }
-      for (const filename of [path.join(deps.config.dataDir, 'sessions', session.id, 'lifecycle.json'), lifecycle.socketPath]) {
+      const directory = await activeLaunchDir(path.join(deps.config.dataDir, 'sessions', session.id));
+      for (const filename of [path.join(directory, 'lifecycle.json'), lifecycle.socketPath]) {
         const stat = await lstat(filename);
         if (stat.isSymbolicLink() || (filename === lifecycle.socketPath ? !stat.isSocket() : !stat.isFile()) ||
             (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {

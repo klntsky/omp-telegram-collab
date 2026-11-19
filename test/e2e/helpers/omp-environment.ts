@@ -101,6 +101,17 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
       for (const session of sessions) {
         const directory = join(sessionsDir, session);
         const filenames = await readdir(directory);
+        if (filenames.includes('launches')) {
+          const launches = join(directory, 'launches');
+          for (const launch of await readdir(launches)) {
+            for (const filename of await readdir(join(launches, launch))) {
+              if (!/^terminal\.log(?:\.1)?$/.test(filename)) continue;
+              const target = join(logDirectory, 'sessions', session, 'launches', launch);
+              await mkdir(target, { recursive: true, mode: 0o700 });
+              await cp(join(launches, launch, filename), join(target, filename));
+            }
+          }
+        }
         const destination = join(logDirectory, 'sessions', session);
         for (const filename of filenames) {
           if (/^terminal\.log(?:\.1)?$/.test(filename)) {
@@ -168,6 +179,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const agentConfigPath = join(agent, 'config.yml');
   await writeFile(agentConfigPath, JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
+    // Predictions issue auxiliary model requests outside the scripted task.
+    // https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/modes/settings.ts#L1184-L1196
+    composer: { predictions: false },
     // Scripted turns exclude OMP's skill-description model calls, not explicit skill invocation.
     // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/session/settings.ts#L437-L448
     skillful: false,

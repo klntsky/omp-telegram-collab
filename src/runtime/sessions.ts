@@ -1,3 +1,4 @@
+import { launchUnresolved } from './launch-record.js';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
@@ -33,6 +34,18 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     if (deps.closed || !/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) return false;
     if (deps.pending.has(session.id)) return true;
     if (session.runtime.kind === 'managed') await deps.acquire();
+    if (session.runtime.kind === 'managed') {
+      if (await launchUnresolved(path.join(deps.config.dataDir, 'sessions', session.id))) return true;
+      const owned = deps.managed.get(session.id);
+      if (owned?.identity) {
+        const identity = await procIdentity(owned.identity.pid);
+        if (identity?.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') return true;
+      }
+      if (owned?.process?.pid && !owned.exited) {
+        const identity = await procIdentity(owned.process.pid);
+        if (identity && identity.state !== 'Z' && identity.state !== 'X') return true;
+      }
+    }
     const hosts = await deps.list(Date.now() + deps.config.omp.startupTimeoutMs);
     const runtime = session.runtime;
     if (runtime.kind === 'attached') return hosts.some(host => host.instanceId === runtime.instanceId && host.sessionId === runtime.sessionId && host.cwd === session.cwd);
@@ -73,7 +86,12 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
       : host.sessionId === pin!.sessionId);
     if (matches.length > 1) throw new Error('More than one host is serving the OMP session');
     const host = matches[0];
-    if (!host) return undefined;
+    if (!host) {
+      if (runtime.kind === 'managed' && await launchUnresolved(path.join(deps.config.dataDir, 'sessions', session.id))) {
+        throw new Error('OMP host is not registered; launch ownership remains unresolved');
+      }
+      return undefined;
+    }
     if (runtime.kind === 'attached') {
       if (host.sessionId !== runtime.sessionId) throw new Error('Attached OMP session identity changed');
       if (await realpath(session.cwd) !== session.cwd || await realpath(host.cwd) !== session.cwd) {

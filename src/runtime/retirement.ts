@@ -7,6 +7,7 @@ import { type RegistryHost, type ManagedHost, type HostLifecycle } from './types
 import { privateFile } from './files.js';
 import { procIdentity } from './process.js';
 import { record, errno, delay } from './values.js';
+import { activeLaunchDir, cleanupLaunch, launchFailure, settleLaunch } from './launch-record.js';
 interface RetirementDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   forgetActivity(id: string): void;
@@ -24,6 +25,14 @@ export interface RuntimeRetirement {
 export function createRetirement(deps: RetirementDependencies): RuntimeRetirement {
 
   async function settleManagedExit(id: string, host: ManagedHost): Promise<boolean> {
+    if (!await settleLaunch(path.join(deps.config.dataDir, 'sessions', id))) return false;
+    const lifecycle = await deps.lifecycle(id);
+    if (lifecycle) {
+      for (const pid of [lifecycle.pid, lifecycle.supervisorPid]) {
+        const identity = await procIdentity(pid);
+        if (identity && identity.state !== 'Z' && identity.state !== 'X') return false;
+      }
+    }
     if (host.retiring && !host.retirement && !host.identity && !host.process) return false;
     if (host.identity) {
       const identity = await procIdentity(host.identity.pid);
@@ -44,7 +53,10 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
   }
 
   async function shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void> {
-    if (host.exited) return;
+    if (host.exited) {
+      await cleanupLaunch(path.join(deps.config.dataDir, 'sessions', id));
+      return;
+    }
     if (deps.killing.has(id)) return;
     let lifecycle = await deps.lifecycle(id);
     const registered = async (): Promise<RegistryHost | undefined> => {
@@ -101,6 +113,10 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
         }
       }
       if (await settleManagedExit(id, host)) return;
+      const error = new Error('OMP launch ownership is unresolved; cannot safely retire its process');
+      await launchFailure(path.join(deps.config.dataDir, 'sessions', id), error);
+      if (!guard) throw error;
+      return;
     } else {
       if (host.cwd !== undefined && await realpath(current.cwd) !== host.cwd) throw new Error('Managed host working directory changed');
       if (host.binding && (host.binding.instanceId !== current.instanceId || host.binding.sessionId !== current.sessionId ||
@@ -134,7 +150,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     }
     if (deps.killing.has(id)) return;
     const requestId = randomUUID();
-    const grant = path.join(deps.config.dataDir, 'sessions', id, `retirement-${requestId}.request`);
+    const grant = path.join(await activeLaunchDir(path.join(deps.config.dataDir, 'sessions', id)), `retirement-${requestId}.request`);
     await privateFile(grant, '', true);
     host.retiring = true;
     host.retirement = { pid: lifecycle.pid, start: identity.start, socketPath: lifecycle.socketPath };
@@ -208,6 +224,15 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     }
   }
 
-  return { shutdown };
+  return { shutdown: async (id, host, guard) => {
+    try { await shutdown(id, host, guard); }
+    catch (error) {
+      try { await launchFailure(path.join(deps.config.dataDir, 'sessions', id), error); }
+      catch (persistenceError) {
+        if (error instanceof Error) Object.defineProperty(error, 'persistenceError', { value: persistenceError, configurable: true });
+      }
+      throw error;
+    }
+  } };
 }
 
