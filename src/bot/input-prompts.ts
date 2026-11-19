@@ -70,7 +70,7 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
       return true;
     }
     if (intent.kind === 'skill-selection') {
-      if (!detached) await deps.skills.selection(ctx, intent.text, session);
+      if (!detached) await deps.skills.selection(ctx, intent.source ?? message, intent.text, session);
       return true;
     }
     if (intent.kind === 'new-task' || intent.kind === 'session-prompt') {

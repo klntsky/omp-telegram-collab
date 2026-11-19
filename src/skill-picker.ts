@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Context } from 'grammy';
+import type { Message } from 'grammy/types';
 import type { TopicSession } from '../shared/contracts.js';
 import type { Store, PendingSkillKey } from './store.js';
 import { sameTopicDestination } from '../shared/topic-destination.js';
@@ -107,9 +108,8 @@ export class SkillPicker {
     await this.select(ctx, match[2]!, match[1] === 'clear' ? undefined : Number(match[3]), session);
     return true;
   }
-  async selection(ctx: Context, text: string, session?: TopicSession): Promise<void> {
-    const message = ctx.message;
-    if (!message || !('via_bot' in message) || message.via_bot?.id !== this.options.botId()) {
+  async selection(ctx: Context, message: Message, text: string, session?: TopicSession): Promise<void> {
+    if (!('via_bot' in message) || message.via_bot?.id !== this.options.botId()) {
       await replyTo(ctx, contextDestination(ctx), 'Use /skills to select a skill for your next prompt.');
       return;
     }

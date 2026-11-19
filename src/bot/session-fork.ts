@@ -1,4 +1,5 @@
 import type { Context, Bot } from 'grammy';
+import type { Message } from 'grammy/types';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import { contextDestination, replyTo, sendTo, forwardTo } from '../telegram-destination.js';
@@ -25,7 +26,7 @@ export interface SessionForkDependencies {
 
 export class SessionFork {
   constructor(private readonly dependencies: SessionForkDependencies) {}
-  async forkSession(ctx: Context, source: TopicSession): Promise<void> {
+  async forkSession(ctx: Context, source: TopicSession, message: Message): Promise<void> {
     const generation = this.dependencies.options.store.getSessionGeneration(source.id);
     const epoch = this.dependencies.admissionEpoch;
     const defaultSkills = this.dependencies.defaultNewTopicSkills(source.chatId);
@@ -42,7 +43,10 @@ export class SessionFork {
     await check();
     const binding = await this.dependencies.options.runtime.existingBinding(source);
     let target: {ompSessionId:string;entryId:string;parentEntryId:string|null;kind:'assistant'|'collab-prompt'} | undefined;
-    const replied = ctx.message?.reply_to_message;
+    // The effective command owns the anchor, not the invoking wrapper. Telegram embeds
+    // selected replies without their reply chain (Client::JsonMessage::store, need_reply_):
+    // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
+    const replied = message.reply_to_message;
     const reply = replied && !replied.forum_topic_created && replied.message_id !== source.threadId
       ? replied : undefined;
     if (reply) {

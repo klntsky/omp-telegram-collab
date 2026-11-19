@@ -1,6 +1,7 @@
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { codeHtml, preHtml } from '../telegram-html.js';
 import type { Context } from 'grammy';
+import type { Message } from 'grammy/types';
 import type { TopicSession, HostBinding, CollabConnection, PromptContent } from '../../shared/contracts.js';
 import type { PromptExtension } from '../telegram-commands.js';
 import type { BotOptions } from '../bot.js';
@@ -14,7 +15,7 @@ export interface InputCommandSessionsDependencies {
   commandHelp(chatId: number, admin: boolean): string;
   currentAdmin(ctx: Context): Promise<boolean>;
   dropListener(id: string, reason?: string): void;
-  forkSession(ctx: Context, source: TopicSession): Promise<void>;
+  forkSession(ctx: Context, source: TopicSession, message: Message): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>, existingOnly?: boolean, recoverClosed?: boolean): Promise<CollabConnection>;
   newSession(ctx: Context, task?: PromptContent, attached?: { hostId: string; sessionId: string; instanceId: number; cwd: string; }, name?: string, accepted?: () => void, worktree?: boolean, authority?: Context, extensions?: readonly PromptExtension[], reservation?: { bind(id: string): void; }, cwd?: string, proposedSkills?: { names: string[]; topicSkills: string[]; }): Promise<void>;
   config: BotOptions['config'];
@@ -32,7 +33,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         if (arg) throw new Error('Usage: /fork');
         if (!session || destination.kind !== 'topic' || session.runtime.kind !== 'managed' || session.status !== 'open')
           throw new Error('Use /fork inside an open managed session topic.');
-        await deps.forkSession(ctx, session);
+        await deps.forkSession(ctx, session, input.source);
         return true;
       }
       if (action === 'worktree') {

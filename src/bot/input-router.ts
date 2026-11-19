@@ -1,4 +1,5 @@
 import type { Context } from 'grammy';
+import type { Message } from 'grammy/types';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { TopicDestination } from '../../shared/topic-destination.js';
 import type { InputIntent } from '../telegram-input.js';
@@ -18,6 +19,7 @@ export type MessageContext = Context & {
 };
 export interface CommandRouteInput {
   ctx: MessageContext & { from: NonNullable<Context['from']> };
+  source: Message;
   session: TopicSession | undefined;
   destination: TopicDestination;
   detached: boolean;
@@ -45,7 +47,7 @@ export class InputRouter {
     // Entry admitted a group message. Keep the local narrowing across routing stages.
     const messageContext = ctx as MessageContext;
     const command = intent.kind === 'command'
-      ? { action: intent.action, argument: intent.argument }
+      ? { action: intent.action, argument: intent.argument, source: intent.source ?? messageContext.message }
       : undefined;
     const destination = contextDestination(ctx);
     const session = this.entry.store.getTopic({ botId: this.entry.id, destination });
@@ -61,6 +63,7 @@ export class InputRouter {
     await this.prompts.authorize(ctx.chat!.id, ctx.from!.id);
     const input: CommandRouteInput = {
       ctx: messageContext as CommandRouteInput['ctx'],
+      source: command.source,
       session, destination, detached, assigned,
       action: command.action, arg: command.argument,
     };

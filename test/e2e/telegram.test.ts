@@ -24,6 +24,7 @@ import { registerFolderSettings } from './scenarios/folder-settings.js';
 import { registerProviderSetup } from './scenarios/provider-setup.js';
 import { registerChatIsolation } from './scenarios/chat-isolation.js';
 import { registerPromptQueue } from './scenarios/prompt-queue.js';
+import { registerSelectedCommandSource } from './scenarios/selected-command-source.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -76,6 +77,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
       message => context.diagnostic(message),
     );
   });
+  registerSelectedCommandSource(() => app);
   registerWorktreeCleanup(() => app);
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
