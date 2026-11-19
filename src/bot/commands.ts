@@ -43,7 +43,7 @@ Member task proposals are ${options.proposals ? 'enabled and require administrat
 <b>${++section}. Stop work</b> · Inside a topic
 
 <code>/stop</code>
-Interrupt the current task and pause queued messages without killing the agent process.
+Interrupt the current task
 
 <code>/continue</code>
 Resume queued messages after /stop.
@@ -117,7 +117,7 @@ export const groupCommands = [
   { command: 'agent', description: 'Open this topic’s transcript and tool details' },
   { command: 'status', description: 'Show host, mirroring, recovery and skill diagnostics' },
   { command: 'usage', description: 'Show provider plan usage, remaining quotas and resets' },
-  { command: 'stop', description: 'Interrupt the current task and pause queued messages' },
+  { command: 'stop', description: 'Interrupt the current task' },
   { command: 'continue', description: 'Resume queued messages after /stop' },
   { command: 'kill', description: 'Force-stop this topic’s agent; preserve history' },
   { command: 'terminate', description: 'Terminate all agents and suspend service (group admin)' },
