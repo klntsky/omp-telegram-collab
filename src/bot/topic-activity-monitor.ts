@@ -101,7 +101,7 @@ export class TopicActivityMonitor {
         session,
         state.isStreaming ||
           state.queuedMessageCount > 0 ||
-          this.deps.options.store.promptQueue.has(session.id)
+          (this.deps.options.store.promptQueue.has(session.id) && !this.deps.options.store.promptQueue.isPaused(session.id))
           ? 'running'
           : 'finished',
       );

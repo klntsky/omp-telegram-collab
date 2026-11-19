@@ -46,7 +46,7 @@ test('bare presets compose interactively and repeated extensions start literal t
 });
 
 test('all standalone command groups enforce their arities', () => {
-  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'agent', 'status', 'usage', 'stop', 'kill', 'terminate', 'help', 'cli']) {
+  for (const action of ['settings', 'setup', 'list_admins', 'detach', 'agent', 'status', 'usage', 'stop', 'continue', 'kill', 'terminate', 'help', 'cli']) {
     assert.deepEqual(parse(`/${action}`), { kind: 'command', action, argument: '' });
     for (const argument of ['extra', '/worktree', '/home/work/error.ts:27', '/unknown /kill']) {
       assert.equal(parse(`/${action} ${argument}`).kind, 'invalid');

@@ -28,6 +28,7 @@ export interface PromptWorkerDependencies {
 export class PromptWorker {
   private readonly drains = new Map<string, Promise<void>>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly requested = new Set<string>();
   private closed = false;
   constructor(private readonly deps: PromptWorkerDependencies) {}
   async close(): Promise<void> {
@@ -42,16 +43,23 @@ export class PromptWorker {
   drain(session: TopicSession): Promise<void> {
     if (this.closed) return Promise.resolve();
     const existing = this.drains.get(session.id);
-    if (existing) return existing;
+    if (existing) {
+      this.requested.add(session.id);
+      return existing;
+    }
     const previousHead = this.deps.options.store.promptQueue.first(session.id)?.id;
+    const pauseGeneration = this.deps.options.store.promptQueue.pauseGeneration(session.id);
     const pending = this.drainSession(session).finally(() => {
       this.drains.delete(session.id);
+      const requested = this.requested.delete(session.id);
       if (this.closed || this.deps.stopped()) return;
       const head = this.deps.options.store.promptQueue.first(session.id);
       if (head &&
           this.deps.options.store.getSession(session.id)?.status === 'open' &&
           this.deps.sessionAssigned(session) && !this.deps.options.store.isSessionPreparing(session.id) &&
-          (head.state === 'submitted' || head.availableAt > Date.now() || head.id !== previousHead))
+          (head.state === 'submitted' || (!this.deps.options.store.promptQueue.isPaused(session.id) &&
+            (head.availableAt > Date.now() || head.id !== previousHead || requested ||
+              this.deps.options.store.promptQueue.pauseGeneration(session.id) !== pauseGeneration))))
         this.schedule(session, head.state === 'submitted' ? head.acceptanceDeadline ?? Date.now() : Math.max(Date.now(), head.availableAt));
     });
     this.drains.set(session.id, pending);
@@ -60,6 +68,8 @@ export class PromptWorker {
   private schedule(session: TopicSession, at: number): void {
     clearTimeout(this.timers.get(session.id));
     if (this.closed || this.deps.stopped() || this.deps.options.config.terminated) return;
+    const head = this.deps.options.store.promptQueue.first(session.id);
+    if (!head || (head.state === 'pending' && this.deps.options.store.promptQueue.isPaused(session.id))) return;
     const timer = setTimeout(() => {
       this.timers.delete(session.id);
       void this.drain(session).catch(error => console.warn(`Could not resume queued prompt (${session.id}).`, error));
@@ -109,10 +119,12 @@ export class PromptWorker {
       }
       return;
     }
-    if (queued.availableAt > Date.now()) return;
+    if (store.promptQueue.isPaused(session.id) || queued.availableAt > Date.now()) return;
+    const pauseGeneration = store.promptQueue.pauseGeneration(session.id);
     const generation = store.getSessionGeneration(session.id);
     const cancellation = new Error('The queued prompt was cancelled before submission.');
     const active = () => !this.closed && store.getSession(session.id)?.status === 'open' &&
+      !store.promptQueue.isPaused(session.id) && store.promptQueue.pauseGeneration(session.id) === pauseGeneration &&
       store.getSessionGeneration(session.id) === generation && store.promptQueue.contains(queued.id);
     const authorize = async () => {
       if (!active()) throw cancellation;
@@ -123,9 +135,16 @@ export class PromptWorker {
     let listener: Listener | undefined;
     try {
       await authorize();
+      // Native steers may drain during abort; keep Telegram intent local until a fresh listener reports idle.
+      // https://github.com/can1357/oh-my-pi/blob/v18.20.2/packages/coding-agent/src/collab/host.ts (#handlePrompt, #handleAbort)
+      await this.deps.listen(session, authorize);
+      await authorize();
+      listener = this.deps.listener(session.id);
+      if (!listener || listener.nativeStreaming !== false || listener.queuedMessages > 0 || listener.pendingPrompts.length) return;
       let preparation = queued.preparation;
       if (preparation?.skills?.length) {
         const available = await this.deps.options.runtime.listSkills(session.instanceId, session);
+        if (!active()) throw cancellation;
         const missing = preparation.skills.filter(name => !available.some(skill => skill.name === name));
         if (missing.length) throw new PromptPreparationRejectedError(`Skills are no longer available: ${missing.map(name => `/skill:${name}`).join(', ')}. Use /skills clear for explicit selections. Restore a missing topic-default skill, or create a new topic after changing the forum default.`);
       }
@@ -152,6 +171,7 @@ export class PromptWorker {
       await this.deps.listen(session, authorize);
       listener = this.deps.listener(session.id);
       if (!listener) return;
+      if (listener.nativeStreaming !== false || listener.queuedMessages > 0 || listener.pendingPrompts.length) return;
       const uploaded = await this.deps.uploadDocuments(session, queued.content, authorize,
         topicDestination(session.chatId, session.threadId), remaining => store.promptQueue.replaceContent(queued.id, remaining));
       store.promptQueue.replaceContent(queued.id, uploaded);
@@ -163,10 +183,12 @@ export class PromptWorker {
       }
       const prompt = await this.deps.prepareContent(session, expanded);
       await authorize();
-      if (this.deps.listener(session.id) !== listener) return;
+      if (this.deps.listener(session.id) !== listener || listener.nativeStreaming !== false ||
+          listener.queuedMessages > 0 || listener.pendingPrompts.length) return;
       this.deps.sendPrompt(listener, prompt, queued.messageId, submissionId => {
         if (!active()) throw cancellation;
         store.promptQueue.markSubmitted(queued.id, submissionId, Date.now() + this.deps.options.config.omp.startupTimeoutMs);
+        listener!.nativeStreaming = true;
       });
     } catch (error) {
       // Maintenance cancellation may interrupt a shared native operation before authorize can observe closure.
@@ -174,7 +196,7 @@ export class PromptWorker {
       if (error instanceof PromptPreparationRejectedError) {
         try { await this.deps.reportQueuedFailure(session, error); }
         catch (reportError) { throw new AggregateError([error, reportError], `${error.message}\n${reportError instanceof Error ? reportError.message : String(reportError)}`); }
-        store.promptQueue.remove(queued.id);
+        if (active()) store.promptQueue.remove(queued.id);
         return;
       }
       if (error instanceof SessionCapacityError) { await this.deps.requestCapacity(session, error.limit); return; }
@@ -183,7 +205,7 @@ export class PromptWorker {
         this.deps.scheduleReconnect(session);
         return;
       }
-      if (error instanceof AuthorizationDeniedError) store.promptQueue.remove(queued.id);
+      if (error instanceof AuthorizationDeniedError && active()) store.promptQueue.remove(queued.id);
       throw error;
     }
   }

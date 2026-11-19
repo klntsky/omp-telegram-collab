@@ -44,6 +44,38 @@ test('prompt queue is FIFO per session and duplicate admission preserves the ori
   }
 });
 
+test('queue pause is session scoped and pending counts exclude submitted prompts', () => {
+  const store = new Store(':memory:');
+  try {
+    const session = store.createSession(key, 'Paused');
+    const other = store.createSession({ ...key, threadId: 18 }, 'Unpaused');
+    const submitted = store.promptQueue.enqueue(session.id, 1, 42, 43, { text: 'Submitted' });
+    const submission = store.recordPromptSubmission(session.id, 'omp-session', 'sender', { text: 'Submitted' }, 1);
+    store.promptQueue.markSubmitted(submitted, submission, Date.now() + 10000);
+    const pending = store.promptQueue.enqueue(session.id, 2, 42, 43, content);
+    store.promptQueue.enqueue(other.id, 3, 42, 43, content);
+    store.promptQueue.pause(session.id);
+    store.promptQueue.pause(session.id);
+    assert.equal(store.promptQueue.isPaused(session.id), true);
+    assert.equal(store.promptQueue.isPaused(other.id), false);
+    assert.equal(store.promptQueue.count(session.id), 1);
+    assert.equal(store.promptQueue.count(other.id), 1);
+    assert.deepEqual(store.promptQueue.list(session.id).map(item => item.id), [submitted, pending]);
+    store.promptQueue.resume(other.id);
+    assert.equal(store.promptQueue.isPaused(session.id), true);
+    store.promptQueue.resume(session.id);
+    store.promptQueue.resume(session.id);
+    assert.equal(store.promptQueue.isPaused(session.id), false);
+    assert.equal(store.promptQueue.count(session.id), 1);
+    assert.deepEqual(store.promptQueue.list(session.id).map(item => item.id), [submitted, pending]);
+    store.promptQueue.remove(pending);
+    assert.equal(store.promptQueue.has(session.id), true);
+    assert.equal(store.promptQueue.count(session.id), 0);
+  } finally {
+    store.close();
+  }
+});
+
 test('prompt queue preserves full pending attachments and removals across disk reopen', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-prompt-queue-'));
   const filename = join(directory, 'topics.sqlite');

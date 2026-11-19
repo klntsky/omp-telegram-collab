@@ -75,8 +75,8 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await setTopicClosed(app, idleSession, true);
     await setTopicClosed(app, idleSession, false);
     const stop = await app.sendAndWait('/stop', idleThreadId);
-    await waitForReactionAttempt(app, stop.id, '👀');
-    assert.deepEqual(reactionAttempts(app, stop.id), [['👀']]);
+    await waitForReactionAttempt(app, stop.id, '🤝');
+    assert.ok(reactionAttempts(app, stop.id).some(reactions => reactions.includes('🤝')));
     const localCommands = [];
     for (const command of ['/help', '/status', '/skills', '/settings', '/cli']) {
       localCommands.push(await app.sendAndWait(command, idleThreadId));
@@ -95,13 +95,18 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     for (const command of localCommands) assert.deepEqual(reactionAttempts(app, command.id), []);
     const adminCommands = await app.telegram.api.getMyCommands({ scope: { type: 'chat_administrators', chat_id: session.chatId } });
     assert.ok(adminCommands.some(command => command.command === 'cli'));
+    assert.ok(adminCommands.some(command => command.command === 'continue'));
     for (const scope of [{ type: 'all_group_chats' as const }, { type: 'chat' as const, chat_id: session.chatId }]) {
       const commands = await app.telegram.api.getMyCommands({ scope });
       assert.ok(!commands.some(command => command.command === 'cli' || command.command === 'agent'));
       assert.ok(commands.some(command => command.command === 'p'));
+      assert.ok(commands.some(command => command.command === 'continue'));
       if (scope.type === 'chat') assert.ok(commands.some(command => command.command === 'skill_e2e_review'));
     }
     const idleTask = await app.sendAndWait(`/p ${tasks.idle.prompt}`, idleThreadId);
+    assert.equal(app.store.promptQueue.isPaused(idleSession.id), true);
+    assert.equal(app.store.promptQueue.first(idleSession.id)?.messageId, idleTask.id);
+    await app.sendAndWait('/continue', idleThreadId);
     await completeWriteTask(app, tasks.idle, idleTask, idleThreadId);
     await setTopicClosed(app, idleSession, true);
   

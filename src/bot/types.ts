@@ -75,6 +75,7 @@ export interface Listener {
   customAnswerMessage?: {messageIds:number[]; messageId:number};
   pendingStops: number[];
   queuedMessages: number;
+  nativeStreaming?: boolean;
   typingText?: boolean;
   typingNextAt?: number;
   typingTimer?: NodeJS.Timeout;
