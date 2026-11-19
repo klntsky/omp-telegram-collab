@@ -47,7 +47,7 @@ export class WorktreeCleanup {
     if (!target) return;
     // Manage Topics permits outgoing messages in closed topics. Do not reopen to send.
     // https://github.com/tdlib/td/blob/master/td/telegram/ForumTopicManager.cpp (can_send_message_to_forum_topic)
-    const text = `🌳 This topic used this Git worktree:\n${codeHtml(target.path)}\n\nA group administrator can delete it. Clean worktrees whose branch exists on a remote need no additional confirmation. Session history is kept.`;
+    const text = `🌳 This topic used this Git worktree:\n${codeHtml(target.path)}\n\nA group administrator can delete it after explicit confirmation. Session history is kept.`;
     await this.deps.delivery.run(session.chatId, () => this.deps.bot.api.sendMessage(session.chatId,
       text, {
         parse_mode: 'HTML', message_thread_id: session.threadId, reply_markup: { inline_keyboard: this.buttons(session) },
