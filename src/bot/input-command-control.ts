@@ -84,11 +84,6 @@ export async function inputCommandControl(deps: InputCommandControlDependencies,
           if (index !== -1) activeListener.pendingStops.splice(index, 1);
           throw error;
         }
-        await replyTo(
-          ctx,
-          contextDestination(ctx),
-          'Abort requested. The session process is still running.',
-        );
         return true;
       }
   return false;
