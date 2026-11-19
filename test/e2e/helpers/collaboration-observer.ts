@@ -1,3 +1,7 @@
+import assert from 'node:assert/strict';
+import type { TopicSession } from '../../../shared/contracts.js';
+import type { BotComponents } from '../../../src/bot/composition.js';
+import type { CollaborationTest } from './collaboration-fixture.js';
 import { Bot } from 'grammy';
 import type { Update } from 'grammy/types';
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
@@ -77,4 +81,21 @@ export function createCollaborationObserver(options: {
     };
   }
   return { createBot, instrumentRuntime };
+}
+
+export async function reconnectQuestionTransport(app: CollaborationTest, session: TopicSession, reqId: number): Promise<void> {
+  const start = app.hostFrames.length;
+  assert.equal(app.omp.disconnectGuests(), 1);
+  await app.waitForCondition(() => {
+    const frames = app.hostFrames.slice(start);
+    const replay = frames.findIndex(frame => frame.t === 'ui-request' && frame.request.reqId === reqId);
+    return replay >= 0 && frames.slice(replay + 1).some(frame =>
+      frame.t === 'event' && frame.event.type === 'notice' && frame.event.source === 'collab' &&
+      frame.event.message === `Telegram @${app.bot.botInfo.username} joined the collab session`);
+  });
+  const components: BotComponents = Reflect.get(app.service, 'components');
+  const listener = components.connections.listeners.get(session.id);
+  assert.ok(listener);
+  await listener.tail;
+  assert.equal(components.connections.listeners.get(session.id), listener);
 }

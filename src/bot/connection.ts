@@ -15,7 +15,7 @@ export interface SessionConnectionsDependencies {
   bot: Bot<Context>;
   id: number;
   cancelReconnect: (id: string) => void;
-  endListenerQuestions: (listener: Listener | undefined) => void;
+  endSessionQuestions: (sessionId: string) => void;
   invalidateActivity: (id: string) => void;
   onFrame: (session: TopicSession, listener: Listener, frame: HostFrame, replay?: boolean) => void;
   refreshTyping: (session: TopicSession, listener: Listener) => void;
@@ -98,7 +98,7 @@ export class SessionConnections {
       throw error;
     }
   }
-  dropListener(id: string, reason = 'Host disconnected'): void {
+  dropListener(id: string, reason = 'Host disconnected', preserveQuestions = false): void {
     this.deps.invalidateActivity(id);
     this.deps.cancelReconnect(id);
     const listener = this.listeners.get(id);
@@ -111,7 +111,7 @@ export class SessionConnections {
     clearTimeout(listener?.typingTimer);
     const session = this.deps.options.store.getSession(id);
     if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
-    this.deps.endListenerQuestions(listener);
+    if (!preserveQuestions) this.deps.endSessionQuestions(id);
     listener?.feed.close(reason);
     if (listener) {
       for (const reader of listener.readers) {
@@ -182,6 +182,7 @@ export class SessionConnections {
         await this.deps.applySessionTitle(session);
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
+        listener.questionOwner = JSON.stringify([generation, binding.instanceId, binding.generation, binding.sessionId]);
         if (session.runtime.kind === 'managed') {
           listener.history = new SessionHistory(listener.feed, {
             sessionId: binding.sessionId,
@@ -223,7 +224,7 @@ export class SessionConnections {
                 error: reason,
               };
               const connected = listener.connection !== undefined;
-              this.dropListener(session.id, reason);
+              this.dropListener(session.id, reason, true);
               if (connected) this.deps.scheduleReconnect(session);
             },
           },
@@ -264,7 +265,7 @@ export class SessionConnections {
             throw error;
         } finally {
           if (this.listeners.get(session.id) === listener)
-            this.dropListener(session.id, error instanceof Error ? error.message : String(error));
+            this.dropListener(session.id, error instanceof Error ? error.message : String(error), true);
         }
         return this.listen(session, undefined, beforeMutation, false, false);
       });

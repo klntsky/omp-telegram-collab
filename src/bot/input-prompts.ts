@@ -21,7 +21,7 @@ export interface InputPromptsDependencies {
   requestKind(token: string): CollabUiRequest['kind'] | undefined;
   routePrompt(ctx: Context, content: PendingPromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, frozenSkills?: { names: string[]; topicSkills: string[]; }, cwd?: string): Promise<void>;
   skills: SkillPicker;
-  submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void;
+  submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): boolean;
   usersCanProposePrompts(chatId: number): boolean;
 }
 
@@ -51,9 +51,10 @@ export async function routePrompts(deps: InputPromptsDependencies, ctx: MessageC
         );
         return true;
       }
-      if (kind === 'editor')
-        deps.submitAnswer(intent.token, intent.text, undefined, message.message_id);
-      else await replyTo(ctx, destination, 'Use the numbered answer buttons on the question.');
+      if (kind === 'editor') {
+        if (!deps.submitAnswer(intent.token, intent.text, undefined, message.message_id))
+          await replyTo(ctx, destination, 'This question is reconnecting. Try again after reconnection.');
+      } else await replyTo(ctx, destination, 'Use the numbered answer buttons on the question.');
       return true;
     }
     if (intent.kind === 'ended-question') {

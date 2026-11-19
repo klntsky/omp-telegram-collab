@@ -57,6 +57,7 @@ export interface Listener {
   sessionId: string;
   generation: number;
   ompSessionId?: string;
+  questionOwner?: string;
   connection?: CollabConnection;
   promise?: Promise<CollabConnection>;
   feed: SessionFeed;
@@ -82,6 +83,8 @@ export interface Listener {
 export interface PendingQuestion {
   session: TopicSession;
   listener: Listener;
+  owner: string;
+  editorMessage?: {messageId:number; updated:boolean};
   request: CollabUiRequest;
   messageIds: number[];
   buttonIds: number[];

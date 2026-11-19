@@ -79,6 +79,17 @@ export async function startLocalRelay() {
   return {
     url: `ws://localhost:${address.port}`,
     interruptNextGuest() { interruptNextGuest = true; },
+    disconnectGuests() {
+      let disconnected = 0;
+      for (const room of rooms.values()) {
+        for (const guest of room.guests.values()) {
+          if (guest.readyState !== WebSocket.OPEN) continue;
+          guest.terminate();
+          disconnected++;
+        }
+      }
+      return disconnected;
+    },
     async close() {
       for (const socket of server.clients) socket.terminate();
       const { promise, resolve, reject } = Promise.withResolvers<void>();

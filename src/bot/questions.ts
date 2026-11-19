@@ -55,9 +55,16 @@ export class BotQuestions {
     for (const token of this.questions.keys()) this.endQuestion(token);
   }
 
-  endForListener(listener: Listener | undefined): void {
+  endForSession(sessionId: string): void {
     for (const [token, question] of this.questions) {
-      if (question.listener === listener) this.endQuestion(token);
+      if (question.session.id === sessionId) this.endQuestion(token);
+    }
+  }
+
+  reconcile(listener: Listener, complete = false): void {
+    for (const [token, question] of this.questions) {
+      if (question.session.id === listener.sessionId &&
+          (question.owner !== listener.questionOwner || (complete && question.listener !== listener))) this.endQuestion(token);
     }
   }
 
@@ -73,7 +80,7 @@ export class BotQuestions {
     this.questions.delete(token);
     for (const messageId of question.messageIds) {
       this.endedQuestionReplies.set(`${question.session.chatId}:${messageId}`,question.answer?.kind === 'discussion'
-        ? {sessionId:question.session.id,generation:this.dependencies.store.getSessionGeneration(question.session.id)}
+        ? {sessionId:question.session.id,generation:question.listener.generation}
         : undefined);
     }
     while (this.endedQuestionReplies.size > 512) this.endedQuestionReplies.delete(this.endedQuestionReplies.keys().next().value!);
@@ -125,10 +132,11 @@ export class BotQuestions {
       }).catch(error => { console.warn(`Could not show question answer (${question.session.id}).`, error); });
     }
   }
-  submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): void {
+  submitAnswer(token: string, value?: string, receipt?: string, messageId?: number): boolean {
     const question = this.questions.get(token);
     if (!question || this.dependencies.stopped() || this.dependencies.listener(question.session.id) !== question.listener ||
-        !this.dependencies.sessionAssigned(question.session) || this.dependencies.store.getSession(question.session.id)?.status !== 'open') return;
+        !question.listener.connection || this.dependencies.store.getSessionGeneration(question.session.id) !== question.listener.generation ||
+        !this.dependencies.sessionAssigned(question.session) || this.dependencies.store.getSession(question.session.id)?.status !== 'open') return false;
     this.dependencies.requireSessionAssignment(question.session);
     const discussion = question.request.kind === 'select' && value === 'Chat about this';
     question.answer = {kind:discussion ? 'discussion' : question.request.kind === 'editor' && value !== undefined ? 'typed' : 'answer',text:discussion
@@ -143,6 +151,7 @@ export class BotQuestions {
       throw error;
     }
     this.endQuestion(token);
+    return true;
   }
   async answerQuestion(ctx: Context, token: string, choice: string): Promise<void> {
     const question = this.questions.get(token);
@@ -156,7 +165,8 @@ export class BotQuestions {
     }
     await this.dependencies.delivery.run(ctx.chat.id, () => this.dependencies.authorize(ctx.chat!.id,ctx.from!.id),
       () => !this.dependencies.stopped() && this.questions.get(token) === question);
-    if (choice === 'cancel') this.submitAnswer(token);
+    let submitted = false;
+    if (choice === 'cancel') submitted = this.submitAnswer(token);
     else if (question.request.kind === 'select') {
       const option = question.request.options[Number(choice)];
       if (option === undefined) return;
@@ -166,35 +176,58 @@ export class BotQuestions {
           this.dependencies.listener(question.session.id) === question.listener && this.questions.get(token) === question)
         .catch(error => { console.warn(`Could not show question selection receipt (${question.session.id}).`, error); });
       const value = typeof option === 'string' ? option : option.label;
-      this.submitAnswer(token, value, value === 'Other (type your own)' ? value : `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
+      submitted = this.submitAnswer(token, value, value === 'Other (type your own)' ? value : `Selected ${optionMarker(Number(choice))}: ${value}`, message.message_id);
     }
-    await ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery(submitted ? undefined : 'This question is reconnecting. Try again after reconnection.');
   }
   relayQuestion(session: TopicSession, listener: Listener, request: CollabUiRequest): void {
-    if (listener.pendingAnswers.has(request.reqId) ||
-        [...this.questions.values()].some(question => question.listener === listener && question.request.reqId === request.reqId)) return;
-    const token = randomBytes(12).toString('base64url');
-    const question: PendingQuestion = {session, listener, request, messageIds:[],buttonIds:[]};
-    this.questions.set(token, question);
+    const owner = listener.questionOwner;
+    if (owner === undefined) throw new Error('OMP question arrived before its host binding');
+    if (listener.pendingAnswers.has(request.reqId)) return;
+    const existing = [...this.questions.entries()].find(([, question]) =>
+      question.session.id === session.id && question.owner === owner && question.request.reqId === request.reqId);
+    let token: string;
+    let question: PendingQuestion;
+    if (existing) {
+      [token, question] = existing;
+      if (question.listener === listener) return;
+      // An in-flight Telegram send can finish after the socket closes. Keep its
+      // returned message ID before resuming delivery on the replacement listener.
+      const previousTail = question.listener.tail;
+      question.listener = listener;
+      listener.tail = Promise.all([listener.tail, previousTail]).then(() => {});
+    } else {
+      token = randomBytes(12).toString('base64url');
+      question = {session, listener, owner, request, messageIds:[],buttonIds:[]};
+      this.questions.set(token, question);
+    }
     if (++listener.queued > 128) { this.dependencies.dropListener(session.id); return; }
     listener.tail = listener.tail.then(async () => {
-      const active = () => this.questions.get(token) === question && !this.dependencies.stopped() &&
-        this.dependencies.listener(session.id) === listener && this.dependencies.sessionAssigned(session) &&
+      const active = () => this.questions.get(token) === question && question.listener === listener &&
+        !this.dependencies.stopped() && this.dependencies.listener(session.id) === listener &&
+        this.dependencies.sessionAssigned(session) &&
+        this.dependencies.store.getSessionGeneration(session.id) === listener.generation &&
         this.dependencies.store.getSession(session.id)?.status === 'open';
-      if (!active() || !(await this.dependencies.ready(session.chatId))) { this.endQuestion(token); return; }
+      if (!active()) return;
+      if (!(await this.dependencies.ready(session.chatId))) { if (active()) this.endQuestion(token); return; }
       const previous = listener.customAnswerMessage;
       listener.customAnswerMessage = undefined;
       if (request.kind === 'editor' && previous) {
         question.messageIds.push(...previous.messageIds);
         question.buttonIds.push(previous.messageId);
+        question.editorMessage = {messageId:previous.messageId,updated:false};
         for (const messageId of previous.messageIds) this.endedQuestionReplies.delete(`${session.chatId}:${messageId}`);
+      }
+      if (request.kind === 'editor' && question.editorMessage) {
+        if (question.editorMessage.updated) return;
         // Bot API Client::get_reply_markup and TDLib preserve force_reply on inline keyboards.
         // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp
         const reply_markup = {inline_keyboard:[[{text:'Cancel',callback_data:`ask:${token}:cancel`}]],force_reply:true};
-        await this.dependencies.delivery.run(session.chatId,
-          () => this.dependencies.api.editMessageText(session.chatId,previous.messageId,
+        const result = await this.dependencies.delivery.run(session.chatId,
+          () => this.dependencies.api.editMessageText(session.chatId,question.editorMessage!.messageId,
             [request.title,request.prefill,'Reply to this message with your answer. Multiline text is supported.'].filter(Boolean).join('\n\n'),
             {reply_markup}),active);
+        if (result !== undefined) question.editorMessage.updated = true;
         return;
       }
       const parts = [request.title];
@@ -207,19 +240,22 @@ export class BotQuestions {
         if (request.helpText) parts.push(request.helpText);
       } else if (request.prefill) parts.push(request.prefill);
       const body = parts.join('\n\n');
-      for (let offset = 0; offset < body.length;) {
+      let part = 0;
+      for (let offset = 0; offset < body.length; part++) {
         if (!active()) return;
         let end = Math.min(offset+4000, body.length);
         if (end < body.length && body.charCodeAt(end-1) >= 0xD800 && body.charCodeAt(end-1) <= 0xDBFF) end--;
-        const message = await this.dependencies.delivery.run(session.chatId,
-          () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),body.slice(offset,end)),active);
-        if (!message) return;
-        question.messageIds.push(message.message_id);
+        if (part >= question.messageIds.length - question.buttonIds.length) {
+          const message = await this.dependencies.delivery.run(session.chatId,
+            () => sendTo(this.dependencies.api, topicDestination(session.chatId, session.threadId),body.slice(offset,end)),active);
+          if (!message) return;
+          question.messageIds.push(message.message_id);
+        }
         offset = end;
       }
       const buttons = request.kind === 'select' ? request.options.map((_, index) =>
         ({text:optionMarker(index),callback_data:`ask:${token}:${index}`})) : [];
-      for (let offset = 0; offset < Math.max(1,buttons.length); offset += 80) {
+      for (let offset = question.buttonIds.length * 80; offset < Math.max(1,buttons.length); offset += 80) {
         if (!active()) return;
         const keyboard: {text:string;callback_data:string}[][] = [];
         for (let index = offset; index < Math.min(offset+80,buttons.length); index += 5) {
@@ -235,7 +271,7 @@ export class BotQuestions {
         if (!message) return;
         question.messageIds.push(message.message_id);
         question.buttonIds.push(message.message_id);
-        if (!active()) {
+        if (this.questions.get(token) !== question) {
           void this.dependencies.delivery.run(session.chatId,
             () => this.dependencies.api.editMessageReplyMarkup(session.chatId,message.message_id,{reply_markup:{inline_keyboard:[]}}),
             () => !this.dependencies.stopped() && this.dependencies.sessionAssigned(session))

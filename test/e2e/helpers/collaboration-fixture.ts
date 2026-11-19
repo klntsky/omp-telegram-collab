@@ -365,6 +365,7 @@ export interface CollaborationTest {
     args: string[];
     relayUrl: string;
     interruptNextGuest(): void;
+    disconnectGuests(): number;
     provider: FakeLlmProvider;
     log(event: string, data: unknown): void;
     step<T>(name: string, action: () => Promise<T>): Promise<T>;

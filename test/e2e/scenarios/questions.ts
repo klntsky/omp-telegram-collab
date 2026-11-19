@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, createManagedTopic, openPanel, replyText, waitForEditor, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
+import { clickPanel, createManagedTopic, deliveredPanels, openPanel, replyText, submitCallback, waitForEditor, waitForPanel, waitForReactionAttempt } from '../helpers/telegram-actions.js';
 import { completeWriteTask } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks, WorkflowControls } from './workflow-tasks.js';
+import { reconnectQuestionTransport } from '../helpers/collaboration-observer.js';
 
 export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'question' | 'customAnswer' | 'askHandoff' | 'chatHandoff'>, controls: WorkflowControls): void {
   it('questions', async t => {
@@ -29,19 +30,41 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
       const panel = await waitForPanel(app, 'question', 'ask:', start, session.threadId);
       const select = app.hostFrames.slice(questionFrames).findLast(frame => frame.t === 'ui-request');
       assert.ok(select?.t === 'ui-request' && select.request.kind === 'select');
+      const originalDeliveries = deliveredPanels(app.apiCalls.slice(start), 'question', 'ask:', session.threadId);
+      const reconnect = async (reqId: number) => {
+        const reconnectStart = app.apiCalls.length;
+        await reconnectQuestionTransport(app, session, reqId);
+        assert.deepEqual(deliveredPanels(app.apiCalls.slice(start), 'question', 'ask:', session.threadId), originalDeliveries);
+        const topicSend = z.object({
+          method: z.literal('sendMessage'),
+          payload: z.object({ message_thread_id: z.literal(session.threadId) }),
+        });
+        assert.equal(app.apiCalls.slice(reconnectStart).filter(call => topicSend.safeParse(call).success).length, 0);
+        const retiredControl = z.object({
+          method: z.enum(['editMessageReplyMarkup', 'deleteMessage']),
+          payload: z.object({ message_id: z.literal(panel.messageId) }),
+        });
+        assert.equal(app.apiCalls.slice(reconnectStart).filter(call => retiredControl.safeParse(call).success).length, 0);
+      };
+      await reconnect(select.request.reqId);
+      await reconnect(select.request.reqId);
       if (task === tasks.question) {
         await replyText(app, panel.messageId, session.threadId, '/unknown Never treat this as an answer');
         assert.equal(app.omp.provider.requests.get(task.name)!.length, 1);
-        await clickPanel(app, panel, 1);
+        await submitCallback(app, panel, panel.buttons[1]!);
         await completeWriteTask(app, task, instruction, session.threadId);
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId && frame.value === 'Remote'));
       } else {
         const editorStart = app.apiCalls.length;
-        await clickPanel(app, panel, 2);
+        await submitCallback(app, panel, panel.buttons[2]!);
         const editorMessageId = await waitForEditor(app, editorStart, session.threadId);
         assert.equal(editorMessageId, panel.messageId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
+        originalDeliveries.splice(0, originalDeliveries.length,
+          ...deliveredPanels(app.apiCalls.slice(start), 'question', 'ask:', session.threadId));
+        await reconnect(editor.request.reqId);
+        await reconnect(editor.request.reqId);
         await replyText(app, editorMessageId, session.threadId, '/unknown Never treat this command as an answer');
         const answer = 'Custom destination\n  Preserve <literal> **content** and whitespace';
         const submitted = await replyText(app, editorMessageId, session.threadId, answer);
@@ -56,6 +79,10 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         await completeWriteTask(app, task, instruction, session.threadId);
         assert.ok(app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId && frame.value === answer));
       }
+      const responses = app.guestFrames.filter(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId);
+      assert.equal(responses.length, 1);
+      await app.waitForCondition(() => app.hostFrames.slice(questionFrames).some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
+      assert.equal(app.hostFrames.slice(questionFrames).filter(frame => frame.t === 'event' && frame.event.type === 'agent_end').length, 1);
     }
     const handoffStart = app.apiCalls.length;
     await app.sendAndWait(`/p ${cancelledQuestion.prompt}`, session.threadId);

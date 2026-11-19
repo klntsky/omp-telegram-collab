@@ -23,6 +23,7 @@ export interface FrameProjectionDependencies {
   getListener: (id: string) => Listener | undefined;
   currentMetadataOwner: (id: string) => SessionMetadataOwner | undefined;
   endRequestQuestions: (listener: Listener, reqId: number) => void;
+  reconcileQuestions: (listener: Listener, complete?: boolean) => void;
   ready: (chatId: number) => Promise<boolean>;
   reconcilePromptReceipt: (session: TopicSession, listener: Listener, entry: CustomMessageEntry, replay: boolean, ompSessionId: string) => void;
   refreshTyping: (session: TopicSession, listener: Listener) => void;
@@ -63,6 +64,7 @@ export class FrameProjection {
     if (frame.t === 'welcome') {
       listener.receiptBoundary = this.deps.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
       listener.snapshotReplyTarget = this.deps.options.store.getReplyTarget(session.id);
+      this.deps.reconcileQuestions(listener);
     }
     this.deps.options.runtime.observeFrame(session.id, frame);
     if (
@@ -80,6 +82,14 @@ export class FrameProjection {
         at: Date.now(),
         error: frame.event.message,
       };
+    }
+    // HostRoom.#handleHello replays pending UI after the final snapshot chunk,
+    // then emits this join notice. Reconciling earlier would retire live questions.
+    // https://github.com/klntsky/oh-my-pi/blob/main/packages/coding-agent/src/collab/host.ts#L839-L850
+    if (frame.t === 'event' && frame.event.type === 'notice' && frame.event.level === 'info' &&
+        frame.event.source === 'collab' &&
+        frame.event.message === `Telegram @${this.deps.bot.botInfo!.username} joined the collab session`) {
+      this.deps.reconcileQuestions(listener, true);
     }
     if (frame.t === 'ui-request') {
       this.deps.relayQuestion(session, listener, frame.request);
