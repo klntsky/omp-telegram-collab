@@ -53,7 +53,7 @@ Bot-generated Telegram messages display file and directory paths as inline code,
 | `/settings` | Open interactive forum settings, defaults, and the live session count limit. Requires the current supergroup owner or an administrator. |
 | `/agent` | Get the current topic's Mini App link when the Mini App is enabled. |
 | `/cli` | Get a copyable terminal join command for the current open session topic. Requires the current supergroup owner or an administrator. |
-| `/stop` | Interrupt the current agent turn without terminating OMP. |
+| `/stop` | Interrupt the current agent turn without terminating OMP. Acknowledge only after OMP confirms interruption, with no immediate abort-request notification. |
 | `/kill` | Force-terminate the topic's OMP process, even while busy. In-flight work may be lost. |
 | `/terminate` | Supergroup owner or administrator service-wide break: persist `terminated: true`, force-kill all session hosts across bots, and keep the bot online. |
 | `/detach` | Make the topic permanently conversation-only. Requires the supergroup owner or an administrator. |
