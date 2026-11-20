@@ -1,6 +1,6 @@
 import type { Bot, Context } from 'grammy';
 import { stat } from 'node:fs/promises';
-import type { SessionEntry } from '@oh-my-pi/pi-wire';
+import type { CustomMessageEntry, SessionEntry } from '@oh-my-pi/pi-wire';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
@@ -15,6 +15,7 @@ interface ReplyDeliveryDependencies {
   sessionAssigned(session: TopicSession): boolean;
   stopped(): boolean;
   runBackground(phase: string, operation: () => Promise<void>): Promise<void>;
+  recordReceipt(session: TopicSession, entry: CustomMessageEntry, ompSessionId: string, boundary: number): {messageId?: number};
 }
 
 // Volatile coordination only; SQLite owns payloads and confirmed delivery progress.
@@ -80,17 +81,21 @@ export class ReplyDelivery {
     const entries = await readReplyHistory(source);
     if (this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session) || store.getSessionGeneration(session.id) !== generation || store.getSession(session.id)?.status !== 'open') return;
     const historical = !store.hasSnapshot(session.id);
+    // Read the file prefix before freezing submission matching: every included receipt's
+    // submission was committed before its native entry, even if new input arrived during the read.
+    const boundary = store.beginPromptReceiptSnapshot(session.id, source.sessionId);
     let replyTo: number | undefined;
     // Native replication includes all wire entries, not a reconstructed active branch.
     // This reader recovers only outbound text; browser history still uses native snapshots.
     // https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/collab/host.ts#L906-L912
     for (const entry of entries) {
       if (entry.type === 'custom_message' && entry.customType === 'collab-prompt') {
-        replyTo = store.replies.getReceiptMessageId(session.id, source.sessionId, entry.id);
+        replyTo = this.deps.recordReceipt(session, entry, source.sessionId, boundary).messageId;
       } else this.accept(session, source.sessionId, entry, replyTo, historical);
     }
-    work.captured = stamp;
     store.markSnapshot(session.id);
+    // A failed baseline write must remain retryable even when history is unchanged.
+    work.captured = stamp;
   }
 
   private async deliver(session: TopicSession): Promise<void> {

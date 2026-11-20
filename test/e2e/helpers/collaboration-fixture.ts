@@ -148,7 +148,7 @@ export async function setupCollaborationTest(
   const handledMessages = new Set<number>();
   const apiCalls: { method: string; payload: unknown; result: unknown }[] = [];
   let changed = Promise.withResolvers<void>();
-  const { createBot: instrumentedBot, instrumentRuntime, disconnectGuests } = createCollaborationObserver({
+  const { createBot: instrumentedBot, instrumentRuntime, disconnectGuests, interruptNextPromptReceipt } = createCollaborationObserver({
     signal: t.signal, token: telegram.bot.token, chatId: telegram.forum.chatId, log: omp.log,
     apiCalls, updates, handledMessages, hostFrames, guestFrames,
     notify() {
@@ -329,6 +329,7 @@ export async function setupCollaborationTest(
     },
     waitForCondition,
     disconnectGuests,
+    interruptNextPromptReceipt,
     waitForMessage,
     async waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
       let messageId: number | undefined;
@@ -380,6 +381,7 @@ export interface CollaborationTest {
   updates: Update[];
   topicActivityEmojis: { running: string; finished: string };
   disconnectGuests(): () => void;
+  interruptNextPromptReceipt(): Promise<() => void>;
   readonly runtime: OmpRuntime;
   readonly store: Store;
   readonly service: BotService;

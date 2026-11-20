@@ -193,6 +193,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
     runBackground: maintenance.runBackground.bind(maintenance),
+    recordReceipt: receipts.recordReceipt.bind(receipts),
   });
   const menus: BotCommandMenus = new BotCommandMenus({
     bot: bot,

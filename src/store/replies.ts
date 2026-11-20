@@ -69,10 +69,4 @@ export class ReplyLedger {
     this.db.prepare(`UPDATE replies SET state='done' WHERE session_id=? AND omp_session_id=?
       AND entry_id=? AND next_part=? AND state='pending'`).run(reply.sessionId, reply.ompSessionId, reply.entryId, reply.nextPart);
   }
-
-  getReceiptMessageId(sessionId: string, ompSessionId: string, entryId: string): number | undefined {
-    const row = this.db.prepare('SELECT message_id FROM prompt_receipts WHERE session_id=? AND omp_session_id=? AND entry_id=?')
-      .get(sessionId, ompSessionId, entryId);
-    return row?.message_id == null ? undefined : Number(row.message_id);
-  }
 }

@@ -21,6 +21,12 @@ export function createCollaborationObserver(options: {
   const { log, notify, apiCalls, updates, handledMessages, hostFrames, guestFrames } = options;
   const connections = new Set<CollabConnection>();
   let resumeConnections: PromiseWithResolvers<void> | undefined;
+  let interruptPrompt: PromiseWithResolvers<() => void> | undefined;
+  function interruptNextPromptReceipt(): Promise<() => void> {
+    if (interruptPrompt) throw new Error('A prompt receipt interruption is already armed');
+    interruptPrompt = Promise.withResolvers<() => void>();
+    return interruptPrompt.promise;
+  }
   function disconnectGuests(): () => void {
     // Close actual Collab transports, so the real close handlers drive recovery.
     // Admission waits rather than fabricating a failed connection or host frame.
@@ -71,6 +77,14 @@ export function createCollaborationObserver(options: {
           onFrame(frame) {
             hostFrames.push(frame);
             log('collab.host.frame', frame);
+            if (interruptPrompt && frame.t === 'entry' &&
+                frame.entry.type === 'custom_message' && frame.entry.customType === 'collab-prompt') {
+              const interrupted = interruptPrompt;
+              interruptPrompt = undefined;
+              interrupted.resolve(disconnectGuests());
+              notify();
+              return;
+            }
             handlers.onFrame(frame);
             notify();
           },
@@ -100,5 +114,5 @@ export function createCollaborationObserver(options: {
       }
     };
   }
-  return { createBot, instrumentRuntime, disconnectGuests };
+  return { createBot, instrumentRuntime, disconnectGuests, interruptNextPromptReceipt };
 }

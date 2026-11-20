@@ -25,6 +25,8 @@ import { registerProviderSetup } from './scenarios/provider-setup.js';
 import { registerChatIsolation } from './scenarios/chat-isolation.js';
 import { registerPromptQueue } from './scenarios/prompt-queue.js';
 import { registerReplyRecovery } from './scenarios/reply-recovery.js';
+import { registerReplyBaselineRecovery } from './scenarios/reply-baseline-recovery.js';
+import { registerReplyReceiptRecovery } from './scenarios/reply-receipt-recovery.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -97,3 +99,5 @@ registerMiniAppRecovery();
 registerProviderSetup();
 registerPromptQueue();
 registerReplyRecovery();
+registerReplyBaselineRecovery();
+registerReplyReceiptRecovery();

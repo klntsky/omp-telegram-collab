@@ -41,8 +41,6 @@ test('message anchors preserve receipt aliases and exact native identity across 
     assert.deepEqual(store.replies.pending(session.id), []);
     store.replies.stage(session.id, 'omp-fork', 'answer-entry', 'prompt-entry', ['new'], 100, 1);
     assert.equal(store.replies.pending(session.id)[0]?.ompSessionId, 'omp-fork');
-    assert.equal(store.replies.getReceiptMessageId(session.id, 'omp-original', prompt.entryId), 100);
-    assert.equal(store.replies.getReceiptMessageId(session.id, 'omp-fork', prompt.entryId), undefined);
     assert.equal(store.getMessageAnchor(session.id, 'omp-fork', topic.chatId, 100), undefined);
     assert.deepEqual(store.recordPromptReceipt(session.id, prompt, sender, content), {fresh:false,messageId:100});
   } finally {
