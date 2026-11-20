@@ -230,7 +230,7 @@ export async function setupCollaborationTest(
   }
   await omp.step('application.start', startService);
   async function waitForCondition(
-    predicate: () => boolean,
+    predicate: () => boolean | Promise<boolean>,
     phase = 'expectation',
     timeoutMs: number = telegramTestTimeouts.expectation,
   ): Promise<void> {
@@ -245,7 +245,7 @@ export async function setupCollaborationTest(
           for (;;) {
             signal.throwIfAborted();
             const notification = changed.promise;
-            if (predicate()) return;
+            if (await predicate()) return;
             await bounded(Promise.race([notification, failure.promise]), signal);
           }
         } finally {
@@ -393,7 +393,7 @@ export interface CollaborationTest {
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
   waitForTaskStarted(name: string): Promise<void>;
-  waitForCondition(predicate: () => boolean): Promise<void>;
+  waitForCondition(predicate: () => boolean | Promise<boolean>): Promise<void>;
   waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }

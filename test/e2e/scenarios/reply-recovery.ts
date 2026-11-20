@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -45,7 +44,7 @@ export function registerReplyRecovery(): void {
     const reconnectGuests = app.omp.disconnectGuests();
     final.resolve();
     const firstReply = await completeWriteTask(app, disconnected, firstPrompt, first.threadId);
-    await app.waitForCondition(() => !existsSync(`/proc/${firstHost.pid}`));
+    await app.waitForCondition(async () => !await app.runtime.isRunning(first));
     reconnectGuests();
     assert.equal(await app.runtime.resolveExisting(first), undefined);
     assert.equal(app.store.getSessionGeneration(first.id), firstGeneration);
@@ -102,7 +101,7 @@ export function registerReplyRecovery(): void {
     });
     const thirdPrompt = await app.sendAndWait(`/p ${restarted.prompt}`, third.threadId);
     await bounded(received.promise, t.signal);
-    await app.waitForCondition(() => !existsSync(`/proc/${thirdHost.pid}`));
+    await app.waitForCondition(async () => !await app.runtime.isRunning(third));
     const pausing = app.pause();
     queueMicrotask(() => checkpoint.resolve());
     await pausing;
