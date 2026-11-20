@@ -27,6 +27,7 @@ import { registerPromptQueue } from './scenarios/prompt-queue.js';
 import { registerReplyRecovery } from './scenarios/reply-recovery.js';
 import { registerReplyBaselineRecovery } from './scenarios/reply-baseline-recovery.js';
 import { registerReplyReceiptRecovery } from './scenarios/reply-receipt-recovery.js';
+import { registerProviderFailure } from './scenarios/provider-failure.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -101,3 +102,4 @@ registerPromptQueue();
 registerReplyRecovery();
 registerReplyBaselineRecovery();
 registerReplyReceiptRecovery();
+registerProviderFailure();

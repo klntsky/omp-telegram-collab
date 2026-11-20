@@ -194,6 +194,24 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     stopped: lifecycle.stopped.bind(lifecycle),
     runBackground: maintenance.runBackground.bind(maintenance),
     recordReceipt: receipts.recordReceipt.bind(receipts),
+    observeAssistant: (session, message) => {
+      if (message.role !== 'assistant') return;
+      const observation = owners.activityObservation(session);
+      if (observation.turnOutcome !== 'retrying') {
+        const outcome = message.stopReason === 'error' ? 'failed' : undefined;
+        if (observation.turnOutcome !== outcome) {
+          observation.turnOutcome = outcome;
+          ++observation.revision;
+        }
+      }
+      if (message.stopReason === 'error') {
+        recovery.sessionObservation(session.id).failure = {
+          operation: 'OMP provider', at: Date.now(), error: message.errorMessage,
+        };
+        if (observation.value === 'finished' && observation.turnOutcome === 'failed')
+          void activity.setTopicStatus(session, 'unknown');
+      }
+    },
   });
   const menus: BotCommandMenus = new BotCommandMenus({
     bot: bot,

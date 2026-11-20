@@ -43,6 +43,7 @@ export class TopicMetadataOwners {
       );
       activity.value = 'unknown';
       activity.observedAt = undefined;
+      if (activity.turnOutcome === 'retrying') activity.turnOutcome = undefined;
       activity.suspect = true;
       ++activity.revision;
     }

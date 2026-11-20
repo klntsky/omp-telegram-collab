@@ -7,6 +7,7 @@ import { bounded } from './async.js';
 export type FakeLlmStep =
   | { type: 'text'; text: string; barrier?: Promise<void> }
   | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> }
+  | { type: 'error'; message: string; partialText?: string; release?: Promise<void> }
   | { type: 'await-abort' };
 
 export interface FakeLlmScenario {
@@ -137,6 +138,10 @@ export async function startFakeLlmProvider(options: {
     if (step.type === 'text' && step.barrier) await step.barrier;
     if (step.type === 'text') {
       chunk({ content: step.text });
+    } else if (step.type === 'error') {
+      await step.release;
+      if (step.partialText) chunk({ content: step.partialText });
+      emit({ error: { message: step.message, type: 'invalid_request_error', code: 'invalid_request_error', status: 400 } });
     } else {
       const argumentsJson = JSON.stringify(step.arguments);
       const split = Math.max(1, Math.floor(argumentsJson.length / 2));
@@ -144,8 +149,10 @@ export async function startFakeLlmProvider(options: {
       chunk({ tool_calls: [{ index: 0, function: { arguments: argumentsJson.slice(0, split) } }] });
       chunk({ tool_calls: [{ index: 0, function: { arguments: argumentsJson.slice(split) } }] });
     }
-    chunk({}, step.type === 'tool' ? 'tool_calls' : 'stop');
-    emit({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+    if (step.type !== 'error') {
+      chunk({}, step.type === 'tool' ? 'tool_calls' : 'stop');
+      emit({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+    }
     emit('[DONE]');
     const finished = Promise.withResolvers<void>();
     response.once('error', finished.reject);

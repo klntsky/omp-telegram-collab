@@ -52,15 +52,10 @@ export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
     const dirty = await closeForConfirmation(app, session);
     const dirtyFile = join(target.path, 'uncommitted-evidence');
     await writeFile(dirtyFile, 'retain uncommitted changes\n');
-    let diagnostic = '';
-    await assert.rejects(app.omp.git(target.commonDir, 'worktree', 'remove', '--', target.path), error => {
-      assert.ok(error instanceof Error);
-      diagnostic = error.message;
-      return true;
-    });
+    await assert.rejects(app.omp.git(target.commonDir, 'worktree', 'remove', '--', target.path), { code: 128 });
     await clickPanel(app, dirty, 0);
     await app.waitForCondition(async () => (await applicationErrors(app)).some(values =>
-      values.some(value => z.object({ message: z.literal(diagnostic) }).safeParse(value).success)));
+      values.some(value => z.object({ code: z.literal(128) }).safeParse(value).success)));
     assert.equal(await readFile(dirtyFile, 'utf8'), 'retain uncommitted changes\n');
     await unlink(dirtyFile);
     start = app.apiCalls.length;

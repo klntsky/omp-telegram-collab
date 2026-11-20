@@ -50,6 +50,14 @@ export class FrameProjection {
     const ompSessionId = listener.ompSessionId;
     if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
     if (!replay) listener.feed.accept(frame);
+    const activity = this.deps.activityObservation(session);
+    if (frame.t === 'event') {
+      const event = frame.event;
+      if (event.type === 'auto_retry_start') activity.turnOutcome = 'retrying';
+      if (event.type === 'auto_retry_end') activity.turnOutcome = event.success ? undefined : 'failed';
+      if (event.type === 'message_end' && event.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
+        activity.turnOutcome = event.message.stopReason === 'error' ? 'failed' : undefined;
+    }
     if (frame.t === 'welcome') {
       listener.receiptBoundary = this.deps.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
       listener.snapshotReplyTarget = this.deps.options.store.getReplyTarget(session.id);
@@ -111,16 +119,17 @@ export class FrameProjection {
       listener.queuedMessages = frame.state.queuedMessageCount;
       void this.deps.setTopicStatus(
         session,
-        this.deps.options.store.promptQueue.has(session.id) ||
+        activity.turnOutcome === 'retrying' ||
+          this.deps.options.store.promptQueue.has(session.id) ||
           frame.state.isStreaming ||
           listener.queuedMessages > 0
           ? 'running'
-          : 'finished',
+          : activity.turnOutcome === 'failed' ? 'unknown' : 'finished',
       );
-    } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
+    } else if (frame.t === 'event' && (frame.event.type === 'agent_start' || frame.event.type === 'auto_retry_start')) {
       void this.deps.setTopicStatus(session, 'running');
-    } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      void this.deps.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
+    } else if (frame.t === 'event' && (frame.event.type === 'agent_end' || frame.event.type === 'auto_retry_end')) {
+      void this.deps.setTopicStatus(session, activity.turnOutcome === 'retrying' || listener.queuedMessages > 0 ? 'running' : activity.turnOutcome === 'failed' ? 'unknown' : 'finished', activity.turnOutcome !== 'failed');
     }
     if (frame.t === 'event') {
       const event = frame.event;
@@ -200,11 +209,14 @@ export class FrameProjection {
       if (frame.final) {
         this.deps.options.store.markSnapshot(session.id);
         this.deps.options.store.setReplyTarget(session.id, listener.snapshotReplyTarget);
+        if (activity.turnOutcome === 'failed' && activity.value === 'finished')
+          void this.deps.setTopicStatus(session, 'unknown');
       }
       return;
     }
     if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
-    this.deps.queueReply(session, ompSessionId, frame.entry,
+    const entry = frame.entry;
+    this.deps.queueReply(session, ompSessionId, entry,
       replay ? listener.snapshotReplyTarget : this.deps.options.store.getReplyTarget(session.id));
   }
 }

@@ -30,11 +30,11 @@ export async function requestCleanupConfirmation(app: CollaborationTest, session
 }
 
 export async function applicationErrors(app: CollaborationTest): Promise<unknown[][]> {
-  const failure = z.object({ event: z.literal('application.console.error'), data: z.array(z.unknown()) });
+  const failure = z.object({ event: z.literal('application.log'), data: z.object({ level: z.literal('error') }).passthrough() });
   await app.omp.flushLogs();
   return (await readFile(join(app.omp.logDirectory, 'events.jsonl'), 'utf8')).split('\n').slice(0, -1).flatMap(line => {
     if (!line) return [];
     const parsed = failure.safeParse(JSON.parse(line));
-    return parsed.success ? [parsed.data.data] : [];
+    return parsed.success ? [Object.values(parsed.data.data)] : [];
   });
 }

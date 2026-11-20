@@ -1,11 +1,12 @@
 import type { Bot, Context } from 'grammy';
 import { stat } from 'node:fs/promises';
-import type { CustomMessageEntry, SessionEntry } from '@oh-my-pi/pi-wire';
+import type { CustomMessageEntry, SessionEntry, WireMessage } from '@oh-my-pi/pi-wire';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { renderTelegramMarkdown } from '../telegram-markdown.js';
 import { readReplyHistory } from './reply-history.js';
+import { logEvent } from '../logging.js';
 
 interface ReplyDeliveryDependencies {
   bot: Bot<Context>;
@@ -16,6 +17,7 @@ interface ReplyDeliveryDependencies {
   stopped(): boolean;
   runBackground(phase: string, operation: () => Promise<void>): Promise<void>;
   recordReceipt(session: TopicSession, entry: CustomMessageEntry, ompSessionId: string, boundary: number): {messageId?: number};
+  observeAssistant(session: TopicSession, message: WireMessage): void;
 }
 
 // Volatile coordination only; SQLite owns payloads and confirmed delivery progress.
@@ -31,8 +33,18 @@ export class ReplyDelivery {
 
   accept(session: TopicSession, ompSessionId: string, entry: SessionEntry, replyTo?: number, historical = false): void {
     if (entry.type !== 'message' || entry.message.role !== 'assistant') return;
-    const text = entry.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
-    if (!text.trim()) return;
+    this.deps.observeAssistant(session, entry.message);
+    let text = entry.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+    if (entry.message.stopReason === 'error') {
+      const diagnostic = entry.message.errorMessage ?? 'The provider returned an error without a diagnostic.';
+      const fence = '`'.repeat(Math.max(3, ...Array.from(diagnostic.matchAll(/`+/g), match => match[0].length + 1)));
+      text = `${text.trim() ? `${text}\n\n` : ''}OMP provider attempt failed (automatic recovery may follow).\n\n${fence}\n${diagnostic}\n${fence}`;
+      if (!historical)
+        logEvent('error', 'omp-provider-attempt-failed', {
+          botId: session.botId, sessionId: session.id, ompSessionId, entryId: entry.id,
+          model: entry.message.model, error: entry.message.errorMessage,
+        });
+    } else if (!text.trim()) return;
     const store = this.deps.options.store;
     store.replies.stage(session.id, ompSessionId, entry.id, entry.parentId,
       historical ? [] : renderTelegramMarkdown(text), replyTo, store.getSessionGeneration(session.id), historical);

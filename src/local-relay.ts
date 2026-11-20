@@ -54,7 +54,9 @@ export class LocalRelay {
     if (socket.readyState !== WebSocket.OPEN) return;
     const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
     if (socket.bufferedAmount + bytes > MAX_SOCKET_QUEUE || this.queuedBytes + bytes > MAX_TOTAL_QUEUE) {
-      this.report('relay backpressure', new Error('Relay outbound queue capacity exceeded; disconnecting slow consumer'));
+      this.report('relay backpressure', new Error(
+        `Relay outbound queue capacity exceeded; disconnecting slow consumer (socketBytes=${socket.bufferedAmount}, frameBytes=${bytes}, totalBytes=${this.queuedBytes})`,
+      ));
       socket.terminate();
       return;
     }
