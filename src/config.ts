@@ -28,12 +28,6 @@ const publicUrlSchema = z.string().refine(value => {
     return url.protocol === 'https:' && url.pathname === '/' && !url.username && !url.password && !url.search && !url.hash;
   } catch { return false; }
 }).transform(value => value ? new URL(value).origin : '');
-const relayUrlSchema = z.string().refine(value => {
-  try {
-    const url = new URL(value);
-    return (url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))) && !url.username && !url.password && !value.includes('#');
-  } catch { return false; }
-});
 const forbiddenArgs: Record<string, true> = {
   '--session': true, '-s': true, '--session-dir': true, '--resume': true, '-r': true,
   '--continue': true, '-c': true, '--no-session': true, '--restore': true, '--fork': true,
@@ -76,7 +70,6 @@ const configSchema = z.object({
     args: z.array(argumentSchema),
     maxSessions: positiveInteger,
     startupTimeoutMs: positiveInteger,
-    relayUrl: relayUrlSchema.optional(),
   }).strict(),
 }).strict();
 

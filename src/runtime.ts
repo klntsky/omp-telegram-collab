@@ -26,6 +26,8 @@ import { createAdmission, type RuntimeAdmission } from './runtime/admission.js';
 import { createSessions, type RuntimeSessions } from './runtime/sessions.js';
 import { createTermination, type RuntimeTermination } from './runtime/termination.js';
 import { childEnvironment } from './runtime/environment.js';
+import { ManagedRelay } from './managed-relay.js';
+import { createRelayCutover, type RuntimeRelayCutover } from './runtime/relay-cutover.js';
 
 // Terminal joins launch only the native client; they must not acquire service-owned runtime resources.
 export const terminalOmp: Pick<Omp, 'joinTerminal'> = {
@@ -53,6 +55,8 @@ export class OmpRuntime implements Omp {
   readonly #processKill: RuntimeProcessKill;
   readonly #retirement: RuntimeRetirement;
   readonly #ownership: RuntimeOwnership;
+  readonly #relay: ManagedRelay;
+  readonly #relayCutover: RuntimeRelayCutover;
   readonly #admission: RuntimeAdmission;
   readonly #sessions: RuntimeSessions;
   readonly #termination: RuntimeTermination;
@@ -81,6 +85,7 @@ export class OmpRuntime implements Omp {
     }
     this.#config = config;
     this.#sessionLimit = config.omp.maxSessions;
+    this.#relay = new ManagedRelay(config.dataDir);
     const runtime = this;
     this.#activity = createActivity({
       assertActive: () => this.#assertActive(),
@@ -169,6 +174,7 @@ export class OmpRuntime implements Omp {
       config: this.#config,
       prepare: (session) => runtime.#paths.prepare(session),
       acquire: () => runtime.#ownership.acquire(),
+      relayUrl: async () => { await runtime.#ownership.acquire(); return runtime.#relay.ensure(); },
       get closed() { return runtime.#closed; },
       stopping: this.#stopping,
       assertActive: () => runtime.#assertActive(),
@@ -198,6 +204,15 @@ export class OmpRuntime implements Omp {
       get closed() { return runtime.#closed; },
       config: this.#config,
     });
+    this.#relayCutover = createRelayCutover({
+      dataDir: config.dataDir,
+      relayUrl: async () => { await runtime.#ownership.acquire(); return runtime.#relay.ensure(); },
+      lifecycle: id => runtime.#ownership.lifecycle(id),
+      readManagedBinding: session => runtime.#paths.readManagedBinding(session),
+      managed: this.#managed,
+      pending: this.#pending,
+      stopHost: (id, guard) => runtime.#termination.stopHost(id, guard),
+    });
     this.#admission = createAdmission({
       config: this.#config,
       lifecycle: (id) => runtime.#ownership.lifecycle(id),
@@ -220,6 +235,7 @@ export class OmpRuntime implements Omp {
       pending: this.#pending,
       acquire: () => runtime.#ownership.acquire(),
       list: (deadline) => runtime.#registry.list(deadline),
+      relayUrl: async () => { await runtime.#ownership.acquire(); return runtime.#relay.ensure(); },
       config: this.#config,
       stopping: this.#stopping,
       readManagedBinding: (session) => runtime.#paths.readManagedBinding(session),
@@ -261,7 +277,7 @@ export class OmpRuntime implements Omp {
     this.markPrompt = this.#activity.markPrompt;
     this.observeFrame = this.#activity.observeFrame;
     this.#idleTimer = setInterval(() => {
-      void this.retireIdle().catch(error => console.error('OMP idle retirement failed:', error));
+      void this.#relayCutover.drain().then(() => this.retireIdle()).catch(error => console.error('OMP idle retirement failed:', error));
     }, 60000);
     this.#idleTimer.unref();
   }
@@ -325,8 +341,14 @@ export class OmpRuntime implements Omp {
     return retired;
   }
   async #admitManaged(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding> {
-    await this.#admission.claimManaged(session.id, beforeMutation);
-    return this.#startup.ensureManaged(session,beforeMutation);
+    // Relay cutover retires the old ledger entry before launching its replacement.
+    // Reserve the logical session throughout that gap so concurrent admissions
+    // cannot spend its capacity slot.
+    const reservation = Symbol();
+    await this.#admission.claimManaged(session.id, beforeMutation, reservation);
+    this.#activity.hostActivity(session.id).lastUsed = Date.now();
+    try { return await this.#startup.ensureManaged(session, beforeMutation); }
+    finally { this.#reservations.delete(reservation); }
   }
   isRunning: (session: TopicSession) => Promise<boolean>;
   historySource: (session: TopicSession) => Promise<{ sessionId: string; path: string } | undefined>;
@@ -388,22 +410,36 @@ export class OmpRuntime implements Omp {
   attach: (instanceId: string, instancePath: string) => Promise<HostBinding>;
   stop: (session: TopicSession) => Promise<boolean>;
   kill: (session: TopicSession) => Promise<void>;
+  prepareManagedRelay(sessions: TopicSession[]): Promise<void> { return this.#relayCutover.prepare(sessions); }
   close(): Promise<void> {
     if (this.#closing) return this.#closing;
     this.#closed = true;
     this.#reservations.clear();
     clearInterval(this.#idleTimer);
     this.#closing = (async () => {
+      const errors: unknown[] = [];
+      const cleanup = async (operation: () => unknown | Promise<unknown>) => {
+        try { await operation(); } catch (error) { errors.push(error); }
+      };
       for (const child of this.#skillProcesses) this.#skills.killSkillProcess(child);
-      await this.#skills.closeDiscovery();
+      await cleanup(() => this.#skills.closeDiscovery());
+      // Admission and termination callers own their failures; shutdown only waits
+      // for their fences before releasing the relay lease and exclusive lock.
       await Promise.allSettled(this.#pending.values());
-      await this.#fork.drain();
+      await cleanup(() => this.#fork.drain());
       await Promise.allSettled(this.#killing.values());
-      await this.#ownership.settleAcquisition();
-      await this.retireIdle(0);
-      this.#ownership.close();
+      await cleanup(() => this.#ownership.settleAcquisition());
+      await cleanup(() => this.#relayCutover.close());
+      await cleanup(() => this.retireIdle(0));
+      await cleanup(() => this.#relay.close());
+      await cleanup(() => this.#ownership.close());
+      if (errors.length === 1) throw errors[0];
+      if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
     })();
     return this.#closing;
   }
-  acquire(): Promise<void> { return this.#ownership.acquire(); }
+  async acquire(): Promise<void> {
+    await this.#ownership.acquire();
+    await this.#relay.ensure();
+  }
 }

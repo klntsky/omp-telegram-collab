@@ -4,6 +4,7 @@ import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { type RegistryHost } from './types.js';
 import { childEnvironment } from './environment.js';
+import { CollabTransportError } from '../collab.js';
 interface RegistryDependencies {
   readonly config: AppConfig;
   assertActive(): void;
@@ -55,7 +56,10 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
 
   async function resolve(host: RegistryHost, deadline: number): Promise<HostBinding> {
     deps.assertActive();
-    if (host.access !== 'control' || !host.relayConnected) throw new Error('OMP host does not publish a connected control room');
+    if (host.access !== 'control') throw new Error('OMP host does not publish a connected control room');
+    // A live host keeps its identity while reconnecting after relay recovery.
+    // Preserve the diagnostic but let the gateway retry instead of ending the session.
+    if (!host.relayConnected) throw new CollabTransportError('OMP host does not publish a connected control room');
     const link = await json(['collab', 'link', host.instanceId, '--json'], deadline);
     if (link.version !== 1 || link.instanceId !== host.instanceId || link.generation !== host.generation || link.access !== 'control' || typeof link.url !== 'string') {
       throw new Error('OMP host changed while resolving its capability');

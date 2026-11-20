@@ -13,7 +13,7 @@ import { bounded } from './async.js';
 import type { CollaborationTest } from './collaboration-fixture.js';
 
 export async function observeBrowser(t: TestContext, app: CollaborationTest, session: TopicSession, options: {
-  interruptSetup?: () => void;
+  interruptSetup?: () => void | Promise<void>;
 } = {}) {
   const signal = AbortSignal.any([t.signal, AbortSignal.timeout(120000)]);
   const publicUrl = 'https://mini-app.example';
@@ -22,7 +22,7 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     bots: app.config.bots.map(bot => ({ ...bot, miniAppShortName: 'e2e' })),
   };
   let interruptSetup = options.interruptSetup;
-  const recovery = {phases: new Set<ConnectionPhase>(), interruptedSetupFailure: undefined as unknown};
+  const recovery = {phases: new Set<ConnectionPhase>()};
   const service = app.service;
   const server = createServer({ config, bots: [{
     id: service.id, token: service.token,
@@ -33,13 +33,8 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     async ensureMirroring(...args) {
       const interrupt = interruptSetup;
       interruptSetup = undefined;
-      interrupt?.();
-      try {
-        return await service.ensureMirroring(...args);
-      } catch (error) {
-        if (interrupt) recovery.interruptedSetupFailure = error;
-        throw error;
-      }
+      await interrupt?.();
+      return service.ensureMirroring(...args);
     },
   }], store: app.store, runtime: app.runtime });
   const sockets = new Set<WebSocket>();

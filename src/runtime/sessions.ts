@@ -4,12 +4,14 @@ import type { AppConfig, HostBinding, TopicSession } from '../../shared/contract
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
 import { procIdentity } from './process.js';
 import { errno } from './values.js';
+import { parseCollabLink } from '../vendor/link.js';
 interface SessionsDependencies {
   assertActive(): void;
   readonly closed: boolean;
   readonly pending: Map<string, Promise<HostBinding>>;
   acquire(): Promise<void>;
   list(deadline: number): Promise<RegistryHost[]>;
+  relayUrl(): Promise<string>;
   readonly config: AppConfig;
   readonly stopping: Map<string, Promise<void>>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;
@@ -106,6 +108,13 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
           owned.binding = binding;
         }
       }
+    }
+    if (runtime.kind === 'managed') {
+      const parsed = parseCollabLink(binding.url);
+      const relayUrl = await deps.relayUrl();
+      // Read-only recovery must not expose a foreign capability. Returning no
+      // binding sends authorized admission through idle-guarded relay cutover.
+      if ('error' in parsed || new URL(parsed.wsUrl).origin !== new URL(relayUrl).origin) return undefined;
     }
     return binding;
   }

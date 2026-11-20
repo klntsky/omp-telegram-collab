@@ -135,7 +135,6 @@ export async function setupCollaborationTest(
   config.omp = {
     executable: omp.executable,
     args: omp.args,
-    relayUrl: omp.relayUrl,
     maxSessions: 2,
     startupTimeoutMs: 60_000,
   };
@@ -363,8 +362,6 @@ export interface CollaborationTest {
     executable: string;
     agentConfigPath: string;
     args: string[];
-    relayUrl: string;
-    interruptNextGuest(): void;
     provider: FakeLlmProvider;
     log(event: string, data: unknown): void;
     step<T>(name: string, action: () => Promise<T>): Promise<T>;

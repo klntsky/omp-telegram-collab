@@ -131,6 +131,7 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
     await runtime.validateSessionPaths(sessions);
     for (const session of sessions) store.setSessionCwd(session.id, session.cwd);
     timing('session validation', phaseAt);
+    await runtime.prepareManagedRelay(sessions);
     for (const botConfig of config.bots) {
       const bot = new BotService({ config, botConfig, token: botConfig.token, store, runtime });
       bots.push(bot);
