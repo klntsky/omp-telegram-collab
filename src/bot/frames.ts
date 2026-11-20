@@ -234,7 +234,7 @@ export class FrameProjection {
         if (
           this.deps.stopped() ||
           !this.deps.sessionAssigned(session) ||
-          this.deps.getListener(session.id) !== listener
+          this.deps.options.store.getSessionGeneration(session.id) !== listener.generation
         )
           return;
         const current = this.deps.options.store.getSession(session.id);
@@ -245,6 +245,9 @@ export class FrameProjection {
           !this.deps.sessionAssigned(current)
         )
           return;
+        // Accepted output belongs to the topic generation, not the socket that
+        // observed it. Graceful host exit must not cancel an already queued
+        // reply; kill/closure still invalidate it through the generation fence.
         let partIndex = 0;
         for (const part of renderTelegramMarkdown(text)) {
           if (!this.deps.sessionAssigned(current)) return;
@@ -269,7 +272,7 @@ export class FrameProjection {
             () =>
               !this.deps.stopped() &&
               this.deps.sessionAssigned(current) &&
-              this.deps.getListener(session.id) === listener,
+              this.deps.options.store.getSessionGeneration(session.id) === listener.generation,
           );
           if (!sent) return;
           this.deps.options.store.recordMessageAnchor(session.id, sent.chat.id, sent.message_id, {
