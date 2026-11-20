@@ -61,7 +61,7 @@ export async function fixture(mode: RetirementMode = 'busy', pid?: number, guard
   const socketPath = join(directory, 'host.sock');
   const lifecyclePath = join(sessionDir, 'lifecycle.json');
   const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
-    pid, cwd: directory, access: 'control', relayConnected: true, busy: false };
+    pid, cwd: directory, access: 'control' as const, relayConnected: true, busy: false };
   const url = `${new URL(relayUrl).origin}/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
   const state: { host: typeof host | undefined; failLink: boolean; startupHost?: typeof host; holdStartup?: boolean } = { host, failLink: false };
   const persistRegistry = () => writeFile(statePath, JSON.stringify(state));
@@ -118,7 +118,7 @@ if (process.argv[2] !== 'collab') {
   const history = join(sessionDir, 'history.jsonl');
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: host.sessionId, cwd: directory }) + '\n');
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
-  const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
+  const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: 1 } = {
     pid, supervisorPid: process.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
   const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor), { mode: 0o600 });
   await persistLifecycle();

@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { OmpRuntime } from '../src/runtime.js';
 import { fixture, type RetirementRequest } from './runtime-retirement-fixture.js';
+import { createRetirement } from '../src/runtime/retirement.js';
+import { procIdentity } from '../src/runtime/process.js';
+import type { ManagedHost } from '../src/runtime/types.js';
 
 test('automatic idle retirement lets the host authoritatively reject busy retirement', async t => {
   const app = await fixture('busy');
@@ -159,6 +162,93 @@ for (const mode of ['uncertain', 'accepted'] as const) {
     }
   });
 }
+
+for (const prior of [false, true]) {
+  test(`worktree waits for ${prior ? 'previously accepted' : 'slow accepted'} retirement to complete`, async t => {
+    const app = await fixture('accepted');
+    t.after(() => { t.mock.restoreAll(); t.mock.timers.reset(); return app.close(); });
+    const host: ManagedHost = { sessionId: app.host.sessionId, exited: false, retiring: prior };
+    if (prior) {
+      const identity = await procIdentity(app.host.pid);
+      assert.ok(identity);
+      host.identity = { pid: app.host.pid, start: identity.start };
+      host.retirement = { ...host.identity, socketPath: app.descriptor.socketPath };
+      app.descriptor.retiring = true;
+      await app.persistLifecycle();
+    }
+    const managed = new Map([[app.session.id, host]]);
+    const retirement = createRetirement({
+      config: app.config, managed, killing: new Map(), forgetActivity() {},
+      async lifecycle() { return app.descriptor; },
+      async list() { return [app.host]; },
+    });
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+    let poll = Promise.withResolvers<void>();
+    const setTimer = globalThis.setTimeout;
+    t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      const timer = setTimer(callback, ms, ...args);
+      if (ms === 100) poll.resolve();
+      return timer;
+    });
+    const pending = retirement.shutdown(app.session.id, host, 'worktree');
+    await Promise.race([poll.promise, pending.then(() => { throw new Error('Retirement returned before observing exit'); })]);
+    poll = Promise.withResolvers<void>();
+    t.mock.timers.tick(8000);
+    await Promise.race([poll.promise, pending.then(() => { throw new Error('Retirement returned before configured completion deadline'); })]);
+    await app.stopProcess();
+    t.mock.timers.tick(100);
+    await pending;
+    t.mock.restoreAll();
+    t.mock.timers.reset();
+    assert.equal(host.exited, true);
+    assert.equal(managed.has(app.session.id), false);
+    assert.equal(app.requests.length, prior ? 0 : 1);
+  });
+}
+
+test('worktree refuses a closed session while its accepted retirement is pending', async t => {
+  const app = await fixture('accepted');
+  t.after(() => app.close());
+  app.descriptor.retiring = true;
+  await app.persistLifecycle();
+  await assert.rejects(app.runtime.ensure(app.session), /Session is retiring/);
+  await assert.rejects(app.runtime.worktree({ ...app.session, status: 'closed' }), { message: 'Session closed' });
+  assert.equal(app.descriptor.retiring, true);
+  assert.deepEqual(app.requests, []);
+  assert.ok((await app.commands()).every(args => args[0] === 'collab' && ['list', 'link'].includes(args[1]!)));
+});
+
+test('worktree retirement timeout preserves the accepted host fence and diagnostic', async t => {
+  const app = await fixture('accepted');
+  t.after(() => { t.mock.restoreAll(); t.mock.timers.reset(); return app.close(); });
+  app.config.omp.startupTimeoutMs = 200;
+  const host: ManagedHost = { sessionId: app.host.sessionId, exited: false, retiring: false };
+  const managed = new Map([[app.session.id, host]]);
+  const retirement = createRetirement({
+    config: app.config, managed, killing: new Map(), forgetActivity() {},
+    async lifecycle() { return app.descriptor; },
+    async list() { return [app.host]; },
+  });
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const poll = Promise.withResolvers<void>();
+  const setTimer = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const timer = setTimer(callback, ms, ...args);
+    if (ms === 100) poll.resolve();
+    return timer;
+  });
+  const rejected = assert.rejects(retirement.shutdown(app.session.id, host, 'worktree'), /retirement has not completed within 200ms/);
+  await poll.promise;
+  t.mock.timers.tick(200);
+  await rejected;
+  t.mock.restoreAll();
+  t.mock.timers.reset();
+  assert.equal(host.exited, false);
+  assert.equal(host.retiring, true);
+  assert.ok(host.retirement);
+  assert.equal(managed.get(app.session.id), host);
+  assert.equal(app.requests.length, 1);
+});
 
 test('accepted retirement admits a validated replacement reusing its PID with a new lifecycle socket', async t => {
   const app = await fixture('accepted');
