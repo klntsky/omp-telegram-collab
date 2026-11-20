@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { z } from 'zod';
 import { Store } from '../../../src/store.js';
+import { writeConfig } from '../../../src/config.js';
 import { setupCollaborationTest } from '../helpers/collaboration-fixture.js';
 import { createManagedTopic, enrollForum } from '../helpers/telegram-actions.js';
 import { completeWriteTask, createWriteTask, writeScenario } from '../helpers/model-tasks.js';
@@ -30,6 +31,7 @@ export function registerReplyRecovery(): void {
     const extension = join(app.omp.dataDir, 'shutdown-after-turn.ts');
     await writeFile(extension, `import { existsSync } from 'node:fs';\nimport { join } from 'node:path';\nexport default function (pi) { pi.on('agent_end', async (_event, ctx) => { if (existsSync(join(ctx.cwd, 'shutdown-after-turn'))) ctx.shutdown(); }); }\n`);
     app.config.omp.args.push('--extension', extension);
+    writeConfig(app.config);
     await enrollForum(app);
 
     const first = await createManagedTopic(app);
