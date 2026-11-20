@@ -116,6 +116,8 @@ Runtime leases distinguish observation from mutation. The read-only gateway reso
 
 Read reconnection preserves an explicitly resolved host binding when a listener is replaced. Temporary retirement-admission races use the gateway's recoverable-close boundary rather than an authorization-style terminal failure; the browser refreshes read authorization before reconnecting and never replays a mutation.
 
+Prompt retirement rejections retain the existing listener and pending question controls. The queue retries unsent work after retirement without disconnecting observers of the admitted turn.
+
 Managed admission enforces the local endpoint; attached hosts retain their terminal-selected relay. Service initialization and maintenance retire previously managed hosts through the native idle guard before later admission resumes their pinned histories. Registry absence cannot prove that startup failed before creating a process: offline retirement verifies the private lifecycle, pinned session, operating-system process ancestry, and execution identity. The lifecycle endpoint remains the authority for accepting retirement; migration does not signal busy hosts or replay prompts.
 
 The private lifecycle rejects idle-guarded retirement while the main agent turn, native background jobs, or queued/in-flight result deliveries remain. Accepted drains defer the shutdown call until that same whole-work boundary, rather than asking the native streaming-idle predicate to stand in for turn completion. Only verified process exit releases the managed slot or authorizes a replacement.

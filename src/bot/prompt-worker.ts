@@ -179,7 +179,9 @@ export class PromptWorker {
       }
       if (error instanceof SessionCapacityError) { await this.deps.requestCapacity(session, error.limit); return; }
       if (error instanceof SessionRetiringError) {
-        if (listener && this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
+        // Retirement rejects new work, not observation of the admitted turn.
+        // Dropping this shared listener would disconnect readers and discard
+        // pending question controls on every retry of the unsent queue head.
         this.deps.scheduleReconnect(session);
         return;
       }

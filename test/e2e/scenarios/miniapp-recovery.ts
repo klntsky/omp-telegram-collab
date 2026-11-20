@@ -40,7 +40,8 @@ test('Mini App recovers when the managed local relay stops during gateway setup'
 });
 test('Mini App observes draining work across restart without reopening mutation admission', {timeout: 480000}, async t => {
   const task = createWriteTask('miniapp-draining-work');
-  const app = await setupCollaborationTest(t, {scenarios: [questionScenario(task)]});
+  const nextTask = createWriteTask('miniapp-after-draining');
+  const app = await setupCollaborationTest(t, {scenarios: [questionScenario(task), writeScenario(nextTask)]});
   await enrollForum(app);
   const session = await createManagedTopic(app);
   const generation = app.store.getSessionGeneration(session.id);
@@ -70,6 +71,20 @@ test('Mini App observes draining work across restart without reopening mutation 
   assert.ok(!browser.recovery.phases.has('ended'));
   await browser.denyMutations();
   assert.equal((await app.omp.listHosts()).find(value => value.sessionId === host.sessionId)?.pid, host.pid);
+  const disconnects: string[] = [];
+  const feed = await app.service.subscribeSessionFeed(session, {
+    onFrame: () => {},
+    onClose: reason => disconnects.push(reason),
+  });
+  t.after(() => feed.close());
+  const queued = await app.sendAndWait(`/p ${nextTask.prompt}`, session.threadId);
+  const pending = app.store.promptQueue.first(session.id);
+  assert.equal(pending?.messageId, queued.id);
+  assert.equal(pending?.state, 'pending');
+  assert.equal(pending?.submissionId, undefined);
+  assert.deepEqual(disconnects, [], 'Rejected new work must preserve the existing session feed');
+  assert.equal(browser.client.getSnapshot().phase, 'live');
+  feed.close();
   // The retirement assertions concern this host, not the viewer's normal
   // reconnect-and-resume behavior after a host has fully exited.
   browser.client.close();
@@ -81,5 +96,7 @@ test('Mini App observes draining work across restart without reopening mutation 
   await waitUntil(() => app.omp.listHosts(), hosts => !hosts.some(value => value.pid === host.pid),
     AbortSignal.any([t.signal, AbortSignal.timeout(60000)]));
   assert.equal(app.store.getSessionGeneration(session.id), generation);
+  await completeWriteTask(app, nextTask, queued, session.threadId);
+  assert.equal(app.store.promptQueue.first(session.id), undefined);
 });
 }
