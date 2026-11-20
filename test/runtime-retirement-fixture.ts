@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
+import { ManagedRelay } from '../src/managed-relay.js';
 import { OmpRuntime } from '../src/runtime.js';
 
 const execute = promisify(execFile);
@@ -24,6 +25,7 @@ export async function fixture(mode: RetirementMode = 'busy', pid?: number, guard
   await mkdir(sessionDir, { recursive: true });
   const servers: Server[] = [];
   const sockets = new Set<Socket>();
+  const relay = new ManagedRelay(dataDir);
   // Exercise the real /proc identity boundary: the test runner has neither the
   // pinned cwd nor --session-dir argv. Explicit PIDs remain available for invalid identities.
   const children: { process: ChildProcess; exited: Promise<unknown> }[] = [];
@@ -44,6 +46,11 @@ export async function fixture(mode: RetirementMode = 'busy', pid?: number, guard
     if (failures.length) throw new AggregateError(failures, `Retirement fixture child exit failed\n${failures.map(String).join('\n')}`);
   }
   try {
+  const relayUrl = await relay.ensure();
+  await writeFile(join(sessionDir, 'runtime.yml'), JSON.stringify({
+    collab: { autoStart: 'control', relayUrl },
+    startup: { checkUpdate: false, setupWizard: false },
+  }), { mode: 0o600 });
   if (pid === undefined) pid = await startProcess();
   assert.ok(pid);
   const executable = join(directory, 'omp');
@@ -55,7 +62,7 @@ export async function fixture(mode: RetirementMode = 'busy', pid?: number, guard
   const lifecyclePath = join(sessionDir, 'lifecycle.json');
   const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
     pid, cwd: directory, access: 'control', relayConnected: true, busy: false };
-  const url = `wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
+  const url = `${new URL(relayUrl).origin}/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
   const state: { host: typeof host | undefined; failLink: boolean; startupHost?: typeof host; holdStartup?: boolean } = { host, failLink: false };
   const persistRegistry = () => writeFile(statePath, JSON.stringify(state));
   await persistRegistry();
@@ -251,6 +258,7 @@ if (process.argv[2] !== 'collab') {
       await clean(() => writeFile(statePath, JSON.stringify({ ...state, host: undefined })));
       await clean(() => rm(lifecyclePath, { force: true }));
       await clean(() => runtime.close());
+      await clean(() => relay.close());
       for (const socket of sockets) socket.destroy();
       for (const server of servers) await clean(() => {
         const closed = Promise.withResolvers<void>();
@@ -267,6 +275,7 @@ if (process.argv[2] !== 'collab') {
     for (const socket of sockets) socket.destroy();
     const cleanup = await Promise.allSettled([
       stopProcess(),
+      relay.close(),
       ...servers.map(server => {
         const closed = Promise.withResolvers<void>();
         server.close(failure => failure ? closed.reject(failure) : closed.resolve());
