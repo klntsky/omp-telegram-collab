@@ -14,6 +14,7 @@ export function registerQuestionReconnectAnswer(getApp: () => CollaborationTest,
     const session = await createManagedTopic(app);
     const start = app.apiCalls.length;
     const frameStart = app.hostFrames.length;
+    const guestStart = app.guestFrames.length;
     const instruction = await app.sendAndWait(`/p ${task.prompt}`, session.threadId);
     const panel = await waitForPanel(app, 'question', 'ask:', start, session.threadId);
     const select = app.hostFrames.slice(frameStart).findLast(frame => frame.t === 'ui-request');
@@ -55,7 +56,7 @@ export function registerQuestionReconnectAnswer(getApp: () => CollaborationTest,
       const editorStart = app.apiCalls.length;
       await submitCallback(app, panel, panel.buttons[2]!);
       await app.waitForCondition(() =>
-        app.guestFrames.some(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId && frame.value === 'Other (type your own)') &&
+        app.guestFrames.slice(guestStart).some(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId && frame.value === 'Other (type your own)') &&
         app.hostFrames.slice(reconnectStart).some(frame => frame.t === 'ui-request-end' && frame.reqId === select.request.reqId));
       assert.equal(released, false, 'select must end while replay readiness is still held');
       release();
@@ -75,8 +76,8 @@ export function registerQuestionReconnectAnswer(getApp: () => CollaborationTest,
         new Set(originalDeliveries.map(delivery => delivery.messageId)),
         'reconnect must not deliver replacement question controls');
       assert.equal(extraSends.length, 0, 'reconnect answer must reuse the original body and control messages');
-      const selectResponses = app.guestFrames.filter(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId);
-      const editorResponses = app.guestFrames.filter(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId);
+      const selectResponses = app.guestFrames.slice(guestStart).filter(frame => frame.t === 'ui-response' && frame.reqId === select.request.reqId);
+      const editorResponses = app.guestFrames.slice(guestStart).filter(frame => frame.t === 'ui-response' && frame.reqId === editor.request.reqId);
       assert.equal(selectResponses.length, 1);
       assert.equal(editorResponses.length, 1);
       assert.ok(editorResponses[0]?.t === 'ui-response' && editorResponses[0].value === answer);

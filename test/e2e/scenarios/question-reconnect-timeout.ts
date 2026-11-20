@@ -17,6 +17,7 @@ export function registerQuestionReconnectTimeout(getApp: () => CollaborationTest
     const session = await createManagedTopic(app);
     const start = app.apiCalls.length;
     const questionStart = app.hostFrames.length;
+    const guestStart = app.guestFrames.length;
     const instruction = await app.sendAndWait(`/p ${task.prompt}`, session.threadId);
     const panel = await waitForPanel(app, 'question', 'ask:', start, session.threadId);
     const request = app.hostFrames.slice(questionStart).findLast(frame => frame.t === 'ui-request');
@@ -97,7 +98,7 @@ export function registerQuestionReconnectTimeout(getApp: () => CollaborationTest
       }), [], 'A recovery deadline must not retire the original question controls');
       await submitCallback(app, panel, panel.buttons[1]!);
       await completeWriteTask(app, task, instruction, session.threadId);
-      const responses = app.guestFrames.filter(frame => frame.t === 'ui-response' && frame.reqId === reqId);
+      const responses = app.guestFrames.slice(guestStart).filter(frame => frame.t === 'ui-response' && frame.reqId === reqId);
       assert.equal(responses.length, 1);
       assert.ok(responses[0]?.t === 'ui-response' && responses[0].value === 'Remote');
       app.omp.provider.assertComplete([task.name]);
