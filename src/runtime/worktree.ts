@@ -190,8 +190,8 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
 
   async function switchWorktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     deps.assertActive();
-    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (session.status !== 'open') throw new Error('Session closed');
+    if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     const activity = deps.hostActivity(session.id);
@@ -213,7 +213,10 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
       // Retirement owns registry and offline lifecycle/PID checks. A missing
       // registry entry alone must never authorize another history writer.
       await deps.shutdown(session.id, host, 'worktree');
-      if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      if (!host.exited) {
+        if (host.retiring) throw new Error('OMP host accepted retirement but has not exited; worktree switching cannot continue until shutdown completes');
+        throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      }
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
       const config = path.join(dir, 'worktree.yml');

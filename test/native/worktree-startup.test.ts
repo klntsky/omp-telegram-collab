@@ -44,8 +44,8 @@ test('dormant worktree preparation fences startup and releases ownership after a
     throw diagnostic;
   });
   const rejected = assert.rejects(switching, error => error === diagnostic);
-  cleanup.push(() => { resume.resolve(); });
-  await bounded(entered.promise, AbortSignal.any([t.signal, AbortSignal.timeout(10000)]));
+  cleanup.push(async () => { resume.resolve(); await rejected; });
+  await bounded(Promise.race([entered.promise, rejected]), AbortSignal.any([t.signal, AbortSignal.timeout(config.omp.startupTimeoutMs)]));
   await assert.rejects(runtime.ensure(session), SessionRetiringError);
   await assert.rejects(runtime.worktree(session, 'concurrent-worktree'), /OMP runtime is stopping/);
   resume.resolve();

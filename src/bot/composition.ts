@@ -31,6 +31,7 @@ import { SkillPicker } from '../skill-picker.js';
 import { composeInputRouter } from './router-composition.js';
 import type { BotInput } from './input.js';
 import { WorktreeCleanup } from './worktree-cleanup.js';
+import { ReplyDelivery } from './reply-delivery.js';
 
 export interface LifecycleDependencies {
  id(): number; stopped(): boolean; apiAbort: TelegramAbortController;
@@ -52,6 +53,7 @@ export interface BotComponents {
   entries: SessionEntries;
   admission: PromptAdmission;
   worker: PromptWorker;
+  replies: ReplyDelivery;
   input: BotInput;
 }
 
@@ -104,6 +106,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionObservation: (id) => recovery.sessionObservation(id),
     setTopicStatus: (session, status, completed) => activity.setTopicStatus(session, status, completed),
     settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
+    recoverReplies: session => replies.wake(session, true),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
@@ -135,6 +138,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     refreshTopicStatus: activity.refreshTopicStatus.bind(activity),
     runBackground: maintenance.runBackground.bind(maintenance),
     drainPrompts: session => worker.drain(session),
+    recoverReplies: session => replies.wake(session, !connections.listeners.has(session.id)),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
@@ -165,14 +169,10 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     acknowledgeMessage: receipts.acknowledgeMessage.bind(receipts),
     activityObservation: owners.activityObservation.bind(owners),
     settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
-    background: maintenance.background.signal,
     bot: bot,
-    delivery: connections.delivery,
-    dropListener: connections.dropListener.bind(connections),
     getListener: connections.listeners.get.bind(connections.listeners),
     currentMetadataOwner: owners.metadataOwners.get.bind(owners.metadataOwners),
     endRequestQuestions: (listener, reqId) => questions.endForRequest(listener, reqId),
-    ready: authorization.ready.bind(authorization),
     reconcilePromptReceipt: receipts.reconcilePromptReceipt.bind(receipts),
     refreshTyping: typing.refreshTyping.bind(typing),
     relayQuestion: (session, listener, request) => questions.relayQuestion(session, listener, request),
@@ -182,6 +182,18 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     stopped: lifecycle.stopped.bind(lifecycle),
     syncTopicTitle: titles.syncTopicTitle.bind(titles),
     options: options,
+    queueReply: (session, ompSessionId, entry, replyTo, historical) => {
+      replies.accept(session, ompSessionId, entry, replyTo, historical);
+      if (!historical) replies.wake(session);
+    },
+  });
+  const replies = new ReplyDelivery({
+    bot, options, delivery: connections.delivery,
+    ready: authorization.ready.bind(authorization),
+    sessionAssigned: authorization.sessionAssigned.bind(authorization),
+    stopped: lifecycle.stopped.bind(lifecycle),
+    runBackground: maintenance.runBackground.bind(maintenance),
+    recordReceipt: receipts.recordReceipt.bind(receipts),
   });
   const menus: BotCommandMenus = new BotCommandMenus({
     bot: bot,
@@ -418,5 +430,5 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     authorizeSession: authorization.authorizeSession.bind(authorization),
   });
   const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, worker, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
-  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, worker, input };
+  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, worker, replies, input };
 }

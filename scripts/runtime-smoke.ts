@@ -72,7 +72,7 @@ try {
   forgedToken[0] = forgedToken[0]! ^ 1;
   const forgedBinding = {
     ...first,
-    url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
+    url: formatCollabLink(new URL(controlLink.wsUrl).origin, controlLink.roomId, controlLink.key, forgedToken),
   };
   await assert.rejects(async () => {
     const unauthorized = await runtime.connectCollab(forgedBinding, 'Forged capability verifier', {

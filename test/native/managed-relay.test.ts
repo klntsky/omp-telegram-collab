@@ -57,10 +57,12 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   let runtime = new OmpRuntime(config);
   cleanup.push(async () => { try { await runtime.kill(session); } finally { await runtime.close(); } });
   async function startForeignHost(): Promise<ChildProcess> {
+    // This host has no forum preset; inheriting the invoking bot session's preset
+    // makes lifecycle startup shut down against the isolated model catalog.
     const supervisor = spawn(process.execPath, [hostSupervisorPath, omp.executable, ...config.omp.args,
       '--cwd', session.cwd, '--config', join(directory, 'runtime.yml'), '--session-dir', directory,
       '--resume', sessionFile, '--no-title', '--extension', hostLifecyclePath,
-    ], { cwd: session.cwd, env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: directory }, stdio: 'ignore', detached: true });
+    ], { cwd: session.cwd, env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: directory, OMP_TELEGRAM_DEFAULT_PRESET: '' }, stdio: 'ignore', detached: true });
     supervisor.unref();
     cleanup.push(async () => {
       if (!supervisor.pid || supervisor.exitCode !== null || supervisor.signalCode !== null) return;
@@ -89,8 +91,18 @@ test('managed relay preserves native history through foreign-relay cutover, serv
     await spawned.promise;
     return supervisor;
   }
-  await startForeignHost();
   const signal = () => AbortSignal.any([t.signal, AbortSignal.timeout(60000)]);
+  const originalSupervisor = await startForeignHost();
+  // Discovery starts another native executable. Wait for this host's
+  // session_start before competing with its cold initialization for I/O.
+  await waitUntil(async () => {
+    try {
+      return JSON.parse(await readFile(join(directory, 'lifecycle.json'), 'utf8')) as { sessionId: string; supervisorPid: number };
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }, lifecycle => lifecycle?.sessionId === sessionId && lifecycle.supervisorPid === originalSupervisor.pid, signal());
   const hosts = await waitUntil(() => omp.listHosts(), hosts => hosts.some(host => host.sessionId === sessionId), signal());
   const original = hosts.find(host => host.sessionId === sessionId)!;
   let connection: CollabConnection | undefined;

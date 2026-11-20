@@ -16,6 +16,9 @@ export default async function hostLifecycle(pi) {
   let settingsError;
   let getActiveSkills;
   let skillsError;
+  let activeTurn = false;
+  pi.on('agent_start', (_event, context) => { if (context.agent.kind === 'main') activeTurn = true; });
+  pi.on('agent_end', (_event, context) => { if (context.agent.kind === 'main') activeTurn = false; });
   try {
     ({ getActiveSkills } = await import('@oh-my-pi/pi-coding-agent/extensibility/skills'));
   } catch (error) {
@@ -33,6 +36,17 @@ export default async function hostLifecycle(pi) {
     const sessionId = context.sessionManager.getSessionId();
     const startupPreset = process.env.OMP_TELEGRAM_DEFAULT_PRESET;
     let startupReady;
+    // Streaming-idle can occur between tool steps or while async jobs run.
+    // Keep the admission fence and actual shutdown decision separate: an
+    // accepted drain must still let the complete admitted turn emit its reply.
+    // Native ExtensionContext.isIdle and AgentSession.getAsyncJobSnapshot:
+    // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/extensibility/extensions/types.ts
+    // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/agent-session.ts
+    const workPending = () => {
+      if (activeTurn || !context.isIdle() || context.hasPendingMessages()) return true;
+      const jobs = context.getAsyncJobSnapshot();
+      return jobs !== null && (jobs.running.length > 0 || jobs.delivery.queued > 0 || jobs.delivery.delivering);
+    };
     if (startupPreset) {
       const publish = result => {
         const filename = join(directory, 'startup-preset.json');
@@ -209,7 +223,7 @@ export default async function hostLifecycle(pi) {
               retirementResponse('expired');
               return;
             }
-            if (request.guard === 'idle' && (!context.isIdle() || context.hasPendingMessages())) {
+            if (request.guard === 'idle' && workPending()) {
               retirementResponse('busy');
               return;
             }
@@ -226,8 +240,9 @@ export default async function hostLifecycle(pi) {
             descriptor = nextDescriptor;
             retirementResponse('requested');
             if (!timer) {
-              timer = context.setInterval(() => context.shutdown(), 1000);
-              context.shutdown();
+              const retireWhenSettled = () => { if (!workPending()) context.shutdown(); };
+              timer = context.setInterval(retireWhenSettled, 1000);
+              retireWhenSettled();
             }
             return;
           }

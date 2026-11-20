@@ -7,6 +7,7 @@ import { topicDestination, type TopicDestination } from '../shared/topic-destina
 import { initializeDatabase } from './migrations.js';
 import { PromptQueue, type NewSessionPrompt } from './store/prompt-queue.js';
 import { WorktreeConfirmations } from './store/worktree-confirmations.js';
+import { ReplyLedger } from './store/replies.js';
 
 type Row = Record<string, string | number | null>;
 export type PendingSkillKey = { botId: number; destination: TopicDestination; userId: number };
@@ -42,6 +43,7 @@ export class Store {
   readonly promptQueue: PromptQueue;
   private readonly prompts: PromptLedger;
   readonly worktreeConfirmations: WorktreeConfirmations;
+  readonly replies: ReplyLedger;
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
@@ -52,6 +54,7 @@ export class Store {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
       initializeDatabase(this.db);
+      this.replies = new ReplyLedger(this.db);
     } catch (error) {
       this.db.close();
       throw error;
@@ -293,7 +296,6 @@ export class Store {
   recordMessageAnchor(sessionId: string, chatId: number, messageId: number, anchor: MessageAnchor): void {
     this.prompts.recordMessageAnchor(sessionId, chatId, messageId, anchor);
   }
-  rememberReply(id: string, ompSessionId: string, entryId: string): boolean { return this.prompts.rememberReply(id, ompSessionId, entryId); }
   hasSnapshot(id: string): boolean { return this.prompts.hasSnapshot(id); }
   markSnapshot(id: string): void { this.prompts.markSnapshot(id); }
   getTopicFinishIcon(id: string): string | undefined {
