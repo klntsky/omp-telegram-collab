@@ -25,6 +25,7 @@ export interface SessionConnectionsDependencies {
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
   setTopicStatus: (session: TopicSession, status: TopicActivity, completed?: boolean) => void | Promise<void>;
+  recoverReplies(session: TopicSession): void;
   settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
@@ -224,6 +225,7 @@ export class SessionConnections {
               };
               const connected = listener.connection !== undefined;
               this.dropListener(session.id, reason);
+              this.deps.recoverReplies(session);
               if (connected) this.deps.scheduleReconnect(session);
             },
           },

@@ -7,7 +7,7 @@ import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { AppConfig } from '../shared/contracts.js';
-import { createDiscovery } from '../src/runtime/discovery.js';
+import { createDiscovery, DiscoveryTimeoutError } from '../src/runtime/discovery.js';
 import { createRegistry } from '../src/runtime/registry.js';
 
 interface Start {
@@ -70,14 +70,15 @@ const timer = setInterval(() => {
     return (await readFile(startsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Start);
   }
   async function started(count: number): Promise<Start> {
-    const deadline = Date.now() + 5000;
+    const deadline = Date.now() + config.omp.startupTimeoutMs;
     while (Date.now() < deadline) {
+      t.signal.throwIfAborted();
       const values = await starts();
       if (values.length >= count) {
         assert.equal(values.length, count);
         return values[count - 1]!;
       }
-      await delay(5);
+      await delay(5, undefined, { signal: t.signal });
     }
     assert.fail(`Discovery subprocess ${count} did not start`);
   }
@@ -262,3 +263,41 @@ test('missing executable rejection retains native execFile fields', async t => {
     return true;
   });
 });
+
+for (const initial of ['link', 'omission'] as const) {
+  for (const final of ['deadline', 'fatal'] as const) {
+    test(`registry preserves ${initial} diagnostic only for final ${final}`, async t => {
+      if (process.platform !== 'linux') return t.skip('Requires Linux process lifetime identity');
+      const app = await fixture(t);
+      const logged: unknown[][] = [];
+      t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(args); });
+      const registry = createRegistry({ config: app.config, assertActive() {}, closed: false, async acquire() {} });
+      const host = { instanceId: 'fixture', sessionId: 'session', generation: 1, pid: process.pid,
+        cwd: app.directory, access: 'control' as const, relayConnected: true };
+      const deadline = Date.now() + 10000;
+      const result = app.track(registry.resolve(host, deadline));
+      const observed = result.catch(error => error as unknown);
+      await app.started(1);
+      await app.release(1, initial === 'link'
+        ? { code: 1, stderr: 'error: no active Collab host matches fixture\n' }
+        : { value: { version: 1, instanceId: host.instanceId, generation: 1, access: 'control',
+          url: `wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}` } });
+      await app.started(2);
+      await app.release(2, { value: { version: 1, hosts: initial === 'link' ? [host] : [] } });
+      await app.started(3);
+      const clock = t.mock.method(Date, 'now', () => deadline + 1);
+      await app.release(3, final === 'fatal' ? { code: 23, stderr: 'permission denied\n' } : {});
+      const error = await observed;
+      clock.mock.restore();
+      assert.ok(error instanceof Error);
+      if (final === 'fatal') {
+        assert.equal(error, logged.at(-1)![2]);
+        assert.equal(Reflect.get(error, 'code'), 23);
+      } else {
+        assert.ok(error.cause instanceof DiscoveryTimeoutError);
+        if (initial === 'link') assert.equal(error, logged[0]![2]);
+        else assert.match(error.message, /OMP host session changed while resolving its capability/);
+      }
+    });
+  }
+}

@@ -148,8 +148,8 @@ export async function setupCollaborationTest(
   const handledMessages = new Set<number>();
   const apiCalls: { method: string; payload: unknown; result: unknown }[] = [];
   let changed = Promise.withResolvers<void>();
-  const { createBot: instrumentedBot, instrumentRuntime } = createCollaborationObserver({
-    token: telegram.bot.token, chatId: telegram.forum.chatId, log: omp.log,
+  const { createBot: instrumentedBot, instrumentRuntime, disconnectGuests, interruptNextPromptReceipt } = createCollaborationObserver({
+    signal: t.signal, token: telegram.bot.token, chatId: telegram.forum.chatId, log: omp.log,
     apiCalls, updates, handledMessages, hostFrames, guestFrames,
     notify() {
       const notification = changed;
@@ -229,7 +229,7 @@ export async function setupCollaborationTest(
   }
   await omp.step('application.start', startService);
   async function waitForCondition(
-    predicate: () => boolean,
+    predicate: () => boolean | Promise<boolean>,
     phase = 'expectation',
     timeoutMs: number = telegramTestTimeouts.expectation,
   ): Promise<void> {
@@ -244,7 +244,7 @@ export async function setupCollaborationTest(
           for (;;) {
             signal.throwIfAborted();
             const notification = changed.promise;
-            if (predicate()) return;
+            if (await bounded(Promise.resolve().then(predicate), signal)) return;
             await bounded(Promise.race([notification, failure.promise]), signal);
           }
         } finally {
@@ -328,6 +328,8 @@ export async function setupCollaborationTest(
       ));
     },
     waitForCondition,
+    disconnectGuests,
+    interruptNextPromptReceipt,
     waitForMessage,
     async waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message> {
       let messageId: number | undefined;
@@ -378,6 +380,8 @@ export interface CollaborationTest {
   apiCalls: { method: string; payload: unknown; result: unknown }[];
   updates: Update[];
   topicActivityEmojis: { running: string; finished: string };
+  disconnectGuests(): () => void;
+  interruptNextPromptReceipt(): Promise<() => void>;
   readonly runtime: OmpRuntime;
   readonly store: Store;
   readonly service: BotService;
@@ -389,7 +393,7 @@ export interface CollaborationTest {
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
   waitForTaskStarted(name: string): Promise<void>;
-  waitForCondition(predicate: () => boolean): Promise<void>;
+  waitForCondition(predicate: () => boolean | Promise<boolean>, phase?: string, timeoutMs?: number): Promise<void>;
   waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }

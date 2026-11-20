@@ -15,7 +15,7 @@ export interface TelegramWorkflow {
   omp: { step<T>(name: string, action: () => Promise<T>): Promise<T> };
   store: Pick<Store, 'isEnrolled'>;
   send(text: string, threadId?: number): Promise<Message>;
-  waitForCondition(predicate: () => boolean): Promise<void>;
+  waitForCondition(predicate: () => boolean, phase?: string, timeoutMs?: number): Promise<void>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
 }
@@ -251,8 +251,8 @@ export async function setTopicClosed(app: LifecycleWorkflow, session: TopicSessi
 
 export async function waitForBackgroundCompletion(app: {
   omp: {logDirectory:string}; waitForCondition: TelegramWorkflow['waitForCondition'];
-}, phase: string): Promise<void> {
-  const since = Date.now();
+}, phase: string, options: {since?: number; timeoutMs?: number} = {}): Promise<void> {
+  const since = options.since ?? Date.now();
   await app.waitForCondition(() => {
     const lines = readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').trimEnd().split('\n');
     for (let index = lines.length - 1; index >= 0; index--) {
@@ -263,5 +263,5 @@ export async function waitForBackgroundCompletion(app: {
       if (JSON.parse(value).phase === phase) return true;
     }
     return false;
-  });
+  }, `background ${phase} completion`, options.timeoutMs);
 }

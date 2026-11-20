@@ -44,6 +44,27 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     return true;
   }
 
+  async function waitForManagedExit(id: string, host: ManagedHost, pid: number, start: string, guard?: 'idle' | 'worktree'): Promise<void> {
+    // v19.0.1 postmortem.runCleanup has a 10s base budget (callbacks can extend
+    // it); runQuit then drains stdout for up to 5s. A 7.5s observation is not
+    // a completion deadline: https://github.com/can1357/oh-my-pi/blob/v19.0.1/packages/utils/src/postmortem.ts
+    const timeoutMs = guard === 'worktree' ? deps.config.omp.startupTimeoutMs : 7500;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = await procIdentity(pid);
+      if (!current || current.start !== start || current.state === 'Z' || current.state === 'X') {
+        // The supervisor releases host-owner.sqlite in its PTY exit callback;
+        // native exit alone does not complete the ownership handoff.
+        if (await settleManagedExit(id, host)) return;
+      }
+      await delay(100);
+      if (deps.killing.has(id)) return;
+    }
+    if (guard === 'worktree') {
+      throw new Error(`OMP host retirement has not completed within ${timeoutMs}ms (pid ${pid}, supervisor ${host.process?.pid ?? 'adopted'}); worktree switching requires confirmed exit`);
+    }
+  }
+
   async function shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void> {
     if (host.exited) return;
     if (deps.killing.has(id)) return;
@@ -73,12 +94,16 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
         (host.retirement.pid !== current.pid || host.retirement.socketPath !== lifecycle.socketPath);
       if (!alive && !current && (!lifecycle ||
           (lifecycle.pid === host.retirement.pid && lifecycle.socketPath === host.retirement.socketPath))) {
-        await settleManagedExit(id, host);
+        const retirement = host.retirement;
+        if (!await settleManagedExit(id, host) && guard === 'worktree') {
+          await waitForManagedExit(id, host, retirement.pid, retirement.start, guard);
+        }
         return;
       }
       if (alive && !replacement) {
         if (host.retirement.error !== undefined) throw host.retirement.error;
         host.retiring = true;
+        if (guard === 'worktree') await waitForManagedExit(id, host, host.retirement.pid, host.retirement.start, guard);
         return;
       }
       if (replacement) delete host.identity;
@@ -95,6 +120,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
           if (lifecycle.retiring === true && lifecycle.retirement === 1) {
             host.retiring = true;
             host.retirement = { pid: lifecycle.pid, start: identity.start, socketPath: lifecycle.socketPath };
+            if (guard === 'worktree') await waitForManagedExit(id, host, lifecycle.pid, identity.start, guard);
             return;
           }
           offlineIdentity = identity;
@@ -130,6 +156,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     if (alreadyRetiring) {
       host.retiring = true;
       host.retirement = { pid: lifecycle.pid, start: identity.start, socketPath: lifecycle.socketPath };
+      if (guard === 'worktree') await waitForManagedExit(id, host, lifecycle.pid, identity.start, guard);
       return;
     }
     if (deps.killing.has(id)) return;
@@ -197,15 +224,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       if (result.error) throw result.error;
       if (!host.retiring) return;
     }
-    const deadline = Date.now()+7500;
-    while (Date.now() < deadline) {
-      const current = await procIdentity(lifecycle.pid);
-      if (!current || current.start !== identity.start || current.state === 'Z' || current.state === 'X') {
-        if (await settleManagedExit(id, host)) return;
-      }
-      await delay(100);
-      if (deps.killing.has(id)) return;
-    }
+    await waitForManagedExit(id, host, lifecycle.pid, identity.start, guard);
   }
 
   return { shutdown };

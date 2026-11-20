@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,15 +7,7 @@ import type { TopicSession } from '../shared/contracts.js';
 import { fixture } from './runtime-retirement-fixture.js';
 
 test('closed stop recovers only its managed survivor without resolving a capability and tracks retirement until exit', async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  assert.ok(child.pid);
-  const app = await fixture('accepted', child.pid, 'none');
+  const app = await fixture('accepted', undefined, 'none');
   t.after(() => app.close());
   await app.failLink(true);
   const unrelated = join(app.config.dataDir, 'sessions', 'unrelated');
@@ -39,8 +29,7 @@ test('closed stop recovers only its managed survivor without resolving a capabil
   assert.equal(await app.runtime.retireIdle(0), 0);
   assert.equal(app.requests.length, 1, 'maintenance and repeated stop must not send another request');
   assert.throws(() => app.runtime.retain(closed.id), /Session is retiring/);
-  child.kill();
-  await exited;
+  await app.stopProcess();
   await rm(app.lifecyclePath);
   assert.equal(await app.runtime.stop(closed), true);
   assert.equal(await app.runtime.stop(closed), true);
@@ -82,7 +71,7 @@ test('attached stop leaves terminal ownership and unrelated managed hosts untouc
 
 for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', 'stale-cwd'] as const) {
   test(`recovered stop refuses ${invalid} identity without unsafe fallback`, async t => {
-    const app = await fixture('accepted', process.pid, 'none');
+    const app = await fixture('accepted', undefined, 'none');
     t.after(() => app.close());
     let diagnostic: RegExp = /does not support safe retirement/;
     if (invalid === 'missing') await rm(app.lifecyclePath);
@@ -111,23 +100,14 @@ for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', '
 }
 
 test('maintenance settles a recovered draining host after exact process exit without another request', async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  assert.ok(child.pid);
-  const app = await fixture('accepted', child.pid, 'none');
+  const app = await fixture('accepted', undefined, 'none');
   t.after(() => app.close());
   app.descriptor.retiring = true;
   await app.persistLifecycle();
   assert.equal(await app.runtime.stop(app.session), false);
   assert.equal(await app.runtime.stop(app.session), false);
   assert.deepEqual(app.requests, []);
-  child.kill();
-  await exited;
+  await app.stopProcess();
   assert.equal(await app.runtime.retireIdle(0), 1);
   assert.equal(await app.runtime.retireIdle(0), 0);
   assert.equal(await app.runtime.stop(app.session), true, 'a stale registry PID must not keep an exited host alive');
