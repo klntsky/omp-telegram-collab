@@ -105,7 +105,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
           const launches = join(directory, 'launches');
           for (const launch of await readdir(launches)) {
             for (const filename of await readdir(join(launches, launch))) {
-              if (!/^terminal\.log(?:\.1)?$/.test(filename)) continue;
+              if (!/^(?:terminal\.log(?:\.1)?|retirement-(?:request|accepted)\.json|supervisor\.json|lifecycle\.json)$/.test(filename)) continue;
               const target = join(logDirectory, 'sessions', session, 'launches', launch);
               await mkdir(target, { recursive: true, mode: 0o700 });
               await cp(join(launches, launch, filename), join(target, filename));
@@ -204,7 +204,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const actualOmp = process.env.OMP_EXECUTABLE ?? 'omp';
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const assignments = Object.entries(env).map(([key, value]) => quote(`${key}=${value}`));
-  const lifecycleKeys = ['OMP_TELEGRAM_SESSION_DIR', 'OMP_TELEGRAM_DEFAULT_PRESET', 'OMP_TELEGRAM_SUPERVISOR_PID'];
+  const lifecycleKeys = ['OMP_TELEGRAM_SESSION_DIR', 'OMP_TELEGRAM_LAUNCH_ID', 'OMP_TELEGRAM_DEFAULT_PRESET', 'OMP_TELEGRAM_SUPERVISOR_PID'];
   const forwarded = lifecycleKeys.map(key => `"${key}=\${${key}-}"`);
   const launch = `command=$1
 shift

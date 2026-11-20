@@ -88,6 +88,9 @@ export function registerReplyRecovery(): void {
         held = true;
         // Only hold a real successful response. Cancellation releases that known result,
         // allowing confirm() to checkpoint it while shutdown prevents the next API action.
+        // Bot API answers only after TDLib's successful-send update; this does not
+        // manufacture an acknowledgement or assume an unconfirmed request succeeded.
+        // https://github.com/tdlib/telegram-bot-api/blob/master/telegram-bot-api/Client.cpp#L14174-L14208
         const release = () => checkpoint.resolve();
         if (signal?.aborted) release();
         else signal?.addEventListener('abort', release, { once: true });
