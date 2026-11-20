@@ -26,7 +26,7 @@ test('dormant worktree preparation fences startup and releases ownership after a
   const omp = await setupOmpEnvironment({
     signal: t.signal, diagnostic: t.diagnostic.bind(t),
     after: ((close: () => unknown | Promise<unknown>) => { cleanup.push(close); }) as TestContext['after'],
-  }, { telegramSecrets: false, scenarios: [] });
+  }, { scenarios: [] });
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
   config.instances = [{ id: 1, defaultDir: omp.workspace, chats: [] }];

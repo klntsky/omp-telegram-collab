@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Context, Bot } from 'grammy';
 import type { TopicSession, PromptContent, HostBinding } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -33,18 +34,18 @@ export class SessionEntries {
         } catch (error) {
           if (!(error instanceof GrammyError)) throw error;
           if (error.description === 'Bad Request: message to edit not found') {
-            console.warn(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} editMessageReplyMarkup: pinned entry ${entry.messageId} no longer exists.`, error);
+            logEvent('warn', 'pinned-session-entry-no-longer-exists', {botId:this.dependencies.id,chatId:session.chatId,sessionId:session.id,messageId:entry.messageId,operation,error});
             operation = 'clearSessionEntry';
             this.dependencies.options.store.clearSessionEntry(session.id);
             continue;
           }
           if (!error.description.startsWith('Bad Request: message is not modified')) throw error;
-          console.warn(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} editMessageReplyMarkup: pinned entry ${entry.messageId} already has the desired markup.`, error);
+          logEvent('warn', 'pinned-session-entry-already-has-the-desired-markup', {botId:this.dependencies.id,chatId:session.chatId,sessionId:session.id,messageId:entry.messageId,operation,error});
         }
         operation = 'setSessionEntry';
         this.dependencies.options.store.setSessionEntry(session.id,entry.messageId,markup);
       } catch (error) {
-        console.error(`Bot ${this.dependencies.id} chat ${session.chatId} session ${session.id} ${operation} failed.`, error);
+        logEvent('error', 'session-entry-sync-failed', {botId:this.dependencies.id,chatId:session.chatId,sessionId:session.id,operation,error});
         if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
       }
     }

@@ -1,4 +1,4 @@
-import { stdout, stderr } from 'node:process';
+import { stdout } from 'node:process';
 import { resolve, join } from 'node:path';
 import { watchFile, unwatchFile } from 'node:fs';
 import { chmod, unlink } from 'node:fs/promises';
@@ -7,6 +7,7 @@ import { readConfig, defaultConfigPath, validateStart, findInstance } from '../c
 import type { AppConfig } from '../../shared/contracts.js';
 import { launch } from './generation.js';
 import { pollingFailureReported } from './polling-failure.js';
+import { logEvent } from '../logging.js';
 
 function serviceSettings(config: AppConfig): string {
   const { maxSessions: _, ...omp } = config.omp;
@@ -46,7 +47,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
         try { generation = await launch(next, pollingFailure.resolve); }
         catch (error) {
           try { generation = await launch(previous, pollingFailure.resolve); }
-          catch (rollbackError) { if (!pollingFailureReported(rollbackError)) console.error('Configuration rollback failed:', rollbackError); }
+          catch (rollbackError) { if (!pollingFailureReported(rollbackError)) logEvent('error', 'configuration-rollback-failed', { message: 'Configuration rollback failed:', error: rollbackError }); }
           throw error;
         }
         await bindControl(next.dataDir);
@@ -154,7 +155,7 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
           response.end(JSON.stringify({ ok: true }));
         }
       })().catch(error => {
-        if (!pollingFailureReported(error)) console.error('Service control request failed.', error);
+        if (!pollingFailureReported(error)) logEvent('error', 'service-control-request-failed', { message: 'Service control request failed.', error });
         response.writeHead(409, { 'content-type': 'application/json' });
         const detail = error as { code?: unknown; signal?: unknown } | null;
         response.end(JSON.stringify({
@@ -174,11 +175,11 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
   }
 
   const changed = () => { void reload().catch(error => {
-    if (!pollingFailureReported(error)) stderr.write(`Configuration not applied: ${error instanceof Error ? error.message : 'Reload failed'}\n`);
+    if (!pollingFailureReported(error)) logEvent('error', 'configuration-not-applied', { message: 'Configuration not applied:', error });
   }); };
   try { await bindControl(generation.config.dataDir); }
   catch (error) {
-    await generation.close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));
+    await generation.close().catch(cleanupError => logEvent('error', 'startup-cleanup-failed', { message: 'Startup cleanup failed:', error: cleanupError }));
     throw error;
   }
   watchFile(configPath, { interval: 500, persistent: false }, changed);
@@ -201,6 +202,6 @@ export async function startService(configPath = defaultConfigPath()): Promise<{ 
       return closePromise;
     },
   };
-  void pollingFailure.promise.then(() => service.close()).catch(error => console.error('Service shutdown failed:', error));
+  void pollingFailure.promise.then(() => service.close()).catch(error => logEvent('error', 'service-shutdown-failed', { message: 'Service shutdown failed:', error }));
   return service;
 }

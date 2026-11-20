@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -65,7 +66,7 @@ export class TypingIndicators {
         () => this.typingActive(session, listener),
       )
       .catch((error) => {
-        console.warn(`Could not send typing action (${session.id}).`, error);
+        logEvent('warn', 'could-not-send-typing-action', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not send typing action (${session.id}).`, error});
       });
   }
 }

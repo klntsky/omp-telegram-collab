@@ -62,7 +62,7 @@ export async function startFakeLlmProvider(options: {
     const metadata = {
       method: request.method,
       path: request.url,
-      headers: { ...request.headers, authorization: request.headers.authorization ? '[REDACTED]' : undefined },
+      headers: { 'content-type': request.headers['content-type'], 'content-length': request.headers['content-length'], accept: request.headers.accept },
     };
     let body: unknown;
     try {

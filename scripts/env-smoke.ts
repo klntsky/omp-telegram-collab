@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { readConfig } from '../src/config.js';
+import { logEvent } from '../src/logging.js';
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -51,7 +52,7 @@ export async function verifyEnvironmentCli(): Promise<void> {
     assert.equal(readConfig(configPath).publicUrl, 'https://cli.example');
     const missing = join(cwd, 'missing.yaml');
     await assert.rejects(run('start', '--config', missing));
-    console.log('PASS compiled CLI configuration, stable numeric identities, protected-file reads/write rejection, and atomic refusal.');
+    logEvent('info', 'environment-cli-verified', { checks: ['configuration', 'numeric-identities', 'protected-files', 'atomic-refusal'] });
   } finally {
     await chmod(configPath, 0o600).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true });

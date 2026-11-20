@@ -5,6 +5,7 @@ import type { Listener } from './types.js';
 import { AuthorizationDeniedError, PromptPreparationRejectedError } from './types.js';
 import { SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
 import { topicDestination } from '../../shared/topic-destination.js';
+import { logEvent } from '../logging.js';
 
 export interface PromptWorkerDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -62,7 +63,7 @@ export class PromptWorker {
     if (this.closed || this.deps.stopped() || this.deps.options.config.terminated) return;
     const timer = setTimeout(() => {
       this.timers.delete(session.id);
-      void this.drain(session).catch(error => console.warn(`Could not resume queued prompt (${session.id}).`, error));
+      void this.drain(session).catch(error => logEvent('warn', 'queued-prompt-resume-failed', {botId:session.botId,sessionId:session.id,chatId:session.chatId,threadId:session.threadId,error}));
     }, Math.max(0, at - Date.now()));
     timer.unref();
     this.timers.set(session.id, timer);

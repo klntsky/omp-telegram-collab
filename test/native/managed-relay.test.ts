@@ -35,7 +35,7 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   const omp = await setupOmpEnvironment({
     signal: t.signal, diagnostic: t.diagnostic.bind(t),
     after: ((close: () => unknown | Promise<unknown>) => { cleanup.push(close); }) as TestContext['after'],
-  }, { telegramSecrets: false, scenarios: tasks.map(task => writeScenario(task)) });
+  }, { scenarios: tasks.map(task => writeScenario(task)) });
   const foreign = await startLocalRelay();
   cleanup.push(() => foreign.close());
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));

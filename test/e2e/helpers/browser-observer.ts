@@ -57,21 +57,19 @@ export async function observeBrowser(t: TestContext, app: CollaborationTest, ses
     generation, userId: account.id,
     displayName: String(account.id), authDate: Math.floor(Date.now() / 1000),
   }, app.telegram.bot.token);
-  app.omp.registerSecret(credential);
   async function authenticate(requestSignal = signal) {
     const response = await fetch(`${origin}/api/session`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, signal: requestSignal,
       body: JSON.stringify({ botId: app.telegram.bot.id, sessionId: session.id, initData: credential, credential, generation }),
     });
     if (!response.ok) {
-      const diagnostic = await response.text();
+      const diagnostic = `Session authentication failed with HTTP ${response.status}`;
       // Match authorizeSession in web/src/lib/telegram.ts so this fixture cannot
       // recover across an access denial or invalidated session generation.
       if ([401, 403, 404, 409].includes(response.status)) throw new SessionAccessError(diagnostic, response.status);
       throw new Error(diagnostic);
     }
     const result = z.object({ ticket: z.string(), displayName: z.string() }).parse(await response.json());
-    app.omp.registerSecret(result.ticket);
     return result;
   }
   async function socket() {
