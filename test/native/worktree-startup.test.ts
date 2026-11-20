@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { TopicSession } from '../../shared/contracts.js';
 import { emptyConfig, writeConfig } from '../../src/config.js';
 import { OmpRuntime } from '../../src/runtime.js';
+import { hostLifecyclePath, hostSupervisorPath } from '../../src/host-assets.js';
 import { SessionRetiringError } from '../../src/runtime/types.js';
-import { bounded } from '../e2e/helpers/async.js';
+import { bounded, waitUntil } from '../e2e/helpers/async.js';
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
 
 test('dormant worktree preparation fences startup and releases ownership after authorization failure', { timeout: 120000 }, async t => {
@@ -52,6 +56,41 @@ test('dormant worktree preparation fences startup and releases ownership after a
   await rejected;
   const original = await runtime.existingBinding(session);
   assert.ok(original);
+  const directory = join(omp.dataDir, 'sessions', session.id);
+  const pin = JSON.parse(await readFile(join(directory, 'binding.json'), 'utf8')) as { sessionFile: string };
+  const marker = join(omp.dataDir, 'unpublished-host.pid');
+  const gate = join(omp.dataDir, 'unpublished-omp');
+  await writeFile(gate, `#!/bin/sh\nprintf '%s' "$$" > '${marker}'\nkill -STOP "$$"\nexec '${omp.executable}' "$@"\n`, { mode: 0o700 });
+  const supervisor = spawn(process.execPath, [
+    hostSupervisorPath, gate, ...config.omp.args, '--cwd', session.cwd,
+    '--session-dir', directory, '--resume', pin.sessionFile, '--extension', hostLifecyclePath,
+  ], { cwd: session.cwd, env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: directory }, stdio: 'ignore' });
+  const exited = once(supervisor, 'exit');
+  void exited.catch(error => omp.log('native.unpublished-host.exit.failure', String(error)));
+  let pausedPid: number | undefined;
+  cleanup.push(async () => {
+    if (supervisor.exitCode !== null || supervisor.signalCode !== null) return;
+    if (pausedPid !== undefined) process.kill(pausedPid, 'SIGKILL');
+    else supervisor.kill('SIGKILL');
+    await exited;
+  });
+  const startup = waitUntil(async () => {
+    try { return Number(await readFile(marker, 'utf8')); }
+    catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }, pid => pid !== undefined && pid > 1, AbortSignal.any([t.signal, AbortSignal.timeout(config.omp.startupTimeoutMs)]));
+  pausedPid = await Promise.race([startup, exited.then(() => { throw new Error('Unpublished host exited before reaching its startup gate'); })]);
+  await assert.rejects(runtime.worktree(session, 'prepared-worktree'), error => {
+    assert.ok(error instanceof Error && 'errcode' in error && error.errcode === 5);
+    t.diagnostic(error.message);
+    return true;
+  });
+  assert.equal(await omp.git(omp.workspace, 'for-each-ref', '--format=%(refname)', 'refs/heads/prepared-worktree'), '');
+  assert.deepEqual((await omp.launches()).filter(args => args.includes('--mode') && args[args.indexOf('--mode') + 1] === 'rpc'), []);
+  process.kill(pausedPid!, 'SIGKILL');
+  await exited;
   await runtime.worktree(session, 'prepared-worktree');
   await omp.assertWorktree(session, 'prepared-worktree');
   assert.deepEqual(await runtime.existingBinding(session), original);

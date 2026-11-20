@@ -8,6 +8,7 @@ import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActi
 import { privateFile, writeBinding, readHeader } from './files.js';
 import { errno, record } from './values.js';
 import { childEnvironment } from './environment.js';
+import { acquireHostOwnership } from '../host-ownership.mjs';
 interface WorktreeDependencies {
   readonly config: AppConfig;
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{ bind(id: string): void; release(): void }>;
@@ -217,6 +218,9 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         if (host.retiring) throw new Error('OMP host accepted retirement but has not exited; worktree switching cannot continue until shutdown completes');
         throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
       }
+      // Missing lifecycle/registry entries cannot prove that an initializing
+      // supervisor has released the session. Keep exclusion through publication.
+      using ownership = await acquireHostOwnership(dir);
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
       const config = path.join(dir, 'worktree.yml');
