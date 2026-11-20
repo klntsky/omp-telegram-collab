@@ -1,4 +1,4 @@
-import { GrammyError, type Bot, type Context } from 'grammy';
+import type { Bot, Context } from 'grammy';
 import { stat } from 'node:fs/promises';
 import type { SessionEntry } from '@oh-my-pi/pi-wire';
 import type { TopicSession } from '../../shared/contracts.js';
@@ -102,7 +102,7 @@ export class ReplyDelivery {
           store.getSessionGeneration(session.id) === reply.generation;
         while (reply.nextPart < reply.parts.length) {
           const sent = await this.deps.delivery.run(session.chatId, async () => {
-            if (!active() || !store.replies.begin(reply)) return undefined;
+            if (!active()) return undefined;
             try {
               const result = await this.deps.bot.api.sendRichMessage(session.chatId, { markdown: reply.parts[reply.nextPart]! }, {
                 message_thread_id: session.threadId === 1 ? undefined : session.threadId,
@@ -111,10 +111,9 @@ export class ReplyDelivery {
               store.replies.confirm(reply, result.chat.id, result.message_id);
               return result;
             } catch (error) {
-              // Only a definite API rejection is safe to retry. Lost responses and
-              // interrupted sends remain uncertain across listener and service restarts.
-              const uncertain = !(error instanceof GrammyError && error.error_code >= 400 && error.error_code < 500);
-              try { store.replies.fail(reply, error, uncertain); }
+              // Leave unconfirmed chunks pending: a lost acknowledgement may duplicate
+              // a reply on retry, but must not permanently suppress its delivery.
+              try { store.replies.fail(reply, error); }
               catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
               throw error;
             }

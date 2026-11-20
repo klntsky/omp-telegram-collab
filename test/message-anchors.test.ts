@@ -28,7 +28,6 @@ test('message anchors preserve receipt aliases and exact native identity across 
     store.replies.stage(session.id, answer.ompSessionId, answer.entryId, answer.parentEntryId, ['first','second'], 100, 0);
     for (const messageId of [200,201]) {
       const reply = store.replies.pending(session.id)[0]!;
-      assert.equal(store.replies.begin(reply), true);
       store.replies.confirm(reply, topic.chatId, messageId);
     }
     store.advanceSessionGeneration(session.id);
@@ -103,7 +102,7 @@ test('message anchors never resolve ambiguous or foreign prompt receipts through
   } finally { store.close(); }
 });
 
-test('reply checkpoints roll back with anchors and interrupted sends never replay after reopen', async () => {
+test('reply checkpoints roll back atomically and unconfirmed chunks retry after reopen', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-reply-checkpoints-'));
   const filename = join(directory, 'telegram.sqlite');
   let store = new Store(filename);
@@ -112,34 +111,35 @@ test('reply checkpoints roll back with anchors and interrupted sends never repla
     store.replies.stage(session.id, 'omp', 'answer', 'prompt', ['one','two'], 100, 0);
     store.replies.stage(session.id, 'omp', 'historical', null, ['old'], undefined, 0, true);
     const first = store.replies.pending(session.id)[0]!;
-    assert.equal(store.replies.begin(first), true);
-    assert.equal(store.replies.begin(first), false);
     store.recordMessageAnchor(session.id, topic.chatId, 200,
       {...target('omp', 'occupied'),kind:'assistant',partIndex:0});
     assert.throws(() => store.replies.confirm(first, topic.chatId, 200), /UNIQUE constraint failed/);
     assert.deepEqual(store.db.prepare('SELECT next_part,state FROM replies WHERE entry_id=?').get('answer'),
-      {__proto__:null,next_part:0,state:'uncertain'});
+      {__proto__:null,next_part:0,state:'pending'});
     const diagnostic = 'Original rejection\nwith details';
-    store.replies.fail(first, new Error(diagnostic), false);
+    store.replies.fail(first, new Error(diagnostic));
     assert.equal(store.db.prepare('SELECT error FROM replies WHERE entry_id=?').get('answer')?.error, diagnostic);
-    assert.equal(store.replies.begin(first), true);
     store.replies.confirm(first, topic.chatId, 201);
     const second = store.replies.pending(session.id)[0]!;
     assert.equal(second.nextPart, 1);
-    assert.equal(store.replies.begin(second), true);
+    const lostResponse = 'Original transport failure\nresponse unavailable';
+    store.replies.fail(second, new Error(lostResponse));
     store.close();
     store = new Store(filename);
-    assert.deepEqual(store.replies.pending(session.id), []);
-    assert.equal(store.db.prepare('SELECT state FROM replies WHERE entry_id=?').get('answer')?.state, 'uncertain');
+    const recovered = store.replies.pending(session.id)[0]!;
+    assert.equal(recovered.nextPart, 1);
+    assert.equal(recovered.replyTo, 100);
+    assert.deepEqual(recovered.parts, ['one', 'two']);
+    assert.equal(store.db.prepare('SELECT error FROM replies WHERE entry_id=?').get('answer')?.error, lostResponse);
     assert.deepEqual(store.getMessageAnchor(session.id, 'omp', topic.chatId, 201),
       {...target('omp', 'answer', 'prompt'),kind:'assistant',partIndex:0});
     store.replies.stage(session.id, 'omp', 'answer', 'prompt', ['replacement'], 100, 1);
+    assert.deepEqual(store.replies.pending(session.id), [recovered]);
+    store.replies.confirm(recovered, topic.chatId, 202);
     assert.deepEqual(store.replies.pending(session.id), []);
-    store.replies.stage(session.id, 'omp', 'failed', null, ['part'], undefined, 1);
-    const failed = store.replies.pending(session.id)[0]!;
-    assert.equal(store.replies.begin(failed), true);
-    store.replies.fail(failed, new Error(diagnostic), true);
-    assert.equal(store.db.prepare('SELECT error FROM replies WHERE entry_id=?').get('failed')?.error, diagnostic);
+    assert.deepEqual(store.getMessageAnchor(session.id, 'omp', topic.chatId, 202),
+      {...target('omp', 'answer', 'prompt'),kind:'assistant',partIndex:1});
+    assert.throws(() => store.replies.confirm(recovered, topic.chatId, 203), /Reply checkpoint changed/);
     store.replies.stage(session.id, 'omp', 'obsolete', null, ['part'], undefined, 1);
     store.replies.discard(store.replies.pending(session.id)[0]!);
     assert.deepEqual(store.replies.pending(session.id), []);

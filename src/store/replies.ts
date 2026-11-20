@@ -9,7 +9,7 @@ export interface Reply {
   replyTo?: number;
   generation: number;
   nextPart: number;
-  state: 'pending' | 'uncertain' | 'done';
+  state: 'pending' | 'done';
 }
 
 export class ReplyLedger {
@@ -33,21 +33,12 @@ export class ReplyLedger {
     }));
   }
 
-  // Invoke only inside the queued API action, immediately before the network operation.
-  // Unconfirmed already means uncertain, including after a crash. Opening another
-  // Store must not mutate a live sender's state or require a recovery transition.
-  begin(reply: Reply): boolean {
-    return Number(this.db.prepare(`UPDATE replies SET state='uncertain' WHERE session_id=? AND omp_session_id=?
-      AND entry_id=? AND next_part=? AND state='pending'`).run(
-      reply.sessionId, reply.ompSessionId, reply.entryId, reply.nextPart).changes) === 1;
-  }
-
   confirm(reply: Reply, chatId: number, messageId: number): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = this.db.prepare(`UPDATE replies SET next_part=next_part+1,
         state=CASE WHEN next_part+1>=json_array_length(parts) THEN 'done' ELSE 'pending' END
-        WHERE session_id=? AND omp_session_id=? AND entry_id=? AND next_part=? AND state='uncertain'`)
+        WHERE session_id=? AND omp_session_id=? AND entry_id=? AND next_part=? AND state='pending'`)
         .run(reply.sessionId, reply.ompSessionId, reply.entryId, reply.nextPart);
       if (Number(result.changes) !== 1) throw new Error(`Reply checkpoint changed for session ${reply.sessionId}, entry ${reply.entryId}, part ${reply.nextPart}`);
       this.db.prepare('INSERT INTO message_anchors VALUES (?,?,?,?,?,?,?,?)').run(
@@ -59,9 +50,9 @@ export class ReplyLedger {
     }
   }
 
-  fail(reply: Reply, error: unknown, uncertain: boolean): void {
-    this.db.prepare(`UPDATE replies SET state=?,error=? WHERE session_id=? AND omp_session_id=?
-      AND entry_id=? AND next_part=? AND state='uncertain'`).run(uncertain ? 'uncertain' : 'pending',
+  fail(reply: Reply, error: unknown): void {
+    this.db.prepare(`UPDATE replies SET error=? WHERE session_id=? AND omp_session_id=?
+      AND entry_id=? AND next_part=? AND state='pending'`).run(
       error instanceof Error ? error.message : String(error), reply.sessionId, reply.ompSessionId, reply.entryId, reply.nextPart);
   }
 

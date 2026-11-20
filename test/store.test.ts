@@ -198,7 +198,6 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     store.markSnapshot(original.id);
     store.replies.stage(original.id, 'omp-session', 'saved-reply', null, ['first', 'second'], 77, 0);
     const reply = store.replies.pending(original.id)[0]!;
-    assert.equal(store.replies.begin(reply), true);
     store.replies.confirm(reply, chatId, 78);
     store.advanceSessionGeneration(original.id);
     store.setReplyTarget(original.id, 77);
