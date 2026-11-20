@@ -1,8 +1,8 @@
 import { stdout } from 'node:process';
 import { join } from 'node:path';
-import { writeFileSync, writeSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { unlink, readFile, writeFile } from 'node:fs/promises';
-import { inspect } from 'node:util';
+import { logEvent } from '../logging.js';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import { validateStart, findInstance } from '../config.js';
 import type { AppConfig } from '../../shared/contracts.js';
@@ -16,7 +16,7 @@ let pendingExitMarker: { path: string; startedAt: number } | undefined;
 process.once('exit', () => {
   if (pendingExitMarker) {
     try { writeFileSync(pendingExitMarker.path, JSON.stringify({ startedAt: pendingExitMarker.startedAt, predecessorExitedAt: Date.now() }), { mode: 0o600 }); }
-    catch (error) { writeSync(2, `Restart exit marker write failed: ${inspect(error)}\n`); }
+    catch (error) { logEvent('error', 'restart-exit-marker-write-failed', { message: 'Restart exit marker write failed:', error }); }
   }
 });
 
@@ -40,11 +40,11 @@ async function notifyGroups(config: AppConfig, bots: BotService[], store: Store,
       }
     }));
     for (const result of groupResults) {
-      if (result.status === 'rejected' && !signal?.aborted) console.error(`Lifecycle notification failed for bot ${bot.id}:`, result.reason);
+      if (result.status === 'rejected' && !signal?.aborted) logEvent('error', 'lifecycle-notification-failed', { message: `Lifecycle notification failed for bot ${bot.id}:`, botId: bot.id, error: result.reason });
     }
   }));
   for (const result of botResults) {
-    if (result.status === 'rejected' && !signal?.aborted) console.error('Lifecycle notification failed:', result.reason);
+    if (result.status === 'rejected' && !signal?.aborted) logEvent('error', 'lifecycle-notification-failed', { message: 'Lifecycle notification failed:', error: result.reason });
   }
 }
 
@@ -80,7 +80,7 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
       const attempt = async (operation: () => Promise<void> | void) => {
         try { await operation(); }
         catch (error) {
-          console.error('Service cleanup failed:', error);
+          logEvent('error', 'service-cleanup-failed', { message: 'Service cleanup failed:', error });
           if (!failed) { failed = true; failure = error; }
         }
       };
@@ -185,11 +185,11 @@ export async function launch(config: AppConfig, onPollingFailure: () => void, in
       pendingExitMarker = undefined;
       if (onlineController.signal.aborted) return;
       await notifyGroups(config, bots, store!, `OMP bot service is back online (restarting took ${((Date.now() - marker.startedAt) / 1000).toFixed(2)} seconds).`, onlineController.signal);
-    })().catch(error => console.error('Online notification failed:', error)).finally(() => timing('ready-to-notification', readyAt));
+    })().catch(error => logEvent('error', 'online-notification-failed', { message: 'Online notification failed:', error })).finally(() => timing('ready-to-notification', readyAt));
     stdout.write(`OMP Telegram ${config.publicUrl ? `listening on ${config.host}:${config.port}` : 'running in Telegram-only mode'}. Configuration: ${config.configPath}\n`);
     return { config, store, runtime, bots, close };
   } catch (error) {
-    await close().catch(cleanupError => console.error('Startup cleanup failed:', cleanupError));
+    await close().catch(cleanupError => logEvent('error', 'startup-cleanup-failed', { message: 'Startup cleanup failed:', error: cleanupError }));
     throw error;
   }
 }

@@ -55,7 +55,7 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
       // https://github.com/tdlib/td/blob/master/td/telegram/CallbackQueriesManager.cpp
       await clickPanel(app, confirmation, 0);
       const diagnostic = `Another session uses this worktree: ${peer.id}`;
-      await app.waitForCondition(() => applicationErrors(app).some(values =>
+      await app.waitForCondition(async () => (await applicationErrors(app)).some(values =>
         values.some(value => typeof value === 'object' && value !== null && 'message' in value && value.message === diagnostic)));
       await retained();
       assert.equal(app.store.getSession(peer.id)!.cwd, target.path);

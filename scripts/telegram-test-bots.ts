@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
-import { formatWithOptions } from 'node:util';
+import { logEvent } from '../src/logging.js';
 import { resolveTelegramTestEnvFile } from '../test/e2e/helpers/telegram-env.js';
 import { createTelegramTestBot, saveTelegramTestBot } from './lib/telegram-test-bot-provision.js';
 
@@ -46,7 +46,7 @@ if (args.length === 1 && ['--help', '-h', 'help'].includes(args[0]!)) {
     }
     process.stdout.write(String(`Saved bot ${id} in ${filename}`) + '\n');
   } catch (error) {
-    console.error(formatWithOptions({ depth: null }, error).replace(/[1-9]\d*:[A-Za-z0-9_-]{30,}/g, '[REDACTED_BOT_TOKEN]'));
+    logEvent('error', 'telegram.test.bot.provision.failed', { error });
     process.exitCode = 1;
   } finally {
     process.removeListener('SIGINT', interrupt);

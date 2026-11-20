@@ -1,20 +1,18 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { appendFile, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { TestContext } from 'node:test';
-import { formatWithOptions, parseEnv, promisify } from 'node:util';
+import { promisify } from 'node:util';
 import { z } from 'zod';
 import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from './fake-llm-provider.js';
 import { readSessionHistory } from './model-tasks.js';
 import type { TopicSession } from '../../../shared/contracts.js';
-import { resolveTelegramTestEnvFile } from './telegram-env.js';
+import { errorDiagnostic } from '../../../src/logging.js';
 
 export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal' | 'diagnostic'>, options: {
   scenarios: readonly FakeLlmScenario[];
-  telegramSecrets?: boolean;
   tools?: readonly string[];
   compaction?: { enabled: boolean; supersedeReads: boolean; dropUseless: boolean; experimentalContextManagement: boolean };
 }) {
@@ -23,52 +21,22 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const tracePath = join(logDirectory, 'events.jsonl');
   await writeFile(tracePath, '', { mode: 0o600 });
   t.diagnostic(`E2E debug artifacts: ${logDirectory}`);
-  const secrets = new Set<string>();
-  const registerSecret = (value: string) => { if (value) secrets.add(value); };
-  const secretEnvironments = options.telegramSecrets === false ? [] : [
-    process.env, parseEnv(await readFile(await resolveTelegramTestEnvFile(), 'utf8')),
-  ];
-  for (const env of secretEnvironments) {
-    for (const key of ['TELEGRAM_TEST_BOT_TOKENS', 'TELEGRAM_TEST_API_HASH', 'TELEGRAM_TEST_SESSIONS']) {
-      if (env[key]) registerSecret(env[key]!);
-    }
-    if (env.TELEGRAM_TEST_BOT_TOKENS) {
-      let tokens: unknown;
-      try { tokens = JSON.parse(env.TELEGRAM_TEST_BOT_TOKENS); }
-      catch { throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings'); }
-      if (!Array.isArray(tokens) || !tokens.every((token: unknown): token is string => typeof token === 'string' && token.length > 0)) {
-        throw new Error('TELEGRAM_TEST_BOT_TOKENS must be a JSON array of bot token strings');
-      }
-      for (const token of tokens) registerSecret(token);
-    }
-  }
-  if (options.telegramSecrets !== false && process.env.TELEGRAM_TEST_SESSIONS) {
-    let sessions: unknown;
-    try {
-      sessions = JSON.parse(process.env.TELEGRAM_TEST_SESSIONS);
-    } catch {
-      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
-    }
-    if (!Array.isArray(sessions) || !sessions.every((session: unknown): session is string => typeof session === 'string')) {
-      throw new Error('TELEGRAM_TEST_SESSIONS must be a JSON array of session strings');
-    }
-    for (const session of sessions) registerSecret(session);
-  }
   const started = performance.now();
   let sequence = 0;
-  function redact(text: string): string {
-    for (const secret of secrets) text = text.replaceAll(secret, '[REDACTED]');
-    return text.replace(/\b\d{5,}:[A-Za-z0-9_-]{30,}\b/g, '[REDACTED_BOT_TOKEN]');
-  }
-  function formatDiagnostic(args: unknown[]): string {
-    return redact(formatWithOptions({ depth: null, maxArrayLength: null, maxStringLength: null }, ...args));
-  }
+  let traceWrites = Promise.resolve();
+  const traceErrors: unknown[] = [];
   function log(event: string, data: unknown): void {
     const line = JSON.stringify({ sequence: ++sequence, time: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), event, data }, (_key, value: unknown) => {
-      if (value instanceof Error) return Object.fromEntries(Object.getOwnPropertyNames(value).map(key => [key, Reflect.get(value, key)]));
+      if (value instanceof Error) return errorDiagnostic(value);
       return value;
     });
-    appendFileSync(tracePath, `${redact(line)}\n`, { mode: 0o600 });
+    traceWrites = traceWrites.then(() => appendFile(tracePath, `${line}\n`, { mode: 0o600 })).catch(error => { traceErrors.push(error); });
+  }
+  async function flushLogs(): Promise<void> {
+    await traceWrites;
+    if (traceErrors.length === 1) throw traceErrors[0];
+    if (traceErrors.length > 1)
+      throw new AggregateError(traceErrors, traceErrors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
   }
   async function step<T>(name: string, action: () => Promise<T>): Promise<T> {
     log('step.start', { name });
@@ -118,6 +86,8 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     }
     try { await rm(root, { recursive: true, force: true }); } catch (error) { log('environment-cleanup-error', error); errors.push(error); }
     log('environment-cleanup-end', { errors: errors.length });
+    await traceWrites;
+    errors.push(...traceErrors);
     if (errors.length === 1) throw errors[0];
     if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
   });
@@ -225,5 +195,5 @@ exec -a "$0" "$command" "\${args[@]}"`;
     '--system-prompt', 'Complete the requested task with the available tools.',
   ];
   log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl });
-  return { workspace, dataDir, executable, agentConfigPath, args, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
+  return { workspace, dataDir, executable, agentConfigPath, args, provider, log, step, git, listHosts, assertWorktree, logDirectory, flushLogs };
 }

@@ -5,7 +5,9 @@ import { Writable } from 'node:stream';
 import { createTelegramTestClient, exportTelegramTestSession, readTelegramApplicationCredentials } from './lib/telegram-test-auth.js';
 import { appendTelegramTestSession, resolveTelegramTestEnvFile } from '../test/e2e/helpers/telegram-env.js';
 import { combineTelegramErrors } from '../test/e2e/helpers/errors.js';
+import { logEvent } from '../src/logging.js';
 
+try {
 const filename = await resolveTelegramTestEnvFile();
 const credentials = readTelegramApplicationCredentials(parseEnv(await readFile(filename, 'utf8')));
 if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('Run pnpm telegram:test:login in an interactive terminal');
@@ -63,3 +65,7 @@ try {
 }
 if (errors.length === 1) throw errors[0];
 if (errors.length > 1) throw combineTelegramErrors(...errors);
+} catch (error) {
+  logEvent('error', 'telegram.test.login.failed', { error });
+  process.exitCode = 1;
+}

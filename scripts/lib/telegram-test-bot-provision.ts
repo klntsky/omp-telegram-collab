@@ -57,17 +57,17 @@ export async function createTelegramTestBot(filename: string, signal: AbortSigna
             const cooldown = /^Sorry, too many attempts\. Please try again in (\d+) seconds\.$/.exec(reply.text.trim());
             if (!cooldown) return reply.text;
             const seconds = Number(cooldown[1]);
-            if (!Number.isSafeInteger(seconds) || seconds > 2147483) throw new Error(`Unsupported BotFather cooldown:\n${reply.text}`);
-            console.error(`BotFather rejected the request:\n${reply.text}`);
+            if (!Number.isSafeInteger(seconds) || seconds > 2147483) throw new Error(`Unsupported BotFather cooldown: ${cooldown[1]} seconds`);
+            console.error(`BotFather rejected the request: Please try again in ${seconds} seconds.`);
             await setTimeout(seconds * 1000, undefined, { signal });
           }
         };
         await prompt('/cancel');
         const requested = await prompt('/newbot');
-        if (!/how are we going to call it|choose a name/i.test(requested)) throw new Error(`Unexpected BotFather response:\n${requested}`);
+        if (!/how are we going to call it|choose a name/i.test(requested)) throw new Error('Unexpected BotFather response while requesting a new bot');
         const suffix = randomBytes(8).toString('hex');
         const named = await prompt(`OMP Test ${suffix}`);
-        if (!/choose a username/i.test(named)) throw new Error(`Unexpected BotFather response:\n${named}`);
+        if (!/choose a username/i.test(named)) throw new Error('Unexpected BotFather response while setting the bot name');
         const username = `omp_test_${suffix}_bot`;
         const recovery = join(homedir(), '.local/state/omp-telegram-test/provisioned-bots');
         await mkdir(recovery, { recursive: true, mode: 0o700 });
@@ -78,7 +78,7 @@ export async function createTelegramTestBot(filename: string, signal: AbortSigna
         await durableJournal(journal, { username }, true);
         const reply = await prompt(username);
         const token = reply.match(/(?:^|\s)([1-9]\d*:[A-Za-z0-9_-]{30,})(?=\s|$)/)?.[1];
-        if (!token) throw new Error(`Unexpected BotFather response (recovery journal: ${journal}):\n${reply}`);
+        if (!token) throw new Error(`Unexpected BotFather response while setting the bot username (recovery journal: ${journal})`);
         await durableJournal(journal, { username, token }, false);
         const id = await saveTelegramTestBot(filename, token, signal);
         await unlink(journal);

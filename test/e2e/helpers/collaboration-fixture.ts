@@ -17,6 +17,7 @@ import { bounded } from './async.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 import { createCollaborationObserver, observeApplicationLogs } from './collaboration-observer.js';
 import { cleanupLifecycle } from './lifecycle-cleanup.js';
+import { errorDiagnostic } from '../../../src/logging.js';
 
 const operationTimeoutMs = telegramTestTimeouts.request;
 const cleanupTimeoutMs = telegramTestTimeouts.cleanup;
@@ -75,7 +76,7 @@ export async function setupCollaborationTest(
         void pending.catch(error => {
           if (cleanupController.signal.aborted) {
             log?.('cleanup.late.error', error);
-            t.diagnostic(`Late cleanup failure: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+            t.diagnostic(`Late cleanup failure: ${JSON.stringify(errorDiagnostic(error))}`);
           }
         });
         await bounded(pending, cleanupController.signal);
@@ -118,15 +119,15 @@ export async function setupCollaborationTest(
   restoreConsole.push(observeApplicationLogs(omp.log));
   const originalError = console.error;
   console.error = (...args: unknown[]) => {
-    omp.log('application.console.error', args);
-    originalError.call(console, omp.formatDiagnostic(args));
+    const diagnostics = args.map(error => errorDiagnostic(error));
+    omp.log('application.console.error', diagnostics);
+    originalError.call(console, ...diagnostics);
   };
   restoreConsole.push(() => { console.error = originalError; });
   const telegram = await omp.step('telegram.provision', () => setupTelegramTest({
     signal: t.signal,
     after: ((run: Cleanup) => { telegramCleanup.push(run); }) as TestContext['after'],
   }, { canReleaseBot: () => activePollers === 0 && !pollerStopFailed, step: omp.step, cleanupSignal: cleanupController.signal }));
-  omp.registerSecret(telegram.bot.token);
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
   config.bots = [{ id: telegram.bot.id, token: telegram.bot.token }];
@@ -170,7 +171,7 @@ export async function setupCollaborationTest(
   const receive = (message: Message) => {
     if (message.chat.id !== telegram.forum.chatId) return;
     messages.push(message);
-    omp.log('telegram.user.message', message.raw);
+    omp.log('telegram.user.message', { id: message.id });
     const previous = changed;
     changed = Promise.withResolvers<void>();
     previous.resolve();
@@ -266,11 +267,11 @@ export async function setupCollaborationTest(
     t.signal.throwIfAborted();
     failed.signal.throwIfAborted();
     return omp.step('telegram.user.send', async () => {
-      omp.log('telegram.user.send.request', { text, threadId });
+      omp.log('telegram.user.send.request', { threadId });
       const sent = await operation(telegram.user.client.sendText(
         telegram.forum.chat, text, threadId === undefined ? undefined : { threadId },
       ));
-      omp.log('telegram.user.send.result', sent.raw);
+      omp.log('telegram.user.send.result', { id: sent.id });
       return sent;
     });
   }
@@ -349,7 +350,7 @@ export async function setupCollaborationTest(
       }));
       const [message] = await operation(telegram.user.client.getMessages(telegram.forum.chatId, messageId!));
       if (!message) throw new Error(`Delivered Telegram reply ${messageId} is unavailable to the user client`);
-      omp.log('telegram.user.reply', message.raw);
+      omp.log('telegram.user.reply', { id: message.id });
       return message;
     },
   };
@@ -369,9 +370,8 @@ export interface CollaborationTest {
     git(cwd: string, ...args: string[]): Promise<string>;
     listHosts(): Promise<{ sessionId: string; cwd: string; pid: number }[]>;
     assertWorktree(session: TopicSession, branch?: string): Promise<void>;
-    formatDiagnostic(args: unknown[]): string;
     logDirectory: string;
-    registerSecret(value: string): void;
+    flushLogs(): Promise<void>;
   };
   config: AppConfig;
   hostFrames: HostFrame[];

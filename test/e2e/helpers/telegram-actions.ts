@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { InputMedia, type Message } from '@mtcute/node';
 import { z } from 'zod';
-import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Store } from '../../../src/store.js';
 import type { OmpRuntime } from '../../../src/runtime.js';
@@ -15,7 +15,7 @@ export interface TelegramWorkflow {
   omp: { step<T>(name: string, action: () => Promise<T>): Promise<T> };
   store: Pick<Store, 'isEnrolled'>;
   send(text: string, threadId?: number): Promise<Message>;
-  waitForCondition(predicate: () => boolean, phase?: string, timeoutMs?: number): Promise<void>;
+  waitForCondition(predicate: () => boolean | Promise<boolean>, phase?: string, timeoutMs?: number): Promise<void>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
 }
@@ -261,11 +261,12 @@ export async function setTopicClosed(app: LifecycleWorkflow, session: TopicSessi
 }
 
 export async function waitForBackgroundCompletion(app: {
-  omp: {logDirectory:string}; waitForCondition: TelegramWorkflow['waitForCondition'];
+  omp: {logDirectory:string; flushLogs(): Promise<void>}; waitForCondition: TelegramWorkflow['waitForCondition'];
 }, phase: string, options: {since?: number; timeoutMs?: number} = {}): Promise<void> {
   const since = options.since ?? Date.now();
-  await app.waitForCondition(() => {
-    const lines = readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').trimEnd().split('\n');
+  await app.waitForCondition(async () => {
+    await app.omp.flushLogs();
+    const lines = (await readFile(join(app.omp.logDirectory, 'events.jsonl'), 'utf8')).split('\n').slice(0, -1);
     for (let index = lines.length - 1; index >= 0; index--) {
       const entry = JSON.parse(lines[index]!);
       if (Date.parse(entry.time) < since) break;

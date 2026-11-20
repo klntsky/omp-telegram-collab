@@ -80,7 +80,7 @@ export class MirrorRecovery {
           }).finally(() => this.restoring.delete(existing.id));
         }
       }),
-    ).catch(error => console.error('Could not restore sessions.', error, {botId:this.deps.id,operation:'restoreSessions'}));
+    ).catch(error => logEvent('error', 'sessions-restore-failed', {botId:this.deps.id,operation:'restoreSessions',error}));
   }
   recoverExistingMirror(
     session: TopicSession,
@@ -184,7 +184,7 @@ export class MirrorRecovery {
           }
         }).then(() => this.reconnecting.delete(session.id), error => {
           this.reconnecting.delete(session.id);
-          console.error('Could not complete session reconnection.', error, {botId:this.deps.id,chatId:session.chatId,sessionId:session.id,operation:'reconnect'});
+          logEvent('error', 'session-reconnection-failed', {botId:this.deps.id,chatId:session.chatId,sessionId:session.id,operation:'reconnect',error});
         });
       },
       Math.min(1000 * 2 ** attempt, 16000),

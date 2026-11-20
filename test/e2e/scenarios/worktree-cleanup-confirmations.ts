@@ -136,7 +136,7 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.equal(JSON.parse(await readFile(bindingPath, 'utf8')).removedWorktree, undefined);
     await setTopicClosed(app, session, true);
     start = app.apiCalls.length;
-    const errorsBefore = applicationErrors(app).length;
+    const errorsBefore = (await applicationErrors(app)).length;
     await Promise.all([
       submitCallback(app, confirmation, confirmation.buttons[0]!),
       submitCallback(app, confirmation, confirmation.buttons[0]!),
@@ -146,7 +146,7 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.equal(JSON.parse(await readFile(bindingPath, 'utf8')).removedWorktree, true);
     const registry = await app.omp.git(target.commonDir, 'worktree', 'list', '--porcelain');
     assert.ok(!registry.split('\n').includes(`worktree ${target.path}`));
-    assert.deepEqual(applicationErrors(app).slice(errorsBefore), []);
+    assert.deepEqual((await applicationErrors(app)).slice(errorsBefore), []);
   });
 
   it('worktree cleanup confirmation cannot delete a different registered directory at the same path', async t => {
@@ -170,13 +170,13 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     await writeFile(sentinel, 'retain the replacement worktree\n');
     await app.omp.git(target.path, 'add', '--', sentinel);
     await app.omp.git(target.path, 'commit', '-m', 'Record replacement directory evidence');
-    const errorsBefore = applicationErrors(app).length;
+    const errorsBefore = (await applicationErrors(app)).length;
     const start = app.apiCalls.length;
     await clickPanel(app, confirmation, 0);
     await waitForPanel(app, 'worktree-cleanup', 'wtcleanup:o:', start, session.threadId);
     assert.equal(await readFile(sentinel, 'utf8'), 'retain the replacement worktree\n');
     assert.ok(existsSync(displaced));
     assert.equal(JSON.parse(await readFile(join(app.omp.dataDir, 'sessions', session.id, 'binding.json'), 'utf8')).removedWorktree, undefined);
-    assert.deepEqual(applicationErrors(app).slice(errorsBefore), []);
+    assert.deepEqual((await applicationErrors(app)).slice(errorsBefore), []);
   });
 }

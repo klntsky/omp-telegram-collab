@@ -1,6 +1,7 @@
 import { request } from 'node:http';
 import { join } from 'node:path';
 import type { AppConfig } from '../../shared/contracts.js';
+import { logEvent } from '../logging.js';
 
 export async function notifyReload(config: AppConfig, socketDataDir = config.dataDir): Promise<void> {
   const {promise, resolve: acknowledge, reject} = Promise.withResolvers<void>();
@@ -9,7 +10,7 @@ export async function notifyReload(config: AppConfig, socketDataDir = config.dat
     let body = '';
     response.setEncoding('utf8');
     response.on('data', (chunk: string) => { if (body.length < 8192) body += chunk; });
-    response.on('error', error => { console.error('Configuration reload response failed.', error); reject(error); });
+    response.on('error', error => { logEvent('error', 'configuration-reload-response-failed', { message: 'Configuration reload response failed.', error }); reject(error); });
     response.on('aborted', () => reject(failure()));
     response.on('end', () => {
       try {
@@ -24,14 +25,14 @@ export async function notifyReload(config: AppConfig, socketDataDir = config.dat
             return;
           }
         }
-      } catch (error) { console.error('Configuration reload acknowledgement was invalid.', error); reject(error); return; }
+      } catch (error) { logEvent('error', 'configuration-reload-acknowledgement-invalid', { message: 'Configuration reload acknowledgement was invalid.', error }); reject(error); return; }
       reject(failure());
     });
   });
   const timer = setTimeout(() => req.destroy(failure()), 5000);
   req.on('error', (error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT' || error.code === 'ECONNREFUSED') acknowledge();
-    else { console.error('Configuration reload request failed.', error); reject(error); }
+    else { logEvent('error', 'configuration-reload-request-failed', { message: 'Configuration reload request failed.', error }); reject(error); }
   });
   req.end(JSON.stringify({ configPath: config.configPath }));
   try { await promise; } finally { clearTimeout(timer); req.destroy(); }
