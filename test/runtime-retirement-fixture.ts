@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { createServer, type Socket } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,20 +17,35 @@ export interface RetirementRequest {
   type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
 }
 
-export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
+export async function fixture(mode: RetirementMode = 'busy', pid?: number, guard: RetirementRequest['guard'] = 'idle') {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-retirement-')));
-  const fixtureProcess = mode === 'cancel-failure' && pid === process.pid
-    ? spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] })
-    : undefined;
-  const fixtureExited = fixtureProcess ? once(fixtureProcess, 'exit') : undefined;
-  if (fixtureProcess) {
-    await once(fixtureProcess, 'spawn');
-    assert.ok(fixtureProcess.pid);
-    pid = fixtureProcess.pid;
-  }
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
   await mkdir(sessionDir, { recursive: true });
+  const servers: Server[] = [];
+  const sockets = new Set<Socket>();
+  // Exercise the real /proc identity boundary: the test runner has neither the
+  // pinned cwd nor --session-dir argv. Explicit PIDs remain available for invalid identities.
+  const children: { process: ChildProcess; exited: Promise<unknown> }[] = [];
+  async function startProcess() {
+    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()', '--', '--session-dir', sessionDir],
+      { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] });
+    children.push({ process: child, exited: once(child, 'exit') });
+    await once(child, 'spawn');
+    assert.ok(child.pid);
+    return child.pid;
+  }
+  async function stopProcess() {
+    for (const child of children) {
+      if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill('SIGKILL');
+    }
+    const results = await Promise.allSettled(children.map(child => child.exited));
+    const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (failures.length) throw new AggregateError(failures, `Retirement fixture child exit failed\n${failures.map(String).join('\n')}`);
+  }
+  try {
+  if (pid === undefined) pid = await startProcess();
+  assert.ok(pid);
   const executable = join(directory, 'omp');
   const statePath = join(directory, 'registry.json');
   const startedPidPath = join(directory, 'started.pid');
@@ -74,9 +89,10 @@ if (process.argv[2] !== 'collab') {
     });
   });
   server.listen(socketPath, () => {
+    fs.chmodSync(socketPath, 0o600);
     fs.writeFileSync(${JSON.stringify(startedPidPath)}, String(process.pid));
     const publish = () => {
-      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor));
+      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor), {mode:0o600});
       fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
     };
     if (!state.holdStartup) publish();
@@ -96,8 +112,8 @@ if (process.argv[2] !== 'collab') {
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: host.sessionId, cwd: directory }) + '\n');
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
   const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
-    pid, supervisorPid: process.ppid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
-  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor));
+    pid, supervisorPid: process.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
+  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor), { mode: 0o600 });
   await persistLifecycle();
   const requests: RetirementRequest[] = [];
   const delayed = Promise.withResolvers<void>();
@@ -120,7 +136,6 @@ if (process.argv[2] !== 'collab') {
     Object.assign(descriptor, next);
     return true;
   }
-  const sockets = new Set<Socket>();
   const handleConnection = (socket: Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
@@ -158,11 +173,12 @@ if (process.argv[2] !== 'collab') {
     });
   };
   const server = createServer(handleConnection);
-  const servers = [server];
+  servers.push(server);
   const listening = Promise.withResolvers<void>();
   server.once('error', listening.reject);
   server.listen(socketPath, listening.resolve);
   await listening.promise;
+  await chmod(socketPath, 0o600);
   const config: AppConfig = { bots: [], instances: [{id: 1, defaultDir: directory, chats: []}],
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir,
@@ -171,7 +187,7 @@ if (process.argv[2] !== 'collab') {
   const runtime = new OmpRuntime(config);
   const session: TopicSession = { id: 'topic', botId: 1, chatId: -100, threadId: 2,
     instanceId: 1, cwd: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
-  return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
+  return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, stopProcess, received: received.promise,
     async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
     async removeHost() { state.host = undefined; await persistRegistry(); },
     async rotateConnection() { host.generation++; await persistRegistry(); },
@@ -186,7 +202,8 @@ if (process.argv[2] !== 'collab') {
       state.startupHost = { ...host, instanceId: 'replacement-host', generation: host.generation + 1 };
       await persistRegistry();
     },
-    async replaceHost(pid = host.pid) {
+    async replaceHost(pid: number | 'new' = host.pid) {
+      if (pid === 'new') pid = await startProcess();
       host.pid = pid;
       host.instanceId = 'replacement-host';
       host.generation++;
@@ -199,6 +216,7 @@ if (process.argv[2] !== 'collab') {
       replacement.once('error', listening.reject);
       replacement.listen(descriptor.socketPath, listening.resolve);
       await listening.promise;
+      await chmod(descriptor.socketPath, 0o600);
       await persistLifecycle();
       state.host = host;
       state.failLink = false;
@@ -210,31 +228,55 @@ if (process.argv[2] !== 'collab') {
       throw new Error('Expected registry failure');
     },
     async close() {
+      // Teardown must reap owned children and close sockets even when another
+      // cleanup operation fails; retain every original diagnostic for the test.
+      const cleanupFailures: unknown[] = [];
+      const clean = async (operation: () => Promise<unknown>) => {
+        try { await operation(); }
+        catch (error) { cleanupFailures.push(error); }
+      };
       delayed.resolve();
-      await Promise.all(handled);
-      const startedPid = await readFile(startedPidPath, 'utf8').catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-        throw error;
+      await clean(() => Promise.all(handled));
+      await clean(async () => {
+        const startedPid = await readFile(startedPidPath, 'utf8').catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw error;
+        });
+        if (startedPid) {
+          try { process.kill(Number(startedPid), 'SIGKILL'); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+        }
       });
-      if (startedPid) {
-        try { process.kill(Number(startedPid), 'SIGKILL'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
-      }
-      if (fixtureProcess) {
-        if (fixtureProcess.exitCode === null && fixtureProcess.signalCode === null) fixtureProcess.kill();
-        await fixtureExited;
-      }
-      await writeFile(statePath, JSON.stringify({ ...state, host: undefined }));
-      await rm(lifecyclePath, { force: true });
-      await runtime.close();
+      await clean(stopProcess);
+      await clean(() => writeFile(statePath, JSON.stringify({ ...state, host: undefined })));
+      await clean(() => rm(lifecyclePath, { force: true }));
+      await clean(() => runtime.close());
       for (const socket of sockets) socket.destroy();
-      await Promise.all(servers.map(server => {
+      for (const server of servers) await clean(() => {
         const closed = Promise.withResolvers<void>();
-        server.close(() => closed.resolve());
+        server.close(error => error ? closed.reject(error) : closed.resolve());
         return closed.promise;
-      }));
-      await rm(directory, { recursive: true, force: true });
-      assert.deepEqual(failures, []);
+      });
+      await clean(() => rm(directory, { recursive: true, force: true }));
+      cleanupFailures.push(...failures);
+      if (cleanupFailures.length) throw new AggregateError(cleanupFailures, `Retirement fixture cleanup failed\n${cleanupFailures.map(String).join('\n')}`);
     },
   };
+  } catch (error) {
+    const cleanupFailures: unknown[] = [];
+    for (const socket of sockets) socket.destroy();
+    const cleanup = await Promise.allSettled([
+      stopProcess(),
+      ...servers.map(server => {
+        const closed = Promise.withResolvers<void>();
+        server.close(failure => failure ? closed.reject(failure) : closed.resolve());
+        return closed.promise;
+      }),
+    ]);
+    for (const result of cleanup) if (result.status === 'rejected') cleanupFailures.push(result.reason);
+    try { await rm(directory, { recursive: true, force: true }); }
+    catch (failure) { cleanupFailures.push(failure); }
+    if (cleanupFailures.length) throw new AggregateError([error, ...cleanupFailures], `Retirement fixture setup failed\n${[error, ...cleanupFailures].map(String).join('\n')}`);
+    throw error;
+  }
 }

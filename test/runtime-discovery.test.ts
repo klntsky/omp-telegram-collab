@@ -104,6 +104,10 @@ if (process.argv[2] !== 'collab') {
     id: 'topic', botId: 1, chatId: -100, threadId: 2, instanceId: 1, cwd: directory,
     name: 'Discovery regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' },
   };
+  // Relay provisioning is not the discovery failure under test. Establish its
+  // lease before the startup deadline so a cold daemon cannot consume the
+  // budget before the first retryable link rejection has even occurred.
+  await runtime.acquire();
   return {
     runtime, session, executable, startupTimeoutMs,
     async attempts(): Promise<number[]> { return JSON.parse(await readFile(attemptsPath, 'utf8')); },
@@ -148,6 +152,7 @@ test('managed startup preserves the last original not-found diagnostic at its or
 test('managed startup retains the original discovery rejection when the final probe is killed at the deadline', async t => {
   const app = await startupFixture('deadline');
   t.after(() => app.close());
+  const started = Date.now();
   await assert.rejects(app.runtime.ensure(app.session), error => {
     assert.ok(error instanceof Error);
     assert.equal((error as NodeJS.ErrnoException).code, 1);
@@ -159,6 +164,8 @@ test('managed startup retains the original discovery rejection when the final pr
     assert.equal(cause.killed, true);
     return true;
   });
+  assert.equal((await app.attempts()).length, 1);
+  assert.ok(Date.now() - started >= app.startupTimeoutMs - 100);
 });
 
 test('managed startup does not retry a nontransient Collab link subprocess failure', async t => {
