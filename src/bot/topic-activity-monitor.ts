@@ -20,6 +20,12 @@ export class TopicActivityMonitor {
     if (this.deps.isStopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session))
       return Promise.resolve();
     const observation = this.owners.activityObservation(session);
+    if (activity === 'finished' && this.deps.options.store.getSession(session.id)?.status !== 'closed') {
+      if (observation.turnOutcome === 'failed') {
+        activity = 'unknown';
+        suspect = false;
+      } else if (observation.turnOutcome === 'retrying') activity = 'running';
+    }
     observation.value = activity;
     observation.observedAt = activity === 'unknown' ? undefined : Date.now();
     observation.suspect = suspect;

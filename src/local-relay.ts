@@ -14,7 +14,11 @@ interface Room {
 
 /** Only the four-byte routing envelope is inspected; encrypted payloads remain opaque. */
 export class LocalRelay {
-  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false });
+  // A snapshot burst must yield between frames so outbound writes can drain.
+  // ws otherwise emits an entire buffered batch synchronously, hitting the
+  // pending-send limit even for a fast local guest.
+  // https://github.com/websockets/ws/blob/8.22.0/lib/receiver.js#L605-L614
+  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false, allowSynchronousEvents: false });
   private readonly rooms = new Map<string, Room>();
   private readonly alive = new Set<WebSocket>();
   private readonly pending = new Map<WebSocket, number>();
@@ -49,7 +53,9 @@ export class LocalRelay {
     const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
     const count = this.pending.get(socket) ?? 0;
     if (socket.bufferedAmount + bytes > MAX_SOCKET_QUEUE || this.queuedBytes + bytes > MAX_TOTAL_QUEUE || count >= 128) {
-      this.report('relay backpressure', new Error('Relay outbound queue capacity exceeded; disconnecting slow consumer'));
+      this.report('relay backpressure', new Error(
+        `Relay outbound queue capacity exceeded; disconnecting slow consumer (socketBytes=${socket.bufferedAmount}, frameBytes=${bytes}, totalBytes=${this.queuedBytes}, pendingFrames=${count})`,
+      ));
       socket.terminate();
       return;
     }

@@ -30,6 +30,7 @@ export interface HostActivityObservation {
   observedAt?: number;
   suspect: boolean;
   revision: number;
+  turnOutcome?: 'failed' | 'retrying';
   probe?: Promise<void>;
   controller?: AbortController;
 }

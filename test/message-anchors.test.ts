@@ -45,6 +45,31 @@ test('message anchors preserve receipt aliases and exact native identity across 
   }
 });
 
+test('confirmed multipart reply parts survive reopen without completing an interrupted entry', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'omp-interrupted-reply-'));
+  const filename = join(directory, 'telegram.sqlite');
+  let store = new Store(filename);
+  try {
+    const session = store.createSession(topic, 'Interrupted reply');
+    const anchor: MessageAnchor = { ...target('omp-original', 'reply-entry'), kind: 'assistant', partIndex: 0 };
+    store.recordMessageAnchor(session.id, topic.chatId, 200, anchor);
+    store.recordMessageAnchor(session.id, topic.chatId, 202, { ...anchor, partIndex: 2 });
+    store.close();
+    store = new Store(filename);
+    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'reply-entry'), new Set([0, 2]));
+    assert.equal(store.hasReply(session.id, 'omp-original', 'reply-entry'), false);
+    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-other', 'reply-entry'), new Set());
+    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'other-entry'), new Set());
+    store.recordMessageAnchor(session.id, topic.chatId, 201, { ...anchor, partIndex: 1 });
+    store.rememberReply(session.id, 'omp-original', 'reply-entry');
+    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'reply-entry'), new Set([0, 2, 1]));
+    assert.equal(store.hasReply(session.id, 'omp-original', 'reply-entry'), true);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('message anchors isolate native sessions, topics and chats and reject conflicting targets atomically', () => {
   const store = new Store(':memory:');
   try {

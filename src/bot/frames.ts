@@ -1,6 +1,6 @@
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
-import type { HostFrame, CollabUiRequest, CustomMessageEntry } from '@oh-my-pi/pi-wire';
+import type { HostFrame, CollabUiRequest, CustomMessageEntry, WireMessage } from '@oh-my-pi/pi-wire';
 import type { BotOptions } from '../bot.js';
 import type { Listener, SessionObservation, SessionMetadataOwner, HostActivityObservation, TopicActivity } from './types.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
@@ -35,13 +35,16 @@ export interface FrameProjectionDependencies {
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
 }
 
-function assistantText(message: unknown): string | undefined {
-  if (!message || typeof message !== 'object' || !('role' in message) || message.role !== 'assistant' || !('content' in message) || !Array.isArray(message.content)) return undefined;
-  const text = message.content.filter((part): part is {type:'text';text:string} => Boolean(part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string')).map(part => part.text).join('\n');
-  if (!text.trim()) return undefined;
-  return text;
+function assistantReply(message: WireMessage): string | undefined {
+  if (message.role !== 'assistant') return undefined;
+  const text = message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+  if (message.stopReason !== 'error') return text.trim() ? text : undefined;
+  const diagnostic = message.errorMessage ?? 'The provider returned an error without a diagnostic.';
+  const fence = '`'.repeat(Math.max(3, ...Array.from(diagnostic.matchAll(/`+/g), match => match[0].length + 1)));
+  return `${text.trim() ? `${text}\n\n` : ''}OMP provider attempt failed (automatic recovery may follow).\n\n${fence}\n${diagnostic}\n${fence}`;
 }
 export class FrameProjection {
+  private readonly pendingReplies = new WeakMap<Listener, Set<string>>();
   constructor(private readonly deps: FrameProjectionDependencies) {}
   onFrame(
     session: TopicSession,
@@ -60,6 +63,14 @@ export class FrameProjection {
     const ompSessionId = listener.ompSessionId;
     if (ompSessionId === undefined) throw new Error('OMP frame arrived before its session binding');
     if (!replay) listener.feed.accept(frame);
+    const activity = this.deps.activityObservation(session);
+    if (frame.t === 'event') {
+      const event = frame.event;
+      if (event.type === 'auto_retry_start') activity.turnOutcome = 'retrying';
+      if (event.type === 'auto_retry_end') activity.turnOutcome = event.success ? undefined : 'failed';
+      if (event.type === 'message_end' && event.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
+        activity.turnOutcome = event.message.stopReason === 'error' ? 'failed' : undefined;
+    }
     if (frame.t === 'welcome') {
       listener.receiptBoundary = this.deps.options.store.beginPromptReceiptSnapshot(session.id, ompSessionId);
       listener.snapshotReplyTarget = this.deps.options.store.getReplyTarget(session.id);
@@ -121,16 +132,17 @@ export class FrameProjection {
       listener.queuedMessages = frame.state.queuedMessageCount;
       void this.deps.setTopicStatus(
         session,
-        this.deps.options.store.promptQueue.has(session.id) ||
+        activity.turnOutcome === 'retrying' ||
+          this.deps.options.store.promptQueue.has(session.id) ||
           frame.state.isStreaming ||
           listener.queuedMessages > 0
           ? 'running'
-          : 'finished',
+          : activity.turnOutcome === 'failed' ? 'unknown' : 'finished',
       );
-    } else if (frame.t === 'event' && frame.event.type === 'agent_start') {
+    } else if (frame.t === 'event' && (frame.event.type === 'agent_start' || frame.event.type === 'auto_retry_start')) {
       void this.deps.setTopicStatus(session, 'running');
-    } else if (frame.t === 'event' && frame.event.type === 'agent_end') {
-      void this.deps.setTopicStatus(session, listener.queuedMessages > 0 ? 'running' : 'finished', true);
+    } else if (frame.t === 'event' && (frame.event.type === 'agent_end' || frame.event.type === 'auto_retry_end')) {
+      void this.deps.setTopicStatus(session, activity.turnOutcome === 'retrying' || listener.queuedMessages > 0 ? 'running' : activity.turnOutcome === 'failed' ? 'unknown' : 'finished', activity.turnOutcome !== 'failed');
     }
     if (frame.t === 'event') {
       const event = frame.event;
@@ -206,22 +218,42 @@ export class FrameProjection {
         )
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else if (entry.type === 'message') {
-          const result = assistantText(entry.message);
-          if (result) this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
+          const result = assistantReply(entry.message);
+          if (entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
+            activity.turnOutcome = entry.message.stopReason === 'error' ? 'failed' : undefined;
+          if (result && !this.pendingReplies.get(listener)?.has(entry.id))
+            this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
         }
       }
       if (frame.final) {
         this.deps.options.store.markSnapshot(session.id);
         this.deps.options.store.setReplyTarget(session.id, listener.snapshotReplyTarget);
+        if (activity.turnOutcome === 'failed' && activity.value === 'finished')
+          void this.deps.setTopicStatus(session, 'unknown');
       }
       return;
     }
     if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
     const entry = frame.entry;
-    const text = assistantText(entry.message);
+    const text = assistantReply(entry.message);
     if (!text) return;
-    const unseen = this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
-    if (!unseen) return;
+    if (entry.message.role === 'assistant' && entry.message.stopReason === 'error') {
+      if (activity.turnOutcome !== 'retrying') activity.turnOutcome = 'failed';
+      this.deps.sessionObservation(session.id).failure = {
+        operation: 'OMP provider',
+        at: Date.now(),
+        error: entry.message.errorMessage,
+      };
+    } else if (entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying') {
+      activity.turnOutcome = undefined;
+    }
+    const pending = this.pendingReplies.get(listener) ?? new Set<string>();
+    this.pendingReplies.set(listener, pending);
+    if (pending.has(entry.id) || this.deps.options.store.hasReply(session.id, ompSessionId, entry.id)) return;
+    if (entry.message.role === 'assistant' && entry.message.stopReason === 'error')
+      console.error('OMP provider attempt failed.', {
+        sessionId: session.id, ompSessionId, entryId: entry.id, model: entry.message.model,
+      }, entry.message.errorMessage);
     const replyTarget = replay
       ? listener.snapshotReplyTarget
       : this.deps.options.store.getReplyTarget(session.id);
@@ -229,6 +261,7 @@ export class FrameProjection {
       this.deps.dropListener(session.id);
       return;
     }
+    pending.add(entry.id);
     listener.tail = listener.tail
       .then(async () => {
         if (
@@ -246,8 +279,11 @@ export class FrameProjection {
         )
           return;
         let partIndex = 0;
+        const deliveredParts = this.deps.options.store.deliveredReplyParts(session.id, ompSessionId, entry.id);
         for (const part of renderTelegramMarkdown(text)) {
           if (!this.deps.sessionAssigned(current)) return;
+          const index = partIndex++;
+          if (deliveredParts.has(index)) continue;
           const sent = await this.deps.delivery.run(
             session.chatId,
             () =>
@@ -274,13 +310,15 @@ export class FrameProjection {
           if (!sent) return;
           this.deps.options.store.recordMessageAnchor(session.id, sent.chat.id, sent.message_id, {
             ompSessionId, entryId:entry.id, parentEntryId:entry.parentId,
-            kind:'assistant', partIndex:partIndex++,
+            kind:'assistant', partIndex:index,
           });
         }
+        this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
       })
       .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
       .finally(() => {
         listener.queued--;
+        pending.delete(entry.id);
       });
   }
 }

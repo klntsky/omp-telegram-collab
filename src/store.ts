@@ -294,6 +294,8 @@ export class Store {
     this.prompts.recordMessageAnchor(sessionId, chatId, messageId, anchor);
   }
   rememberReply(id: string, ompSessionId: string, entryId: string): boolean { return this.prompts.rememberReply(id, ompSessionId, entryId); }
+  hasReply(id: string, ompSessionId: string, entryId: string): boolean { return this.prompts.hasReply(id, ompSessionId, entryId); }
+  deliveredReplyParts(id: string, ompSessionId: string, entryId: string): Set<number> { return this.prompts.deliveredReplyParts(id, ompSessionId, entryId); }
   hasSnapshot(id: string): boolean { return this.prompts.hasSnapshot(id); }
   markSnapshot(id: string): void { this.prompts.markSnapshot(id); }
   getTopicFinishIcon(id: string): string | undefined {
