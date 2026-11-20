@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import { startLocalRelay } from '../src/local-relay.js';
@@ -34,6 +35,10 @@ test('relay forwards coalesced frame bursts without disconnecting a draining gue
   });
   guest.on('close', code => completed.reject(new Error(`Guest closed before burst completion (${code})`)));
   guest.on('error', completed.reject);
+  // Deliberately stop the consumer while the producer queues more than the
+  // relay's budget. This is a transport condition, not a latency assertion.
+  guest.pause();
+  const resume = delay(500, undefined, { signal: t.signal }).then(() => guest.resume());
   for (let index = 0; index < 4096; index++) {
     const frame = Buffer.alloc(8);
     frame.writeUInt32BE(peer, 0);
@@ -49,6 +54,7 @@ test('relay forwards coalesced frame bursts without disconnecting a draining gue
     host.send(frame);
   }
   await completed.promise;
+  await resume;
   assert.deepEqual(received, Array.from({ length: 4288 }, (_, index) => index));
   const echoed = once(host, 'message', { signal: t.signal });
   const response = Buffer.alloc(8);
