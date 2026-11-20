@@ -119,6 +119,8 @@ BotFather creation limits are account-wide and still apply with independent user
 
 Each Node.js test worker process locks an available seed and approves one fresh QR-token authorization when its first fixture needs a user. Sequential fixtures exclusively borrow that worker's client; parallel workers and separate checkouts use independent keys. Fixture teardown ends its own request scope without disconnecting the worker's client. The worker's final teardown closes the connection and releases its authorization lease. Failed authorization setup is not replayed by later fixtures in the same worker.
 
+Every session-list save retains at most the newest 30 entries. Older entries are removed only from local storage; their Telegram authorizations are not revoked, so active workers keep their connections.
+
 Fresh clients start on the seed's saved test-network datacenter, avoiding an unnecessary cross-datacenter login; server-directed migration remains supported. Saved authorizations already in use are not reused as seeds. Definitively dead sessions are removed before another seed is tried; transient network failures and rate limits retain the credentials and original diagnostic. If no usable seed remains, run interactive login again.
 
 The private state directory under `~/.local/state/omp-telegram-test` owns cross-process locks. Do not unlink live lock files. Authorization forking does not cache flood failures, retry rejected login requests, or replay ambiguous mutations. More sessions do not bypass account-level Telegram limits.
