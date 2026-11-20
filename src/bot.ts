@@ -177,8 +177,8 @@ async start(onReady?: () => void): Promise<void> {
               // Middleware failures belong to their chat, not the shared polling loop.
               // grammY wraps them with their context in Bot.handleUpdate:
               // https://github.com/grammyjs/grammY/blob/v1.46.0/src/bot.ts#L366-L408
-              console.error('Telegram chat update failed.', error.error, {
-                botId: this.id, chatId: error.ctx.chat.id, updateId: update.update_id,
+              logEvent('error', 'telegram-chat-update-failed', {
+                message: 'Telegram chat update failed.', error, botId: this.id, chatId: error.ctx.chat.id, updateId: update.update_id,
               });
             }
             offset = update.update_id + 1;

@@ -16,22 +16,9 @@ export interface GuestTransport {
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 
-function logSocketError(context: string, error: unknown, ticket: string, url: string): void {
-	const secrets = [url, ticket, encodeURIComponent(ticket),
-		new URLSearchParams({ ticket }).toString().slice("ticket=".length)].filter(Boolean);
-	const redact = (value: string): string => {
-		for (const secret of secrets) value = value.split(secret).join("[redacted]");
-		return value;
-	};
-	if (!(error instanceof Error)) {
-		console.error(context, redact(String(error)));
-		return;
-	}
-	const message = redact(error.message);
-	const stack = error.stack === undefined ? undefined : redact(error.stack);
-	const name = redact(error.name);
-	console.error(context, message === error.message && stack === error.stack && name === error.name
-		? error : { name, message, stack, redacted: true });
+function logSocketError(event: string, error: unknown): void {
+	// Native socket exceptions can contain the ticket URL, so omit their message and stack.
+	console.error({ level: "error", event, errorType: error instanceof Error ? error.name : typeof error });
 }
 
 export class GatewaySocket implements GuestTransport {
@@ -84,7 +71,7 @@ export class GatewaySocket implements GuestTransport {
 		try {
 			ws = new WebSocket(url);
 		} catch (error) {
-			logSocketError("Session WebSocket construction failed:", error, ticket, url.href);
+			logSocketError("session-websocket-construction-failed", error);
 			this.reconnect("Could not connect to the session. Reconnecting…");
 			return;
 		}
@@ -155,8 +142,7 @@ export class GatewaySocket implements GuestTransport {
 		try {
 			ws.send(text);
 		} catch (error) {
-			logSocketError("Session WebSocket send failed; delivery is uncertain:", error,
-				new URL(ws.url).searchParams.get("ticket") ?? "", ws.url);
+			logSocketError("session-websocket-send-failed", error);
 			this.reconnect("Could not send to the session. Reconnecting; delivery is uncertain.");
 		}
 	}

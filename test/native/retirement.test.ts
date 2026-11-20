@@ -23,7 +23,7 @@ test('idle retirement does not fence a native session waiting for its background
   const omp = await setupOmpEnvironment({
     signal: t.signal, diagnostic: t.diagnostic.bind(t),
     after: ((close: () => unknown | Promise<unknown>) => { cleanup.push(close); }) as TestContext['after'],
-  }, { telegramSecrets: false, tools: ['bash'], scenarios: [{ name: 'retirement-background', prompt, steps: [
+  }, { tools: ['bash'], scenarios: [{ name: 'retirement-background', prompt, steps: [
     { type: 'tool', id: 'call_retirement_background', name: 'bash', arguments: {
       i: 'Holding native background work', command: 'printf started > retirement-job-started; while :; do sleep 1; done',
       timeout: 0, async: true,

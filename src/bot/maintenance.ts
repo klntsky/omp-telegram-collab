@@ -133,7 +133,7 @@ private async notifyProviderSetupFailure(instanceId: number, defaultDir: string,
         notified.add(chatId);
       } catch (error) {
         if (error !== signal.reason)
-          console.error(`Bot ${botId} chat ${chatId} background skills:${instanceId}:provider-setup-notice failed.`, error);
+          logEvent('error', 'provider-setup-notice-failed', {botId,chatId,instanceId,error});
       } finally {
         signal.removeEventListener('abort', abort);
       }

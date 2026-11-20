@@ -5,6 +5,7 @@ import type { SkillCatalogEntry } from '../skill-picker.js';
 import { skillCommandAliases } from '../skill-commands.js';
 import type { AbortSignal as TelegramAbortSignal } from 'abort-controller';
 import { groupCommands, cliCommand } from './commands.js';
+import { logEvent } from '../logging.js';
 
 interface CommandMenuDependencies {
  bot: Bot<Context>; config: AppConfig; store: Store; signal: TelegramAbortSignal;
@@ -65,7 +66,7 @@ syncCommandMenus(): Promise<void> {
           this.commandMenus.set(chat.chatId, fingerprint);
           this.skillAliases.set(chat.chatId, aliases);
         } catch (error) {
-          console.error(`Bot ${this.deps.botId()} chat ${chat.chatId} instance ${instanceId} ${operation} failed.`, error);
+          logEvent('error', 'telegram-command-menu-publish-failed', {botId:this.deps.botId(),chatId:chat.chatId,instanceId,operation,error});
           if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
         }
       }
@@ -81,7 +82,7 @@ syncCommandMenus(): Promise<void> {
         this.skillAliases.delete(chatId);
         this.commandMenuChats.delete(chatId);
       } catch (error) {
-        console.error(`Bot ${this.deps.botId()} chat ${chatId} ${operation} failed.`, error);
+        logEvent('error', 'telegram-command-menu-delete-failed', {botId:this.deps.botId(),chatId,operation,error});
         if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
       }
     }

@@ -158,7 +158,7 @@ export function createServer(options: ServerOptions): GatewayServer {
     })().catch(error => {
       if (authorizationSignal?.aborted && error === authorizationSignal.reason) return;
       if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError))
-        console.error('Mini App HTTP request failed.', error);
+        logEvent('error', 'mini-app-http-request-failed', { message: 'Mini App HTTP request failed.', error });
       if (response.destroyed || response.writableEnded) return;
       if (!response.headersSent) {
         if (error instanceof ServiceTerminatedError) json(response,403,{error:error.message});
@@ -191,7 +191,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       upgraded = true;
       sockets.handleUpgrade(request,socket,head,ws => connectSocket(ws,identity));
     })().catch(error => {
-      console.error('Mini App WebSocket upgrade failed.', error);
+      logEvent('error', 'mini-app-websocket-upgrade-failed', { message: 'Mini App WebSocket upgrade failed.', error });
       if (error instanceof ServiceTerminatedError && !socket.destroyed && !upgraded) {
         const payload = JSON.stringify({error:error.message});
         socket.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\nConnection: close\r\n\r\n${payload}`);
@@ -230,7 +230,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         readAccess.session = current.session;
         readAccess.canControl = current.canControl;
       }).catch(error => {
-        console.error(`Mini App access refresh failed (${identity.botId}, ${identity.sessionId}).`, error);
+        logEvent('error', 'mini-app-access-refresh-failed', { message: 'Mini App access refresh failed.', botId: identity.botId, sessionId: identity.sessionId, error });
         fail(error instanceof AuthorizationUnavailableError ? 1013 : 4003,error instanceof Error ? error.message : 'Access or session unavailable');
       })
         .finally(() => { refreshingAccess = false; });
@@ -246,7 +246,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       const terminate = setTimeout(() => ws.terminate(),1000); terminate.unref();
     }
     async function failAction(error: unknown): Promise<void> {
-      console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
+      logEvent('error', 'mini-app-session-operation-failed', { message: 'Mini App session operation failed.', botId: identity.botId, sessionId: identity.sessionId, error });
       if (error instanceof ServiceTerminatedError) fail(4003,error.message);
       else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
       else if (error instanceof SessionRetiringError) fail(1013,error.message);
@@ -255,7 +255,7 @@ export function createServer(options: ServerOptions): GatewayServer {
         fail(4009,error.message);
         const session = options.store.getSession(identity.sessionId);
         if (session) await botMap.get(identity.botId)?.requestCapacity(session,error.limit).catch(error => {
-          console.error(`Mini App capacity request failed (${identity.botId}, ${identity.sessionId}).`, error);
+          logEvent('error', 'mini-app-capacity-request-failed', { message: 'Mini App capacity request failed.', botId: identity.botId, sessionId: identity.sessionId, error });
         });
       } else fail(4003,error instanceof Error ? error.message : 'Access or session unavailable');
     }
@@ -287,7 +287,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       })().catch(failAction);
     }
     ws.on('error',error => {
-      console.error(`Mini App WebSocket failed (${identity.botId}, ${identity.sessionId}).`, error);
+      logEvent('error', 'mini-app-websocket-failed', { message: 'Mini App WebSocket failed.', botId: identity.botId, sessionId: identity.sessionId, error });
       fail(1011,'Connection failed');
     });
     ws.on('close',() => { closed=true; clearInterval(accessTimer); unsubscribeKill(); release?.(); upstream?.close(); });
@@ -329,7 +329,7 @@ export function createServer(options: ServerOptions): GatewayServer {
           catch (error) { fail(4003,error instanceof ServiceTerminatedError ? error.message : 'Access or session unavailable'); return; }
           let payload: string;
           try { payload = JSON.stringify(frame); } catch (error) {
-            console.error(`Mini App host frame serialization failed (${identity.botId}, ${identity.sessionId}).`, error);
+            logEvent('error', 'mini-app-host-frame-serialization-failed', { message: 'Mini App host frame serialization failed.', botId: identity.botId, sessionId: identity.sessionId, error });
             fail(1011,'Invalid host frame'); return;
           }
           outgoing.push({frame,payload});
