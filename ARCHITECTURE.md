@@ -112,7 +112,11 @@ The runtime owns a lease on a detached local relay daemon and supervises its rec
 
 The forwarding boundary yields between received WebSocket messages so completed outbound writes release their reservations before another frame is admitted. This keeps coalesced snapshot bursts from being mistaken for slow consumers while retaining per-socket, aggregate-byte, and pending-write limits for genuinely congested destinations.
 
+Runtime leases distinguish observation from mutation. The read-only gateway resolves an existing host before requesting admission, so pending graceful retirement does not prevent observation of the work it is waiting for. Read leases neither revoke retirement nor grant mutation permission; ordinary leases and prompt admission retain the retirement fence.
+
 Managed admission enforces the local endpoint; attached hosts retain their terminal-selected relay. Service initialization and maintenance retire previously managed hosts through the native idle guard before later admission resumes their pinned histories. Registry absence cannot prove that startup failed before creating a process: offline retirement verifies the private lifecycle, pinned session, operating-system process ancestry, and execution identity. The lifecycle endpoint remains the authority for accepting retirement; migration does not signal busy hosts or replay prompts.
+
+The private lifecycle rejects idle-guarded retirement while native background jobs or queued/in-flight result deliveries remain. The native extension's streaming-idle predicate alone is not a terminal-work boundary. Explicit retirement remains a drain request, and only verified process exit releases the managed slot or authorizes a replacement.
 
 `Omp` is the single application-facing TypeScript contract for OMP communication. Bot adapters and the gateway depend on that contract, not on transport implementations. `OmpRuntime` implements host lifecycle, native CLI and RPC operations, lifecycle sockets, Collab connections and activity reads, and managed-history watcher acquisition. Returned connections and watchers retain their own protocol and resource lifetimes.
 

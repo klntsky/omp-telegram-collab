@@ -11,7 +11,7 @@ interface ActivityDependencies {
 // Leases and turn observations share one activity record per native host.
 export interface RuntimeActivity {
   hostActivity(id: string): HostActivity;
-  retain(id: string): () => void;
+  retain(id: string, access?: 'read' | 'write'): () => void;
   markPrompt(id: string): void;
   observeFrame(id: string, frame: HostFrame): void;
   forget(id: string): void;
@@ -28,9 +28,11 @@ export function createActivity(deps: ActivityDependencies): RuntimeActivity {
     return activity;
   }
 
-  function retain(id: string): () => void {
+  function retain(id: string, access: 'read' | 'write' = 'write'): () => void {
     deps.assertActive();
-    if (deps.managed.get(id)?.retiring || deps.stopping.has(id)) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
+    // Retirement waits for admitted work, which may still need observation.
+    // A read lease cannot cancel retirement or authorize another mutation.
+    if (access === 'write' && (deps.managed.get(id)?.retiring || deps.stopping.has(id))) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
     const activity = hostActivity(id);
     activity.leases++;
     activity.lastUsed = Date.now();

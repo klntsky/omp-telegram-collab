@@ -209,7 +209,15 @@ export default async function hostLifecycle(pi) {
               retirementResponse('expired');
               return;
             }
-            if (request.guard === 'idle' && (!context.isIdle() || context.hasPendingMessages())) {
+            // isIdle only means "not streaming": background jobs and result
+            // deliveries can still wake the current run. Do not fence admission
+            // during that scheduling pause; native shutdown also waits for it.
+            // AgentSession.getAsyncJobSnapshot and InteractiveMode.checkShutdownRequested:
+            // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/agent-session.ts
+            // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/modes/interactive-mode.ts
+            const jobs = request.guard === 'idle' ? context.getAsyncJobSnapshot() : null;
+            if (request.guard === 'idle' && (!context.isIdle() || context.hasPendingMessages() ||
+                (jobs !== null && (jobs.running.length > 0 || jobs.delivery.queued > 0 || jobs.delivery.delivering)))) {
               retirementResponse('busy');
               return;
             }

@@ -308,9 +308,12 @@ export function createServer(options: ServerOptions): GatewayServer {
       connectedSession = session;
       if (closed) return;
       checkGeneration(identity);
-      release = options.runtime.retain(session.id);
+      release = options.runtime.retain(session.id, 'read');
       checkTermination();
-      const binding = await options.runtime.ensure(session,async () => { await authorize(identity,session); });
+      // The viewer must not readmit a host that is draining active work.
+      // Only confirmed absence takes the mutation-authorized startup path.
+      const binding = await options.runtime.resolveExisting(session) ??
+        await options.runtime.ensure(session,async () => { await authorize(identity,session); });
       if (closed) return;
       checkTermination();
       await authorize(identity,session,readAccess);
