@@ -106,7 +106,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionObservation: (id) => recovery.sessionObservation(id),
     setTopicStatus: (session, status, completed) => activity.setTopicStatus(session, status, completed),
     settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
-    recoverReplies: session => { void maintenance.runBackground(`reply-recovery:${session.id}`, () => replies.recover(session)); },
+    recoverReplies: session => replies.wake(session, true),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
@@ -138,10 +138,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     refreshTopicStatus: activity.refreshTopicStatus.bind(activity),
     runBackground: maintenance.runBackground.bind(maintenance),
     drainPrompts: session => worker.drain(session),
-    recoverReplies: session => {
-      void maintenance.runBackground(`reply-recovery:${session.id}`, () =>
-        connections.listeners.has(session.id) ? replies.drain(session) : replies.recover(session));
-    },
+    recoverReplies: session => replies.wake(session, !connections.listeners.has(session.id)),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
@@ -187,7 +184,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     options: options,
     queueReply: (session, ompSessionId, entry, replyTo, historical) => {
       replies.accept(session, ompSessionId, entry, replyTo, historical);
-      if (!historical) void maintenance.runBackground(`reply-delivery:${session.id}`, () => replies.drain(session));
+      if (!historical) replies.wake(session);
     },
   });
   const replies = new ReplyDelivery({
@@ -195,6 +192,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     ready: authorization.ready.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
+    runBackground: maintenance.runBackground.bind(maintenance),
   });
   const menus: BotCommandMenus = new BotCommandMenus({
     bot: bot,

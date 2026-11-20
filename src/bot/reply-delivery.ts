@@ -14,12 +14,14 @@ interface ReplyDeliveryDependencies {
   ready(chatId: number): Promise<boolean>;
   sessionAssigned(session: TopicSession): boolean;
   stopped(): boolean;
+  runBackground(phase: string, operation: () => Promise<void>): Promise<void>;
 }
 
 export class ReplyDelivery {
   private readonly drains = new Map<string, Promise<void>>();
   private readonly requested = new Set<string>();
-  private readonly captures = new Map<string, Promise<void>>();
+  private readonly recoveryRequested = new Set<string>();
+  private readonly retryAfter = new Map<string, number>();
   private readonly captured = new Map<string, string>();
   constructor(private readonly deps: ReplyDeliveryDependencies) {}
 
@@ -32,28 +34,39 @@ export class ReplyDelivery {
       historical ? [] : renderTelegramMarkdown(text), replyTo, store.getSessionGeneration(session.id), historical);
   }
 
-  drain(session: TopicSession): Promise<void> {
+  wake(session: TopicSession, recover = false): void {
+    if (this.deps.stopped() || this.deps.options.config.terminated ||
+        Date.now() < (this.retryAfter.get(session.id) ?? 0)) return;
     this.requested.add(session.id);
-    const existing = this.drains.get(session.id);
-    if (existing) return existing;
-    const operation = this.deliver(session).finally(() => {
+    if (recover) this.recoveryRequested.add(session.id);
+    if (this.drains.has(session.id)) return;
+    // Coalesce before creating background tasks, including upgrades to history recovery.
+    const operation = this.deps.runBackground(`reply-delivery:${session.id}`, async () => {
+      try {
+        do {
+          if (this.recoveryRequested.delete(session.id)) await this.recover(session);
+          else await this.deliver(session);
+        } while (this.requested.has(session.id) || this.recoveryRequested.has(session.id));
+        this.retryAfter.delete(session.id);
+      } catch (error) {
+        // Every event shares this cooldown; existing maintenance provides the next wake.
+        this.retryAfter.set(session.id, Date.now() + 30000);
+        throw error;
+      }
+    }).finally(() => {
       this.drains.delete(session.id);
       this.requested.delete(session.id);
+      this.recoveryRequested.delete(session.id);
     });
     this.drains.set(session.id, operation);
-    return operation;
   }
 
-  async recover(session: TopicSession): Promise<void> {
-    await this.drain(session);
+  private async recover(session: TopicSession): Promise<void> {
+    await this.deliver(session);
     if (session.runtime.kind !== 'managed' || this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session) || session.status !== 'open') return;
-    let capture = this.captures.get(session.id);
-    if (!capture) {
-      capture = this.capture(session).finally(() => this.captures.delete(session.id));
-      this.captures.set(session.id, capture);
-    }
-    await capture;
-    await this.drain(session);
+    await this.capture(session);
+    this.requested.add(session.id);
+    await this.deliver(session);
   }
 
   private async capture(session: TopicSession): Promise<void> {
@@ -126,7 +139,7 @@ export class ReplyDelivery {
   }
 
   async close(): Promise<void> {
-    const results = await Promise.allSettled([...this.drains.values(), ...this.captures.values()]);
+    const results = await Promise.allSettled(this.drains.values());
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
     if (errors.length === 1) throw errors[0];
     if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));

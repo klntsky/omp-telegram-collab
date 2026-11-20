@@ -65,9 +65,30 @@ export function registerReplyRecovery(): void {
     app.disconnectGuests()();
     await app.service.ensureMirroring(second, binding);
     await app.waitForCondition(() => app.hostFrames.slice(frames).some(frame => frame.t === 'welcome'));
+    // Fail local persistence after a real Telegram send; no API response is fabricated.
+    app.store.db.exec(`CREATE TEMP TRIGGER reject_reply_checkpoint BEFORE INSERT ON message_anchors
+      WHEN NEW.kind='assistant' BEGIN SELECT RAISE(FAIL,'Injected reply checkpoint failure'); END`);
     gate.release();
     const secondReply = await completeWriteTask(app, replaced, secondPrompt, second.threadId);
-    assert.ok(app.store.getMessageAnchor(second.id, binding.sessionId, second.chatId, secondReply.id));
+    await app.waitForCondition(() => app.store.db.prepare('SELECT error FROM replies WHERE session_id=?')
+      .get(second.id)?.error === 'Injected reply checkpoint failure');
+    const failedAt = performance.now();
+    assert.equal(app.store.getMessageAnchor(second.id, binding.sessionId, second.chatId, secondReply.id), undefined);
+    assert.equal(app.store.replies.pending(second.id)[0]?.nextPart, 0);
+    app.store.db.exec('DROP TRIGGER reject_reply_checkpoint');
+    app.disconnectGuests()();
+    await app.service.ensureMirroring(second, binding);
+    const retry = () => app.apiCalls.find(call => {
+      if (call.method !== 'sendRichMessage' ||
+          requestPayload.parse(call.payload).message_thread_id !== second.threadId) return false;
+      const id = successfulReply.parse(call.result).result.message_id;
+      return id !== secondReply.id && app.store.getMessageAnchor(second.id, binding.sessionId, second.chatId, id);
+    });
+    await app.waitForCondition(() => retry() !== undefined, 'reply checkpoint retry', 90000);
+    assert.ok(performance.now() - failedAt >= 29000);
+    assert.equal(app.store.getMessageAnchor(second.id, binding.sessionId, second.chatId,
+      successfulReply.parse(retry()!.result).result.message_id)?.partIndex, 0);
+    assert.deepEqual(app.store.replies.pending(second.id), []);
     await app.runtime.stop(second);
 
     const third = await createManagedTopic(app);

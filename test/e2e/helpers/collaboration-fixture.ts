@@ -391,7 +391,7 @@ export interface CollaborationTest {
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
   waitForTaskStarted(name: string): Promise<void>;
-  waitForCondition(predicate: () => boolean | Promise<boolean>): Promise<void>;
+  waitForCondition(predicate: () => boolean | Promise<boolean>, phase?: string, timeoutMs?: number): Promise<void>;
   waitForMessage(predicate: (message: Message) => boolean): Promise<Message>;
   waitForReply(options: { replyToMessageId: number; threadId?: number }): Promise<Message>;
 }
