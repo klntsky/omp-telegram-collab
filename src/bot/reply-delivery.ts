@@ -17,12 +17,16 @@ interface ReplyDeliveryDependencies {
   runBackground(phase: string, operation: () => Promise<void>): Promise<void>;
 }
 
+// Volatile coordination only; SQLite owns payloads and confirmed delivery progress.
+interface ReplyWork {
+  task?: Promise<void>;
+  next?: 'delivery' | 'recovery';
+  retryAfter?: number;
+  captured?: string;
+}
+
 export class ReplyDelivery {
-  private readonly drains = new Map<string, Promise<void>>();
-  private readonly requested = new Set<string>();
-  private readonly recoveryRequested = new Set<string>();
-  private readonly retryAfter = new Map<string, number>();
-  private readonly captured = new Map<string, string>();
+  private readonly work = new Map<string, ReplyWork>();
   constructor(private readonly deps: ReplyDeliveryDependencies) {}
 
   accept(session: TopicSession, ompSessionId: string, entry: SessionEntry, replyTo?: number, historical = false): void {
@@ -35,48 +39,45 @@ export class ReplyDelivery {
   }
 
   wake(session: TopicSession, recover = false): void {
-    if (this.deps.stopped() || this.deps.options.config.terminated ||
-        Date.now() < (this.retryAfter.get(session.id) ?? 0)) return;
-    this.requested.add(session.id);
-    if (recover) this.recoveryRequested.add(session.id);
-    if (this.drains.has(session.id)) return;
+    if (this.deps.stopped() || this.deps.options.config.terminated) return;
+    const work: ReplyWork = this.work.get(session.id) ?? {};
+    if (Date.now() < (work.retryAfter ?? 0)) return;
+    work.next = recover || work.next === 'recovery' ? 'recovery' : 'delivery';
+    if (work.task) return;
+    this.work.set(session.id, work);
     // Coalesce before creating background tasks, including upgrades to history recovery.
-    const operation = this.deps.runBackground(`reply-delivery:${session.id}`, async () => {
+    work.task = this.deps.runBackground(`reply-delivery:${session.id}`, async () => {
       try {
-        do {
-          if (this.recoveryRequested.delete(session.id)) await this.recover(session);
-          else await this.deliver(session);
-        } while (this.requested.has(session.id) || this.recoveryRequested.has(session.id));
-        this.retryAfter.delete(session.id);
+        while (work.next) {
+          const next = work.next;
+          work.next = undefined;
+          await this.deliver(session);
+          if (next === 'recovery' && session.runtime.kind === 'managed' && !this.deps.stopped() &&
+              !this.deps.options.config.terminated && this.deps.sessionAssigned(session) && session.status === 'open') {
+            await this.capture(session, work);
+            await this.deliver(session);
+          }
+        }
+        work.retryAfter = undefined;
       } catch (error) {
         // Every event shares this cooldown; existing maintenance provides the next wake.
-        this.retryAfter.set(session.id, Date.now() + 30000);
+        work.retryAfter = Date.now() + 30000;
         throw error;
       }
     }).finally(() => {
-      this.drains.delete(session.id);
-      this.requested.delete(session.id);
-      this.recoveryRequested.delete(session.id);
+      work.task = undefined;
+      work.next = undefined;
     });
-    this.drains.set(session.id, operation);
   }
 
-  private async recover(session: TopicSession): Promise<void> {
-    await this.deliver(session);
-    if (session.runtime.kind !== 'managed' || this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session) || session.status !== 'open') return;
-    await this.capture(session);
-    this.requested.add(session.id);
-    await this.deliver(session);
-  }
-
-  private async capture(session: TopicSession): Promise<void> {
+  private async capture(session: TopicSession, work: ReplyWork): Promise<void> {
     const store = this.deps.options.store;
     const generation = store.getSessionGeneration(session.id);
     const source = await this.deps.options.runtime.historySource(session);
     if (!source) return;
     const metadata = await stat(source.path, { bigint: true });
     const stamp = `${source.sessionId}:${source.path}:${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeNs}`;
-    if (this.captured.get(session.id) === stamp) return;
+    if (work.captured === stamp) return;
     const entries = await readReplyHistory(source);
     if (this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session) || store.getSessionGeneration(session.id) !== generation || store.getSession(session.id)?.status !== 'open') return;
     const historical = !store.hasSnapshot(session.id);
@@ -89,57 +90,55 @@ export class ReplyDelivery {
         replyTo = store.replies.getReceiptMessageId(session.id, source.sessionId, entry.id);
       } else this.accept(session, source.sessionId, entry, replyTo, historical);
     }
-    this.captured.set(session.id, stamp);
+    work.captured = stamp;
     store.markSnapshot(session.id);
   }
 
   private async deliver(session: TopicSession): Promise<void> {
     const store = this.deps.options.store;
-    while (this.requested.delete(session.id)) {
-      if (this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session)) return;
-      const pending = store.replies.pending(session.id);
-      if (!pending.length) continue;
-      if (store.getSession(session.id)?.status !== 'open') {
-        for (const reply of pending) store.replies.discard(reply);
-        return;
+    if (this.deps.stopped() || this.deps.options.config.terminated || !this.deps.sessionAssigned(session)) return;
+    const pending = store.replies.pending(session.id);
+    if (!pending.length) return;
+    if (store.getSession(session.id)?.status !== 'open') {
+      for (const reply of pending) store.replies.discard(reply);
+      return;
+    }
+    if (!await this.deps.ready(session.chatId)) return;
+    for (const reply of pending) {
+      const current = store.getSession(session.id);
+      if (current?.status !== 'open' || store.getSessionGeneration(session.id) !== reply.generation) {
+        store.replies.discard(reply);
+        continue;
       }
-      if (!await this.deps.ready(session.chatId)) return;
-      for (const reply of pending) {
-        const current = store.getSession(session.id);
-        if (current?.status !== 'open' || store.getSessionGeneration(session.id) !== reply.generation) {
-          store.replies.discard(reply);
-          continue;
-        }
-        const active = () => !this.deps.stopped() && !this.deps.options.config.terminated &&
-          this.deps.sessionAssigned(current) && store.getSession(session.id)?.status === 'open' &&
-          store.getSessionGeneration(session.id) === reply.generation;
-        while (reply.nextPart < reply.parts.length) {
-          const sent = await this.deps.delivery.run(session.chatId, async () => {
-            if (!active()) return undefined;
-            try {
-              const result = await this.deps.bot.api.sendRichMessage(session.chatId, { markdown: reply.parts[reply.nextPart]! }, {
-                message_thread_id: session.threadId === 1 ? undefined : session.threadId,
-                ...(reply.replyTo === undefined ? {} : { reply_parameters: { message_id: reply.replyTo, allow_sending_without_reply: true } }),
-              });
-              store.replies.confirm(reply, result.chat.id, result.message_id);
-              return result;
-            } catch (error) {
-              // Leave unconfirmed chunks pending: a lost acknowledgement may duplicate
-              // a reply on retry, but must not permanently suppress its delivery.
-              try { store.replies.fail(reply, error); }
-              catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
-              throw error;
-            }
-          }, active);
-          if (!sent) return;
-          reply.nextPart++;
-        }
+      const active = () => !this.deps.stopped() && !this.deps.options.config.terminated &&
+        this.deps.sessionAssigned(current) && store.getSession(session.id)?.status === 'open' &&
+        store.getSessionGeneration(session.id) === reply.generation;
+      while (reply.nextPart < reply.parts.length) {
+        const sent = await this.deps.delivery.run(session.chatId, async () => {
+          if (!active()) return undefined;
+          try {
+            const result = await this.deps.bot.api.sendRichMessage(session.chatId, { markdown: reply.parts[reply.nextPart]! }, {
+              message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+              ...(reply.replyTo === undefined ? {} : { reply_parameters: { message_id: reply.replyTo, allow_sending_without_reply: true } }),
+            });
+            store.replies.confirm(reply, result.chat.id, result.message_id);
+            return result;
+          } catch (error) {
+            // Leave unconfirmed chunks pending: a lost acknowledgement may duplicate
+            // a reply on retry, but must not permanently suppress its delivery.
+            try { store.replies.fail(reply, error); }
+            catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
+            throw error;
+          }
+        }, active);
+        if (!sent) return;
+        reply.nextPart++;
       }
     }
   }
 
   async close(): Promise<void> {
-    const results = await Promise.allSettled(this.drains.values());
+    const results = await Promise.allSettled(Array.from(this.work.values(), work => work.task));
     const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
     if (errors.length === 1) throw errors[0];
     if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('\n'));
