@@ -121,7 +121,7 @@ export class OmpRuntime implements Omp {
       stopping: this.#stopping,
       hostActivity: (id) => runtime.#activity.hostActivity(id),
       pending: this.#pending,
-      ensure: (session, beforeMutation) => runtime.ensure(session, beforeMutation),
+      presetLaunch: session => runtime.#settings.presetLaunch(session),
       managed: this.#managed,
       list: (deadline) => runtime.#registry.list(deadline),
       shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
