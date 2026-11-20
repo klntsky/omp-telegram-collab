@@ -71,13 +71,17 @@ export function registerReplyRecovery(): void {
     gate.release();
     const secondReply = await completeWriteTask(app, replaced, secondPrompt, second.threadId);
     await app.waitForCondition(() => app.store.db.prepare('SELECT error FROM replies WHERE session_id=?')
-      .get(second.id)?.error === 'Injected reply checkpoint failure');
+      .get(second.id)?.error === 'Injected reply checkpoint failure' &&
+      app.store.replies.retryAfter(second.id) > Date.now());
     const failedAt = performance.now();
+    const retryAfter = app.store.replies.retryAfter(second.id);
     assert.equal(app.store.getMessageAnchor(second.id, binding.sessionId, second.chatId, secondReply.id), undefined);
     assert.equal(app.store.replies.pending(second.id)[0]?.nextPart, 0);
     app.store.db.exec('DROP TRIGGER reject_reply_checkpoint');
     app.disconnectGuests()();
     await app.service.ensureMirroring(second, binding);
+    await app.restart();
+    assert.equal(app.store.replies.retryAfter(second.id), retryAfter);
     const retry = () => app.apiCalls.find(call => {
       if (call.method !== 'sendRichMessage' ||
           requestPayload.parse(call.payload).message_thread_id !== second.threadId) return false;

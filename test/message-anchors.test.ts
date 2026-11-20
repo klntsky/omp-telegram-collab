@@ -124,8 +124,13 @@ test('reply checkpoints roll back atomically and unconfirmed chunks retry after 
     assert.equal(second.nextPart, 1);
     const lostResponse = 'Original transport failure\nresponse unavailable';
     store.replies.fail(second, new Error(lostResponse));
+    const retryAfter = Date.now() + 30000;
+    store.replies.defer(session.id, retryAfter);
+    store.replies.defer(session.id, retryAfter - 1000);
     store.close();
     store = new Store(filename);
+    assert.equal(store.replies.retryAfter(session.id), retryAfter);
+    assert.equal(store.replies.retryAfter('absent-session'), 0);
     const recovered = store.replies.pending(session.id)[0]!;
     assert.equal(recovered.nextPart, 1);
     assert.equal(recovered.replyTo, 100);

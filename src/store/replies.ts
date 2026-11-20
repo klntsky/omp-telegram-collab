@@ -15,6 +15,15 @@ export interface Reply {
 export class ReplyLedger {
   constructor(private readonly db: DatabaseSync) {}
 
+  retryAfter(sessionId: string): number {
+    return Number(this.db.prepare('SELECT retry_after FROM reply_cooldowns WHERE session_id=?').get(sessionId)?.retry_after ?? 0);
+  }
+
+  defer(sessionId: string, until: number): void {
+    this.db.prepare(`INSERT INTO reply_cooldowns VALUES (?,?)
+      ON CONFLICT(session_id) DO UPDATE SET retry_after=MAX(retry_after,excluded.retry_after)`).run(sessionId, until);
+  }
+
   stage(sessionId: string, ompSessionId: string, entryId: string, parentEntryId: string | null,
     parts: string[], replyTo: number | undefined, generation: number, historical = false): void {
     this.db.prepare(`INSERT OR IGNORE INTO replies

@@ -21,7 +21,6 @@ interface ReplyDeliveryDependencies {
 interface ReplyWork {
   task?: Promise<void>;
   next?: 'delivery' | 'recovery';
-  retryAfter?: number;
   captured?: string;
 }
 
@@ -41,7 +40,7 @@ export class ReplyDelivery {
   wake(session: TopicSession, recover = false): void {
     if (this.deps.stopped() || this.deps.options.config.terminated) return;
     const work: ReplyWork = this.work.get(session.id) ?? {};
-    if (Date.now() < (work.retryAfter ?? 0)) return;
+    if (!work.task && Date.now() < this.deps.options.store.replies.retryAfter(session.id)) return;
     work.next = recover || work.next === 'recovery' ? 'recovery' : 'delivery';
     if (work.task) return;
     this.work.set(session.id, work);
@@ -58,10 +57,10 @@ export class ReplyDelivery {
             await this.deliver(session);
           }
         }
-        work.retryAfter = undefined;
       } catch (error) {
-        // Every event shares this cooldown; existing maintenance provides the next wake.
-        work.retryAfter = Date.now() + 30000;
+        // Persist the deadline so reconnects and service restarts share the same cooldown.
+        try { this.deps.options.store.replies.defer(session.id, Date.now() + 30000); }
+        catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
         throw error;
       }
     }).finally(() => {
