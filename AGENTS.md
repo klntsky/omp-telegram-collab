@@ -30,6 +30,7 @@
 - Do not include commit hashes, abbreviated commit IDs, or commit numbers in user-facing responses unless explicitly requested. Report that changes were committed without displaying an identifier.
 - When referring to a GitHub branch in user-facing responses, link its full GitHub branch URL rather than mentioning only its name.
 - When the user says "remember" a preference or instruction, update AGENTS.md with the durable rule rather than only acknowledging it in chat.
+- Do not post comments or reviews on GitHub. Create pull requests with an empty body; report review findings, verification, and any manual test overrides in the user chat instead.
 - When the user asks why you did something, quote the literal relevant AGENTS.md lines and include their line numbers. If no AGENTS.md rule supports the decision, say so explicitly rather than attributing it to an instruction.
 - Use pnpm for package installation, dependency management, packaging, and package-script execution. Consumer instructions must use pnpm rather than the npm CLI; the npm registry remains the package distribution registry.
 - Use the current Node.js LTS through nvm for development and verification. Keep `.nvmrc`, the package engine requirement, Node.js types, and setup documentation synchronized. Do not add compatibility support for older runtimes.
