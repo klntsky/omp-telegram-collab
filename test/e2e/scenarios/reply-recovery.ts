@@ -120,7 +120,10 @@ export function registerReplyRecovery(): void {
     const firstChunkId = successfulReply.parse(confirmed[0]!.result).result.message_id;
     await app.restart();
     assert.equal(app.store.getMessageAnchor(third.id, thirdSource.sessionId, third.chatId, firstChunkId)?.partIndex, 0);
-    await app.waitForCondition(() => app.store.replies.pending(third.id).length === 0);
+    await app.waitForCondition(() => app.apiCalls.filter(call => call.method === 'sendRichMessage' &&
+      requestPayload.parse(call.payload).message_thread_id === third.threadId &&
+      app.store.getMessageAnchor(third.id, thirdSource.sessionId, third.chatId,
+        successfulReply.parse(call.result).result.message_id)).length === pending.parts.length);
     const chunks = app.apiCalls.filter(call => call.method === 'sendRichMessage' &&
       requestPayload.parse(call.payload).message_thread_id === third.threadId);
     assert.equal(chunks.length, pending.parts.length);
