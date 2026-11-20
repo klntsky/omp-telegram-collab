@@ -55,11 +55,20 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   let runtime = new OmpRuntime(config);
   cleanup.push(async () => { try { await runtime.kill(session); } finally { await runtime.close(); } });
   async function startForeignHost(): Promise<void> {
-    const supervisor = spawn(process.execPath, [hostSupervisorPath, omp.executable, ...config.omp.args,
+    const args = [hostSupervisorPath, omp.executable, ...config.omp.args,
       '--cwd', session.cwd, '--config', join(directory, 'runtime.yml'), '--session-dir', directory,
       '--resume', sessionFile, '--no-title', '--extension', hostLifecyclePath,
-    ], { cwd: session.cwd, env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: directory }, stdio: 'ignore', detached: true });
+    ];
+    omp.log('native.foreign.launch', { args, overlay: JSON.parse(await readFile(join(directory, 'runtime.yml'), 'utf8')), sessionId });
+    const supervisor = spawn(process.execPath, args,
+      {
+        cwd: session.cwd,
+        // This fixture has no preset; do not inherit the enclosing OMP host's forum preset.
+        env: { ...childEnvironment(), OMP_TELEGRAM_SESSION_DIR: directory, OMP_TELEGRAM_DEFAULT_PRESET: '' },
+        stdio: 'ignore', detached: true,
+      });
     supervisor.unref();
+    supervisor.once('exit', (code, signal) => omp.log('native.foreign.exit', { pid: supervisor.pid, code, signal }));
     cleanup.push(async () => {
       if (!supervisor.pid || supervisor.exitCode !== null || supervisor.signalCode !== null) return;
       // This pre-cutover process is created by the fixture, before runtime
@@ -88,7 +97,16 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   }
   await startForeignHost();
   const signal = () => AbortSignal.any([t.signal, AbortSignal.timeout(60000)]);
-  const hosts = await waitUntil(() => omp.listHosts(), hosts => hosts.some(host => host.sessionId === sessionId), signal());
+  let hosts;
+  try {
+    hosts = await waitUntil(() => omp.listHosts(), hosts => hosts.some(host => host.sessionId === sessionId), signal());
+  } catch (error) {
+    for (const filename of ['runtime.yml', 'lifecycle.json', 'startup-preset.json']) {
+      try { omp.log('native.foreign.startup-state', { filename, value: JSON.parse(await readFile(join(directory, filename), 'utf8')) }); }
+      catch (diagnosticError) { omp.log('native.foreign.startup-state', { filename, error: String(diagnosticError) }); }
+    }
+    throw error;
+  }
   const original = hosts.find(host => host.sessionId === sessionId)!;
   let connection: CollabConnection | undefined;
   cleanup.push(() => connection?.close());

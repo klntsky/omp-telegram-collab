@@ -7,8 +7,8 @@ export type InputIntent =
   | { kind: 'ignore' }
   | { kind: 'event' }
   | { kind: 'invalid'; error: Error }
-  | { kind: 'command'; action: string; argument: string }
-  | { kind: 'skill-selection'; text: string }
+  | { kind: 'command'; action: string; argument: string; source?: Message }
+  | { kind: 'skill-selection'; text: string; source?: Message }
   | { kind: 'question-answer'; token: string; text: string }
   | { kind: 'ended-question' }
   | { kind: 'new-task' | 'session-prompt'; content: TelegramContent; extensions?: PromptExtension[] };
@@ -118,7 +118,7 @@ export function classifyMessage(message: Message, content: TelegramContent, cont
     const bot = {id:context.botId,username:context.username,mentioned:false};
     const addressedText = parsed ? undefined : messages.map(part => messageText(part,bot)).filter(Boolean).join('\n\n').trim();
     const barePrompt = parsed?.kind === 'prompt' && parsed.action === 'p' && !parsed.text && !parsed.extensions.length;
-    const bareMention = !context.question && !context.endedQuestion && bot.mentioned && !addressedText;
+    const bareMention = bot.mentioned && !addressedText;
     if (barePrompt || bareMention) {
       // Select only Telegram's embedded message, never its author's authority or reply chain.
       // Keeping Context untouched preserves the invoking user's authorization and destination.
@@ -143,7 +143,7 @@ export function classifyMessage(message: Message, content: TelegramContent, cont
     if (parsed.kind === 'invalid') return parsed;
     if (parsed.kind === 'selection') {
       if (content.images.length || content.documents?.length) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:parsed.name}]};
-      return {kind:'skill-selection',text:`/skill:${parsed.name}`};
+      return {kind:'skill-selection',text:`/skill:${parsed.name}`,...(selected ? {source:message} : {})};
     }
     if (parsed.kind === 'prompt') return {
       kind:parsed.action === 'new' ? 'new-task' : 'session-prompt',
@@ -154,7 +154,7 @@ export function classifyMessage(message: Message, content: TelegramContent, cont
       const skill = context.skillAliases.get(parsed.action);
       if (skill) return {kind:'session-prompt',content:withContext(''),extensions:[{kind:'skill',name:skill.name}]};
     }
-    return parsed;
+    return parsed.kind === 'command' && selected ? {...parsed,source:message} : parsed;
   }
   if (!content.text.trim() && !content.images.length && !content.documents?.length) return {kind:'ignore'};
   if (!selected && context.question) return {kind:'question-answer',token:context.question,text:content.text};

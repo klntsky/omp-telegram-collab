@@ -26,6 +26,7 @@ export interface FakeLlmProvider {
   apiKey: string;
   requests: ReadonlyMap<string, readonly Record<string, unknown>[]>;
   failure: Promise<never>;
+  addScenario(scenario: FakeLlmScenario): void;
   waitForRequest(name: string, signal: AbortSignal): Promise<void>;
   waitForAbort(name: string, signal: AbortSignal): Promise<void>;
   assertComplete(names?: readonly string[]): void;
@@ -42,6 +43,7 @@ export async function startFakeLlmProvider(options: {
     started: Promise.withResolvers<void>(), aborted: Promise.withResolvers<void>(),
   }]));
   if (scenarios.size !== options.scenarios.length) throw new Error('Fake LLM scenario names must be unique');
+  const requests = new Map([...scenarios].map(([name, scenario]) => [name, scenario.requests]));
   const errors: unknown[] = [];
   const sockets = new Set<Socket>();
   const expectedAborts = new WeakSet<Duplex>();
@@ -89,7 +91,7 @@ export async function startFakeLlmProvider(options: {
     const userMessage = messages.findLast(message => message.role === 'user');
     const content = JSON.stringify(userMessage?.content);
     const matches = [...scenarios.values()].filter(scenario =>
-      content?.includes(JSON.stringify(scenario.prompt).slice(1, -1)));
+      scenario.nextStep < scenario.steps.length && content?.includes(JSON.stringify(scenario.prompt).slice(1, -1)));
     if (matches.length !== 1) throw new Error(`Fake LLM expected one scenario for the latest user prompt, matched ${matches.length}: ${content}`);
     const scenario = matches[0]!;
     const step = scenario.steps[scenario.nextStep];
@@ -195,7 +197,14 @@ export async function startFakeLlmProvider(options: {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     apiKey,
-    requests: new Map([...scenarios].map(([name, scenario]) => [name, scenario.requests])),
+    requests,
+    addScenario(scenario) {
+      if (scenarios.has(scenario.name)) throw new Error(`Duplicate fake LLM scenario "${scenario.name}"`);
+      const state = { ...scenario, requests: [] as Record<string, unknown>[], nextStep: 0, completed: 0,
+        started: Promise.withResolvers<void>(), aborted: Promise.withResolvers<void>() };
+      scenarios.set(scenario.name, state);
+      requests.set(scenario.name, state.requests);
+    },
     failure: failure.promise,
     waitForRequest(name, signal) {
       const scenario = scenarios.get(name);
