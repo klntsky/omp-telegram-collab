@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { ManagedRelay } from '../src/managed-relay.js';
 
 const execute = promisify(execFile);
 type RetirementMode = 'busy' | 'uncertain' | 'accepted' | 'delayed' | 'never-received' | 'cancel-failure';
@@ -17,20 +18,23 @@ export interface RetirementRequest {
   type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
 }
 
-export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
+export async function fixture(mode: RetirementMode = 'busy', guard: RetirementRequest['guard'] = 'idle') {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'omp-retirement-')));
-  const fixtureProcess = mode === 'cancel-failure' && pid === process.pid
-    ? spawn(process.execPath, ['-e', 'process.stdin.resume()'], { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] })
-    : undefined;
-  const fixtureExited = fixtureProcess ? once(fixtureProcess, 'exit') : undefined;
-  if (fixtureProcess) {
-    await once(fixtureProcess, 'spawn');
-    assert.ok(fixtureProcess.pid);
-    pid = fixtureProcess.pid;
-  }
   const dataDir = join(directory, 'data');
   const sessionDir = join(dataDir, 'sessions', 'topic');
   await mkdir(sessionDir, { recursive: true });
+  const children: { child: ChildProcess; exited: Promise<unknown> }[] = [];
+  async function spawnHost() {
+    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()', '--', '--session-dir', sessionDir],
+      { cwd: directory, stdio: ['pipe', 'ignore', 'ignore'] });
+    const exited = once(child, 'exit');
+    children.push({ child, exited });
+    await once(child, 'spawn');
+    assert.ok(child.pid);
+    return child;
+  }
+  const fixtureProcess = await spawnHost();
+  const pid = fixtureProcess.pid!;
   const executable = join(directory, 'omp');
   const statePath = join(directory, 'registry.json');
   const startedPidPath = join(directory, 'started.pid');
@@ -40,7 +44,12 @@ export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, 
   const lifecyclePath = join(sessionDir, 'lifecycle.json');
   const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
     pid, cwd: directory, access: 'control', relayConnected: true, busy: false };
-  const url = `wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
+  const relay = new ManagedRelay(dataDir);
+  const relayUrl = await relay.ensure();
+  await writeFile(join(sessionDir, 'runtime.yml'), JSON.stringify({
+    collab: { autoStart: 'control', relayUrl },
+  }), { mode: 0o600 });
+  const url = `${new URL(relayUrl).origin}/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}`;
   const state: { host: typeof host | undefined; failLink: boolean; startupHost?: typeof host; holdStartup?: boolean } = { host, failLink: false };
   const persistRegistry = () => writeFile(statePath, JSON.stringify(state));
   await persistRegistry();
@@ -74,9 +83,10 @@ if (process.argv[2] !== 'collab') {
     });
   });
   server.listen(socketPath, () => {
+    fs.chmodSync(socketPath, 0o600);
     fs.writeFileSync(${JSON.stringify(startedPidPath)}, String(process.pid));
     const publish = () => {
-      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor));
+      fs.writeFileSync(${JSON.stringify(lifecyclePath)}, JSON.stringify(descriptor), {mode:0o600});
       fs.writeFileSync(statePath, JSON.stringify({ ...state, host, failLink: false }));
     };
     if (!state.holdStartup) publish();
@@ -96,8 +106,8 @@ if (process.argv[2] !== 'collab') {
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: host.sessionId, cwd: directory }) + '\n');
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
   const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
-    pid, supervisorPid: process.ppid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
-  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor));
+    pid, supervisorPid: process.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
+  const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor), { mode: 0o600 });
   await persistLifecycle();
   const requests: RetirementRequest[] = [];
   const delayed = Promise.withResolvers<void>();
@@ -163,6 +173,7 @@ if (process.argv[2] !== 'collab') {
   server.once('error', listening.reject);
   server.listen(socketPath, listening.resolve);
   await listening.promise;
+  await chmod(socketPath, 0o600);
   const config: AppConfig = { bots: [], instances: [{id: 1, defaultDir: directory, chats: []}],
     configPath: join(directory, 'config.yaml'), publicUrl: 'https://localhost:3000',
     host: '127.0.0.1', port: 3000, dataDir,
@@ -172,6 +183,9 @@ if (process.argv[2] !== 'collab') {
   const session: TopicSession = { id: 'topic', botId: 1, chatId: -100, threadId: 2,
     instanceId: 1, cwd: directory, name: 'Regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' } };
   return { runtime, config, session, host, requests, descriptor, persistLifecycle, sessionDir, lifecyclePath, grantPath, accept, received: received.promise,
+    child: fixtureProcess,
+    exited: children[0]!.exited,
+    spawnReplacement: spawnHost,
     async commands() { return (await readFile(commandsPath, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]); },
     async removeHost() { state.host = undefined; await persistRegistry(); },
     async rotateConnection() { host.generation++; await persistRegistry(); },
@@ -199,6 +213,7 @@ if (process.argv[2] !== 'collab') {
       replacement.once('error', listening.reject);
       replacement.listen(descriptor.socketPath, listening.resolve);
       await listening.promise;
+      await chmod(descriptor.socketPath, 0o600);
       await persistLifecycle();
       state.host = host;
       state.failLink = false;
@@ -220,13 +235,14 @@ if (process.argv[2] !== 'collab') {
         try { process.kill(Number(startedPid), 'SIGKILL'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
       }
-      if (fixtureProcess) {
-        if (fixtureProcess.exitCode === null && fixtureProcess.signalCode === null) fixtureProcess.kill();
-        await fixtureExited;
+      for (const { child, exited } of children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+        await exited;
       }
       await writeFile(statePath, JSON.stringify({ ...state, host: undefined }));
       await rm(lifecyclePath, { force: true });
       await runtime.close();
+      await relay.close();
       for (const socket of sockets) socket.destroy();
       await Promise.all(servers.map(server => {
         const closed = Promise.withResolvers<void>();

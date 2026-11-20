@@ -1,6 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,15 +7,8 @@ import type { TopicSession } from '../shared/contracts.js';
 import { fixture } from './runtime-retirement-fixture.js';
 
 test('closed stop recovers only its managed survivor without resolving a capability and tracks retirement until exit', async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  assert.ok(child.pid);
-  const app = await fixture('accepted', child.pid, 'none');
+  const app = await fixture('accepted', 'none');
+  const { child, exited } = app;
   t.after(() => app.close());
   await app.failLink(true);
   const unrelated = join(app.config.dataDir, 'sessions', 'unrelated');
@@ -82,7 +73,7 @@ test('attached stop leaves terminal ownership and unrelated managed hosts untouc
 
 for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', 'stale-cwd'] as const) {
   test(`recovered stop refuses ${invalid} identity without unsafe fallback`, async t => {
-    const app = await fixture('accepted', process.pid, 'none');
+    const app = await fixture('accepted', 'none');
     t.after(() => app.close());
     let diagnostic: RegExp = /does not support safe retirement/;
     if (invalid === 'missing') await rm(app.lifecyclePath);
@@ -111,15 +102,8 @@ for (const invalid of ['missing', 'unsupported', 'stale-pid', 'stale-history', '
 }
 
 test('maintenance settles a recovered draining host after exact process exit without another request', async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  assert.ok(child.pid);
-  const app = await fixture('accepted', child.pid, 'none');
+  const app = await fixture('accepted', 'none');
+  const { child, exited } = app;
   t.after(() => app.close());
   app.descriptor.retiring = true;
   await app.persistLifecycle();

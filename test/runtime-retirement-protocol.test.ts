@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { once } from 'node:events';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -77,16 +75,8 @@ test('unresolved cancellation I/O failure keeps admission blocked and preserves 
 });
 
 test('cancellation error stops fencing an adopted host after verified exit and allows a replacement', async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  const pid = child.pid;
-  assert.ok(pid);
-  const app = await fixture('cancel-failure', pid);
+  const app = await fixture('cancel-failure');
+  const { child, exited } = app;
   t.after(() => app.close());
   await app.runtime.ensure(app.session);
   let original: unknown;
@@ -160,7 +150,9 @@ for (const mode of ['uncertain', 'accepted'] as const) {
     assert.equal(await app.runtime.retireIdle(0), 0);
     assert.equal(app.requests.length, 1, 'accepted retirement must not be requested again');
     if (mode === 'accepted') {
-      await app.replaceHost(process.ppid);
+      const child = await app.spawnReplacement();
+      assert.ok(child.pid);
+      await app.replaceHost(child.pid);
       const replacement = await app.runtime.ensure(app.session);
       assert.equal(replacement.instanceId, 'replacement-host');
       assert.doesNotThrow(() => app.runtime.markPrompt(app.session.id));

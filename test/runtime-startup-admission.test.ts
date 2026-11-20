@@ -42,7 +42,7 @@ test('managed startup refreshes mutation authorization after admission and prese
 });
 
 test('stop during managed startup waits for lifecycle publication and retires the host and supervisor', async t => {
-  const app = await fixture('accepted', process.pid, 'none');
+  const app = await fixture('accepted', 'none');
   t.after(() => app.close());
   await app.prepareHostStartup(true);
   await rm(app.lifecyclePath);

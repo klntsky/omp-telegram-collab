@@ -70,9 +70,10 @@ try {
   assert.ok(controlLink.writeToken);
   const forgedToken = controlLink.writeToken.slice();
   forgedToken[0] = forgedToken[0]! ^ 1;
+  // Keep the managed relay and room valid: only the write token should cause rejection.
   const forgedBinding = {
     ...first,
-    url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
+    url: formatCollabLink(new URL(controlLink.wsUrl).origin, controlLink.roomId, controlLink.key, forgedToken),
   };
   await assert.rejects(async () => {
     const unauthorized = await runtime.connectCollab(forgedBinding, 'Forged capability verifier', {

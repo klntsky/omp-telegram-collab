@@ -1,20 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { rm } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fixture } from './runtime-retirement-fixture.js';
 
 test('passive reconnect refreshes room identity so retirement can release capacity', { timeout: 15000 }, async t => {
-  const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-  const exited = once(child, 'exit');
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-    await exited;
-  });
-  await once(child, 'spawn');
-  assert.ok(child.pid);
-  const app = await fixture('accepted', child.pid);
+  const app = await fixture('accepted');
+  const { child, exited } = app;
   t.after(() => app.close());
   const initial = await app.runtime.ensure(app.session);
   await app.rotateConnection();
@@ -41,8 +32,10 @@ for (const replacement of ['instance', 'process'] as const) {
     const initial = await app.runtime.ensure(app.session);
     if (replacement === 'instance') await app.replaceHost();
     else {
-      app.host.pid = process.ppid;
-      app.descriptor.pid = process.ppid;
+      const child = await app.spawnReplacement();
+      assert.ok(child.pid);
+      app.host.pid = child.pid;
+      app.descriptor.pid = child.pid;
       await app.persistLifecycle();
       await app.rotateConnection();
     }
