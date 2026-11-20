@@ -156,6 +156,8 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     HOME: home,
     PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     PI_CODING_AGENT_DIR: agent,
+    // host-control validates lifecycle sockets against the parent's temporary directory.
+    TMPDIR: tmpdir(),
     ...xdg,
     TERM: 'xterm-256color',
     LANG: 'C.UTF-8',
