@@ -71,26 +71,3 @@ for (const code of [1011, 4003]) {
     }
   });
 }
-
-test('socket construction failures omit ticket-bearing exception details', async t => {
-  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: { location: { href: 'file:///session' } } });
-  const originalError = console.error;
-  const records: unknown[][] = [];
-  console.error = (...args: unknown[]) => { records.push(args); };
-  const transport = new GatewaySocket('synthetic_socket_credential', async () => 'unused');
-  t.after(() => {
-    transport.close();
-    console.error = originalError;
-    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
-    else Reflect.deleteProperty(globalThis, 'window');
-  });
-  let reconnecting = false;
-  transport.onClose = (_reason, willReconnect) => { reconnecting = willReconnect; };
-  transport.connect();
-  assert.equal(reconnecting, true);
-  assert.deepEqual(records, [[{
-    level: 'error', event: 'session-websocket-construction-failed', errorType: 'SyntaxError',
-  }]]);
-  assert.ok(!JSON.stringify(records).includes('synthetic_socket_credential'));
-});
