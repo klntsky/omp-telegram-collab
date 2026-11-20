@@ -166,7 +166,7 @@ for (const mode of ['uncertain', 'accepted'] as const) {
 for (const prior of [false, true]) {
   test(`worktree waits for ${prior ? 'previously accepted' : 'slow accepted'} retirement to complete`, async t => {
     const app = await fixture('accepted');
-    t.after(() => { t.mock.restoreAll(); t.mock.timers.reset(); return app.close(); });
+    t.after(() => { t.mock.reset(); t.mock.timers.reset(); return app.close(); });
     const host: ManagedHost = { sessionId: app.host.sessionId, exited: false, retiring: prior };
     if (prior) {
       const identity = await procIdentity(app.host.pid);
@@ -198,7 +198,7 @@ for (const prior of [false, true]) {
     await app.stopProcess();
     t.mock.timers.tick(100);
     await pending;
-    t.mock.restoreAll();
+    t.mock.reset();
     t.mock.timers.reset();
     assert.equal(host.exited, true);
     assert.equal(managed.has(app.session.id), false);
@@ -220,7 +220,7 @@ test('worktree refuses a closed session while its accepted retirement is pending
 
 test('worktree retirement timeout preserves the accepted host fence and diagnostic', async t => {
   const app = await fixture('accepted');
-  t.after(() => { t.mock.restoreAll(); t.mock.timers.reset(); return app.close(); });
+  t.after(() => { t.mock.reset(); t.mock.timers.reset(); return app.close(); });
   app.config.omp.startupTimeoutMs = 200;
   const host: ManagedHost = { sessionId: app.host.sessionId, exited: false, retiring: false };
   const managed = new Map([[app.session.id, host]]);
@@ -241,7 +241,7 @@ test('worktree retirement timeout preserves the accepted host fence and diagnost
   await poll.promise;
   t.mock.timers.tick(200);
   await rejected;
-  t.mock.restoreAll();
+  t.mock.reset();
   t.mock.timers.reset();
   assert.equal(host.exited, false);
   assert.equal(host.retiring, true);

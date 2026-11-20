@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { writeConfig } from '../src/config.js';
+import { createRegistry } from '../src/runtime/registry.js';
 
 const execute = promisify(execFile);
 
@@ -186,3 +188,70 @@ test('managed startup does not retry a Collab link generation identity mismatch'
   await assert.rejects(app.runtime.ensure(app.session), /OMP host changed while resolving its capability/);
   assert.equal((await app.attempts()).length, 1);
 });
+
+for (const mode of ['omission', 'link', 'lifetime', 'replacement'] as const) {
+  test(`capability verification reconciles only a live unchanged host: ${mode}`, async t => {
+    if (process.platform !== 'linux') return t.skip('Requires Linux process lifetime identity');
+    const directory = await mkdtemp(join(tmpdir(), 'omp-registry-visibility-'));
+    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const exited = once(child, 'exit');
+    await once(child, 'spawn');
+    t.after(async () => { child.kill('SIGKILL'); await exited; await rm(directory, { recursive: true, force: true }); });
+    const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
+      pid: child.pid!, cwd: directory, access: 'control' as const, relayConnected: true };
+    const executable = join(directory, 'omp');
+    const attempts = join(directory, 'attempts');
+    await writeFile(attempts, '0');
+    await writeFile(`${attempts}.link`, '0');
+    await writeFile(executable, `#!${process.execPath}
+(async () => {
+  const fs = require('node:fs/promises');
+  const host = ${JSON.stringify(host)};
+  if (process.argv[3] === 'list') {
+    const count = Number(await fs.readFile(${JSON.stringify(attempts)}, 'utf8'));
+    await fs.writeFile(${JSON.stringify(attempts)}, String(count + 1));
+    console.log(JSON.stringify({version:1,hosts:${JSON.stringify(mode)} === 'omission' && count === 0 ? [] :
+      [{...host,generation:${JSON.stringify(mode)} === 'replacement' ? 8 : host.generation}]}));
+  } else {
+    const count = Number(await fs.readFile(${JSON.stringify(`${attempts}.link`)}, 'utf8'));
+    await fs.writeFile(${JSON.stringify(`${attempts}.link`)}, String(count + 1));
+    if (${JSON.stringify(mode)} === 'link' && count === 0) {
+      process.stderr.write('error: no active Collab host matches fixture-host\\n');
+      process.exitCode = 1;
+      return;
+    }
+    if (${JSON.stringify(mode)} === 'lifetime') {
+      process.kill(host.pid, 'SIGKILL');
+      for (;;) {
+        try {
+          const stat = await fs.readFile('/proc/' + host.pid + '/stat', 'utf8');
+          if (['Z','X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0])) break;
+        } catch (error) { if (error.code === 'ENOENT') break; throw error; }
+        const ready = Promise.withResolvers();
+        setImmediate(ready.resolve);
+        await ready.promise;
+      }
+    }
+    console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',
+      url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}));
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`);
+    await chmod(executable, 0o700);
+    const config: AppConfig = {
+      bots: [], instances: [], configPath: join(directory, 'config.yaml'),
+      publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
+      omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 5000 },
+    };
+    const registry = createRegistry({ config, assertActive() {}, closed: false, async acquire() {} });
+    const result = registry.resolve(host, Date.now() + 5000);
+    if (mode === 'omission' || mode === 'link') {
+      assert.equal((await result).generation, host.generation);
+      assert.equal(await readFile(attempts, 'utf8'), '2');
+      assert.equal(await readFile(`${attempts}.link`, 'utf8'), mode === 'link' ? '2' : '1');
+    } else {
+      await assert.rejects(result, /OMP host session changed while resolving its capability/);
+      assert.equal(await readFile(attempts, 'utf8'), '1');
+    }
+  });
+}
