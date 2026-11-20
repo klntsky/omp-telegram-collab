@@ -1,5 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+const replySchema = `
+CREATE TABLE replies (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,parts TEXT NOT NULL,reply_to INTEGER,generation INTEGER NOT NULL,next_part INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL CHECK(state IN ('pending','done')),error TEXT,UNIQUE(session_id,omp_session_id,entry_id));
+CREATE TABLE IF NOT EXISTS reply_cooldowns (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,retry_after INTEGER NOT NULL);`;
+
 const schema = `
       CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
       CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
@@ -20,8 +24,7 @@ const schema = `
       CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
       CREATE TABLE prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
       CREATE TABLE prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,submitted_locally INTEGER NOT NULL CHECK(submitted_locally IN (0,1)),PRIMARY KEY(session_id,omp_session_id,entry_id));
-      CREATE TABLE replies (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,parts TEXT NOT NULL,reply_to INTEGER,generation INTEGER NOT NULL,next_part INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL CHECK(state IN ('pending','done')),error TEXT,UNIQUE(session_id,omp_session_id,entry_id));
-      CREATE TABLE reply_cooldowns (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,retry_after INTEGER NOT NULL);
+      ${replySchema}
       CREATE TABLE prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
       CREATE TABLE message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
       CREATE TABLE session_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id),kind TEXT NOT NULL DEFAULT 'topic' CHECK(kind IN ('topic','fork')));
@@ -54,21 +57,45 @@ CREATE TABLE IF NOT EXISTS prompt_queue_preparations (
   preparation TEXT NOT NULL
 );`;
 
+function upgradeReplies(db: DatabaseSync, version: 10 | 11): void {
+  db.exec('ALTER TABLE replies RENAME TO replies_before_upgrade');
+  db.exec(replySchema);
+  if (version === 10) {
+    // The old rows meant "seen", including copied history, not confirmed delivery.
+    // Preserve that exclusion rather than replaying whole conversations on upgrade.
+    db.exec(`INSERT INTO replies (session_id,omp_session_id,entry_id,parts,generation,state)
+      SELECT r.session_id,r.omp_session_id,r.entry_id,'[]',COALESCE(g.generation,0),'done'
+      FROM replies_before_upgrade r LEFT JOIN session_generations g ON g.session_id=r.session_id`);
+  } else {
+    db.exec(`INSERT INTO replies
+      SELECT id,session_id,omp_session_id,entry_id,parent_entry_id,parts,reply_to,generation,next_part,
+        CASE WHEN state='uncertain' THEN 'pending' ELSE state END,error
+      FROM replies_before_upgrade`);
+  }
+  db.exec('DROP TABLE replies_before_upgrade');
+}
+
 export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 11) throw new Error(`Unsupported database schema version ${version}`);
+    if (version !== 0 && version !== 10 && version !== 11 && version !== 12)
+      throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
       if (existing) throw new Error('Unsupported existing database');
       db.exec(schema);
-      db.exec('PRAGMA user_version=11');
     }
+    if (version === 10 || version === 11) upgradeReplies(db, version);
     db.exec(promptQueueSchema);
+    if (version !== 12) db.exec('PRAGMA user_version=12');
     db.exec('COMMIT');
   } catch (error) {
-    if (db.isTransaction) db.exec('ROLLBACK');
+    try { if (db.isTransaction) db.exec('ROLLBACK'); }
+    catch (rollbackError) {
+      throw new AggregateError([error, rollbackError],
+        `${error instanceof Error ? error.message : String(error)}\n${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+    }
     throw error;
   }
 }

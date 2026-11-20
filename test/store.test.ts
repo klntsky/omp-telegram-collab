@@ -285,7 +285,7 @@ test('session cwd and logical identity persist independently across database res
   }
 });
 
-test('old database schemas are rejected rather than migrated', async () => {
+test('unsupported database schemas are rejected without attempting an upgrade', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'omp-schema-cutover-'));
   const filename = join(directory, 'store.sqlite');
   try {
