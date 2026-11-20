@@ -10,6 +10,8 @@ import { registerForumDefaults } from './scenarios/forum-defaults.js';
 import { registerCapacity } from './scenarios/capacity.js';
 import { registerWorktreesAndForks } from './scenarios/worktrees-forks.js';
 import { registerQuestions } from './scenarios/questions.js';
+import { registerQuestionReconnectTimeout } from './scenarios/question-reconnect-timeout.js';
+import { registerQuestionReconnectAnswer } from './scenarios/question-reconnect-answer.js';
 import { registerMediaSkillsAndFolders } from './scenarios/media-skills-folders.js';
 import { registerLifecycle } from './scenarios/lifecycle.js';
 import { registerLogicalIdentity } from './scenarios/logical-identity.js';
@@ -85,6 +87,8 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
   registerCapacity(() => app, tasks);
   registerWorktreesAndForks(() => app, tasks, () => previousIds);
   registerQuestions(() => app, tasks, controls);
+  registerQuestionReconnectTimeout(() => app, tasks.questionReconnectTimeout);
+  registerQuestionReconnectAnswer(() => app, tasks.questionReconnectAnswer);
   registerMediaSkillsAndFolders(() => app, tasks);
   registerLifecycle(() => app, tasks);
   registerLogicalIdentity(() => app, tasks);

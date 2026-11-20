@@ -12,6 +12,8 @@ export function createWorkflowTasks() {
     worktreeRestarted: createWriteTask('worktree-restarted'),
     question: createWriteTask('question'),
     customAnswer: createWriteTask('custom-answer'),
+    questionReconnectTimeout: createWriteTask('question-reconnect-timeout'),
+    questionReconnectAnswer: createWriteTask('question-reconnect-answer'),
     askHandoff: createWriteTask('ask-handoff'),
     chatHandoff: createWriteTask('chat-handoff'),
     settingsReply: createWriteTask('settings-reply'),
@@ -74,7 +76,8 @@ export function createWorkflowTasks() {
   const scenarios = Object.values(tasks).map(task =>
     task === tasks.defaultsBusy || task === tasks.capacityFirst || task === tasks.capacitySecond
       ? { name: task.name, prompt: task.prompt, steps: [{ type: 'await-abort' as const }] }
-      : task === tasks.question || task === tasks.customAnswer ? questionScenario(task)
+      : task === tasks.question || task === tasks.customAnswer ||
+        task === tasks.questionReconnectTimeout || task === tasks.questionReconnectAnswer ? questionScenario(task)
       : task === tasks.documentOnly ? writeReadScenario(task, task.prompt) : writeScenario(task));
   return { tasks, scenarios, interrupted, cancelledQuestion, questionControls };
 }
