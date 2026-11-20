@@ -42,6 +42,7 @@ test('provider diagnostics survive empty output and reconnect with partial outpu
   const before = app.apiCalls.filter(call => call.method === 'sendRichMessage').length;
   const frameStart = app.hostFrames.length;
   await app.restart();
+  await app.service.ensureMirroring(session, await app.runtime.ensure(session));
   await app.waitForCondition(() => app.hostFrames.slice(frameStart).some(frame => frame.t === 'snapshot-chunk' && frame.final));
   assert.equal(app.apiCalls.filter(call => call.method === 'sendRichMessage').length, before);
   app.omp.provider.assertComplete(['provider-empty-error', 'provider-offline-error']);
