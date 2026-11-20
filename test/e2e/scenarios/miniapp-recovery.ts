@@ -58,9 +58,16 @@ test('Mini App observes draining work across restart without reopening mutation 
   await assert.rejects(app.runtime.ensure(session), SessionRetiringError);
   assert.throws(() => app.runtime.retain(session.id), SessionRetiringError);
   assert.throws(() => app.runtime.markPrompt(session.id), SessionRetiringError);
-  const browser = await observeBrowser(t, app, session);
+  const browser = await observeBrowser(t, app, session, {
+    interruptSetup: () => interruptManagedRelay(app.omp.dataDir),
+  });
+  assert.ok(browser.recovery.phases.has('reconnecting'));
+  assert.ok(!browser.recovery.phases.has('ended'));
   await browser.denyMutations();
   assert.equal((await app.omp.listHosts()).find(value => value.sessionId === host.sessionId)?.pid, host.pid);
+  // The retirement assertions concern this host, not the viewer's normal
+  // reconnect-and-resume behavior after a host has fully exited.
+  browser.client.close();
   const question = await waitForPanel(app, 'question', 'ask:', restored, session.threadId);
   await clickPanel(app, question, 1);
   await completeWriteTask(app, task, instruction, session.threadId);

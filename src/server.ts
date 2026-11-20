@@ -9,7 +9,7 @@ import { Store } from './store.js';
 import { AuthorizationUnavailableError, TicketStore, validateInitData, issueCredential, validateCredential, validateGuestFrame, type TicketIdentity } from './auth.js';
 import type { BotService } from './bot.js';
 import type { Omp } from './omp.js';
-import { SessionCapacityError } from './runtime/types.js';
+import { SessionCapacityError, SessionRetiringError } from './runtime/types.js';
 import { findInstance, refreshTermination } from './config.js';
 import { withCancellation } from './cancellation.js';
 import type { SessionFeedSubscription } from './session-feed.js';
@@ -248,6 +248,7 @@ export function createServer(options: ServerOptions): GatewayServer {
       console.error(`Mini App session operation failed (${identity.botId}, ${identity.sessionId}).`, error);
       if (error instanceof ServiceTerminatedError) fail(4003,error.message);
       else if (error instanceof AuthorizationUnavailableError) fail(1013,error.message);
+      else if (error instanceof SessionRetiringError) fail(1013,error.message);
       else if (error instanceof CollabTransportError) fail(1011,error.message);
       else if (error instanceof SessionCapacityError) {
         fail(4009,error.message);
