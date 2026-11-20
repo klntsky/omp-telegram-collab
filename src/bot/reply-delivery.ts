@@ -47,22 +47,15 @@ export class ReplyDelivery {
     this.work.set(session.id, work);
     // Coalesce before creating background tasks, including upgrades to history recovery.
     work.task = this.deps.runBackground(`reply-delivery:${session.id}`, async () => {
-      try {
-        while (work.next) {
-          const next = work.next;
-          work.next = undefined;
+      while (work.next) {
+        const next = work.next;
+        work.next = undefined;
+        await this.deliver(session);
+        if (next === 'recovery' && session.runtime.kind === 'managed' && !this.deps.stopped() &&
+            !this.deps.options.config.terminated && this.deps.sessionAssigned(session) && session.status === 'open') {
+          await this.capture(session, work);
           await this.deliver(session);
-          if (next === 'recovery' && session.runtime.kind === 'managed' && !this.deps.stopped() &&
-              !this.deps.options.config.terminated && this.deps.sessionAssigned(session) && session.status === 'open') {
-            await this.capture(session, work);
-            await this.deliver(session);
-          }
         }
-      } catch (error) {
-        // Persist the deadline so reconnects and service restarts share the same cooldown.
-        try { this.deps.options.store.replies.defer(session.id, Date.now() + 30000); }
-        catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
-        throw error;
       }
     }).finally(() => {
       work.task = undefined;
@@ -118,23 +111,32 @@ export class ReplyDelivery {
         this.deps.sessionAssigned(current) && store.getSession(session.id)?.status === 'open' &&
         store.getSessionGeneration(session.id) === reply.generation;
       while (reply.nextPart < reply.parts.length) {
-        const sent = await this.deps.delivery.run(session.chatId, async () => {
-          if (!active()) return undefined;
-          try {
-            const result = await this.deps.bot.api.sendRichMessage(session.chatId, { markdown: reply.parts[reply.nextPart]! }, {
-              message_thread_id: session.threadId === 1 ? undefined : session.threadId,
-              ...(reply.replyTo === undefined ? {} : { reply_parameters: { message_id: reply.replyTo, allow_sending_without_reply: true } }),
-            });
-            store.replies.confirm(reply, result.chat.id, result.message_id);
-            return result;
-          } catch (error) {
-            // Leave unconfirmed chunks pending: a lost acknowledgement may duplicate
-            // a reply on retry, but must not permanently suppress its delivery.
-            try { store.replies.fail(reply, error); }
-            catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
-            throw error;
-          }
-        }, active);
+        let sent;
+        try {
+          sent = await this.deps.delivery.run(session.chatId, async () => {
+            if (!active()) return undefined;
+            try {
+              const result = await this.deps.bot.api.sendRichMessage(session.chatId, { markdown: reply.parts[reply.nextPart]! }, {
+                message_thread_id: session.threadId === 1 ? undefined : session.threadId,
+                ...(reply.replyTo === undefined ? {} : { reply_parameters: { message_id: reply.replyTo, allow_sending_without_reply: true } }),
+              });
+              store.replies.confirm(reply, result.chat.id, result.message_id);
+              return result;
+            } catch (error) {
+              // Leave unconfirmed chunks pending: a lost acknowledgement may duplicate
+              // a reply on retry, but must not permanently suppress its delivery.
+              try { store.replies.fail(reply, error); }
+              catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
+              throw error;
+            }
+          }, active);
+        } catch (error) {
+          // The queue retries explicit rate rejections; only its final failure
+          // delays later replies, not a recovered rejection or history-read error.
+          try { store.replies.defer(session.id, Date.now() + 30000); }
+          catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }
+          throw error;
+        }
         if (!sent) return;
         reply.nextPart++;
       }

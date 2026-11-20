@@ -67,18 +67,20 @@ export function registerReplyBaselineRecovery(): void {
 
     const initialEntry = await runNativeTask(initial);
     await app.waitForCondition(() => app.store.db.prepare('SELECT state FROM replies WHERE session_id=? AND entry_id=?')
-      .get(session.id, initialEntry)?.state === 'done' && app.store.replies.retryAfter(session.id) > Date.now(),
+      .get(session.id, initialEntry)?.state === 'done',
     'initial historical capture fails baseline persistence', 100000);
     assert.equal(app.store.hasSnapshot(session.id), false);
-    const retryAfter = app.store.replies.retryAfter(session.id);
+    assert.equal(app.store.replies.retryAfter(session.id), 0);
     const source = await app.runtime.historySource(session);
     assert.ok(source);
     const beforeRetry = await stat(source.path, { bigint: true });
     app.store.db.exec('DROP TRIGGER reject_snapshot_baseline');
 
-    // Observe the real maintenance retry after its persisted cooldown. Keep the bot's
-    // Collab admission closed: a welcome snapshot would independently mark the baseline.
-    await waitForBackgroundCompletion(app, `reply-delivery:${session.id}`, {since: retryAfter, timeoutMs: 100000});
+    const retrySince = Date.now();
+    // A welcome snapshot would independently commit the baseline, so keep native
+    // admission disconnected while observing the history worker's retry.
+    await waitForBackgroundCompletion(app, `reply-delivery:${session.id}`, {since: retrySince, timeoutMs: 100000});
+    await app.waitForCondition(() => app.store.hasSnapshot(session.id), 'history baseline retry commits without a delivery cooldown', 100000);
     const afterRetry = await stat(source.path, { bigint: true });
     assert.equal(afterRetry.size, beforeRetry.size);
     assert.equal(afterRetry.mtimeNs, beforeRetry.mtimeNs);
