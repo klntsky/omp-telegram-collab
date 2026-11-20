@@ -17,7 +17,6 @@ import { registerTermination } from './scenarios/termination.js';
 import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
 import { registerWorktreeCleanup } from './scenarios/worktree-cleanup.js';
-import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-cleanup-authorization.js';
 import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
 import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
@@ -78,7 +77,6 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
     );
   });
   registerWorktreeCleanup(() => app);
-  registerWorktreeCleanupAuthorization(() => app);
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
   registerFolderSettings(() => app);
