@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, truncate, writeFile } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,6 +90,7 @@ if (process.argv[2] !== 'collab') {
           request.sessionId !== host.sessionId) throw new Error('Unexpected startup retirement request');
       descriptor.retiring = true;
       const grant = process.env.OMP_TELEGRAM_SESSION_DIR+'/retirement-'+request.requestId+'.request';
+      fs.truncateSync(grant, 0);
       fs.writeFileSync(grant, JSON.stringify(descriptor), {flag:'r+'});
       fs.renameSync(grant, process.env.OMP_TELEGRAM_SESSION_DIR+'/lifecycle.json');
       socket.end(JSON.stringify({requestId:request.requestId,sessionId:host.sessionId,pid:process.pid,outcome:'requested'})+'\\n');
@@ -135,6 +136,7 @@ if (process.argv[2] !== 'collab') {
     if (request.sessionId !== descriptor.sessionId || request.pid !== descriptor.pid || Date.now() >= request.deadline) return false;
     const next = { ...descriptor, retiring: true };
     try {
+      await truncate(grantPath(request.requestId), 0);
       await writeFile(grantPath(request.requestId), JSON.stringify(next), { flag: 'r+' });
       await rename(grantPath(request.requestId), lifecyclePath);
     } catch (error) {

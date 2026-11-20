@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -284,6 +284,9 @@ export default async function hostLifecycle(pi) {
             try {
               const granted = JSON.parse(readFileSync(grant, 'utf8'));
               if (JSON.stringify(granted) !== JSON.stringify(provenance)) throw new Error('OMP retirement grant provenance changed');
+              // The descriptor can be shorter than the grant. Truncate without creating
+              // the path so cancellation still wins if it has already removed the grant.
+              truncateSync(grant, 0);
               writeFileSync(grant, JSON.stringify(nextDescriptor), { flag: 'r+', mode: 0o600 });
               renameSync(grant, join(directory, 'lifecycle.json'));
             } catch (error) {
