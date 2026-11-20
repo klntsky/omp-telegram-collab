@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 interface Descriptor { sessionId: string; pid: number; socketPath: string; retiring?: boolean; retirement: number }
-interface Request { type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none' }
+interface Request {
+  type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
+  provenance?: { requestId: string; slotId: string; launchId: string; requesterPid: number; targetPid: number; targetStart: string; requestedAt: string; reason: string };
+}
 interface Response { requestId: string; sessionId: string; pid: number; outcome?: 'requested' | 'busy' | 'expired'; error?: string }
 
 async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } = {}) {
@@ -57,19 +60,27 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
       },
       isIdle:()=> ${!options.busy}, hasPendingMessages:()=> false,
       setInterval:(callback, interval)=> {const timer=setInterval(callback,interval);intervals.push(timer);return timer;},
-      shutdown:()=> {fs.writeFileSync(join(directory,'shutdowns'),String(++shutdowns));},
+      shutdown:()=> {
+        fs.writeFileSync(join(directory,'shutdown-evidence.json'), fs.readFileSync(join(directory,'retirement-accepted.json')));
+        fs.writeFileSync(join(directory,'shutdowns'),String(++shutdowns));
+      },
     });
     while (!fs.existsSync(join(directory,'lifecycle.json'))) await delay(5);
     process.send({ready:JSON.parse(fs.readFileSync(join(directory,'lifecycle.json'),'utf8'))});
     process.on('message', message => {
       if (message === 'pause') pause();
+      if (message === 'cleanup') {
+        for (const timer of intervals) clearInterval(timer);
+        handlers.get('session_shutdown')();
+        fs.writeFileSync(join(directory, 'cleaned'), 'done');
+      }
       if (message === 'stop') {
         for (const timer of intervals) clearInterval(timer);
         handlers.get('session_shutdown')();
         process.disconnect();
       }
     });
-  `], { env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: directory, OMP_TELEGRAM_DEFAULT_PRESET: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  `], { env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: directory, OMP_TELEGRAM_LAUNCH_ID: basename(directory), OMP_TELEGRAM_DEFAULT_PRESET: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   let output = '';
   assert.ok(child.stdout);
   assert.ok(child.stderr);
@@ -121,10 +132,18 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
     return response.promise;
   };
   return { directory, descriptor, lifecyclePath, preparedPath, releasePath, request, waitForFile,
+    async cleanup() { child.send('cleanup'); await waitForFile(join(directory, 'cleaned')); },
     async prepare(guard: 'idle' | 'none' = 'idle'): Promise<{ value: Request; grant: string }> {
       const value: Request = { type: 'retire', requestId: randomUUID(), sessionId: descriptor.sessionId, pid: descriptor.pid, deadline: Date.now() + 2000, guard };
+      const stat = await readFile(`/proc/${descriptor.pid}/stat`, 'utf8');
+      value.provenance = {
+        requestId: value.requestId, slotId: basename(dirname(dirname(directory))), launchId: basename(directory),
+        requesterPid: process.pid, targetPid: descriptor.pid,
+        targetStart: stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19]!,
+        requestedAt: new Date().toISOString(), reason: guard === 'idle' ? 'idle' : 'stop',
+      };
       const grant = join(directory, `retirement-${value.requestId}.request`);
-      await writeFile(grant, '', { flag: 'wx', mode: 0o600 });
+      await writeFile(grant, JSON.stringify(value.provenance), { flag: 'wx', mode: 0o600 });
       return { value, grant };
     },
     async pause() { child.send('pause'); await waitForFile(preparedPath); },
@@ -149,7 +168,7 @@ test('actual lifecycle host rejects busy idle retirement without consuming its g
   t.after(() => app.close());
   const { value, grant } = await app.prepare();
   assert.deepEqual(await app.request(value), { requestId: value.requestId, sessionId: app.descriptor.sessionId, pid: app.descriptor.pid, outcome: 'busy' });
-  assert.equal(await readFile(grant, 'utf8'), '');
+  assert.deepEqual(JSON.parse(await readFile(grant, 'utf8')), value.provenance);
   await app.assertNotRetiring();
   const forced = await app.prepare('none');
   assert.equal((await app.request(forced.value))?.outcome, 'requested');
@@ -199,6 +218,13 @@ test('actual lifecycle host publishes accepted retirement even when the acknowle
   await app.waitForFile(join(app.directory, 'shutdowns'));
   assert.equal(JSON.parse(await readFile(app.lifecyclePath, 'utf8')).retiring, true);
   await assert.rejects(readFile(grant), { code: 'ENOENT' });
+  await app.cleanup();
+  await assert.rejects(readFile(app.lifecyclePath), { code: 'ENOENT' });
+  const accepted = JSON.parse(await readFile(join(app.directory, 'retirement-accepted.json'), 'utf8'));
+  const { acceptedAt, ...provenance } = accepted;
+  assert.deepEqual(provenance, value.provenance);
+  assert.ok(Date.parse(acceptedAt) >= Date.parse(value.provenance!.requestedAt));
+  assert.deepEqual(JSON.parse(await readFile(join(app.directory, 'shutdown-evidence.json'), 'utf8')), accepted);
 });
 
 test('actual lifecycle host rejects expired and mismatched retirement identities without accepting', async t => {
@@ -212,7 +238,17 @@ test('actual lifecycle host rejects expired and mismatched retirement identities
     else value.requestId = '../outside';
     const response = await app.request(value);
     assert.ok(response?.outcome === 'expired' || typeof response?.error === 'string');
-    assert.equal(await readFile(grant, 'utf8'), '');
+    assert.deepEqual(JSON.parse(await readFile(grant, 'utf8')), value.provenance);
     await app.assertNotRetiring();
   }
+});
+
+test('acceptance persistence failure reports its original I/O error without shutting down', async t => {
+  const app = await fixture();
+  t.after(() => app.close());
+  const { value } = await app.prepare();
+  await mkdir(join(app.directory, 'retirement-accepted.json'));
+  const response = await app.request(value);
+  assert.match(response?.error ?? '', /EISDIR/);
+  await assert.rejects(readFile(join(app.directory, 'shutdowns')), { code: 'ENOENT' });
 });

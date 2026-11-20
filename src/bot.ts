@@ -220,6 +220,7 @@ async start(onReady?: () => void): Promise<void> {
     pending.push(cleanup(() => this.apiAbort.abort()));
     pending.push(cleanup(() => this.polling?.controller.abort()));
     pending.push(cleanup(() => this.components.worker.close()));
+    pending.push(cleanup(() => this.components.replies.close()));
     pending.push(cleanup(() => Promise.all(this.components.owners.disposeAll().map(completion => cleanup(() => completion)))));
     pending.push(cleanup(() => this.components.connections.delivery.close()));
     pending.push(cleanup(() => this.components.maintenance.stopTimers()));

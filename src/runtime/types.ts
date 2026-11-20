@@ -72,4 +72,4 @@ export interface ManagedHost {
 
 export interface HostActivity { busy: boolean; awaitingTurn: boolean; leases: number; lastUsed: number }
 
-export interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; sessionTitles?: boolean; retirement?: 1; conversations?: 1 }
+export interface HostLifecycle { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring?: boolean; modelPresets?: 2; skills?: boolean; worktree?: boolean; sessionTitles?: boolean; retirement?: 2; conversations?: 1 }

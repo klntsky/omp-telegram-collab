@@ -1,7 +1,7 @@
 import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 export default async function hostLifecycle(pi) {
@@ -258,6 +258,17 @@ export default async function hostLifecycle(pi) {
                 !['idle', 'none'].includes(request.guard)) {
               throw new Error('Invalid OMP retirement request');
             }
+            const provenance = request.provenance;
+            const stat = readFileSync('/proc/self/stat', 'utf8');
+            const targetStart = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+            if (!provenance || provenance.requestId !== request.requestId ||
+                provenance.launchId !== launchId || provenance.slotId !== basename(dirname(dirname(directory))) ||
+                !Number.isSafeInteger(provenance.requesterPid) || provenance.requesterPid <= 0 ||
+                provenance.targetPid !== process.pid || provenance.targetStart !== targetStart ||
+                typeof provenance.requestedAt !== 'string' || !Number.isFinite(Date.parse(provenance.requestedAt)) ||
+                !['idle', 'capacity', 'stop', 'worktree', 'shutdown'].includes(provenance.reason)) {
+              throw new Error('Invalid OMP retirement provenance');
+            }
             const retirementResponse = outcome => respond({ sessionId: request.sessionId, pid: request.pid, outcome });
             if (request.sessionId !== activeContext.sessionManager.getSessionId() ||
                 request.pid !== process.pid || Date.now() >= request.deadline) {
@@ -271,6 +282,8 @@ export default async function hostLifecycle(pi) {
             const nextDescriptor = { ...descriptor, ...snapshot(), candidate, retiring: true };
             const grant = join(directory, `retirement-${request.requestId}.request`);
             try {
+              const granted = JSON.parse(readFileSync(grant, 'utf8'));
+              if (JSON.stringify(granted) !== JSON.stringify(provenance)) throw new Error('OMP retirement grant provenance changed');
               writeFileSync(grant, JSON.stringify(nextDescriptor), { flag: 'r+', mode: 0o600 });
               renameSync(grant, join(directory, 'lifecycle.json'));
             } catch (error) {
@@ -278,6 +291,18 @@ export default async function hostLifecycle(pi) {
               retirementResponse('expired');
               return;
             }
+            // Shutdown removes the descriptor and socket, so durable acceptance must precede
+            // both the acknowledgement and shutdown; an I/O failure must leave the host alive.
+            const accepted = join(directory, 'retirement-accepted.json');
+            const temporary = `${accepted}.${request.requestId}.tmp`;
+            const handle = openSync(temporary, 'wx', 0o600);
+            try {
+              writeFileSync(handle, JSON.stringify({ ...provenance, acceptedAt: new Date().toISOString() }));
+              fsyncSync(handle);
+            } finally { closeSync(handle); }
+            renameSync(temporary, accepted);
+            const directoryHandle = openSync(directory, 'r');
+            try { fsyncSync(directoryHandle); } finally { closeSync(directoryHandle); }
             descriptor = nextDescriptor;
             retirementResponse('requested');
             if (!timer) {
@@ -295,6 +320,7 @@ export default async function hostLifecycle(pi) {
           assertAvailable(request);
         } catch (error) {
           respond({ error: error instanceof Error ? error.message : String(error) });
+          if (request?.type === 'retire') console.error('OMP retirement request failed:', error);
           return;
         }
         clearTimeout(timeout);
@@ -339,7 +365,7 @@ export default async function hostLifecycle(pi) {
         skills: true,
         worktree: true,
         sessionTitles: typeof pi.setSessionName === 'function',
-        retirement: 1,
+        retirement: 2,
       };
       publishDescriptor();
       startupReady?.();

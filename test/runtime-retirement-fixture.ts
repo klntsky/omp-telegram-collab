@@ -16,6 +16,7 @@ const execute = promisify(execFile);
 type RetirementMode = 'busy' | 'uncertain' | 'accepted' | 'delayed' | 'never-received' | 'cancel-failure';
 export interface RetirementRequest {
   type: 'retire'; requestId: string; sessionId: string; pid: number; deadline: number; guard: 'idle' | 'none';
+  provenance?: { requestId: string; slotId: string; launchId: string; requesterPid: number; targetPid: number; targetStart: string; requestedAt: string; reason: string };
 }
 
 export async function fixture(mode: RetirementMode = 'busy', pid = process.pid, guard: RetirementRequest['guard'] = 'idle') {
@@ -78,7 +79,7 @@ if (process.argv[2] !== 'collab') {
   const host = { ...state.startupHost, pid: process.pid };
   const socketPath = ${JSON.stringify(startupSocketPath)};
   const descriptor = {pid:process.pid,supervisorPid:Number(process.env.OMP_TELEGRAM_SUPERVISOR_PID),
-    sessionId:host.sessionId,socketPath,retiring:false,worktree:true,retirement:1};
+    sessionId:host.sessionId,socketPath,retiring:false,worktree:true,retirement:2};
   const server = net.createServer(socket => {
     let input = '';
     socket.on('data', data => {
@@ -119,7 +120,7 @@ if (process.argv[2] !== 'collab') {
   await writeFile(history, JSON.stringify({ type: 'session', version: 3, id: host.sessionId, cwd: directory }) + '\n');
   await writeFile(join(sessionDir, 'binding.json'), JSON.stringify({ version: 1, sessionId: host.sessionId, sessionFile: history, cwd: directory }));
   const descriptor: { pid: number; supervisorPid: number; sessionId: string; socketPath: string; retiring: boolean; worktree: boolean; retirement?: number } = {
-    pid, supervisorPid: supervisor.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 1 };
+    pid, supervisorPid: supervisor.pid, sessionId: host.sessionId, socketPath, retiring: false, worktree: true, retirement: 2 };
   const persistLifecycle = () => writeFile(lifecyclePath, JSON.stringify(descriptor), { mode: 0o600 });
   await persistLifecycle();
   const requests: RetirementRequest[] = [];
@@ -170,7 +171,7 @@ if (process.argv[2] !== 'collab') {
         assert.equal(request.type, 'retire');
         assert.equal(request.guard, guard);
         assert.match(request.requestId, /^[0-9a-f-]{36}$/);
-        assert.equal(await readFile(grantPath(request.requestId), 'utf8'), '', 'runtime must close an empty exclusive grant before sending');
+        assert.deepEqual(JSON.parse(await readFile(grantPath(request.requestId), 'utf8')), request.provenance);
         if (mode === 'busy') { respond('busy'); return; }
         if (mode === 'cancel-failure') {
           await rm(grantPath(request.requestId));

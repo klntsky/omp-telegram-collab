@@ -9,6 +9,7 @@ import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActi
 import { writeBinding, readHeader } from './files.js';
 import { errno, record } from './values.js';
 import { childEnvironment } from './environment.js';
+import type { RetirementReason } from './retirement.js';
 interface WorktreeDependencies {
   readonly config: AppConfig;
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{ bind(id: string): void; release(): void }>;
@@ -20,7 +21,7 @@ interface WorktreeDependencies {
   ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
   readonly managed: Map<string, ManagedHost | null>;
   list(deadline: number): Promise<RegistryHost[]>;
-  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void>;
+  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree', reason?: RetirementReason): Promise<void>;
   prepare(session: TopicSession): Promise<{ dir: string; pin: DurableBinding }>;
   validateCwd(cwd: string): Promise<void>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;

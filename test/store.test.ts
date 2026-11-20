@@ -196,7 +196,10 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
   try {
     const original = store.createSession(topic, 'Pending task', { kind: 'managed' }, {prompt:{messageId:1,userId:123,authorityUserId:456,content:{text:'Pending instruction'}}});
     store.markSnapshot(original.id);
-    store.rememberReply(original.id, 'omp-session', 'saved-reply');
+    store.replies.stage(original.id, 'omp-session', 'saved-reply', null, ['first', 'second'], 77, 0);
+    const reply = store.replies.pending(original.id)[0]!;
+    assert.equal(store.replies.begin(reply), true);
+    store.replies.confirm(reply, chatId, 78);
     store.advanceSessionGeneration(original.id);
     store.setReplyTarget(original.id, 77);
     store.close();
@@ -207,7 +210,9 @@ test('current sessions retain pending tasks and delivery metadata across a disk 
     assert.equal(store.promptQueue.first(original.id)?.userId, 123);
     assert.equal(store.promptQueue.first(original.id)?.authorityUserId, 456);
     assert.equal(store.hasSnapshot(original.id), true);
-    assert.equal(store.rememberReply(original.id, 'omp-session', 'saved-reply'), false);
+    assert.deepEqual(store.replies.pending(original.id), [{...reply,nextPart:1}]);
+    assert.deepEqual(store.getMessageAnchor(original.id, 'omp-session', chatId, 78),
+      {ompSessionId:'omp-session',entryId:'saved-reply',parentEntryId:null,kind:'assistant',partIndex:0});
     assert.equal(store.getReplyTarget(original.id), 77);
     assert.throws(() => store.createSession({ ...topic, instanceId: 2, cwd: '/work/other' }, 'Retarget'), /history belongs/);
     assert.deepEqual(store.getSession(original.id), original);
@@ -286,9 +291,9 @@ test('old database schemas are rejected rather than migrated', async () => {
   const filename = join(directory, 'store.sqlite');
   try {
     const store = new Store(filename);
-    store.db.exec('PRAGMA user_version=3');
+    store.db.exec('PRAGMA user_version=10');
     store.close();
-    assert.throws(() => new Store(filename), /Unsupported database schema version 3/);
+    assert.throws(() => new Store(filename), /Unsupported database schema version 10/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -13,6 +13,11 @@ interface LifecycleRequest {
   pid?: number;
   name?: string;
   guard?: 'idle' | 'none';
+  provenance?: {
+    requestId: string; slotId: string; launchId: string; requesterPid: number;
+    targetPid: number; targetStart: string; requestedAt: string;
+    reason: 'idle' | 'capacity' | 'stop' | 'worktree' | 'shutdown';
+  };
   acknowledgedSessionFile?: string;
 }
 

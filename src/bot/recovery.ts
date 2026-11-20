@@ -19,6 +19,7 @@ export interface MirrorRecoveryDependencies {
   refreshTopicStatus: (session: TopicSession) => Promise<void>;
   runBackground: (phase: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
   drainPrompts(session: TopicSession): Promise<void>;
+  recoverReplies(session: TopicSession): void;
   sessionAssigned: (session: TopicSession) => boolean;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
@@ -85,6 +86,7 @@ export class MirrorRecovery {
     signal = this.deps.background,
   ): Promise<void> {
     if (this.deps.stopped() || this.deps.options.config.terminated || signal.aborted) return Promise.resolve();
+    this.deps.recoverReplies(session);
     const metadataOwner = this.deps.metadataOwner(session);
     const existing = metadataOwner.recovery;
     if (existing) return existing;

@@ -33,6 +33,12 @@ test('closed stop recovers only its managed survivor without resolving a capabil
   assert.equal(await repeated, false);
   assert.equal(app.requests.length, 1);
   assert.equal(app.requests[0]?.guard, 'none');
+  assert.equal(app.requests[0]?.provenance?.reason, 'stop');
+  const requested = JSON.parse(await readFile(join(app.launchDir, 'retirement-request.json'), 'utf8'));
+  assert.deepEqual(requested, app.requests[0]?.provenance);
+  assert.equal(requested.slotId, app.session.id);
+  assert.equal(requested.requesterPid, process.pid);
+  assert.equal(requested.targetPid, child.pid);
   await app.removeHost();
   assert.equal(await app.runtime.stop(closed), false, 'unregistration alone does not prove process exit');
   assert.equal(await app.runtime.retireIdle(0), 0);
@@ -131,3 +137,22 @@ test('maintenance settles a recovered draining host after exact process exit wit
   assert.deepEqual(app.requests, []);
 });
 
+
+for (const reason of ['idle', 'capacity', 'shutdown'] as const) {
+  test(`${reason} retirement persists the caller reason independently of the idle guard`, async t => {
+    const app = await fixture();
+    t.after(() => app.close());
+    assert.equal(await app.runtime.retireIdle(0, reason), 0);
+    await app.release();
+    assert.equal(app.requests[0]?.guard, 'idle');
+    const requested = JSON.parse(await readFile(join(app.launchDir, 'retirement-request.json'), 'utf8'));
+    assert.deepEqual(requested, app.requests[0]?.provenance);
+    assert.ok(requested);
+    assert.equal(requested.reason, reason);
+    assert.equal(requested.launchId, app.launchDir.split('/').at(-1));
+    assert.equal(requested.slotId, app.session.id);
+    assert.equal(requested.targetPid, app.descriptor.pid);
+    assert.ok(requested.targetStart);
+    assert.ok(Number.isFinite(Date.parse(requested.requestedAt)));
+  });
+}

@@ -1,12 +1,13 @@
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { SessionRetiringError, type DurableBinding, type ManagedHost } from './types.js';
+import type { RetirementReason } from './retirement.js';
 interface TerminationDependencies {
   readonly config: AppConfig;
   readonly managed: Map<string, ManagedHost | null>;
   readonly stopping: Map<string, Promise<void>>;
   readonly pending: Map<string, Promise<HostBinding>>;
   readManagedBinding(session: TopicSession): Promise<DurableBinding | undefined>;
-  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void>;
+  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree', reason?: RetirementReason): Promise<void>;
   readonly closed: boolean;
   readonly killing: Map<string, Promise<void>>;
   acquire(): Promise<void>;
@@ -16,7 +17,7 @@ interface TerminationDependencies {
 // This owner keeps the complete termination transaction and its cleanup together.
 export interface RuntimeTermination {
   stop(session: TopicSession): Promise<boolean>;
-  stopHost(id: string, guard?: 'idle' | 'worktree', session?: TopicSession): Promise<void>;
+  stopHost(id: string, guard?: 'idle' | 'worktree', session?: TopicSession, reason?: RetirementReason): Promise<void>;
   kill(session: TopicSession): Promise<void>;
 }
 
@@ -32,7 +33,7 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
     });
   }
 
-  function stopHost(id: string, guard?: 'idle' | 'worktree', session?: TopicSession): Promise<void> {
+  function stopHost(id: string, guard?: 'idle' | 'worktree', session?: TopicSession, reason?: RetirementReason): Promise<void> {
     const pending = deps.stopping.get(id);
     if (pending) return pending;
     const operation = (async () => {
@@ -46,7 +47,7 @@ export function createTermination(deps: TerminationDependencies): RuntimeTermina
         host.cwd = pin.cwd;
         deps.managed.set(id, host);
       }
-      if (host) await deps.shutdown(id,host,guard);
+      if (host) await deps.shutdown(id, host, guard, reason);
     })().finally(() => {
       if (deps.stopping.get(id) === operation) deps.stopping.delete(id);
     });

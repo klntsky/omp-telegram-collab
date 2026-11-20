@@ -10,7 +10,7 @@ interface AdmissionDependencies {
   acquire(): Promise<void>;
   readonly reservations: Map<symbol, string>;
   readonly sessionLimit: number;
-  retireIdle(idleMs?: number): Promise<number>;
+  retireIdle(idleMs?: number, reason?: 'idle' | 'capacity' | 'shutdown'): Promise<number>;
 }
 
 // This owner keeps the complete admission transaction and its cleanup together.
@@ -41,7 +41,7 @@ export function createAdmission(deps: AdmissionDependencies): RuntimeAdmission {
       deps.assertActive();
       if (deps.closed) throw new Error('OMP runtime is stopping');
       if (!used.has(id) && used.size >= deps.sessionLimit) {
-        await deps.retireIdle(0);
+        await deps.retireIdle(0, 'capacity');
         used = await occupied();
         if (!used.has(id) && used.size >= deps.sessionLimit) throw new SessionCapacityError(deps.sessionLimit);
       }

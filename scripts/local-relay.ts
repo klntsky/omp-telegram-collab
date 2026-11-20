@@ -10,6 +10,7 @@ interface Room {
 export async function startLocalRelay() {
   const rooms = new Map<string, Room>();
   let interruptNextGuest = false;
+  let guestsDisconnected = false;
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 16 * 1024 * 1024 });
   server.on('connection', (socket, request) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -27,6 +28,10 @@ export async function startLocalRelay() {
       }
       rooms.set(roomId, { host: socket, guests: new Map(), nextPeer: 1 });
     } else {
+      if (guestsDisconnected) {
+        socket.terminate();
+        return;
+      }
       const room = rooms.get(roomId);
       if (!room) {
         socket.close(4004, 'No such room');
@@ -79,6 +84,11 @@ export async function startLocalRelay() {
   return {
     url: `ws://localhost:${address.port}`,
     interruptNextGuest() { interruptNextGuest = true; },
+    disconnectGuests() {
+      guestsDisconnected = true;
+      for (const room of rooms.values()) for (const guest of room.guests.values()) guest.terminate();
+      return () => { guestsDisconnected = false; };
+    },
     async close() {
       for (const socket of server.clients) socket.terminate();
       const { promise, resolve, reject } = Promise.withResolvers<void>();

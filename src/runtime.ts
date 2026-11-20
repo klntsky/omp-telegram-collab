@@ -123,7 +123,7 @@ export class OmpRuntime implements Omp {
       ensure: (session, beforeMutation) => runtime.ensure(session, beforeMutation),
       managed: this.#managed,
       list: (deadline) => runtime.#registry.list(deadline),
-      shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
+      shutdown: (id, host, guard, reason) => runtime.#retirement.shutdown(id, host, guard, reason),
       prepare: (session) => runtime.#paths.prepare(session),
       validateCwd: (cwd) => runtime.#paths.validateCwd(cwd),
       readManagedBinding: session => runtime.#readManagedBinding(session),
@@ -216,7 +216,7 @@ export class OmpRuntime implements Omp {
       acquire: () => runtime.#ownership.acquire(),
       reservations: this.#reservations,
       get sessionLimit() { return runtime.#sessionLimit; },
-      retireIdle: (idleMs) => runtime.retireIdle(idleMs),
+      retireIdle: (idleMs, reason) => runtime.retireIdle(idleMs, reason),
     });
     this.#sessions = createSessions({
       assertActive: () => runtime.#assertActive(),
@@ -237,7 +237,7 @@ export class OmpRuntime implements Omp {
       pending: this.#pending,
       // Stop uses the accepted binding without opening a socket that concurrent kill can destroy.
       readManagedBinding: session => runtime.#paths.readManagedBinding(session),
-      shutdown: (id, host, guard) => runtime.#retirement.shutdown(id, host, guard),
+      shutdown: (id, host, guard, reason) => runtime.#retirement.shutdown(id, host, guard, reason),
       get closed() { return runtime.#closed; },
       killing: this.#killing,
       acquire: () => runtime.#ownership.acquire(),
@@ -314,7 +314,7 @@ export class OmpRuntime implements Omp {
     return instance.defaultDir;
   }
   validateSessionPaths: (sessions: TopicSession[], config?: AppConfig) => Promise<void>;
-  async retireIdle(idleMs = 300000): Promise<number> {
+  async retireIdle(idleMs = 300000, reason: 'idle' | 'capacity' | 'shutdown' = 'idle'): Promise<number> {
     if (this.#closed && !this.#ownership.acquired) return 0;
     await this.#ownership.acquire();
     let retired = 0;
@@ -328,7 +328,7 @@ export class OmpRuntime implements Omp {
       if (this.#pending.has(id) || [...this.#reservations.values()].includes(id)) continue;
       if (!launch) {
         if (host) {
-          await this.#termination.stopHost(id, 'idle');
+          await this.#termination.stopHost(id, 'idle', undefined, reason);
           if (host.exited) retired++;
         }
         continue;
@@ -340,7 +340,7 @@ export class OmpRuntime implements Omp {
         this.#managed.set(id, host);
       }
       if (!this.#closed) await this.#conversation.refresh({ id, cwd: host.cwd ?? launch.cwd, runtime: { kind: 'managed' } });
-      await this.#termination.stopHost(id, 'idle');
+      await this.#termination.stopHost(id, 'idle', undefined, reason);
       if (host.exited) retired++;
     }
     return retired;
@@ -425,7 +425,7 @@ export class OmpRuntime implements Omp {
       await this.#fork.drain();
       await Promise.allSettled(this.#killing.values());
       await this.#ownership.settleAcquisition();
-      await this.retireIdle(0);
+      await this.retireIdle(0, 'shutdown');
       this.#ownership.close();
     })();
     return this.#closing;

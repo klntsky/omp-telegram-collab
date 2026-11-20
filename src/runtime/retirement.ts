@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { unlink } from 'node:fs/promises';
+import { open, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig } from '../../shared/contracts.js';
 import type { ManagedHost, HostLifecycle } from './types.js';
@@ -16,8 +16,10 @@ interface RetirementDependencies {
   readonly config: AppConfig;
 }
 
+export type RetirementReason = 'idle' | 'capacity' | 'stop' | 'worktree' | 'shutdown';
+
 export interface RuntimeRetirement {
-  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void>;
+  shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree', reason?: RetirementReason): Promise<void>;
 }
 
 export function createRetirement(deps: RetirementDependencies): RuntimeRetirement {
@@ -33,7 +35,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     return true;
   }
 
-  async function shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void> {
+  async function shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree', reason: RetirementReason = guard ?? 'stop'): Promise<void> {
     if (deps.killing.has(id) || await settle(id, host)) return;
     const root = path.join(deps.config.dataDir, 'sessions', id);
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
@@ -43,7 +45,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       await delay(100);
       lifecycle = await deps.lifecycle(id);
     }
-    if (!lifecycle || lifecycle.retirement !== 1 || (guard === 'worktree' && !lifecycle.worktree)) {
+    if (!lifecycle || lifecycle.retirement !== 2 || (guard === 'worktree' && !lifecycle.worktree)) {
       if (!guard || guard === 'worktree') throw new Error('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.');
       return;
     }
@@ -55,14 +57,24 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     if (host.retiring || deps.killing.has(id)) return;
 
     const requestId = randomUUID();
-    const grant = path.join(await activeLaunchDir(root), `retirement-${requestId}.request`);
-    await privateFile(grant, '', true);
+    const directory = await activeLaunchDir(root);
+    const provenance = {
+      requestId, slotId: id, launchId: path.basename(directory), requesterPid: process.pid,
+      targetPid: lifecycle.pid, targetStart: identity.start, requestedAt: new Date().toISOString(), reason,
+    };
+    const temporary = path.join(directory, `retirement-request.${requestId}.tmp`);
+    await privateFile(temporary, JSON.stringify(provenance), true);
+    await rename(temporary, path.join(directory, 'retirement-request.json'));
+    const directoryHandle = await open(directory, 'r');
+    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    const grant = path.join(directory, `retirement-${requestId}.request`);
+    await privateFile(grant, JSON.stringify(provenance), true);
     host.retiring = true;
     let response: Record<string, unknown> = {};
     try {
       response = await requestLifecycle(lifecycle, {
         type: 'retire', requestId, sessionId: host.sessionId, pid: lifecycle.pid,
-        deadline: Date.now() + 2000, guard: guard ? 'idle' : 'none',
+        deadline: Date.now() + 2000, guard: guard ? 'idle' : 'none', provenance,
       });
     } catch (error) {
       console.error(`Session ${id} retirement request failed:`, error);
@@ -89,8 +101,8 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     }
   }
 
-  return { shutdown: async (id, host, guard) => {
-    try { await shutdown(id, host, guard); }
+  return { shutdown: async (id, host, guard, reason) => {
+    try { await shutdown(id, host, guard, reason); }
     catch (error) {
       try { await launchFailure(path.join(deps.config.dataDir, 'sessions', id), error); }
       catch (failure) { throw new AggregateError([error, failure], `${error instanceof Error ? error.message : String(error)}\n${failure instanceof Error ? failure.message : String(failure)}`); }

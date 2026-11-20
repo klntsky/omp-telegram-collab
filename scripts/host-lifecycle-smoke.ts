@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createConnection } from 'node:net';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import * as pty from '@lydell/node-pty';
+import { procIdentity } from '../src/runtime/process.js';
+import { requestLifecycle } from '../src/runtime/lifecycle-client.js';
+import type { HostLifecycle } from '../src/runtime/types.js';
 
 export async function verifyBusyHostRetirement(directory: string, executable: string, relayUrl: string): Promise<void> {
   const started = join(directory,'hold-started');
@@ -14,6 +16,10 @@ export async function verifyBusyHostRetirement(directory: string, executable: st
   const extension = join(directory,'hold-extension.mjs');
   const history = join(directory,'guard-history.jsonl');
   const overlay = join(directory,'guard-runtime.json');
+  const slotId = 'guard';
+  const launchId = randomUUID();
+  const launchDirectory = join(directory, 'sessions', slotId, 'launches', launchId);
+  await mkdir(launchDirectory, { recursive: true, mode: 0o700 });
   await writeFile(history,JSON.stringify({type:'session',version:3,id:randomUUID(),timestamp:new Date().toISOString(),cwd:directory})+'\n');
   await writeFile(overlay,JSON.stringify({collab:{autoStart:'control',relayUrl},startup:{checkUpdate:false,setupWizard:false}}));
   await writeFile(extension,`import {existsSync,writeFileSync} from 'node:fs';
@@ -23,10 +29,10 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
   writeFileSync(${JSON.stringify(finished)},'finished');
 }});`);
   const terminal = pty.spawn(executable,[
-    '--cwd',directory,'--session-dir',directory,'--resume',history,
+    '--cwd',directory,'--session-dir',launchDirectory,'--resume',history,
     '--config',overlay,'--no-extensions','--no-skills','--no-rules','--no-context-files','--no-title',
     '--extension',extension,'--extension',fileURLToPath(new URL('../src/host-lifecycle.mjs',import.meta.url)),
-  ],{cwd:directory,env:{...process.env,TERM:'xterm-256color',OMP_TELEGRAM_SESSION_DIR:directory,OMP_TELEGRAM_DEFAULT_PRESET:''},name:'xterm-256color',cols:100,rows:30});
+  ],{cwd:directory,env:{...process.env,TERM:'xterm-256color',OMP_TELEGRAM_SESSION_DIR:launchDirectory,OMP_TELEGRAM_LAUNCH_ID:launchId,OMP_TELEGRAM_SUPERVISOR_PID:String(process.pid),OMP_TELEGRAM_DEFAULT_PRESET:''},name:'xterm-256color',cols:100,rows:30});
   let exited = false;
   let output = '';
   terminal.onData(part => { output = (output+part).slice(-4000); });
@@ -42,41 +48,32 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     try { await readFile(filename); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  let lifecycle: {socketPath:string;sessionId:string;pid:number;retirement:number} | undefined;
+  let lifecycle: HostLifecycle | undefined;
   async function requestRetirement(): Promise<void> {
     assert.ok(lifecycle);
-    assert.equal(lifecycle.retirement,1);
+    assert.equal(lifecycle.retirement, 2);
+    const identity = await procIdentity(lifecycle.pid);
+    assert.ok(identity);
     const requestId = randomUUID();
-    const grant = join(directory,`retirement-${requestId}.request`);
-    await writeFile(grant,'',{flag:'wx',mode:0o600});
-    const request = {type:'retire',requestId,sessionId:lifecycle.sessionId,pid:lifecycle.pid,deadline:Date.now()+2000,guard:'none'};
-    const {promise,resolve,reject} = Promise.withResolvers<void>();
-    const socket = createConnection(lifecycle.socketPath);
-    socket.setTimeout(2000,()=>{socket.destroy();reject(new Error('Retirement request timed out'));});
-    socket.once('error',reject);
-    socket.once('end',()=>reject(new Error('Retirement host disconnected before acknowledgement')));
-    socket.once('close',()=>reject(new Error('Retirement host closed before acknowledgement')));
-    socket.once('connect',()=>socket.write(JSON.stringify(request)+'\n'));
-    let input = '';
-    socket.on('data',data=>{
-      input += data.toString();
-      if (!input.includes('\n')) return;
-      socket.destroy();
-      try {
-        const response = JSON.parse(input.trim());
-        assert.equal(response.requestId,requestId);
-        assert.equal(response.sessionId,request.sessionId);
-        assert.equal(response.pid,request.pid);
-        assert.equal(response.outcome,'requested');
-        resolve();
-      } catch (error) { reject(error); }
-    });
-    try { await promise; }
-    finally { await rm(grant,{force:true}); }
+    const provenance = {
+      requestId, slotId, launchId, requesterPid: process.pid,
+      targetPid: lifecycle.pid, targetStart: identity.start,
+      requestedAt: new Date().toISOString(), reason: 'stop' as const,
+    };
+    const grant = join(launchDirectory, `retirement-${requestId}.request`);
+    await writeFile(grant, JSON.stringify(provenance), { flag: 'wx', mode: 0o600 });
+    try {
+      const response = await requestLifecycle(lifecycle, {
+        type: 'retire', requestId, sessionId: lifecycle.sessionId, pid: lifecycle.pid,
+        deadline: Date.now() + 2000, guard: 'none', provenance,
+      });
+      if (typeof response.error === 'string') throw new Error(response.error);
+      assert.equal(response.outcome, 'requested');
+    } finally { await rm(grant, { force: true }); }
   }
   try {
-    await waitFor(()=>exists(join(directory,'lifecycle.json')),'Lifecycle extension did not start');
-    lifecycle = JSON.parse(await readFile(join(directory,'lifecycle.json'),'utf8'));
+    await waitFor(() => exists(join(launchDirectory, 'lifecycle.json')), 'Lifecycle extension did not start');
+    lifecycle = JSON.parse(await readFile(join(launchDirectory, 'lifecycle.json'), 'utf8'));
     terminal.write('/lifecycle-hold\r');
     await waitFor(()=>exists(started),'Local command did not start');
     await requestRetirement();
@@ -86,11 +83,14 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     await writeFile(release,'release');
     await waitFor(()=>exists(finished),'Retirement interrupted the working command');
     await waitFor(()=>exited,'Idle host did not retire after its admitted command completed');
+    const accepted = JSON.parse(await readFile(join(launchDirectory, 'retirement-accepted.json'), 'utf8'));
+    assert.equal(accepted.targetPid, lifecycle!.pid);
+    assert.equal(accepted.reason, 'stop');
     console.log('PASS actual OMP host defers retirement while a local command is working, lets it finish, then exits without a signal.');
   } finally {
     await writeFile(release,'release');
     if (!exited && lifecycle) {
-      await requestRetirement().catch(()=>{});
+      await requestRetirement().catch(error => { console.error('Native retirement smoke cleanup failed:', error); terminal.kill('SIGKILL'); });
       await waitFor(()=>exited,'Guard smoke host failed to retire');
     }
   }

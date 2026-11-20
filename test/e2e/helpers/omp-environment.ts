@@ -85,7 +85,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const workspace = join(root, 'workspace');
   const dataDir = join(root, 'application');
   let provider: FakeLlmProvider | undefined;
-  let relay: { url: string; interruptNextGuest(): void; close(): Promise<void> } | undefined;
+  let relay: { url: string; interruptNextGuest(): void; disconnectGuests(): () => void; close(): Promise<void> } | undefined;
   t.after(async () => {
     const errors: unknown[] = [];
     log('environment-cleanup-start', {});
@@ -233,5 +233,5 @@ exec -a "$0" "$command" "\${args[@]}"`;
     '--system-prompt', 'Complete the requested task with the available tools.',
   ];
   log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl, relayUrl: relay.url });
-  return { workspace, dataDir, executable, agentConfigPath, args, relayUrl: relay.url, interruptNextGuest: relay.interruptNextGuest, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
+  return { workspace, dataDir, executable, agentConfigPath, args, relayUrl: relay.url, interruptNextGuest: relay.interruptNextGuest, disconnectGuests: relay.disconnectGuests, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
 }
