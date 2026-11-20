@@ -18,6 +18,9 @@ First-time enrollment needs no separate instance-creation step: `omp-telegram-co
 
 The Mini App is optional and read-only for every user, including administrators. `omp-telegram-collab setup` explains that it adds a live transcript, tool details, and subagent activity before asking whether to enable it. New services default to Telegram-only.
 
+An existing host remains readable in the Mini App while graceful retirement waits for admitted work to finish. Viewing neither cancels retirement nor admits a new prompt; mutation and replacement-host admission remain fenced until retirement settles.
+Automatic retirement waits for native background jobs and pending result deliveries as well as foreground work. An explicit graceful stop may continue draining admitted work, including questions; it does not force-terminate that work or start a replacement host.
+
 An empty public HTTPS origin selects Telegram-only operation for every bot in the service. Prompts, images, replies, agent questions, and Telegram topic commands remain available. Mini App launch buttons and `/agent` menu entries appear when an HTTPS origin is configured. Enabling the Mini App requires a named app registered in BotFather for each bot. A network failure leaves the configured mode unchanged.
 
 The `/cli` command works in both modes. Its code block and copy button contain only the chat and topic IDs. Requesting the command leaves the host unchanged. Executing it locally resolves the current assignment through the running service, resumes a managed host when needed, and joins the live conversation. Closed, detached, missing, ambiguous, unassigned, and terminated sessions are rejected. Leaving the terminal client leaves the host and Telegram conversation running.

@@ -1,7 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
-import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
+import { SessionRetiringError, type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
 import { procIdentity } from './process.js';
 import { errno } from './values.js';
 import { parseCollabLink } from '../vendor/link.js';
@@ -50,7 +50,8 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
 
   async function resolveExisting(session: TopicSession): Promise<HostBinding | undefined> {
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.stopping.has(session.id)) throw new SessionRetiringError('OMP runtime is stopping');
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
     const runtime = session.runtime;
@@ -69,7 +70,8 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
     const hosts = await deps.list(deadline);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.stopping.has(session.id)) throw new SessionRetiringError('OMP runtime is stopping');
     const matches = hosts.filter(host => runtime.kind === 'attached'
       ? host.instanceId === runtime.instanceId
       : host.sessionId === pin!.sessionId);
@@ -86,7 +88,8 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
     }
     const binding = await deps.resolve(host, deadline);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.stopping.has(session.id)) throw new SessionRetiringError('OMP runtime is stopping');
     if (runtime.kind === 'managed') {
       const owned = deps.managed.get(session.id);
       if (!owned || owned.exited) {
@@ -121,13 +124,15 @@ export function createSessions(deps: SessionsDependencies): RuntimeSessions {
 
   async function historySource(session: TopicSession): Promise<{ sessionId: string; path: string } | undefined> {
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.stopping.has(session.id)) throw new SessionRetiringError('OMP runtime is stopping');
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
     if (session.runtime.kind === 'attached') return undefined;
     const pin = await deps.readManagedBinding(session);
     deps.assertActive();
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
+    if (deps.closed) throw new Error('OMP runtime is stopping');
+    if (deps.stopping.has(session.id)) throw new SessionRetiringError('OMP runtime is stopping');
     return pin && { sessionId: pin.sessionId, path: pin.sessionFile };
   }
 

@@ -14,10 +14,13 @@ interface Room {
 
 /** Only the four-byte routing envelope is inspected; encrypted payloads remain opaque. */
 export class LocalRelay {
-  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false });
+  // Yield between received messages so outbound completion can release input
+  // backpressure before the receiver parses its next buffered frame.
+  // https://github.com/websockets/ws/blob/8.22.0/lib/receiver.js#L605-L614
+  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false, allowSynchronousEvents: false });
   private readonly rooms = new Map<string, Room>();
   private readonly alive = new Set<WebSocket>();
-  private readonly pending = new Map<WebSocket, number>();
+  private readonly forwarding = new Map<WebSocket, number>();
   private queuedBytes = 0;
   private readonly heartbeat: NodeJS.Timeout;
   private closing: Promise<void> | undefined;
@@ -27,6 +30,9 @@ export class LocalRelay {
     this.server.on('error', error => report('relay server', error));
     this.heartbeat = setInterval(() => {
       for (const socket of this.server.clients) {
+        // A backpressured producer cannot read its pong yet. Its blocked
+        // destination is still probed and will release this pause on closure.
+        if (this.forwarding.has(socket)) { this.alive.add(socket); continue; }
         if (!this.alive.delete(socket)) socket.terminate();
         else if (socket.readyState === WebSocket.OPEN) socket.ping();
       }
@@ -44,22 +50,35 @@ export class LocalRelay {
     this.server.handleUpgrade(request, socket, head, client => this.server.emit('connection', client, request));
   }
 
-  private send(socket: WebSocket, data: Buffer | string): void {
+  private send(socket: WebSocket, data: Buffer | string, source?: WebSocket): void {
     if (socket.readyState !== WebSocket.OPEN) return;
     const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
-    const count = this.pending.get(socket) ?? 0;
-    if (socket.bufferedAmount + bytes > MAX_SOCKET_QUEUE || this.queuedBytes + bytes > MAX_TOTAL_QUEUE || count >= 128) {
+    if (socket.bufferedAmount + bytes > MAX_SOCKET_QUEUE || this.queuedBytes + bytes > MAX_TOTAL_QUEUE) {
       this.report('relay backpressure', new Error('Relay outbound queue capacity exceeded; disconnecting slow consumer'));
       socket.terminate();
       return;
     }
     this.queuedBytes += bytes;
-    this.pending.set(socket, count + 1);
+    // A full snapshot can exceed the output budget while its consumer is
+    // briefly busy. Stop reading its producer instead of disconnecting and
+    // replaying the snapshot forever. Fanout resumes only after every write
+    // from this producer completes; already-parsed input stays byte-bounded.
+    // ws.pause/resume and its stream adapter use the same TCP flow control:
+    // https://github.com/websockets/ws/blob/8.22.0/lib/stream.js#L62-L67
+    if (source) {
+      this.forwarding.set(source, (this.forwarding.get(source) ?? 0) + 1);
+      source.pause();
+    }
     socket.send(data, error => {
       this.queuedBytes -= bytes;
-      const remaining = (this.pending.get(socket) ?? 1) - 1;
-      if (remaining) this.pending.set(socket, remaining);
-      else this.pending.delete(socket);
+      if (source) {
+        const remaining = this.forwarding.get(source)! - 1;
+        if (remaining) this.forwarding.set(source, remaining);
+        else {
+          this.forwarding.delete(source);
+          if (source.readyState === WebSocket.OPEN) source.resume();
+        }
+      }
       if (error) {
         this.report('relay send', error);
         socket.terminate();
@@ -107,13 +126,13 @@ export class LocalRelay {
       if (bytes.length < 4) { socket.close(1008, 'Invalid envelope'); return; }
       if (role === 'guest') {
         bytes.writeUInt32BE(peer, 0);
-        this.send(room.host, bytes);
+        this.send(room.host, bytes, socket);
       } else {
         const target = bytes.readUInt32BE(0);
-        if (target === 0) for (const guest of room.guests.values()) this.send(guest, bytes);
+        if (target === 0) for (const guest of room.guests.values()) this.send(guest, bytes, socket);
         else {
           const guest = room.guests.get(target);
-          if (guest) this.send(guest, bytes);
+          if (guest) this.send(guest, bytes, socket);
         }
       }
     });

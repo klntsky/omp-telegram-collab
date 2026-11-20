@@ -268,7 +268,9 @@ export class SessionConnections {
           if (this.listeners.get(session.id) === listener)
             this.dropListener(session.id, error instanceof Error ? error.message : String(error));
         }
-        return this.listen(session, undefined, beforeMutation, false, false);
+        // A reader already resolved this host. Listener replacement must not
+        // turn reconnection into mutation admission against a draining host.
+        return this.listen(session, binding, beforeMutation, false, false);
       });
     return listener.promise;
   }
