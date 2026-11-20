@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { once } from 'node:events';
 import test, { type TestContext } from 'node:test';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
 import type { CollabConnection, HostBinding, TopicSession } from '../../shared/contracts.js';
@@ -10,6 +11,7 @@ import { emptyConfig, writeConfig } from '../../src/config.js';
 import { hostLifecyclePath, hostSupervisorPath } from '../../src/host-assets.js';
 import { startLocalRelay } from '../../src/local-relay.js';
 import { OmpRuntime } from '../../src/runtime.js';
+import { CollabTransportError } from '../../src/collab.js';
 import { childEnvironment } from '../../src/runtime/environment.js';
 import { belongsTo, procIdentity } from '../../src/runtime/process.js';
 import { parseCollabLink } from '../../src/vendor/link.js';
@@ -54,7 +56,7 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   await writeFile(join(directory, 'runtime.yml'), JSON.stringify({ collab: { autoStart: 'control', relayUrl: foreign.url }, startup: { checkUpdate: false, setupWizard: false } }), { mode: 0o600 });
   let runtime = new OmpRuntime(config);
   cleanup.push(async () => { try { await runtime.kill(session); } finally { await runtime.close(); } });
-  async function startForeignHost(): Promise<void> {
+  async function startForeignHost(): Promise<ChildProcess> {
     const supervisor = spawn(process.execPath, [hostSupervisorPath, omp.executable, ...config.omp.args,
       '--cwd', session.cwd, '--config', join(directory, 'runtime.yml'), '--session-dir', directory,
       '--resume', sessionFile, '--no-title', '--extension', hostLifecyclePath,
@@ -85,6 +87,7 @@ test('managed relay preserves native history through foreign-relay cutover, serv
     supervisor.once('spawn', spawned.resolve);
     supervisor.once('error', spawned.reject);
     await spawned.promise;
+    return supervisor;
   }
   await startForeignHost();
   const signal = () => AbortSignal.any([t.signal, AbortSignal.timeout(60000)]);
@@ -136,12 +139,23 @@ test('managed relay preserves native history through foreign-relay cutover, serv
   assert.equal(new URL(relay.url).hostname, '127.0.0.1');
   const localHost = (await omp.listHosts()).find(host => host.sessionId === sessionId)!;
   assert.notEqual(localHost.pid, original.pid);
+  const duplicate = await startForeignHost();
+  assert.equal((await bounded(once(duplicate, 'exit'), signal()))[0], 1);
+  assert.match(await readFile(join(directory, 'terminal.log'), 'utf8'), /database is locked/);
+  assert.ok(await procIdentity(localHost.pid));
   const release = runtime.retain(session.id);
-  await runtime.close();
-  release();
-  runtime = new OmpRuntime(config);
-  await runtime.acquire();
-  assert.equal((await descriptor()).pid, relay.pid);
+  process.kill(localHost.pid, 'SIGSTOP');
+  try {
+    // A real host which cannot answer the native registry probe is omitted from
+    // discovery. Neither a retry nor a new service owner may spawn over it.
+    await assert.rejects(runtime.ensure(session), CollabTransportError);
+    await runtime.close();
+    release();
+    runtime = new OmpRuntime(config);
+    await runtime.acquire();
+    assert.equal((await descriptor()).pid, relay.pid);
+    await assert.rejects(runtime.ensure(session), CollabTransportError);
+  } finally { process.kill(localHost.pid, 'SIGCONT'); }
   await runtime.ensure(session);
   assert.equal((await omp.listHosts()).find(host => host.sessionId === sessionId)?.pid, localHost.pid);
   await interruptManagedRelay(omp.dataDir);

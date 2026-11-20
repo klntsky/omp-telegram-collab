@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 import type { AppConfig, HostBinding } from '../../shared/contracts.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { type RegistryHost } from './types.js';
-import { childEnvironment } from './environment.js';
+import { createDiscovery } from './discovery.js';
 import { CollabTransportError } from '../collab.js';
 interface RegistryDependencies {
   readonly config: AppConfig;
@@ -21,30 +20,10 @@ export interface RuntimeRegistry {
 
 export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
 
-  async function json(args: string[], deadline: number): Promise<Record<string, unknown>> {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error('OMP discovery timed out');
-    const output = await new Promise<string>((resolve, reject) => {
-      execFile(deps.config.omp.executable, args, {
-        cwd: deps.config.dataDir,
-        env: childEnvironment(),
-        timeout: Math.min(remaining, 5_000),
-        killSignal: 'SIGKILL',
-        maxBuffer: 2 * 1024 * 1024,
-        encoding: 'utf8',
-      }, (error, stdout) => error ? reject(error) : resolve(stdout));
-    });
-    try {
-      const value: unknown = JSON.parse(output);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
-      return value as Record<string, unknown>;
-    } catch (error) {
-      throw new Error('OMP discovery returned invalid JSON', { cause: error });
-    }
-  }
+  const discovery = createDiscovery(deps.config);
 
   async function list(deadline: number): Promise<RegistryHost[]> {
-    const result = await json(['collab', 'list', '--json'], deadline);
+    const result = await discovery.list(deadline);
     if (result.version !== 1 || !Array.isArray(result.hosts)) throw new Error('Unsupported OMP Collab registry version');
     for (const host of result.hosts as RegistryHost[]) {
       if (!host || typeof host.instanceId !== 'string' || typeof host.sessionId !== 'string' || typeof host.cwd !== 'string' || !Number.isSafeInteger(host.pid) || host.pid < 1 || !Number.isSafeInteger(host.generation) || host.generation < 1 || (host.access !== 'view' && host.access !== 'control') || typeof host.relayConnected !== 'boolean') {
@@ -60,7 +39,7 @@ export function createRegistry(deps: RegistryDependencies): RuntimeRegistry {
     // A live host keeps its identity while reconnecting after relay recovery.
     // Preserve the diagnostic but let the gateway retry instead of ending the session.
     if (!host.relayConnected) throw new CollabTransportError('OMP host does not publish a connected control room');
-    const link = await json(['collab', 'link', host.instanceId, '--json'], deadline);
+    const link = await discovery.link(host.instanceId, deadline);
     if (link.version !== 1 || link.instanceId !== host.instanceId || link.generation !== host.generation || link.access !== 'control' || typeof link.url !== 'string') {
       throw new Error('OMP host changed while resolving its capability');
     }

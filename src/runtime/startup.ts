@@ -11,6 +11,7 @@ import { record, errno, delay } from './values.js';
 import { childEnvironment } from './environment.js';
 import { managedLifecycleIdentity, usesManagedRelay } from './lifecycle-identity.js';
 import { parseCollabLink } from '../vendor/link.js';
+import { CollabTransportError } from '../collab.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
@@ -135,12 +136,30 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         delete owned.retirement;
         owned.retiring = false;
       }
+      // Registry listing omits hosts whose IPC probe did not answer. A missing
+      // listing must not authorize a second process, including after bot restart.
+      // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/collab/registry.ts (host query timeouts)
+      if (lifecycle) {
+        const previous: ManagedHost = owned && !owned.exited ? owned : { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
+        const identity = await managedLifecycleIdentity(deps.config.dataDir, id, previous, lifecycle);
+        if (identity) {
+          previous.identity = { pid: lifecycle.pid, start: identity.start };
+          owned = previous;
+          deps.managed.set(id, previous);
+        }
+      }
       if (owned?.identity) {
         const identity = await procIdentity(owned.identity.pid);
         if (identity && identity.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') {
-          throw new Error('OMP host is not registered; cannot safely start another process');
+          throw new CollabTransportError('OMP host is not registered; cannot safely start another process');
         }
         delete owned.identity;
+      }
+      if (owned?.process?.pid && !owned.exited) {
+        const supervisor = await procIdentity(owned.process.pid);
+        if (supervisor && supervisor.state !== 'Z' && supervisor.state !== 'X') {
+          throw new CollabTransportError('OMP host is not registered; cannot safely start another process');
+        }
       }
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
