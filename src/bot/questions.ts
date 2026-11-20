@@ -210,6 +210,7 @@ export class BotQuestions {
         this.dependencies.store.getSession(session.id)?.status === 'open';
       if (!active()) return;
       if (!(await this.dependencies.ready(session.chatId))) { if (active()) this.endQuestion(token); return; }
+      if (!active()) return;
       const previous = listener.customAnswerMessage;
       listener.customAnswerMessage = undefined;
       if (request.kind === 'editor' && previous) {

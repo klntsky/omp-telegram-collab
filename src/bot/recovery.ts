@@ -10,7 +10,7 @@ import { topicDestination } from '../../shared/topic-destination.js';
 export interface MirrorRecoveryDependencies {
   background: AbortSignal;
   bot: Bot<Context>;
-  dropListener: (id: string, reason?: string) => void;
+  dropListener: (id: string, reason?: string, preserveQuestions?: boolean) => void;
   id: number;
   getListener: (id: string) => Listener | undefined;
   currentMetadataOwner: (id: string) => SessionMetadataOwner | undefined;
@@ -119,7 +119,11 @@ export class MirrorRecovery {
       try {
         await withCancellation(connecting, deadline);
       } catch (error) {
-        if (this.deps.getListener(session.id) === listener) this.deps.dropListener(session.id);
+        if (this.deps.getListener(session.id) === listener) {
+          // A recovery timeout does not invalidate the host's unanswered requests.
+          // Session invalidation still retires them through the active-state fence.
+          this.deps.dropListener(session.id, error instanceof Error ? error.message : String(error), active());
+        }
         throw error;
       }
     })().finally(() => {

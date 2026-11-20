@@ -3,6 +3,7 @@ import { it } from 'node:test';
 import { z } from 'zod';
 import type { BotComponents } from '../../../src/bot/composition.js';
 import type { Listener } from '../../../src/bot/types.js';
+import type { Omp } from '../../../src/omp.js';
 import type { CollabConnection } from '../../../shared/contracts.js';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { bounded } from '../helpers/async.js';
@@ -23,7 +24,8 @@ export function registerQuestionReconnectTimeout(getApp: () => CollaborationTest
     const reqId = request.request.reqId;
     const originalPanels = deliveredPanels(app.apiCalls.slice(start), 'question', 'ask:', session.threadId);
     const components: BotComponents = Reflect.get(app.service, 'components');
-    const connect = app.runtime.connectCollab;
+    const runtime: Omp = app.runtime;
+    const connect = runtime.connectCollab;
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const retry = Promise.withResolvers<void>();
@@ -35,17 +37,17 @@ export function registerQuestionReconnectTimeout(getApp: () => CollaborationTest
     let failed = false;
     const cleanupErrors: unknown[] = [];
     const signal = AbortSignal.any([t.signal, AbortSignal.timeout(60000)]);
-    app.runtime.connectCollab = async (...args) => {
+    runtime.connectCollab = async (...args: Parameters<Omp['connectCollab']>) => {
       if (!first) {
         await retry.promise;
-        return connect.apply(app.runtime, args);
+        return connect.apply(runtime, args);
       }
       first = false;
       lateListener = components.connections.listeners.get(session.id);
       entered.resolve();
       const operation = (async () => {
         await release.promise;
-        const connection = await connect.apply(app.runtime, args);
+        const connection = await connect.apply(runtime, args);
         return {
           send: connection.send.bind(connection),
           refreshSnapshot: connection.refreshSnapshot.bind(connection),
@@ -115,7 +117,7 @@ export function registerQuestionReconnectTimeout(getApp: () => CollaborationTest
         cleanupErrors.push(error);
         t.diagnostic(`Late reconnect cleanup failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
       }
-      app.runtime.connectCollab = connect;
+      runtime.connectCollab = connect;
     }
     if (failed && cleanupErrors.length) throw new AggregateError([failure, ...cleanupErrors],
       [failure, ...cleanupErrors].map(error => error instanceof Error ? error.message : String(error)).join('\n'), { cause: failure });
