@@ -5,6 +5,7 @@ import type { Listener } from './types.js';
 import { AuthorizationDeniedError, PromptPreparationRejectedError } from './types.js';
 import { SessionCapacityError, SessionRetiringError } from '../runtime/types.js';
 import { topicDestination } from '../../shared/topic-destination.js';
+import { logEvent } from '../logging.js';
 
 export interface PromptWorkerDependencies {
   options: Pick<BotOptions, 'config' | 'store' | 'runtime'>;
@@ -62,7 +63,7 @@ export class PromptWorker {
     if (this.closed || this.deps.stopped() || this.deps.options.config.terminated) return;
     const timer = setTimeout(() => {
       this.timers.delete(session.id);
-      void this.drain(session).catch(error => console.warn(`Could not resume queued prompt (${session.id}).`, error));
+      void this.drain(session).catch(error => logEvent('warn', 'queued-prompt-resume-failed', {botId:session.botId,sessionId:session.id,chatId:session.chatId,threadId:session.threadId,error}));
     }, Math.max(0, at - Date.now()));
     timer.unref();
     this.timers.set(session.id, timer);
@@ -179,7 +180,9 @@ export class PromptWorker {
       }
       if (error instanceof SessionCapacityError) { await this.deps.requestCapacity(session, error.limit); return; }
       if (error instanceof SessionRetiringError) {
-        if (listener && this.deps.listener(session.id) === listener) this.deps.dropListener(session.id);
+        // Retirement rejects new work, not observation of the admitted turn.
+        // Dropping this shared listener would disconnect readers and discard
+        // pending question controls on every retry of the unsent queue head.
         this.deps.scheduleReconnect(session);
         return;
       }

@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
@@ -19,6 +20,7 @@ export interface MirrorRecoveryDependencies {
   refreshTopicStatus: (session: TopicSession) => Promise<void>;
   runBackground: (phase: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
   drainPrompts(session: TopicSession): Promise<void>;
+  recoverReplies(session: TopicSession): void;
   sessionAssigned: (session: TopicSession) => boolean;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
@@ -78,13 +80,14 @@ export class MirrorRecovery {
           }).finally(() => this.restoring.delete(existing.id));
         }
       }),
-    ).catch(error => console.error('Could not restore sessions.', error, {botId:this.deps.id,operation:'restoreSessions'}));
+    ).catch(error => logEvent('error', 'sessions-restore-failed', {botId:this.deps.id,operation:'restoreSessions',error}));
   }
   recoverExistingMirror(
     session: TopicSession,
     signal = this.deps.background,
   ): Promise<void> {
     if (this.deps.stopped() || this.deps.options.config.terminated || signal.aborted) return Promise.resolve();
+    this.deps.recoverReplies(session);
     const metadataOwner = this.deps.metadataOwner(session);
     const existing = metadataOwner.recovery;
     if (existing) return existing;
@@ -133,8 +136,7 @@ export class MirrorRecovery {
     const current = this.deps.options.store.getSession(session.id);
     if (current?.status !== 'open' || this.reconnects.has(session.id)) return;
     if (attempt >= 5) {
-      console.warn(JSON.stringify({
-        event: 'omp-mirror-reconnect-exhausted',
+      logEvent('warn', 'omp-mirror-reconnect-exhausted', {
         at: new Date().toISOString(),
         botId: this.deps.id,
         sessionId: session.id,
@@ -142,12 +144,12 @@ export class MirrorRecovery {
         threadId: session.threadId,
         attempts: attempt,
         generation: this.deps.options.store.getSessionGeneration(session.id),
-      }));
+      });
       void sendTo(
         this.deps.bot.api,
         topicDestination(session.chatId, session.threadId),
         'Session mirroring disconnected.',
-      ).catch(error => console.warn(`Could not deliver mirroring disconnected notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-mirroring-disconnected-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver mirroring disconnected notice (${session.id}).`, error}));
       return;
     }
     const generation = this.deps.options.store.getSessionGeneration(session.id);
@@ -182,7 +184,7 @@ export class MirrorRecovery {
           }
         }).then(() => this.reconnecting.delete(session.id), error => {
           this.reconnecting.delete(session.id);
-          console.error('Could not complete session reconnection.', error, {botId:this.deps.id,chatId:session.chatId,sessionId:session.id,operation:'reconnect'});
+          logEvent('error', 'session-reconnection-failed', {botId:this.deps.id,chatId:session.chatId,sessionId:session.id,operation:'reconnect',error});
         });
       },
       Math.min(1000 * 2 ** attempt, 16000),

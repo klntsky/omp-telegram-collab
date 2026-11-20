@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type Server } from 'node:net';
 import { test } from 'node:test';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
+import { ManagedRelay } from '../src/managed-relay.js';
 import { OmpRuntime } from '../src/runtime.js';
 
 test('passive resolution adopts existing identities and never launches absent or disappearing hosts', {timeout:15000}, async () => {
@@ -21,12 +24,24 @@ test('passive resolution adopts existing identities and never launches absent or
   };
   writeConfig(config);
   const runtime = new OmpRuntime(config);
+  const relay = new ManagedRelay(directory);
+  let child: ChildProcess | undefined;
+  let exited: Promise<unknown> | undefined;
+  let lifecycleServer: Server | undefined;
+  const errors: unknown[] = [];
   const session: TopicSession = {id:'topic',botId:1,chatId:-100,threadId:42,instanceId: 1, cwd:directory,
     name:'Existing host',status:'open',createdAt:0,runtime:{kind:'managed'}};
-  const host = {instanceId:'existing-host',sessionId:'history-id',generation:7,pid:process.pid,
-    cwd:directory,access:'control',relayConnected:true};
-  const url = `wss://localhost/r/fixture-room.${Buffer.alloc(48,1).toString('base64url')}`;
+  const sessionDir = join(directory,'sessions',session.id);
   try {
+    const relayUrl = await relay.ensure();
+    child = spawn(process.execPath,['-e','process.stdin.resume()','--','--session-dir',sessionDir],
+      {cwd:directory,stdio:['pipe','ignore','ignore']});
+    exited = once(child,'exit');
+    await once(child,'spawn');
+    assert.ok(child.pid);
+    const host = {instanceId:'existing-host',sessionId:'history-id',generation:7,pid:child.pid,
+      cwd:directory,access:'control',relayConnected:true};
+    const url = `${new URL(relayUrl).origin}/r/fixture-room.${Buffer.alloc(48,1).toString('base64url')}`;
     await writeFile(commandsPath,'');
     await writeFile(statePath,JSON.stringify({hosts:[]}));
     await writeFile(executable,`#!${process.execPath}
@@ -36,12 +51,12 @@ fs.appendFileSync(${JSON.stringify(commandsPath)},JSON.stringify(args)+'\\n');
 if(args[0]!=='collab')throw new Error('Passive resolution attempted host startup');
 const file=${JSON.stringify(statePath)};
 const state=JSON.parse(fs.readFileSync(file,'utf8'));
-if(args[1]==='list')console.log(JSON.stringify({version:1,hosts:state.hosts}));
+if(args[1]==='list')process.stdout.write(JSON.stringify({version:1,hosts:state.hosts}) + '\\n');
 else if(args[1]==='link'){
   if(state.fail){process.stderr.write('Capability lookup failed\\nOriginal diagnostic line two\\n');process.exit(23);}
   const host=state.hosts[0];
   if(state.disappear)fs.writeFileSync(file,JSON.stringify({hosts:[]}));
-  console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',url:${JSON.stringify(url)}}));
+  process.stdout.write(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',url:${JSON.stringify(url)}}) + '\\n');
 }else throw new Error('Unexpected registry command');
 `);
     await chmod(executable,0o700);
@@ -50,14 +65,20 @@ else if(args[1]==='link'){
     }
     assert.equal(await runtime.stop({...session,status:'closed'}),true);
     assert.equal(await readFile(commandsPath,'utf8'),'');
-    await assert.rejects(stat(join(directory,'sessions',session.id)),{code:'ENOENT'});
+    await assert.rejects(stat(sessionDir),{code:'ENOENT'});
     await assert.rejects(stat(join(directory,'runtime-lock.sqlite')),{code:'ENOENT'});
     assert.equal(await runtime.resolveExisting(session),undefined);
     assert.equal(await readFile(commandsPath,'utf8'),'');
     const metadata = join(directory,'sessions',session.id,'binding.json');
     await mkdir(join(directory,'sessions',session.id),{recursive:true});
+    await writeFile(join(sessionDir,'runtime.yml'),JSON.stringify({
+      collab:{autoStart:'control',relayUrl},
+      startup:{checkUpdate:false,setupWizard:false},
+    }),{mode:0o600});
     await writeFile(history,JSON.stringify({type:'session',version:3,id:host.sessionId,cwd:directory})+'\n');
     await writeFile(metadata,JSON.stringify({version:1,sessionId:host.sessionId,sessionFile:history,cwd:directory}));
+    const originalHistory = await readFile(history);
+    const originalBinding = await readFile(metadata);
     assert.equal(await runtime.resolveExisting(session),undefined);
     await writeFile(statePath,JSON.stringify({hosts:[host]}));
     assert.deepEqual(await runtime.resolveExisting(session),{
@@ -85,12 +106,48 @@ else if(args[1]==='link'){
     assert.equal(await runtime.resolveExisting(session),undefined);
     const commands = (await readFile(commandsPath,'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[]);
     assert.deepEqual([...new Set(commands.map(args => args.slice(0,2).join(' ')))].sort(),['collab link','collab list']);
-    await assert.rejects(stat(join(directory,'runtime-lock.sqlite')),{code:'ENOENT'});
-    await writeFile(join(directory,'sessions',session.id,'lifecycle.json'),JSON.stringify({
-      pid:host.pid,sessionId:host.sessionId,socketPath:join(directory,'lifecycle.sock'),
-    }));
+    assert.deepEqual(await readFile(history), originalHistory);
+    assert.deepEqual(await readFile(metadata), originalBinding);
+    const socketPath = join(directory,'lifecycle.sock');
+    // Protocol support is checked only after the private endpoint and process identity.
+    lifecycleServer = createServer(socket => {
+      errors.push(new Error('Unsupported host received a retirement request'));
+      socket.destroy();
+    });
+    const listening = once(lifecycleServer,'listening');
+    lifecycleServer.listen(socketPath);
+    await listening;
+    await chmod(socketPath,0o600);
+    await writeFile(join(sessionDir,'lifecycle.json'),JSON.stringify({
+      pid:host.pid,supervisorPid:process.pid,sessionId:host.sessionId,socketPath,
+    }),{mode:0o600});
     await assert.rejects(runtime.stop(session),/does not support safe retirement/);
-  } finally { await runtime.close(); await rm(directory,{recursive:true,force:true}); }
+  } catch (error) {
+    errors.push(error);
+  } finally {
+    for (const cleanup of [
+      () => runtime.close(),
+      () => relay.close(),
+      () => {
+        if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      },
+      () => exited,
+      () => {
+        if (!lifecycleServer) return;
+        const closed = Promise.withResolvers<void>();
+        lifecycleServer.close(error => error ? closed.reject(error) : closed.resolve());
+        return closed.promise;
+      },
+      () => rm(directory,{recursive:true,force:true}),
+    ]) {
+      try { await cleanup(); }
+      catch (error) { errors.push(error); }
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors,errors.map(error => error instanceof Error ? error.stack ?? error.message : String(error)).join('\n'));
+  }
 });
 
 test('history source reads only the verified managed binding without host startup or registry access', { timeout: 5000 }, async t => {

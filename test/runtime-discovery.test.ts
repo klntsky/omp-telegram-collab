@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { writeConfig } from '../src/config.js';
+import { createRegistry } from '../src/runtime/registry.js';
 
 const execute = promisify(execFile);
 
@@ -26,7 +28,7 @@ for (const failure of ['missing executable', 'list', 'link'] as const) {
       if (failure !== 'missing executable') {
         const host = { instanceId: 'fixture', sessionId: 'session', generation: 1, pid: process.pid,
           cwd: directory, access: 'control', relayConnected: true };
-        await writeFile(executable, `#!${process.execPath}\nif (process.argv[3] === ${JSON.stringify(failure)}) {\n  process.stderr.write('Registry 🚫 unavailable: <socket> & permission denied\\nOriginal diagnostic line two\\n');\n  process.exit(23);\n}\nconsole.log(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))});\n`);
+        await writeFile(executable, `#!${process.execPath}\nif (process.argv[3] === ${JSON.stringify(failure)}) {\n  process.stderr.write('Registry 🚫 unavailable: <socket> & permission denied\\nOriginal diagnostic line two\\n');\n  process.exit(23);\n}\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ version: 1, hosts: [host] }))} + '\\n');\n`);
         await chmod(executable, 0o700);
       }
       const args = failure === 'link' ? ['collab', 'link', 'fixture', '--json'] : ['collab', 'list', '--json'];
@@ -77,7 +79,7 @@ if (process.argv[2] !== 'collab') {
     if (mode === 'deadline' && JSON.parse(fs.readFileSync(attemptsPath, 'utf8')).length > 0 && !fs.existsSync(attemptsPath + '.deadline')) {
       fs.writeFileSync(attemptsPath + '.deadline', '');
       setInterval(() => {}, 1000);
-    } else console.log(JSON.stringify({version:1,hosts:host?[host]:[]}));
+    } else process.stdout.write(JSON.stringify({version:1,hosts:host?[host]:[]}) + '\\n');
   } else {
     const attempts = JSON.parse(fs.readFileSync(attemptsPath, 'utf8'));
     attempts.push(Date.now());
@@ -88,7 +90,7 @@ if (process.argv[2] !== 'collab') {
     if (mode === 'fatal') {
       process.stderr.write('error: permission denied for fixture-host\\n'); process.exit(23);
     }
-    console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:mode==='identity'?8:host.generation,access:'control',url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}));
+    process.stdout.write(JSON.stringify({version:1,instanceId:host.instanceId,generation:mode==='identity'?8:host.generation,access:'control',url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}) + '\\n');
   }
 }
 `);
@@ -104,6 +106,10 @@ if (process.argv[2] !== 'collab') {
     id: 'topic', botId: 1, chatId: -100, threadId: 2, instanceId: 1, cwd: directory,
     name: 'Discovery regression', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' },
   };
+  // Relay provisioning is not the discovery failure under test. Establish its
+  // lease before the startup deadline so a cold daemon cannot consume the
+  // budget before the first retryable link rejection has even occurred.
+  await runtime.acquire();
   return {
     runtime, session, executable, startupTimeoutMs,
     async attempts(): Promise<number[]> { return JSON.parse(await readFile(attemptsPath, 'utf8')); },
@@ -148,6 +154,7 @@ test('managed startup preserves the last original not-found diagnostic at its or
 test('managed startup retains the original discovery rejection when the final probe is killed at the deadline', async t => {
   const app = await startupFixture('deadline');
   t.after(() => app.close());
+  const started = Date.now();
   await assert.rejects(app.runtime.ensure(app.session), error => {
     assert.ok(error instanceof Error);
     assert.equal((error as NodeJS.ErrnoException).code, 1);
@@ -159,6 +166,8 @@ test('managed startup retains the original discovery rejection when the final pr
     assert.equal(cause.killed, true);
     return true;
   });
+  assert.equal((await app.attempts()).length, 1);
+  assert.ok(Date.now() - started >= app.startupTimeoutMs - 100);
 });
 
 test('managed startup does not retry a nontransient Collab link subprocess failure', async t => {
@@ -179,3 +188,70 @@ test('managed startup does not retry a Collab link generation identity mismatch'
   await assert.rejects(app.runtime.ensure(app.session), /OMP host changed while resolving its capability/);
   assert.equal((await app.attempts()).length, 1);
 });
+
+for (const mode of ['omission', 'link', 'lifetime', 'replacement'] as const) {
+  test(`capability verification reconciles only a live unchanged host: ${mode}`, async t => {
+    if (process.platform !== 'linux') return t.skip('Requires Linux process lifetime identity');
+    const directory = await mkdtemp(join(tmpdir(), 'omp-registry-visibility-'));
+    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const exited = once(child, 'exit');
+    await once(child, 'spawn');
+    t.after(async () => { child.kill('SIGKILL'); await exited; await rm(directory, { recursive: true, force: true }); });
+    const host = { instanceId: 'fixture-host', sessionId: 'fixture-session', generation: 7,
+      pid: child.pid!, cwd: directory, access: 'control' as const, relayConnected: true };
+    const executable = join(directory, 'omp');
+    const attempts = join(directory, 'attempts');
+    await writeFile(attempts, '0');
+    await writeFile(`${attempts}.link`, '0');
+    await writeFile(executable, `#!${process.execPath}
+(async () => {
+  const fs = require('node:fs/promises');
+  const host = ${JSON.stringify(host)};
+  if (process.argv[3] === 'list') {
+    const count = Number(await fs.readFile(${JSON.stringify(attempts)}, 'utf8'));
+    await fs.writeFile(${JSON.stringify(attempts)}, String(count + 1));
+    console.log(JSON.stringify({version:1,hosts:${JSON.stringify(mode)} === 'omission' && count === 0 ? [] :
+      [{...host,generation:${JSON.stringify(mode)} === 'replacement' ? 8 : host.generation}]}));
+  } else {
+    const count = Number(await fs.readFile(${JSON.stringify(`${attempts}.link`)}, 'utf8'));
+    await fs.writeFile(${JSON.stringify(`${attempts}.link`)}, String(count + 1));
+    if (${JSON.stringify(mode)} === 'link' && count === 0) {
+      process.stderr.write('error: no active Collab host matches fixture-host\\n');
+      process.exitCode = 1;
+      return;
+    }
+    if (${JSON.stringify(mode)} === 'lifetime') {
+      process.kill(host.pid, 'SIGKILL');
+      for (;;) {
+        try {
+          const stat = await fs.readFile('/proc/' + host.pid + '/stat', 'utf8');
+          if (['Z','X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0])) break;
+        } catch (error) { if (error.code === 'ENOENT') break; throw error; }
+        const ready = Promise.withResolvers();
+        setImmediate(ready.resolve);
+        await ready.promise;
+      }
+    }
+    console.log(JSON.stringify({version:1,instanceId:host.instanceId,generation:host.generation,access:'control',
+      url:'wss://localhost/r/fixture-room.${Buffer.alloc(48, 1).toString('base64url')}'}));
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+`);
+    await chmod(executable, 0o700);
+    const config: AppConfig = {
+      bots: [], instances: [], configPath: join(directory, 'config.yaml'),
+      publicUrl: 'https://localhost:3000', host: '127.0.0.1', port: 3000, dataDir: directory,
+      omp: { executable, args: [], maxSessions: 1, startupTimeoutMs: 5000 },
+    };
+    const registry = createRegistry({ config, assertActive() {}, closed: false, async acquire() {} });
+    const result = registry.resolve(host, Date.now() + 5000);
+    if (mode === 'omission' || mode === 'link') {
+      assert.equal((await result).generation, host.generation);
+      assert.equal(await readFile(attempts, 'utf8'), '2');
+      assert.equal(await readFile(`${attempts}.link`, 'utf8'), mode === 'link' ? '2' : '1');
+    } else {
+      await assert.rejects(result, /OMP host session changed while resolving its capability/);
+      assert.equal(await readFile(attempts, 'utf8'), '1');
+    }
+  });
+}

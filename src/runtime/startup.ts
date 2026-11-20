@@ -12,6 +12,7 @@ import { childEnvironment } from './environment.js';
 import { managedLifecycleIdentity, usesManagedRelay } from './lifecycle-identity.js';
 import { parseCollabLink } from '../vendor/link.js';
 import { CollabTransportError } from '../collab.js';
+import { isDiscoveryDeadlineError } from './discovery.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
@@ -243,10 +244,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         error instanceof Error &&
         error !== discoveryFailure &&
         Date.now() >= deadline &&
-        (error.message === 'OMP discovery timed out' ||
-          ('killed' in error && error.killed === true &&
-            'code' in error && error.code === null &&
-            'signal' in error && error.signal === 'SIGKILL'))
+        isDiscoveryDeadlineError(error)
       ) {
         Object.defineProperty(discoveryFailure, 'cause', { value: error, configurable: true });
         error = discoveryFailure;

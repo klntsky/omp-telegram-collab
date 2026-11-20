@@ -15,7 +15,20 @@ interface Batch {
 }
 
 const maxRequests = 128;
-const timedOut = () => new Error('OMP discovery timed out');
+export class DiscoveryTimeoutError extends Error {
+  constructor() {
+    super('OMP discovery timed out');
+    this.name = 'DiscoveryTimeoutError';
+  }
+}
+
+export function isDiscoveryDeadlineError(error: unknown): error is Error {
+  return error instanceof DiscoveryTimeoutError ||
+    (error instanceof Error && 'killed' in error && error.killed === true &&
+      'code' in error && error.code === null && 'signal' in error && error.signal === 'SIGKILL');
+}
+
+const timedOut = () => new DiscoveryTimeoutError();
 
 export function createDiscovery(config: Pick<AppConfig, 'omp' | 'dataDir'>) {
   const queue: Batch[] = [];

@@ -6,6 +6,7 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { HostFrame, SessionEntry, SubagentLifecyclePayload, SubagentProgressPayload } from '@oh-my-pi/pi-wire';
 import type { BrowserFrame, BrowserHostFrame, HistoryCursor, HistoryPage } from '../shared/contracts.js';
 import { miniAppInterruptionAuthor } from '../shared/interruption.js';
+import { logEvent } from './logging.js';
 
 const PAGE_ENTRIES = 100;
 const PAGE_BYTES = 256 * 1024;
@@ -78,7 +79,7 @@ class HistoryIndex {
       this.db.exec('COMMIT');
     } catch (error) {
       try { this.db.exec('ROLLBACK'); }
-      catch (rollbackError) { console.warn('Could not roll back session history index', rollbackError); }
+      catch (rollbackError) { logEvent('warn', 'session-history-index-rollback-failed', { directory: this.directory, message: 'Could not roll back session history index', error: rollbackError }); }
       throw error;
     }
     if (final) this.ready = true;
@@ -106,9 +107,9 @@ class HistoryIndex {
     if (this.closed) return;
     this.closed = true;
     try { this.db?.close(); }
-    catch (error) { console.warn('Could not close session history index', error); }
+    catch (error) { logEvent('warn', 'session-history-index-close-failed', { directory: this.directory, message: 'Could not close session history index', error }); }
     try { rmSync(this.directory, {recursive: true, force: true}); }
-    catch (error) { console.warn('Could not remove session history index', error); }
+    catch (error) { logEvent('warn', 'session-history-index-remove-failed', { directory: this.directory, message: 'Could not remove session history index', error }); }
   }
 }
 
@@ -313,7 +314,7 @@ export class SessionFeed {
     this.index?.close();
     for (const viewer of viewers) {
       try { viewer.handlers.onClose(reason); }
-      catch (error) { console.warn('Could not close session feed viewer', error); }
+      catch (error) { logEvent('warn', 'session-feed-viewer-close-failed', { reason, message: 'Could not close session feed viewer', error }); }
     }
     this.tools.clear();
     this.bus.clear();

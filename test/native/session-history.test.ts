@@ -65,7 +65,6 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
     diagnostic: t.diagnostic.bind(t),
     after: ((close: () => unknown | Promise<unknown>) => { cleanup.push(close); }) as TestContext['after'],
   }, {
-    telegramSecrets: false,
     tools: ['write', 'read'],
     compaction: { enabled: false, supersedeReads: true, dropUseless: false, experimentalContextManagement: false },
     scenarios: [writeReadScenario(original), writeReadScenario(replacement), writeScenario(followup)],

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import * as pty from '@lydell/node-pty';
+import { logEvent } from '../src/logging.js';
 
 export async function verifyBusyHostRetirement(directory: string, executable: string, relayUrl: string): Promise<void> {
   const started = join(directory,'hold-started');
@@ -86,7 +87,7 @@ export default pi=>pi.registerCommand('lifecycle-hold',{description:'Hold a loca
     await writeFile(release,'release');
     await waitFor(()=>exists(finished),'Retirement interrupted the working command');
     await waitFor(()=>exited,'Idle host did not retire after its admitted command completed');
-    console.log('PASS actual OMP host defers retirement while a local command is working, lets it finish, then exits without a signal.');
+    logEvent('info', 'busy-host-retirement-verified', { directory, deferredWhileWorking: true, completedWithoutSignal: true });
   } finally {
     await writeFile(release,'release');
     if (!exited && lifecycle) {

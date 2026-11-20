@@ -59,7 +59,7 @@ export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
       return true;
     });
     await clickPanel(app, dirty, 0);
-    await app.waitForCondition(() => applicationErrors(app).some(values =>
+    await app.waitForCondition(async () => (await applicationErrors(app)).some(values =>
       values.some(value => z.object({ message: z.literal(diagnostic) }).safeParse(value).success)));
     assert.equal(await readFile(dirtyFile, 'utf8'), 'retain uncommitted changes\n');
     await unlink(dirtyFile);

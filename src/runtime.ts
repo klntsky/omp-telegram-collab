@@ -42,7 +42,7 @@ export class OmpRuntime implements Omp {
   readonly #activity: RuntimeActivity;
   observeFrame: (id: string, frame: HostFrame) => void;
   markPrompt: (id: string) => void;
-  retain: (id: string) => () => void;
+  retain: Omp['retain'];
   readonly #fork: RuntimeFork;
   readonly #forkRpc: RuntimeForkRpc;
   readonly #worktree: RuntimeWorktree;

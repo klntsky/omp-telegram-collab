@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { logEvent } from '../src/logging.js';
 
 const stages = {
   cli: './env-smoke.ts',
@@ -14,7 +15,7 @@ for (const name of selected) {
 
 const results: { name: string; code: number | null; signal: NodeJS.Signals | null }[] = [];
 for (const name of selected as Stage[]) {
-  console.log(`START smoke ${name}`);
+  logEvent('info', 'smoke-stage-started', { stage: name });
   try {
     const { promise, resolve, reject } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
     const child = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL(stages[name], import.meta.url))], { stdio: 'inherit' });
@@ -23,15 +24,13 @@ for (const name of selected as Stage[]) {
     const result = await promise;
     results.push({ name, ...result });
   } catch (error) {
-    console.error(`FAIL smoke ${name}`);
-    console.error(error);
+    logEvent('error', 'smoke-stage-failed', { stage: name, error });
     results.push({ name, code: null, signal: null });
   }
 }
 
-console.log('\nSmoke results:');
-for (const [index, result] of results.entries()) {
+for (const result of results) {
   const passed = result.code === 0;
-  console.log(`${index + 1}. ${result.name}: ${passed ? 'PASS' : `FAIL (exit ${result.code}, signal ${result.signal})`}`);
+  logEvent(passed ? 'info' : 'error', 'smoke-stage-completed', { stage: result.name, passed, exitCode: result.code, signal: result.signal });
   if (!passed) process.exitCode = 1;
 }

@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, PromptContent } from '../../shared/contracts.js';
 import type { CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -103,46 +104,24 @@ ${content.text}`,
     }
     this.deps.requireSessionAssignment(session);
   }
-  reconcilePromptReceipt(
-    session: TopicSession,
-    listener: Listener,
-    entry: CustomMessageEntry,
-    replay: boolean,
-    ompSessionId: string,
-  ): void {
-    const text =
-      typeof entry.content === 'string'
-        ? entry.content
-        : entry.content
-            .filter((part) => part.type === 'text')
-            .map((part) => part.text)
-            .join('\n');
-    const images =
-      typeof entry.content === 'string'
-        ? undefined
-        : entry.content.filter((part) => part.type === 'image');
+  recordReceipt(session: TopicSession, entry: CustomMessageEntry, ompSessionId: string, boundary?: number) {
+    const text = typeof entry.content === 'string' ? entry.content :
+      entry.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
+    const images = typeof entry.content === 'string' ? undefined :
+      entry.content.filter(part => part.type === 'image');
     const details = entry.details;
-    const sender =
-      details &&
-      typeof details === 'object' &&
-      'from' in details &&
-      typeof details.from === 'string'
-        ? details.from
-        : undefined;
-    const receipt = this.deps.options.store.recordPromptReceipt(
-      session.id,
-      {ompSessionId,entryId:entry.id,parentEntryId:entry.parentId},
-      sender,
-      { text, ...(images === undefined ? {} : { images }) },
-      replay ? listener.receiptBoundary : undefined,
-    );
-    if (replay) listener.snapshotReplyTarget = receipt.messageId;
-    else if (receipt.fresh) this.deps.options.store.setReplyTarget(session.id, receipt.messageId);
-    if (!receipt.fresh) return;
-    const index = listener.pendingPrompts.findIndex(
-      (pending) => pending.submissionId === receipt.submissionId,
-    );
-    const pending = index === -1 ? undefined : listener.pendingPrompts.splice(index, 1)[0];
+    const sender = details && typeof details === 'object' && 'from' in details &&
+      typeof details.from === 'string' ? details.from : undefined;
+    const receipt = this.deps.options.store.recordPromptReceipt(session.id,
+      {ompSessionId,entryId:entry.id,parentEntryId:entry.parentId}, sender,
+      {text,...(images === undefined ? {} : {images})}, boundary);
+    if (!receipt.fresh) return receipt;
+    const current = this.deps.getListener(session.id);
+    const listener = current?.ompSessionId === ompSessionId ? current : undefined;
+    const index = listener?.pendingPrompts.findIndex(
+      pending => pending.submissionId === receipt.submissionId,
+    ) ?? -1;
+    const pending = index === -1 ? undefined : listener!.pendingPrompts.splice(index, 1)[0];
     const task = pending?.observation ?? this.deps.sessionObservation(session.id).task;
     if (receipt.submissionId !== undefined && task?.submissionId === receipt.submissionId)
       task.state = 'accepted; completion unknown';
@@ -150,11 +129,26 @@ ${content.text}`,
       this.deps.settlePrompt(session, receipt.submissionId, 'accepted');
     if (receipt.messageId !== undefined)
       this.acknowledgeMessage(session, receipt.messageId, listener);
+    return receipt;
+  }
+  reconcilePromptReceipt(
+    session: TopicSession,
+    listener: Listener,
+    entry: CustomMessageEntry,
+    replay: boolean,
+    ompSessionId: string,
+  ): void {
+    const receipt = this.recordReceipt(session, entry, ompSessionId,
+      replay ? listener.receiptBoundary : undefined);
+    // Offline recovery may have ingested this receipt first. Live frame order still
+    // owns the current reply target even when the receipt's bookkeeping is idempotent.
+    if (replay) listener.snapshotReplyTarget = receipt.messageId;
+    else this.deps.options.store.setReplyTarget(session.id, receipt.messageId);
   }
   acknowledgeMessage(session: TopicSession, messageId: number, listener?: Listener): void {
     void this.deps.delivery.run(session.chatId,
       () => this.deps.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.deps.stopped() && this.deps.sessionAssigned(session) && (listener === undefined || this.deps.getListener(session.id) === listener))
-      .catch(error => console.warn(`Could not show message acceptance reaction (${session.id}).`, error));
+      .catch(error => logEvent('warn', 'could-not-show-message-acceptance-reaction', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not show message acceptance reaction (${session.id}).`, error}));
   }
 }

@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, HostBinding, CollabConnection } from '../../shared/contracts.js';
 import type { HostFrame } from '@oh-my-pi/pi-wire';
@@ -25,6 +26,7 @@ export interface SessionConnectionsDependencies {
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
   setTopicStatus: (session: TopicSession, status: TopicActivity, completed?: boolean) => void | Promise<void>;
+  recoverReplies(session: TopicSession): void;
   settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
@@ -120,7 +122,7 @@ export class SessionConnections {
         reader.connection?.close();
       }
       listener.readers.clear();
-      if (listener.history) void listener.history.close().catch(error => console.error('Could not close session history', error));
+      if (listener.history) void listener.history.close().catch(error => logEvent('error', 'could-not-close-session-history', {botId: this.deps.id, sessionId: id, chatId: session?.chatId, message: 'Could not close session history', error}));
     }
     listener?.connection?.close();
   }
@@ -190,7 +192,7 @@ export class SessionConnections {
             assertActive: () => this.requireFeedListener(session, listener),
             onError: error => {
               this.deps.sessionObservation(session.id).failure = {operation: 'Session history refresh', at: Date.now(), error};
-              console.error('Could not refresh session history', error);
+              logEvent('error', 'could-not-refresh-session-history', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: 'Could not refresh session history', error});
             },
           });
           await listener.history.prepare();
@@ -203,8 +205,7 @@ export class SessionConnections {
             onFrame: (frame) => this.deps.onFrame(session, listener, frame),
             onClose: (reason) => {
               if (!active()) return;
-              console.warn(JSON.stringify({
-                event: 'omp-mirror-disconnected',
+              logEvent('warn', 'omp-mirror-disconnected', {
                 at: new Date().toISOString(),
                 botId: this.deps.id,
                 sessionId: session.id,
@@ -216,7 +217,7 @@ export class SessionConnections {
                 generation,
                 connected: listener.connection !== undefined,
                 reason,
-              }));
+              });
               this.deps.sessionObservation(session.id).failure = {
                 operation: 'Mirroring disconnected',
                 at: Date.now(),
@@ -224,6 +225,7 @@ export class SessionConnections {
               };
               const connected = listener.connection !== undefined;
               this.dropListener(session.id, reason);
+              this.deps.recoverReplies(session);
               if (connected) this.deps.scheduleReconnect(session);
             },
           },
@@ -266,7 +268,9 @@ export class SessionConnections {
           if (this.listeners.get(session.id) === listener)
             this.dropListener(session.id, error instanceof Error ? error.message : String(error));
         }
-        return this.listen(session, undefined, beforeMutation, false, false);
+        // A reader already resolved this host. Listener replacement must not
+        // turn reconnection into mutation admission against a draining host.
+        return this.listen(session, binding, beforeMutation, false, false);
       });
     return listener.promise;
   }

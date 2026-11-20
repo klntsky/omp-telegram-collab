@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { bounded } from './async.js';
 
 export type FakeLlmStep =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; barrier?: Promise<void> }
   | { type: 'tool'; id: string; name: string; arguments: Record<string, unknown> }
   | { type: 'error'; message: string; partialText?: string; release?: Promise<void> }
   | { type: 'await-abort' };
@@ -63,7 +63,7 @@ export async function startFakeLlmProvider(options: {
     const metadata = {
       method: request.method,
       path: request.url,
-      headers: { ...request.headers, authorization: request.headers.authorization ? '[REDACTED]' : undefined },
+      headers: { 'content-type': request.headers['content-type'], 'content-length': request.headers['content-length'], accept: request.headers.accept },
     };
     let body: unknown;
     try {
@@ -135,6 +135,7 @@ export async function startFakeLlmProvider(options: {
       return;
     }
     scenario.started.resolve();
+    if (step.type === 'text' && step.barrier) await step.barrier;
     if (step.type === 'text') {
       chunk({ content: step.text });
     } else if (step.type === 'error') {

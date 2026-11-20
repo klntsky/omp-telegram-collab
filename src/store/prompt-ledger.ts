@@ -188,17 +188,6 @@ export class PromptLedger {
     this.db.prepare('INSERT INTO message_anchors VALUES (?,?,?,?,?,?,?,?)')
       .run(sessionId, anchor.ompSessionId, chatId, messageId, anchor.entryId, anchor.parentEntryId, anchor.kind, anchor.partIndex);
   }
-  deliveredReplyParts(id: string, ompSessionId: string, entryId: string): Set<number> {
-    return new Set(this.db.prepare("SELECT part_index FROM message_anchors WHERE session_id=? AND omp_session_id=? AND entry_id=? AND kind='assistant'")
-      .all(id, ompSessionId, entryId).map(row => Number(row.part_index)));
-  }
-  hasReply(id: string, ompSessionId: string, entryId: string): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM replies WHERE session_id=? AND omp_session_id=? AND entry_id=?').get(id, ompSessionId, entryId));
-  }
-  rememberReply(id: string, ompSessionId: string, entryId: string): boolean {
-    const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, ompSessionId, entryId);
-    return Number(result.changes) === 1;
-  }
   hasSnapshot(id: string): boolean {
     return Boolean(this.db.prepare('SELECT 1 FROM snapshot_baselines WHERE session_id=?').get(id));
   }

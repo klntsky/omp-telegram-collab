@@ -28,7 +28,9 @@ test('provider diagnostics survive empty output and reconnect with partial outpu
   const failedEntries = app.hostFrames.flatMap(frame => frame.t === 'entry' ? [frame.entry] : frame.t === 'snapshot-chunk' ? frame.entries : [])
     .filter(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.stopReason === 'error');
   assert.ok(failedEntries.length >= 2);
-  await app.waitForCondition(() => failedEntries.every(entry => app.store.hasReply(session.id, welcome.header.id, entry.id)));
+  await app.waitForCondition(() => failedEntries.every(entry =>
+    app.store.db.prepare("SELECT 1 FROM replies WHERE session_id=? AND omp_session_id=? AND entry_id=? AND state='done'")
+      .get(session.id, welcome.header.id, entry.id) !== undefined));
   const emptyEntry = failedEntries.find(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.errorMessage?.includes(emptyDiagnostic));
   const partialEntry = failedEntries.find(entry => entry.type === 'message' && entry.message.role === 'assistant' && entry.message.errorMessage?.includes(partialDiagnostic));
   assert.ok(emptyEntry?.type === 'message' && emptyEntry.message.role === 'assistant');

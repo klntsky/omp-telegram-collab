@@ -48,7 +48,7 @@ test('the main host still removes its own lifecycle descriptor and socket on shu
       await ready.promise;
       const descriptor = JSON.parse(readFileSync(filename,'utf8'));
       handlers.get('session_shutdown')();
-      console.log(JSON.stringify({descriptorExists:existsSync(filename),socketExists:existsSync(descriptor.socketPath)}));
+      process.stdout.write(JSON.stringify({descriptorExists:existsSync(filename),socketExists:existsSync(descriptor.socketPath)}) + '\\n');
     `],{env:{...process.env,OMP_TELEGRAM_SESSION_DIR:directory,OMP_TELEGRAM_DEFAULT_PRESET:''},timeout:10000});
     assert.deepEqual(JSON.parse(result.stdout),{descriptorExists:false,socketExists:false});
   } finally { await rm(directory,{recursive:true,force:true}); }
@@ -99,7 +99,7 @@ test('title control invokes the persistent native API and preserves rename diagn
       const failed = await rename('fail');
       const stale = await rename('stale', 'other-session');
       handlers.get('session_shutdown')();
-      console.log(JSON.stringify({supported:descriptor.sessionTitles,titles,applied,failed,stale}));
+      process.stdout.write(JSON.stringify({supported:descriptor.sessionTitles,titles,applied,failed,stale}) + '\\n');
     `], { env: { ...process.env, OMP_TELEGRAM_SESSION_DIR: directory, OMP_TELEGRAM_DEFAULT_PRESET: '' }, timeout: 10000 });
     const output = JSON.parse(result.stdout);
     assert.equal(output.supported, true);

@@ -1,29 +1,24 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
-import type { HostFrame, CollabUiRequest, CustomMessageEntry, WireMessage } from '@oh-my-pi/pi-wire';
+import type { HostFrame, CollabUiRequest, CustomMessageEntry, SessionEntry } from '@oh-my-pi/pi-wire';
 import type { BotOptions } from '../bot.js';
 import type { Listener, SessionObservation, SessionMetadataOwner, HostActivityObservation, TopicActivity } from './types.js';
-import type { TelegramDelivery } from '../telegram-delivery.js';
 import { COLLAB_PROMPT_MESSAGE_TYPE } from '@oh-my-pi/pi-wire';
 import { isStartupRejection } from '../collab.js';
 import { miniAppInterruptionAuthor } from '../../shared/interruption.js';
 import { sendTo } from '../telegram-destination.js';
 import { topicDestination } from '../../shared/topic-destination.js';
-import { renderTelegramMarkdown } from '../telegram-markdown.js';
 import { escapeHtml, preHtml } from '../telegram-html.js';
 
 export interface FrameProjectionDependencies {
   acknowledgeMessage: (session: TopicSession, messageId: number, listener?: Listener) => void;
   activityObservation: (session: TopicSession) => HostActivityObservation;
   settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
-  background: AbortSignal;
   bot: Bot<Context>;
-  delivery: TelegramDelivery;
-  dropListener: (id: string, reason?: string) => void;
   getListener: (id: string) => Listener | undefined;
   currentMetadataOwner: (id: string) => SessionMetadataOwner | undefined;
   endRequestQuestions: (listener: Listener, reqId: number) => void;
-  ready: (chatId: number) => Promise<boolean>;
   reconcilePromptReceipt: (session: TopicSession, listener: Listener, entry: CustomMessageEntry, replay: boolean, ompSessionId: string) => void;
   refreshTyping: (session: TopicSession, listener: Listener) => void;
   relayQuestion: (session: TopicSession, listener: Listener, request: CollabUiRequest) => void;
@@ -33,18 +28,10 @@ export interface FrameProjectionDependencies {
   stopped: () => boolean;
   syncTopicTitle: (session: TopicSession, listener: Listener, title?: string) => void;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
+  queueReply(session: TopicSession, ompSessionId: string, entry: SessionEntry, replyTo?: number, historical?: boolean): void;
 }
 
-function assistantReply(message: WireMessage): string | undefined {
-  if (message.role !== 'assistant') return undefined;
-  const text = message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
-  if (message.stopReason !== 'error') return text.trim() ? text : undefined;
-  const diagnostic = message.errorMessage ?? 'The provider returned an error without a diagnostic.';
-  const fence = '`'.repeat(Math.max(3, ...Array.from(diagnostic.matchAll(/`+/g), match => match[0].length + 1)));
-  return `${text.trim() ? `${text}\n\n` : ''}OMP provider attempt failed (automatic recovery may follow).\n\n${fence}\n${diagnostic}\n${fence}`;
-}
 export class FrameProjection {
-  private readonly pendingReplies = new WeakMap<Listener, Set<string>>();
   constructor(private readonly deps: FrameProjectionDependencies) {}
   onFrame(
     session: TopicSession,
@@ -126,7 +113,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         `⛔️${interruptedBy} interrupted the chat`,
         {},
-      ).catch(error => console.warn(`Could not deliver interruption notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-interruption-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver interruption notice (${session.id}).`, error}));
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
@@ -184,7 +171,7 @@ export class FrameProjection {
       };
       if (pending) this.deps.settlePrompt(session, pending.submissionId, isStartupRejection(frame) ? 'startup-rejected' : 'uncertain');
       if (pending && isStartupRejection(frame)) {
-        console.warn('OMP startup rejected prompt.', frame.message, {sessionId: session.id, submissionId: pending.submissionId});
+        logEvent('warn', 'omp-startup-rejected-prompt', {sessionId:session.id,submissionId:pending.submissionId,error:frame.message});
         listener.pendingAnswers.clear();
         listener.pendingStops.length = 0;
         return;
@@ -207,7 +194,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         escapeHtml(prefix) + preHtml(frame.message),
         { parse_mode: 'HTML' },
-      ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-omp-error-notice', {botId:session.botId,sessionId:session.id,chatId:session.chatId,threadId:session.threadId,error}));
       return;
     }
     if (frame.t === 'snapshot-chunk') {
@@ -217,13 +204,9 @@ export class FrameProjection {
           (entry.type === 'custom_message' && entry.customType === COLLAB_PROMPT_MESSAGE_TYPE)
         )
           this.onFrame(session, listener, { t: 'entry', entry }, true);
-        else if (entry.type === 'message') {
-          const result = assistantReply(entry.message);
-          if (entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
-            activity.turnOutcome = entry.message.stopReason === 'error' ? 'failed' : undefined;
-          if (result && !this.pendingReplies.get(listener)?.has(entry.id))
-            this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
-        }
+        else this.deps.queueReply(session, ompSessionId, entry, undefined, true);
+        if (entry.type === 'message' && entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
+          activity.turnOutcome = entry.message.stopReason === 'error' ? 'failed' : undefined;
       }
       if (frame.final) {
         this.deps.options.store.markSnapshot(session.id);
@@ -235,8 +218,6 @@ export class FrameProjection {
     }
     if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
     const entry = frame.entry;
-    const text = assistantReply(entry.message);
-    if (!text) return;
     if (entry.message.role === 'assistant' && entry.message.stopReason === 'error') {
       if (activity.turnOutcome !== 'retrying') activity.turnOutcome = 'failed';
       this.deps.sessionObservation(session.id).failure = {
@@ -247,78 +228,7 @@ export class FrameProjection {
     } else if (entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying') {
       activity.turnOutcome = undefined;
     }
-    const pending = this.pendingReplies.get(listener) ?? new Set<string>();
-    this.pendingReplies.set(listener, pending);
-    if (pending.has(entry.id) || this.deps.options.store.hasReply(session.id, ompSessionId, entry.id)) return;
-    if (entry.message.role === 'assistant' && entry.message.stopReason === 'error')
-      console.error('OMP provider attempt failed.', {
-        sessionId: session.id, ompSessionId, entryId: entry.id, model: entry.message.model,
-      }, entry.message.errorMessage);
-    const replyTarget = replay
-      ? listener.snapshotReplyTarget
-      : this.deps.options.store.getReplyTarget(session.id);
-    if (++listener.queued > 128) {
-      this.deps.dropListener(session.id);
-      return;
-    }
-    pending.add(entry.id);
-    listener.tail = listener.tail
-      .then(async () => {
-        if (
-          this.deps.stopped() ||
-          !this.deps.sessionAssigned(session) ||
-          this.deps.getListener(session.id) !== listener
-        )
-          return;
-        const current = this.deps.options.store.getSession(session.id);
-        if (
-          !current ||
-          current.status !== 'open' ||
-          !(await this.deps.ready(session.chatId)) ||
-          !this.deps.sessionAssigned(current)
-        )
-          return;
-        let partIndex = 0;
-        const deliveredParts = this.deps.options.store.deliveredReplyParts(session.id, ompSessionId, entry.id);
-        for (const part of renderTelegramMarkdown(text)) {
-          if (!this.deps.sessionAssigned(current)) return;
-          const index = partIndex++;
-          if (deliveredParts.has(index)) continue;
-          const sent = await this.deps.delivery.run(
-            session.chatId,
-            () =>
-              this.deps.bot.api.sendRichMessage(
-                session.chatId,
-                { markdown: part },
-                {
-                  message_thread_id: session.threadId === 1 ? undefined : session.threadId,
-                  ...(replyTarget === undefined
-                    ? {}
-                    : {
-                        reply_parameters: {
-                          message_id: replyTarget,
-                          allow_sending_without_reply: true,
-                        },
-                      }),
-                },
-              ),
-            () =>
-              !this.deps.stopped() &&
-              this.deps.sessionAssigned(current) &&
-              this.deps.getListener(session.id) === listener,
-          );
-          if (!sent) return;
-          this.deps.options.store.recordMessageAnchor(session.id, sent.chat.id, sent.message_id, {
-            ompSessionId, entryId:entry.id, parentEntryId:entry.parentId,
-            kind:'assistant', partIndex:index,
-          });
-        }
-        this.deps.options.store.rememberReply(session.id, ompSessionId, entry.id);
-      })
-      .catch(error => console.error(`Could not mirror OMP reply (${session.id}).`, error))
-      .finally(() => {
-        listener.queued--;
-        pending.delete(entry.id);
-      });
+    this.deps.queueReply(session, ompSessionId, entry,
+      replay ? listener.snapshotReplyTarget : this.deps.options.store.getReplyTarget(session.id));
   }
 }

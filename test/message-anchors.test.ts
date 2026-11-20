@@ -25,9 +25,11 @@ test('message anchors preserve receipt aliases and exact native identity across 
     const prompt = target('omp-original', 'prompt-entry', 'previous-entry');
     store.recordPromptReceipt(session.id, prompt, sender, content, boundary);
     const answer: MessageAnchor = {...target('omp-original', 'answer-entry', 'prompt-entry'),kind:'assistant',partIndex:0};
-    store.recordMessageAnchor(session.id, topic.chatId, 200, answer);
-    store.recordMessageAnchor(session.id, topic.chatId, 201, {...answer,partIndex:1});
-    store.rememberReply(session.id, answer.ompSessionId, answer.entryId);
+    store.replies.stage(session.id, answer.ompSessionId, answer.entryId, answer.parentEntryId, ['first','second'], 100, 0);
+    for (const messageId of [200,201]) {
+      const reply = store.replies.pending(session.id)[0]!;
+      store.replies.confirm(reply, topic.chatId, messageId);
+    }
     store.advanceSessionGeneration(session.id);
     store.close();
     store = new Store(filename);
@@ -35,38 +37,15 @@ test('message anchors preserve receipt aliases and exact native identity across 
       assert.deepEqual(store.getMessageAnchor(session.id, 'omp-original', topic.chatId, messageId), {...prompt,kind:'collab-prompt',partIndex:0});
     assert.deepEqual(store.getMessageAnchor(session.id, 'omp-original', topic.chatId, 200), answer);
     assert.deepEqual(store.getMessageAnchor(session.id, 'omp-original', topic.chatId, 201), {...answer,partIndex:1});
-    assert.equal(store.rememberReply(session.id, 'omp-original', 'answer-entry'), false);
-    assert.equal(store.rememberReply(session.id, 'omp-fork', 'answer-entry'), true);
+    store.replies.stage(session.id, 'omp-original', 'answer-entry', 'prompt-entry', ['duplicate'], 100, 1);
+    assert.deepEqual(store.replies.pending(session.id), []);
+    store.replies.stage(session.id, 'omp-fork', 'answer-entry', 'prompt-entry', ['new'], 100, 1);
+    assert.equal(store.replies.pending(session.id)[0]?.ompSessionId, 'omp-fork');
     assert.equal(store.getMessageAnchor(session.id, 'omp-fork', topic.chatId, 100), undefined);
     assert.deepEqual(store.recordPromptReceipt(session.id, prompt, sender, content), {fresh:false,messageId:100});
   } finally {
     store.close();
     await rm(directory, {recursive:true,force:true});
-  }
-});
-
-test('confirmed multipart reply parts survive reopen without completing an interrupted entry', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'omp-interrupted-reply-'));
-  const filename = join(directory, 'telegram.sqlite');
-  let store = new Store(filename);
-  try {
-    const session = store.createSession(topic, 'Interrupted reply');
-    const anchor: MessageAnchor = { ...target('omp-original', 'reply-entry'), kind: 'assistant', partIndex: 0 };
-    store.recordMessageAnchor(session.id, topic.chatId, 200, anchor);
-    store.recordMessageAnchor(session.id, topic.chatId, 202, { ...anchor, partIndex: 2 });
-    store.close();
-    store = new Store(filename);
-    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'reply-entry'), new Set([0, 2]));
-    assert.equal(store.hasReply(session.id, 'omp-original', 'reply-entry'), false);
-    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-other', 'reply-entry'), new Set());
-    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'other-entry'), new Set());
-    store.recordMessageAnchor(session.id, topic.chatId, 201, { ...anchor, partIndex: 1 });
-    store.rememberReply(session.id, 'omp-original', 'reply-entry');
-    assert.deepEqual(store.deliveredReplyParts(session.id, 'omp-original', 'reply-entry'), new Set([0, 2, 1]));
-    assert.equal(store.hasReply(session.id, 'omp-original', 'reply-entry'), true);
-  } finally {
-    store.close();
-    await rm(directory, { recursive: true, force: true });
   }
 });
 
