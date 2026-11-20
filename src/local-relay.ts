@@ -14,7 +14,12 @@ interface Room {
 
 /** Only the four-byte routing envelope is inspected; encrypted payloads remain opaque. */
 export class LocalRelay {
-  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false });
+  // Yield between inbound frames so completed writes can release their queue
+  // reservations before the next frame. Otherwise a coalesced snapshot burst
+  // can hit the pending-send limit even when the destination is draining.
+  // ws Receiver.dataMessage implements this scheduling:
+  // https://github.com/websockets/ws/blob/8.22.0/lib/receiver.js#L605-L614
+  private readonly server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME, perMessageDeflate: false, allowSynchronousEvents: false });
   private readonly rooms = new Map<string, Room>();
   private readonly alive = new Set<WebSocket>();
   private readonly pending = new Map<WebSocket, number>();
