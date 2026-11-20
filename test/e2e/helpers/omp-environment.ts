@@ -175,9 +175,6 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
     // Scripted turns exclude OMP's skill-description model calls, not explicit skill invocation.
     // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/session/settings.ts#L437-L448
     skillful: false,
-    // Scripted providers cover explicit tasks, not OMP's additional next-message inference.
-    // https://github.com/can1357/oh-my-pi/blob/v19.0.0/packages/coding-agent/src/modes/settings.ts#L1184-L1196
-    composer: { predictions: false },
     modelRoles: { default: selectedModel, smol: selectedModel, slow: selectedModel, plan: selectedModel },
     ...(options.compaction ? { compaction: options.compaction } : {}),
     modelPresets: {
