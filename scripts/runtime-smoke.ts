@@ -7,7 +7,7 @@ import type { AppConfig } from '../shared/contracts.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { SessionCapacityError } from '../src/runtime/types.js';
-import { startLocalRelay } from './local-relay.js';
+import { startLocalRelay } from '../src/local-relay.js';
 import { formatCollabLink, parseCollabLink } from '../src/vendor/link.js';
 import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
 import { verifyRuntimeKill } from './runtime-kill-smoke.js';
@@ -26,7 +26,7 @@ const config: AppConfig = {
   omp: {
     executable: process.env.OMP_EXECUTABLE ?? 'omp',
     args: ['--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title'],
-    maxSessions: 1, startupTimeoutMs: 60_000, relayUrl: relay.url,
+    maxSessions: 1, startupTimeoutMs: 60_000,
   },
 };
 writeConfig(config);

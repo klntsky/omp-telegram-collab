@@ -7,7 +7,6 @@ import { dirname, join, resolve, sep } from 'node:path';
 import type { TestContext } from 'node:test';
 import { formatWithOptions, parseEnv, promisify } from 'node:util';
 import { z } from 'zod';
-import { startLocalRelay } from '../../../scripts/local-relay.js';
 import { startFakeLlmProvider, type FakeLlmProvider, type FakeLlmScenario } from './fake-llm-provider.js';
 import { readSessionHistory } from './model-tasks.js';
 import type { TopicSession } from '../../../shared/contracts.js';
@@ -85,11 +84,10 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const workspace = join(root, 'workspace');
   const dataDir = join(root, 'application');
   let provider: FakeLlmProvider | undefined;
-  let relay: { url: string; interruptNextGuest(): void; close(): Promise<void> } | undefined;
   t.after(async () => {
     const errors: unknown[] = [];
     log('environment-cleanup-start', {});
-    for (const close of [() => provider?.close(), () => relay?.close()]) {
+    for (const close of [() => provider?.close()]) {
       try { await close(); } catch (error) { log('environment-cleanup-error', error); errors.push(error); }
     }
     try {
@@ -114,6 +112,10 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
         }
       }
     } catch (error) { log('artifact-copy-error', error); errors.push(error); }
+    try { await cp(join(root, 'xdg-state', 'omp', 'logs'), join(logDirectory, 'native-logs'), { recursive: true }); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) { log('artifact-copy-error', error); errors.push(error); }
+    }
     try { await rm(root, { recursive: true, force: true }); } catch (error) { log('environment-cleanup-error', error); errors.push(error); }
     log('environment-cleanup-end', { errors: errors.length });
     if (errors.length === 1) throw errors[0];
@@ -156,7 +158,6 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   await mkdir(followupSkillDirectory, { recursive: true });
   await writeFile(join(followupSkillDirectory, 'SKILL.md'), '---\nname: e2e-z-followup\ndescription: Follow up on the E2E task\n---\nPreserve the e2e-followup-loaded marker.\n');
   provider = await startFakeLlmProvider({ scenarios: options.scenarios, log });
-  relay = await startLocalRelay();
   const selectedModel = 'e2e/e2e-model';
   await writeFile(join(agent, 'models.yml'), JSON.stringify({ providers: { e2e: {
     baseUrl: provider.baseUrl,
@@ -168,6 +169,9 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const agentConfigPath = join(agent, 'config.yml');
   await writeFile(agentConfigPath, JSON.stringify({
     startup: { checkUpdate: false, setupWizard: false },
+    // Script only requested turns, not the terminal composer's extra model call.
+    // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/modes/controllers/composer-prediction-controller.ts (ComposerPredictionController.request)
+    composer: { predictions: false },
     // Scripted turns exclude OMP's skill-description model calls, not explicit skill invocation.
     // https://github.com/can1357/oh-my-pi/blob/v18.18.6/packages/coding-agent/src/session/settings.ts#L437-L448
     skillful: false,
@@ -208,9 +212,11 @@ exec -a "$0" "$command" "\${args[@]}"`;
   await writeFile(executable, `#!/bin/sh\nexec /usr/bin/env -i ${assignments.join(' ')} ${forwarded.join(' ')} /bin/bash -c ${quote(launch)} ${quote(executable)} ${quote(actualOmp.includes('/') ? resolve(actualOmp) : actualOmp)} \"$@\"\n`, { mode: 0o700 });
   const listHosts = () => step('omp.hosts', async () => {
     const { stdout } = await execute(executable, ['collab', 'list', '--json'], { cwd: workspace, timeout: 10000 });
+    const result = JSON.parse(stdout);
+    log('omp.hosts.result', result);
     return z.object({ hosts: z.array(z.object({
-      sessionId: z.string(), cwd: z.string(), pid: z.number(),
-    })) }).parse(JSON.parse(stdout)).hosts;
+      instanceId: z.string(), sessionId: z.string(), cwd: z.string(), pid: z.number(), relayConnected: z.boolean(),
+    })) }).parse(result).hosts;
   });
   const args = [
     '--no-extensions', '--no-rules', '--no-context-files', '--no-title', '--no-lsp', '--no-pty',
@@ -218,6 +224,6 @@ exec -a "$0" "$command" "\${args[@]}"`;
     '--thinking', 'off', '--tools', 'write', '--approval-mode', 'yolo',
     '--system-prompt', 'Complete the requested task with the available tools.',
   ];
-  log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl, relayUrl: relay.url });
-  return { workspace, dataDir, executable, agentConfigPath, args, relayUrl: relay.url, interruptNextGuest: relay.interruptNextGuest, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
+  log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl });
+  return { workspace, dataDir, executable, agentConfigPath, args, provider, log, step, git, listHosts, assertWorktree, formatDiagnostic, logDirectory, registerSecret };
 }

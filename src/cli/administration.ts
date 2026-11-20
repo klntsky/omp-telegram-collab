@@ -257,11 +257,6 @@ export class Administration {
     if (options.has('omp-arg') || options.has('clear-omp-args')) config.omp.args = options.get('omp-arg') ?? [];
     if (options.has('max-sessions')) config.omp.maxSessions = integer(one(options, 'max-sessions')!, 'Maximum sessions');
     if (options.has('startup-timeout-ms')) config.omp.startupTimeoutMs = integer(one(options, 'startup-timeout-ms')!, 'Startup timeout');
-    if (options.has('relay-url')) {
-      const relay = one(options, 'relay-url')!;
-      if (relay === '-' || relay === '') delete config.omp.relayUrl;
-      else config.omp.relayUrl = relay;
-    }
     await this.save(config, previousDataDir);
     this.print(`Service configuration saved to ${config.configPath}.`);
     if (interactive && !config.bots.length) await this.botAdd(new Map());

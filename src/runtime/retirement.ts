@@ -7,6 +7,7 @@ import { type RegistryHost, type ManagedHost, type HostLifecycle } from './types
 import { privateFile } from './files.js';
 import { procIdentity } from './process.js';
 import { record, errno, delay } from './values.js';
+import { managedLifecycleIdentity } from './lifecycle-identity.js';
 interface RetirementDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   forgetActivity(id: string): void;
@@ -55,8 +56,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     let current = await registered();
     if (host.process?.pid && !host.binding) {
       const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
-      while (!host.exited && !deps.killing.has(id) &&
-          (!current || lifecycle?.pid !== current.pid || lifecycle.supervisorPid !== host.process.pid) && Date.now() < deadline) {
+      while (!host.exited && !deps.killing.has(id) && !lifecycle && !current && Date.now() < deadline) {
         const supervisor = await procIdentity(host.process.pid);
         if (!supervisor || supervisor.state === 'Z' || supervisor.state === 'X') break;
         await delay(100);
@@ -65,6 +65,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       }
     }
     if (deps.killing.has(id)) return;
+    let offlineIdentity: Awaited<ReturnType<typeof procIdentity>> | undefined;
     if (host.retirement) {
       const previous = await procIdentity(host.retirement.pid);
       const alive = previous && previous.start === host.retirement.start && previous.state !== 'Z' && previous.state !== 'X';
@@ -87,7 +88,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
     if (!current) {
       if (lifecycle) {
         if (lifecycle.sessionId !== host.sessionId) throw new Error('Managed OMP lifecycle identity changed');
-        const identity = await procIdentity(lifecycle.pid);
+        const identity = await managedLifecycleIdentity(deps.config.dataDir, id, host, lifecycle);
         if (identity && identity.state !== 'Z' && identity.state !== 'X') {
           host.identity = { pid: lifecycle.pid, start: identity.start };
           if (!guard && lifecycle.retirement !== 1) throw new Error('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.');
@@ -96,11 +97,10 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
             host.retirement = { pid: lifecycle.pid, start: identity.start, socketPath: lifecycle.socketPath };
             return;
           }
-          if (!guard) throw new Error('OMP host is not registered; cannot safely retire its process');
-          return;
+          offlineIdentity = identity;
         }
       }
-      if (await settleManagedExit(id, host)) return;
+      if (!offlineIdentity && await settleManagedExit(id, host)) return;
     } else {
       if (host.cwd !== undefined && await realpath(current.cwd) !== host.cwd) throw new Error('Managed host working directory changed');
       if (host.binding && (host.binding.instanceId !== current.instanceId || host.binding.sessionId !== current.sessionId ||
@@ -110,7 +110,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
         throw new Error('Managed OMP lifecycle identity changed');
       }
     }
-    const identity = current ? await procIdentity(current.pid) : null;
+    const identity = current ? await procIdentity(current.pid) : offlineIdentity;
     if (current && identity && host.identity?.pid === current.pid && host.identity.start !== identity.start) {
       await settleManagedExit(id, host);
       return;
@@ -125,7 +125,7 @@ export function createRetirement(deps: RetirementDependencies): RuntimeRetiremen
       if (!guard) throw new Error('This running OMP host does not support safe retirement. Stop it with /kill, then send a new prompt to load the updated lifecycle extension.');
       return;
     }
-    if (!current || !identity) return;
+    if (!identity) return;
     const alreadyRetiring = host.retiring || lifecycle.retiring === true;
     if (alreadyRetiring) {
       host.retiring = true;

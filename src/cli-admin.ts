@@ -62,7 +62,6 @@ export function registerAdminCommands(program: Command, configPath: () => string
     ['--omp-arg <arg>', 'Literal OMP argument (repeatable, including values starting with --)'],
     ['--max-sessions <n>', 'Maximum simultaneous OMP sessions'],
     ['--startup-timeout-ms <n>', 'OMP startup timeout in milliseconds'],
-    ['--relay-url <url>', 'OMP relay URL, or - to clear'],
     ['--clear-omp-args', 'Clear configured OMP arguments'],
   ] as const) flag(setup, flags, description, flags === '--omp-arg <arg>');
   setup.action((_values, command: Command) => admin().setup(options(command)));
