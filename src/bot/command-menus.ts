@@ -8,7 +8,7 @@ import { groupCommands, cliCommand } from './commands.js';
 
 interface CommandMenuDependencies {
  bot: Bot<Context>; config: AppConfig; store: Store; signal: TelegramAbortSignal;
- botId(): number; stopped(): boolean; presetDescription(instanceId: number): string;
+ botId(): number; stopped(): boolean;
 }
 
 export class BotCommandMenus {
@@ -42,7 +42,7 @@ syncCommandMenus(): Promise<void> {
       const skills = this.deps.store.getSkillCatalog(instanceId) ?? [];
       if (this.deps.stopped()) return;
       const aliases = new Map([...skillCommandAliases(skills)].slice(0, 100 - baseCommands.length));
-      const instanceCommands = baseCommands.map(command => command.command === 'modelpreset' ? {...command, description:this.deps.presetDescription(instanceId)} : command);
+      const instanceCommands = baseCommands;
       const commands = [...instanceCommands, ...[...aliases].map(([command, skill]) => ({
         command, description: `Select /skill:${skill.name}`.slice(0, 256),
       }))];

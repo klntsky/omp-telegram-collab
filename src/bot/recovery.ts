@@ -19,7 +19,8 @@ export interface MirrorRecoveryDependencies {
   metadataOwner: (session: TopicSession) => SessionMetadataOwner;
   refreshTopicStatus: (session: TopicSession) => Promise<void>;
   runBackground: (phase: string, operation: (signal: AbortSignal) => Promise<void>) => Promise<void>;
-  sendInitial: (session: TopicSession) => Promise<void>;
+  drainPrompts(session: TopicSession): Promise<void>;
+  recoverReplies(session: TopicSession): void;
   sessionAssigned: (session: TopicSession) => boolean;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
@@ -60,11 +61,10 @@ export class MirrorRecovery {
             const generation = this.deps.options.store.getSessionGeneration(existing.id);
             try {
               if (existing.status === 'open') {
-                if (this.deps.options.store.hasPendingInitialTask(existing.id)) {
-                  await withCancellation(this.deps.sendInitial(existing), signal);
-                } else {
+                if (!this.deps.options.store.promptQueue.has(existing.id)) {
                   await this.recoverExistingMirror(existing, signal);
                 }
+                await withCancellation(this.deps.drainPrompts(existing), signal);
               }
               await withCancellation(this.deps.refreshTopicStatus(existing), signal);
             } catch (error) {
@@ -87,6 +87,7 @@ export class MirrorRecovery {
     signal = this.deps.background,
   ): Promise<void> {
     if (this.deps.stopped() || this.deps.options.config.terminated || signal.aborted) return Promise.resolve();
+    this.deps.recoverReplies(session);
     const metadataOwner = this.deps.metadataOwner(session);
     const existing = metadataOwner.recovery;
     if (existing) return existing;
@@ -101,8 +102,8 @@ export class MirrorRecovery {
       this.deps.currentMetadataOwner(session.id)?.activity === owner;
     if (
       !active() ||
-      (this.deps.getListener(session.id) !== undefined) ||
-      this.deps.options.store.hasPendingInitialTask(session.id)
+      this.deps.options.store.promptQueue.has(session.id) ||
+      (this.deps.getListener(session.id) !== undefined)
     )
       return Promise.resolve();
     const deadline = AbortSignal.any([
@@ -166,11 +167,10 @@ export class MirrorRecovery {
           if (active?.status !== 'open') return;
           this.reconnecting.add(active.id);
           try {
-            if (this.deps.options.store.hasPendingInitialTask(active.id)) {
-              await withCancellation(this.deps.sendInitial(active), signal);
-            } else {
+            if (!this.deps.options.store.promptQueue.has(active.id)) {
               await this.recoverExistingMirror(active, signal);
             }
+            await withCancellation(this.deps.drainPrompts(active), signal);
             await withCancellation(this.deps.refreshTopicStatus(active), signal);
           } catch (error) {
             if (

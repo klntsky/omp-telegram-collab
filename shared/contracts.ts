@@ -59,7 +59,6 @@ export interface AppConfig {
     args: string[];
     maxSessions: number;
     startupTimeoutMs: number;
-    relayUrl?: string;
   };
 }
 

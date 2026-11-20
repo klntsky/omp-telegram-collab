@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import * as pty from '@lydell/node-pty';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { OmpRuntime } from '../src/runtime.js';
-import { startLocalRelay } from './local-relay.js';
+import { startLocalRelay } from '../src/local-relay.js';
 import { writeConfig } from '../src/config.js';
 import { logEvent } from '../src/logging.js';
 
@@ -46,7 +46,7 @@ export async function verifyRuntimeKill(directory: string, executable: string, r
     omp: {
       executable,
       args: ['--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title'],
-      maxSessions: 2, startupTimeoutMs: 60000, relayUrl,
+      maxSessions: 2, startupTimeoutMs: 60000,
     },
   };
   writeConfig(config);

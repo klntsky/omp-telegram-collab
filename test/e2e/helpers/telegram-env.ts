@@ -6,6 +6,9 @@ import { readStringSession } from '@mtcute/node/utils.js';
 import { withTelegramTestLock } from '../../../scripts/lib/telegram-test-lock.js';
 import { withTelegramTestEnvStorage } from '../../../scripts/lib/telegram-test-env-storage.js';
 
+// Keep the retained authorization pool file-backed. Loading it into the test
+// runner with --env-file can exceed Linux's per-string environment limit before
+// Node can spawn its first test worker.
 export async function resolveTelegramTestEnvFile(): Promise<string> {
   if (process.env.TELEGRAM_TEST_ENV_FILE) return resolve(process.env.TELEGRAM_TEST_ENV_FILE);
   const { stdout } = await promisify(execFile)('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);

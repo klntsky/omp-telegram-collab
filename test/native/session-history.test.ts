@@ -98,7 +98,7 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   const config = emptyConfig(join(omp.dataDir, 'config.yaml'));
   config.dataDir = omp.dataDir;
   config.instances = [{ id: 1, defaultDir: omp.workspace, chats: [] }];
-  config.omp = { executable: omp.executable, args: [...omp.args, '--no-skills'], relayUrl: omp.relayUrl, maxSessions: 1, startupTimeoutMs: 60000 };
+  config.omp = { executable: omp.executable, args: [...omp.args, '--no-skills'], maxSessions: 1, startupTimeoutMs: 60000 };
   writeConfig(config);
   const session: TopicSession = {
     id: randomUUID(), instanceId: 1, botId: 1, chatId: 1, threadId: 1,

@@ -7,7 +7,7 @@ import type { AppConfig } from '../shared/contracts.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { SessionCapacityError } from '../src/runtime/types.js';
-import { startLocalRelay } from './local-relay.js';
+import { startLocalRelay } from '../src/local-relay.js';
 import { formatCollabLink, parseCollabLink } from '../src/vendor/link.js';
 import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
 import { verifyRuntimeKill } from './runtime-kill-smoke.js';
@@ -27,7 +27,7 @@ const config: AppConfig = {
   omp: {
     executable: process.env.OMP_EXECUTABLE ?? 'omp',
     args: ['--no-extensions', '--no-skills', '--no-rules', '--no-context-files', '--no-title'],
-    maxSessions: 1, startupTimeoutMs: 60_000, relayUrl: relay.url,
+    maxSessions: 1, startupTimeoutMs: 60_000,
   },
 };
 writeConfig(config);
@@ -35,7 +35,9 @@ const filename = join(dir, 'telegram.sqlite');
 const initialStore = new Store(filename);
 const session = initialStore.createSession(
   { botId: 123, chatId: -100123, threadId: 7, instanceId: 1, cwd: selectedFolder },
-  'Local smoke', { kind: 'managed' }, {text:'Preserved pending instruction'},
+  'Local smoke', { kind: 'managed' }, {
+    prompt: {messageId: 1, userId: 42, authorityUserId: 42, content: {text:'Preserved pending instruction'}},
+  },
 );
 initialStore.enrollGroup(session.botId, session.chatId);
 initialStore.close();
@@ -71,7 +73,7 @@ try {
   forgedToken[0] = forgedToken[0]! ^ 1;
   const forgedBinding = {
     ...first,
-    url: formatCollabLink(relay.url, controlLink.roomId, controlLink.key, forgedToken),
+    url: formatCollabLink(new URL(controlLink.wsUrl).origin, controlLink.roomId, controlLink.key, forgedToken),
   };
   await assert.rejects(async () => {
     const unauthorized = await runtime.connectCollab(forgedBinding, 'Forged capability verifier', {
@@ -163,13 +165,13 @@ try {
     await runtime.validateSessionPaths(reopenedStore.listSessions());
     const preserved = reopenedStore.getTopic({botId: session.botId, destination: topicDestination(session.chatId, session.threadId)})!;
     assert.deepEqual(preserved, session);
-    assert.equal(reopenedStore.hasPendingInitialTask(session.id), true);
+    assert.equal(reopenedStore.promptQueue.has(session.id), true);
     assert.equal(reopenedStore.isEnrolled(session.botId, session.chatId), true);
     const recovered = await runtime.ensure(preserved);
     assert.equal(recovered.sessionId, resumed.sessionId);
     assert.equal(recovered.instanceId, resumed.instanceId, 'a current store/config reopen must recover the protected live host');
     await assertProcessCwd(preserved.id, selectedFolder);
-    assert.equal(reopenedStore.hasPendingInitialTask(session.id), true, 'recovery must not submit or claim the pending instruction');
+    assert.equal(reopenedStore.promptQueue.has(session.id), true, 'recovery must not submit or claim the pending instruction');
     assert.deepEqual(await readFile(historyPath), historyBeforeReopen);
     runtime.observeFrame(session.id, { t: 'event', event: { type: 'agent_end' } });
   } finally {

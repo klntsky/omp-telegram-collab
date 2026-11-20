@@ -3,6 +3,7 @@ import type { BotOptions } from '../bot.js';
 import { findInstance, refreshTermination } from '../config.js';
 import { withCancellation } from '../cancellation.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
+import { codeHtml, escapeHtml } from '../telegram-html.js';
 import type { StatusFailure, SessionObservation } from './types.js';
 import type { SessionConnections } from './connection.js';
 import type { MirrorRecovery } from './recovery.js';
@@ -13,6 +14,42 @@ interface StatusDependencies {
  recoveryConnections: SessionConnections; recovery: MirrorRecovery; maintenance: BotMaintenance;
  botId(): number; ready(chatId: number): Promise<boolean>; authorize(chatId: number,userId: number,statusOnly?: boolean): Promise<void>;
  assignedId(chatId: number): number; sessionObservation(id: string): SessionObservation;
+}
+
+interface StatusFragment {
+  text: string;
+  code?: boolean;
+}
+
+// Split plain fragments before escaping so chunks cannot cut an HTML entity or tag.
+// TDLib parse_html decodes entities before measuring message text:
+// https://github.com/tdlib/td/blob/master/td/telegram/MessageEntity.cpp#L3363
+function* statusChunks(fragments: StatusFragment[]): Generator<string> {
+  let html = '';
+  let length = 0;
+  for (const fragment of fragments) {
+    let remaining = fragment.text;
+    while (remaining.length) {
+      let size = Math.min(3900 - length, remaining.length);
+      if (size < remaining.length && remaining.charCodeAt(size - 1) >= 0xD800 && remaining.charCodeAt(size - 1) <= 0xDBFF) size--;
+      if (size === 0) {
+        yield html;
+        html = '';
+        length = 0;
+        continue;
+      }
+      const text = remaining.slice(0, size);
+      html += fragment.code ? codeHtml(text) : escapeHtml(text);
+      length += size;
+      remaining = remaining.slice(size);
+      if (length === 3900) {
+        yield html;
+        html = '';
+        length = 0;
+      }
+    }
+  }
+  if (html) yield html;
 }
 
 export class BotStatus {
@@ -55,9 +92,9 @@ async showStatus(ctx: Context): Promise<void> {
       }
       lines.push(`Host: ${host}`);
       lines.push(`Mirroring: ${listener?.connection ? 'connected' : listener?.promise ? 'connecting' : observation.mirrored || host === 'running' ? 'disconnected' : 'not attached'}`);
-      const task = observation.task?.state ?? (this.deps.store.hasPendingInitialTask(session.id) ? 'waiting for host; not submitted' : 'unknown (no task observed in this process)');
+      const task = observation.task?.state ?? (this.deps.store.promptQueue.has(session.id) ? 'waiting for host; not submitted' : 'unknown (no task observed in this process)');
       lines.push(`Latest task: ${task}`);
-      const recovery = listener?.initial?.phase === 'retrying' ? 'initial task retry scheduled' : this.deps.recovery.restoring.has(session.id) ? 'restoring' : this.deps.recovery.reconnecting.has(session.id) ? 'reconnecting' : this.deps.recovery.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
+      const recovery = this.deps.recovery.restoring.has(session.id) ? 'restoring' : this.deps.recovery.reconnecting.has(session.id) ? 'reconnecting' : this.deps.recovery.reconnects.has(session.id) ? 'reconnect scheduled' : 'not scheduled';
       lines.push(`Recovery: ${recovery}`);
       if (observation.failure) failures.push(observation.failure);
     } else lines.push(detached ? 'Session: detached; this topic is conversation-only' : destination.kind === 'general' ? 'Session: General has no session' : 'Session: none; use /new task or create a topic');
@@ -67,6 +104,7 @@ async showStatus(ctx: Context): Promise<void> {
     lines.push(`Skill shortcuts: ${catalog ? `saved catalog (${catalog.length} skills); ${freshness}` : `unavailable; ${freshness}`}`);
     lines.push(`Last successful skill check: ${catalogObservation?.refreshedAt ? new Date(catalogObservation.refreshedAt).toISOString() : 'unknown'} (runtime discovery cache may apply)`);
     if (catalogObservation?.failure) failures.push(catalogObservation.failure);
+    const fragments: StatusFragment[] = [{ text: lines.join('\n') }];
     for (const failure of failures) {
       const error = failure.error instanceof HttpError && failure.error.error instanceof Error ? failure.error.error : failure.error;
       const fields = error instanceof Error ? ['code','signal','killed'].flatMap(key => {
@@ -74,16 +112,14 @@ async showStatus(ctx: Context): Promise<void> {
         return value === undefined || value === null ? [] : [`${key}: ${String(value)}`];
       }) : [];
       const details = failure.error instanceof Error ? failure.error.message : String(failure.error);
-      lines.push(`Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n${details}${fields.length ? '\n'+fields.join('\n') : ''}`);
+      const prefix = `Last failure — ${failure.operation} (${new Date(failure.at).toISOString()}):\n`;
+      fragments.push({ text: `\n${prefix}` }, { text: details, code: true });
+      if (fields.length) fragments.push({ text: '\n' + fields.join('\n') });
     }
-    const text = lines.join('\n');
-    for (let offset = 0; offset < text.length;) {
+    for (const html of statusChunks(fragments)) {
       await this.deps.authorize(chatId,ctx.from!.id,true);
       if (this.deps.assignedId(chatId) !== path) throw new Error('The group instance assignment changed');
-      let end = Math.min(offset+3900,text.length);
-      if (end < text.length && text.charCodeAt(end-1) >= 0xD800 && text.charCodeAt(end-1) <= 0xDBFF) end--;
-      await replyTo(ctx,destination,text.slice(offset,end));
-      offset = end;
+      await replyTo(ctx,destination,html, { parse_mode: 'HTML' });
     }
   }
 }

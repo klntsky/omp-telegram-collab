@@ -26,6 +26,8 @@ export interface SessionConnectionsDependencies {
   sessionAssigned: (session: TopicSession) => boolean;
   sessionObservation: (id: string) => SessionObservation;
   setTopicStatus: (session: TopicSession, status: TopicActivity, completed?: boolean) => void | Promise<void>;
+  recoverReplies(session: TopicSession): void;
+  settlePrompt(session: TopicSession, submissionId: number, outcome: 'accepted' | 'startup-rejected' | 'uncertain'): void;
   stopped: () => boolean;
   options: Pick<BotOptions, 'config' | 'runtime' | 'store'>;
 }
@@ -102,11 +104,12 @@ export class SessionConnections {
     this.deps.invalidateActivity(id);
     this.deps.cancelReconnect(id);
     const listener = this.listeners.get(id);
-    for (const pending of listener?.pendingPrompts ?? [])
-      pending.observation.state = 'acceptance unknown';
     this.listeners.delete(id);
-    clearTimeout(listener?.initial?.timer);
-    if (listener) listener.initial = undefined;
+    const pendingSession = this.deps.options.store.getSession(id);
+    for (const pending of listener?.pendingPrompts ?? []) {
+      pending.observation.state = 'acceptance unknown';
+      if (pendingSession) this.deps.settlePrompt(pendingSession, pending.submissionId, 'uncertain');
+    }
     clearTimeout(listener?.typingTimer);
     const session = this.deps.options.store.getSession(id);
     if (session) this.delivery.invalidateTyping(session.chatId, session.threadId);
@@ -161,7 +164,7 @@ export class SessionConnections {
     this.deps.refreshTyping(session, listener);
     void this.deps.setTopicStatus(
       session,
-      this.deps.options.store.hasPendingInitialTask(session.id) ? 'running' : 'unknown',
+      this.deps.options.store.promptQueue.has(session.id) ? 'running' : 'unknown',
     );
     const active = () =>
       !this.deps.stopped() &&
@@ -222,6 +225,7 @@ export class SessionConnections {
               };
               const connected = listener.connection !== undefined;
               this.dropListener(session.id, reason);
+              this.deps.recoverReplies(session);
               if (connected) this.deps.scheduleReconnect(session);
             },
           },
@@ -264,7 +268,9 @@ export class SessionConnections {
           if (this.listeners.get(session.id) === listener)
             this.dropListener(session.id, error instanceof Error ? error.message : String(error));
         }
-        return this.listen(session, undefined, beforeMutation, false, false);
+        // A reader already resolved this host. Listener replacement must not
+        // turn reconnection into mutation admission against a draining host.
+        return this.listen(session, binding, beforeMutation, false, false);
       });
     return listener.promise;
   }

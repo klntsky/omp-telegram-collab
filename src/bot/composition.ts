@@ -22,6 +22,7 @@ import { SessionFork } from './session-fork.js';
 import { SessionDetach } from './session-detach.js';
 import { ForumSetup } from './forum-setup.js';
 import { PromptAdmission } from './prompt-admission.js';
+import { PromptWorker } from './prompt-worker.js';
 import { BotStatus } from './status.js';
 import type { Bot, Context } from 'grammy';
 import type { AbortController as TelegramAbortController } from 'abort-controller';
@@ -30,6 +31,7 @@ import { SkillPicker } from '../skill-picker.js';
 import { composeInputRouter } from './router-composition.js';
 import type { BotInput } from './input.js';
 import { WorktreeCleanup } from './worktree-cleanup.js';
+import { ReplyDelivery } from './reply-delivery.js';
 
 export interface LifecycleDependencies {
  id(): number; stopped(): boolean; apiAbort: TelegramAbortController;
@@ -50,6 +52,8 @@ export interface BotComponents {
   capacity: CapacityAdmission;
   entries: SessionEntries;
   admission: PromptAdmission;
+  worker: PromptWorker;
+  replies: ReplyDelivery;
   input: BotInput;
 }
 
@@ -68,7 +72,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     stopped: lifecycle.stopped.bind(lifecycle),
     restoreSessions: () => recovery.restoreSessions(),
     sessionAssigned: (session) => authorization.sessionAssigned(session),
-    sendInitial: (session) => receipts.sendInitial(session),
+    drainPrompts: session => worker.drain(session),
     refreshTopicStatus: (session) => activity.refreshTopicStatus(session),
     recoverExistingMirror: (session) => recovery.recoverExistingMirror(session),
     dropListener: (id) => connections.dropListener(id),
@@ -101,6 +105,8 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     sessionObservation: (id) => recovery.sessionObservation(id),
     setTopicStatus: (session, status, completed) => activity.setTopicStatus(session, status, completed),
+    settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
+    recoverReplies: session => replies.wake(session, true),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
@@ -131,24 +137,21 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     metadataOwner: owners.metadataOwner.bind(owners),
     refreshTopicStatus: activity.refreshTopicStatus.bind(activity),
     runBackground: maintenance.runBackground.bind(maintenance),
-    sendInitial: (session) => receipts.sendInitial(session),
+    drainPrompts: session => worker.drain(session),
+    recoverReplies: session => replies.wake(session, !connections.listeners.has(session.id)),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
   const receipts: PromptReceipts = new PromptReceipts({
     authorize: authorization.authorize.bind(authorization),
-    background: maintenance.background.signal,
     bot: bot,
     delivery: connections.delivery,
     getListener: connections.listeners.get.bind(connections.listeners),
-    listen: connections.listen.bind(connections),
-    uploadDocuments: (...args) => preparation.uploadDocuments(...args),
-    prepareInitialDocuments: (...args) => preparation.prepareInitialDocuments(...args),
-    requestCapacity: (session, limit) => capacity.requestCapacity(session, limit),
     requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
+    settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
     stopped: lifecycle.stopped.bind(lifecycle),
     options: options,
   });
@@ -165,26 +168,32 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
   const frames: FrameProjection = new FrameProjection({
     acknowledgeMessage: receipts.acknowledgeMessage.bind(receipts),
     activityObservation: owners.activityObservation.bind(owners),
-    authorizeInitial: receipts.authorizeInitial.bind(receipts),
-    background: maintenance.background.signal,
+    settlePrompt: (session, id, outcome) => worker.settle(session, id, outcome),
     bot: bot,
-    delivery: connections.delivery,
-    dropListener: connections.dropListener.bind(connections),
     getListener: connections.listeners.get.bind(connections.listeners),
     currentMetadataOwner: owners.metadataOwners.get.bind(owners.metadataOwners),
     endRequestQuestions: (listener, reqId) => questions.endForRequest(listener, reqId),
-    promptHelp: authorization.promptHelp.bind(authorization),
-    ready: authorization.ready.bind(authorization),
     reconcilePromptReceipt: receipts.reconcilePromptReceipt.bind(receipts),
     refreshTyping: typing.refreshTyping.bind(typing),
     relayQuestion: (session, listener, request) => questions.relayQuestion(session, listener, request),
-    sendPrompt: receipts.sendPrompt.bind(receipts),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     sessionObservation: recovery.sessionObservation.bind(recovery),
     setTopicStatus: activity.setTopicStatus.bind(activity),
     stopped: lifecycle.stopped.bind(lifecycle),
     syncTopicTitle: titles.syncTopicTitle.bind(titles),
     options: options,
+    queueReply: (session, ompSessionId, entry, replyTo, historical) => {
+      replies.accept(session, ompSessionId, entry, replyTo, historical);
+      if (!historical) replies.wake(session);
+    },
+  });
+  const replies = new ReplyDelivery({
+    bot, options, delivery: connections.delivery,
+    ready: authorization.ready.bind(authorization),
+    sessionAssigned: authorization.sessionAssigned.bind(authorization),
+    stopped: lifecycle.stopped.bind(lifecycle),
+    runBackground: maintenance.runBackground.bind(maintenance),
+    recordReceipt: receipts.recordReceipt.bind(receipts),
   });
   const menus: BotCommandMenus = new BotCommandMenus({
     bot: bot,
@@ -193,7 +202,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     signal: lifecycle.apiAbort.signal,
     botId: lifecycle.id.bind(lifecycle),
     stopped: lifecycle.stopped.bind(lifecycle),
-    presetDescription: (instanceId) => presets.presetDescription(instanceId),
   });
   const skills: SkillPicker = new SkillPicker({
     store: options.store, botId: lifecycle.id.bind(lifecycle), username: () => bot.botInfo!.username,
@@ -283,7 +291,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     localCliCommand: () => setup.localCliCommand(),
     folderSettings: folders.folderSettings.bind(folders),
     listen: async (session) => { await connections.listen(session); },
-    sendInitial: receipts.sendInitial.bind(receipts),
+    drainPrompts: session => worker.drain(session),
     routePrompt: (ctx, content, session, extensions, worktree, skills, cwd) => admission.routePrompt(ctx, content, session, extensions, worktree, skills, cwd),
   });
   const entries: SessionEntries = new SessionEntries({
@@ -308,9 +316,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     chooseFolder: folders.chooseFolder.bind(folders),
     getIconIds: owners.getIconIds.bind(owners),
     createsTopicWorktrees: authorization.createsTopicWorktrees.bind(authorization),
-    createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
-    requireSessionAssignment: authorization.requireSessionAssignment.bind(authorization),
-    preparePrompt: preparation.preparePrompt.bind(preparation),
     skillKey: skills.key.bind(skills),
     defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     // Input routing needs this owner first; resolve album membership only during dispatch.
@@ -318,7 +323,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     announce: entries.announce.bind(entries),
     setTopicStatus: activity.setTopicStatus.bind(activity),
     listen: connections.listen.bind(connections),
-    sendInitial: receipts.sendInitial.bind(receipts),
+    drainPrompts: session => worker.drain(session),
   });
   const fork: SessionFork = new SessionFork({
     options: options,
@@ -336,6 +341,7 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     listen: connections.listen.bind(connections),
     dropListener: connections.dropListener.bind(connections),
     stripTopicStatus: titles.stripTopicStatus.bind(titles),
+    drainPrompts: session => worker.drain(session),
   });
   const detach: SessionDetach = new SessionDetach({
     options: options,
@@ -361,11 +367,30 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     assignedId: authorization.assignedId.bind(authorization),
     openSettings: settings.open.bind(settings),
   });
+  const worker: PromptWorker = new PromptWorker({
+    options,
+    shutdown: maintenance.background.signal,
+    stopped: lifecycle.stopped.bind(lifecycle),
+    sessionAssigned: authorization.sessionAssigned.bind(authorization),
+    authorizeQueued: receipts.authorizePrompt.bind(receipts),
+    prepareQueuedPrompt: preparation.prepareQueuedPrompt.bind(preparation),
+    reportQueuedFailure: preparation.reportQueuedFailure.bind(preparation),
+    createTopicWorktree: preparation.createTopicWorktree.bind(preparation),
+    requestCapacity: capacity.requestCapacity.bind(capacity),
+    uploadDocuments: preparation.uploadDocuments.bind(preparation),
+    listen: (session, beforeMutation) => connections.listen(session, undefined, beforeMutation),
+    listener: connections.listeners.get.bind(connections.listeners),
+    sendPrompt: receipts.sendPrompt.bind(receipts),
+    prepareContent: receipts.prepareContent.bind(receipts),
+    scheduleReconnect: recovery.scheduleReconnect.bind(recovery),
+    dropListener: connections.dropListener.bind(connections),
+  });
   const admission: PromptAdmission = new PromptAdmission({
     options: options,
     id: lifecycle.id.bind(lifecycle),
     stopped: lifecycle.stopped.bind(lifecycle),
     capacity: capacity,
+    preparePrompt: preparation.preparePrompt.bind(preparation),
     currentAdmin: authorization.currentAdmin.bind(authorization),
     authorize: authorization.authorize.bind(authorization),
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
@@ -380,15 +405,10 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     defaultNewTopicSkills: preparation.defaultNewTopicSkills.bind(preparation),
     renderPresetPanel: presets.renderPresetPanel.bind(presets),
     replyPresetText: presets.replyPresetText.bind(presets),
-    preparePrompt: preparation.preparePrompt.bind(preparation),
-    uploadDocuments: preparation.uploadDocuments.bind(preparation),
     newSession: creation.newSession.bind(creation),
-    listen: async (session) => { await connections.listen(session); },
-    listener: connections.listeners.get.bind(connections.listeners),
+    drainPrompts: session => worker.drain(session),
     // Admission is constructed before input routing; do not bind an uninitialized owner.
     albumContexts: ctx => input.albumContexts(ctx),
-    sendPrompt: receipts.sendPrompt.bind(receipts),
-    prepareContent: receipts.prepareContent.bind(receipts),
   });
   const status: BotStatus = new BotStatus({
     config: options.config,
@@ -409,6 +429,6 @@ export function createBotComponents(options: BotOptions, bot: Bot<Context>, life
     sessionAssigned: authorization.sessionAssigned.bind(authorization),
     authorizeSession: authorization.authorizeSession.bind(authorization),
   });
-  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
-  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, input };
+  const { input }: { input: BotInput } = composeInputRouter({ options, bot, lifecycle, skills, questions, admission, worker, authorization, capacity, folders, settings, presets, panelStore, setup, status, entries, titles, owners, preparation, connections, activity, maintenance, recovery, detach, menus, fork, creation, receipts, cleanup });
+  return { maintenance, authorization, connections, owners, recovery, menus, questions, presets, capacity, entries, admission, worker, replies, input };
 }

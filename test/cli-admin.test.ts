@@ -100,7 +100,7 @@ test('interactive setup preserves explicit storage and OMP settings', async t =>
   const f = fixture(t);
   f.seed();
   const dataDir = join(f.root, 'custom data');
-  await f.run(['setup', '--data-dir', dataDir, '--max-sessions', '37', '--omp-executable', 'custom-omp', '--omp-arg=--model', '--omp-arg', 'selected model', '--startup-timeout-ms', '23456', '--relay-url', 'wss://relay.example']);
+  await f.run(['setup', '--data-dir', dataDir, '--max-sessions', '37', '--omp-executable', 'custom-omp', '--omp-arg=--model', '--omp-arg', 'selected model', '--startup-timeout-ms', '23456']);
   const answers = ['no'];
   await f.run(['setup'], {
     interactive: true,
@@ -118,7 +118,6 @@ test('interactive setup preserves explicit storage and OMP settings', async t =>
     args: ['--model', 'selected model'],
     maxSessions: 37,
     startupTimeoutMs: 23456,
-    relayUrl: 'wss://relay.example',
   });
 });
 

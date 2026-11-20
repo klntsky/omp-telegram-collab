@@ -4,3 +4,5 @@ import { fileURLToPath } from 'node:url';
 // in dist. Resolving from a nested operation module would break one of those layouts.
 export const hostSupervisorPath = fileURLToPath(new URL('./host-supervisor.mjs', import.meta.url));
 export const hostLifecyclePath = fileURLToPath(new URL('./host-lifecycle.mjs', import.meta.url));
+export const relayDaemonPath = fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './relay-daemon.ts' : './relay-daemon.js', import.meta.url));
+export const relayDaemonExecArgs = relayDaemonPath.endsWith('.ts') ? ['--import', import.meta.resolve('tsx')] : [];

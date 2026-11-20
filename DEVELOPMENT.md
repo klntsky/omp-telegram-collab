@@ -47,7 +47,7 @@ Telegram slash-command syntax lives in `src/telegram-commands.grammar`. After ch
 
 `smoke` runs CLI and OMP runtime checks in separate subprocesses. Run a stage with `pnpm smoke:cli` or `pnpm smoke:runtime`, or select both with `pnpm smoke cli runtime`. The CLI stage requires a current build. The runtime stage requires an installed OMP and configured model credentials for its model-executing checks.
 
-The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through a local forwarding relay. It does not verify the production relay or Telegram connectivity.
+The runtime stage uses an actual OMP subprocess and encrypted Collab traffic through the service-managed local relay. Attached-host checks use the same forwarding core in an isolated process environment. This stage does not verify Telegram connectivity.
 
 Run native end-to-end checks without Telegram credentials:
 
@@ -55,7 +55,9 @@ Run native end-to-end checks without Telegram credentials:
 timeout 540s pnpm test:native
 ```
 
-`test:native` uses the installed stock OMP executable, real tools and history files, and a local forwarding relay. Only LLM responses are scripted. Set `OMP_EXECUTABLE` to select the executable. Native test environments keep their process configuration and generated files separate from normal sessions.
+`test:native` uses the installed stock OMP executable, real tools and history files, and the service-managed local relay. Only LLM responses are scripted. Set `OMP_EXECUTABLE` to select the executable. Native test environments keep their process configuration and generated files separate from normal sessions.
+
+Local relay failures retain original diagnostics in the private `local-relay/relay.log` under the configured data directory. Its descriptor pins the loopback endpoint and authenticates service leases; do not edit or delete it to resolve a bind failure. Inspect the reported listener or ownership failure first. The service supervises relay recovery while running, and surviving hosts retain the detached daemon across service restarts.
 
 Run one file or select a test by name (a regular expression), with flags before paths:
 

@@ -4,15 +4,21 @@ import path from 'node:path';
 import { hostSupervisorPath, hostLifecyclePath } from '../host-assets.js';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
+import { SessionRetiringError } from './types.js';
 import { privateFile } from './files.js';
 import { procIdentity, belongsTo } from './process.js';
 import { record, errno, delay } from './values.js';
 import { childEnvironment } from './environment.js';
+import { managedLifecycleIdentity, usesManagedRelay } from './lifecycle-identity.js';
+import { parseCollabLink } from '../vendor/link.js';
+import { CollabTransportError } from '../collab.js';
+import { isDiscoveryDeadlineError } from './discovery.js';
 interface StartupDependencies {
   readonly managed: Map<string, ManagedHost | null>;
   readonly config: AppConfig;
   prepare(session: TopicSession): Promise<{ dir: string; pin: DurableBinding }>;
   acquire(): Promise<void>;
+  relayUrl(): Promise<string>;
   readonly closed: boolean;
   readonly stopping: Map<string, Promise<void>>;
   assertActive(): void;
@@ -46,21 +52,52 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
     try {
       await deps.acquire();
       const { dir, pin } = prepared;
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      const relayUrl = await deps.relayUrl();
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       deps.assertActive();
       let hosts = await deps.list(deadline);
-      const matches = hosts.filter(host => host.sessionId === pin.sessionId);
+      let matches = hosts.filter(host => host.sessionId === pin.sessionId);
       if (matches.length > 1) throw new Error('More than one host is serving the managed OMP session');
+      const lifecycle = await deps.lifecycle(id);
+      let needsLocalRelay = !await usesManagedRelay(dir, relayUrl);
+      let existingBinding: HostBinding | undefined;
+      if (matches[0] && !needsLocalRelay) {
+        existingBinding = await deps.resolve(matches[0], deadline);
+        const parsed = parseCollabLink(existingBinding.url);
+        needsLocalRelay ||= 'error' in parsed || new URL(parsed.wsUrl).origin !== new URL(relayUrl).origin;
+      }
+      if (needsLocalRelay && lifecycle) {
+        const previous = owned ?? { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
+        const identity = await managedLifecycleIdentity(deps.config.dataDir, id, previous, lifecycle);
+        if (identity) {
+          await beforeMutation?.();
+          deps.assertActive();
+          if (deps.closed || deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
+          previous.identity = { pid: lifecycle.pid, start: identity.start };
+          deps.managed.set(id, previous);
+          // The host makes the idle decision at its private lifecycle boundary;
+          // moving relays must never abort a running model turn or replay a prompt.
+          await deps.shutdown(id, previous, 'idle');
+          if (!previous.exited) throw new SessionRetiringError('Managed session is waiting to become idle before moving to the local relay');
+          owned = undefined;
+          existingBinding = undefined;
+          hosts = await deps.list(deadline);
+          matches = hosts.filter(host => host.sessionId === pin.sessionId);
+        }
+      }
+      if (needsLocalRelay && matches.length) throw new Error('Managed host cannot move to the local relay without verified lifecycle ownership');
       if (matches.length === 1) {
         const host = matches[0]!;
         if (await realpath(host.cwd) !== pin.cwd) throw new Error('Managed host working directory changed');
         while (!await presetReady(dir, pin, host.pid)) {
           if (Date.now() >= deadline) throw new Error('Managed OMP startup preset timed out');
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (deps.closed) throw new Error('OMP runtime is stopping');
+          if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
           deps.assertActive();
           await delay(Math.min(200, Math.max(1, deadline - Date.now())));
         }
-        const binding = await deps.resolve(host,deadline);
+        const binding = existingBinding ?? await deps.resolve(host, deadline);
         const lifecycle = await deps.lifecycle(id);
         owned ??= { sessionId: pin.sessionId, exited: false, retiring: false };
         owned.binding = binding;
@@ -83,34 +120,54 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (owned.retirement?.error !== undefined) throw owned.retirement.error;
         owned.retiring = owned.retirement !== undefined || (currentLifecycle && lifecycle.retiring === true);
         deps.managed.set(id,owned);
-        if (owned.retiring) throw new Error('Session is retiring; rejoin after it settles');
+        if (owned.retiring) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
         deps.assertActive();
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed) throw new Error('OMP runtime is stopping');
+        if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
         return binding;
       }
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       if (owned?.retirement) {
         const identity = await procIdentity(owned.retirement.pid);
         if (identity && identity.start === owned.retirement.start && identity.state !== 'Z' && identity.state !== 'X') {
           if (owned.retirement.error !== undefined) throw owned.retirement.error;
-          throw new Error('Session is retiring; rejoin after it settles');
+          throw new SessionRetiringError('Session is retiring; rejoin after it settles');
         }
         delete owned.retirement;
         owned.retiring = false;
       }
+      // Registry listing omits hosts whose IPC probe did not answer. A missing
+      // listing must not authorize a second process, including after bot restart.
+      // https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/collab/registry.ts (host query timeouts)
+      if (lifecycle) {
+        const previous: ManagedHost = owned && !owned.exited ? owned : { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
+        const identity = await managedLifecycleIdentity(deps.config.dataDir, id, previous, lifecycle);
+        if (identity) {
+          previous.identity = { pid: lifecycle.pid, start: identity.start };
+          owned = previous;
+          deps.managed.set(id, previous);
+        }
+      }
       if (owned?.identity) {
         const identity = await procIdentity(owned.identity.pid);
         if (identity && identity.start === owned.identity.start && identity.state !== 'Z' && identity.state !== 'X') {
-          throw new Error('OMP host is not registered; cannot safely start another process');
+          throw new CollabTransportError('OMP host is not registered; cannot safely start another process');
         }
         delete owned.identity;
+      }
+      if (owned?.process?.pid && !owned.exited) {
+        const supervisor = await procIdentity(owned.process.pid);
+        if (supervisor && supervisor.state !== 'Z' && supervisor.state !== 'X') {
+          throw new CollabTransportError('OMP host is not registered; cannot safely start another process');
+        }
       }
       await beforeMutation?.();
       const launch = await deps.presetLaunch(session);
       const overlay = {
-        collab: { autoStart: 'control', ...(deps.config.omp.relayUrl ? { relayUrl: deps.config.omp.relayUrl } : {}) },
-        startup: { checkUpdate: false, setupWizard: false },
         ...launch.overlay,
+        collab: { autoStart: 'control', relayUrl },
+        startup: { checkUpdate: false, setupWizard: false },
       };
       await privateFile(path.join(dir, 'runtime.yml'), JSON.stringify(overlay));
       const startupFile = path.join(dir, 'startup-preset.json');
@@ -121,7 +178,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
       }
       await beforeMutation?.();
       deps.assertActive();
-      if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
       const child = spawn(process.execPath, [
         hostSupervisorPath,
         deps.config.omp.executable,
@@ -149,7 +207,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         if (deps.managed.get(id) === record) deps.managed.delete(id);
       });
       while (Date.now() < deadline) {
-        if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+        if (deps.closed) throw new Error('OMP runtime is stopping');
+        if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
         deps.assertActive();
         if (record.failure) throw new Error(record.failure);
         if (launch.preset !== undefined) await presetReady(dir, pin);
@@ -171,7 +230,8 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
           const identity = await procIdentity(host.pid);
           if (identity) record.identity = { pid: host.pid, start: identity.start };
           deps.assertActive();
-          if (deps.closed || deps.stopping.has(id)) throw new Error('OMP runtime is stopping');
+          if (deps.closed) throw new Error('OMP runtime is stopping');
+          if (deps.stopping.has(id)) throw new SessionRetiringError('OMP runtime is stopping');
           return binding;
         }
         await delay(Math.min(200,Math.max(1,deadline-Date.now())));
@@ -184,10 +244,7 @@ export function createStartup(deps: StartupDependencies): RuntimeStartup {
         error instanceof Error &&
         error !== discoveryFailure &&
         Date.now() >= deadline &&
-        (error.message === 'OMP discovery timed out' ||
-          ('killed' in error && error.killed === true &&
-            'code' in error && error.code === null &&
-            'signal' in error && error.signal === 'SIGKILL'))
+        isDiscoveryDeadlineError(error)
       ) {
         Object.defineProperty(discoveryFailure, 'cause', { value: error, configurable: true });
         error = discoveryFailure;

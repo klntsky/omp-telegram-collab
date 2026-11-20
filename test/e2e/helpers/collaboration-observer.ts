@@ -3,6 +3,8 @@ import { Bot } from 'grammy';
 import type { Update } from 'grammy/types';
 import type { GuestFrame, HostFrame } from '@oh-my-pi/pi-wire';
 import type { Omp } from '../../../src/omp.js';
+import type { CollabConnection } from '../../../shared/contracts.js';
+import { bounded } from './async.js';
 
 export function observeApplicationLogs(log: (event: string, data: unknown) => void): () => void {
   const logs = channel('omp-telegram.log');
@@ -11,9 +13,10 @@ export function observeApplicationLogs(log: (event: string, data: unknown) => vo
   return () => { logs.unsubscribe(observe); };
 }
 
-// Observation owns no application lifecycle; the fixture supplies its wake-up barrier.
+// The fixture owns application lifetime; this helper observes and interrupts real transports.
 export function createCollaborationObserver(options: {
   token: string;
+  signal: AbortSignal;
   chatId: number;
   log(event: string, data: unknown): void;
   notify(): void;
@@ -24,6 +27,25 @@ export function createCollaborationObserver(options: {
   guestFrames: GuestFrame[];
 }) {
   const { log, notify, apiCalls, updates, handledMessages, hostFrames, guestFrames } = options;
+  const connections = new Set<CollabConnection>();
+  let resumeConnections: PromiseWithResolvers<void> | undefined;
+  let interruptPrompt: PromiseWithResolvers<() => void> | undefined;
+  function interruptNextPromptReceipt(): Promise<() => void> {
+    if (interruptPrompt) throw new Error('A prompt receipt interruption is already armed');
+    interruptPrompt = Promise.withResolvers<() => void>();
+    return interruptPrompt.promise;
+  }
+  function disconnectGuests(): () => void {
+    // Close actual Collab transports, so the real close handlers drive recovery.
+    // Admission waits rather than fabricating a failed connection or host frame.
+    const barrier = resumeConnections ??= Promise.withResolvers<void>();
+    for (const connection of connections) connection.close();
+    connections.clear();
+    return () => {
+      if (resumeConnections === barrier) resumeConnections = undefined;
+      barrier.resolve();
+    };
+  }
   function createBot() {
     const value = new Bot(options.token, { client: { environment: 'test' } });
     value.api.config.use(async (previous, method, payload, signal) => {
@@ -54,18 +76,34 @@ export function createCollaborationObserver(options: {
     const connect = value.connectCollab.bind(value);
     value.connectCollab = async (binding, name, handlers, signal) => {
       try {
+        while (resumeConnections) {
+          await bounded(resumeConnections.promise, signal
+            ? AbortSignal.any([signal, options.signal]) : options.signal);
+        }
+        let owned: CollabConnection | undefined;
         const connection = await connect(binding, name, {
           onFrame(frame) {
             hostFrames.push(frame);
             log('collab.host.frame', frame);
+            if (interruptPrompt && frame.t === 'entry' &&
+                frame.entry.type === 'custom_message' && frame.entry.customType === 'collab-prompt') {
+              const interrupted = interruptPrompt;
+              interruptPrompt = undefined;
+              interrupted.resolve(disconnectGuests());
+              notify();
+              return;
+            }
             handlers.onFrame(frame);
             notify();
           },
           onClose(reason) {
+            if (owned) connections.delete(owned);
             log('collab.close', { reason });
             handlers.onClose(reason);
           },
         }, signal);
+        owned = connection;
+        connections.add(connection);
         return {
           send(frame) {
             guestFrames.push(frame);
@@ -76,7 +114,7 @@ export function createCollaborationObserver(options: {
             }
           },
           refreshSnapshot(onFrame) { return connection.refreshSnapshot(onFrame); },
-          close() { connection.close(); },
+          close() { connections.delete(connection); connection.close(); },
         };
       } catch (error) {
         log('collab.connect.error', { error });
@@ -84,5 +122,5 @@ export function createCollaborationObserver(options: {
       }
     };
   }
-  return { createBot, instrumentRuntime };
+  return { createBot, instrumentRuntime, disconnectGuests, interruptNextPromptReceipt };
 }

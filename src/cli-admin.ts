@@ -62,20 +62,19 @@ export function registerAdminCommands(program: Command, configPath: () => string
     ['--omp-arg <arg>', 'Literal OMP argument (repeatable, including values starting with --)'],
     ['--max-sessions <n>', 'Maximum simultaneous OMP sessions'],
     ['--startup-timeout-ms <n>', 'OMP startup timeout in milliseconds'],
-    ['--relay-url <url>', 'OMP relay URL, or - to clear'],
     ['--clear-omp-args', 'Clear configured OMP arguments'],
   ] as const) flag(setup, flags, description, flags === '--omp-arg <arg>');
   setup.action((_values, command: Command) => admin().setup(options(command)));
-  const create = program.command('create <path>').description('Register a project directory with a stable numeric ID');
+  const create = program.command('create <path>').description('Add a project');
   flag(create, '--id <id>', 'Explicit unused instance ID (default: maximum configured or persisted ID plus one)');
   create.action((path: string, _values, command: Command) => admin().create(path, one(options(command), 'id')));
   program.command('list').description('List registered project directories').action(() => { const service = admin(); service.show(service.load()); });
   program.command('show <id>').description('Show an instance and its chat assignments').action((id: string) => { const service = admin(); service.show(service.load(), id); });
-  program.command('remove <id>').description('Remove an unassigned instance, retaining histories').action((id: string) => admin().remove(id));
+  program.command('remove <id>').description('Remove a project').action((id: string) => admin().remove(id));
   const chat = program.command('chat').description('Manage instance chat assignments');
   chat.command('list <id>').description('List an instance’s chat assignments').action((id: string) => { const service = admin(); service.show(service.load(), id); });
   const addChat = chat.command('add <id>').description('Connect or update a forum chat assignment');
-  const removeChat = chat.command('remove <id>').description('Remove a chat assignment, retaining histories');
+  const removeChat = chat.command('remove <id>').description('Disconnect a group');
   for (const command of [addChat, removeChat]) {
     flag(command, '--chat <id>', 'Telegram forum chat ID');
     flag(command, '--bot <id>', 'Configured bot ID');
@@ -107,7 +106,7 @@ export function registerAdminCommands(program: Command, configPath: () => string
   flag(addBot, '--mini-app-short-name <name>', 'BotFather Mini App short name');
   addBot.action((_values, command: Command) => admin().botAdd(options(command)));
   bot.command('list').description('List configured bots').action(() => admin().listBots());
-  bot.command('remove <id>').description('Remove a bot and its assignments, retaining histories').action((id: string) => admin().removeBot(id));
+  bot.command('remove <id>').description('Remove a bot').action((id: string) => admin().removeBot(id));
   return () => input?.close();
 }
 

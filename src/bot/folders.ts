@@ -7,6 +7,7 @@ import type { AppConfig } from '../../shared/contracts.js';
 import { findInstance, readConfig, refreshTermination } from '../config.js';
 import { sameTopicDestination } from '../../shared/topic-destination.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
+import { codeHtml } from '../telegram-html.js';
 
 export interface FolderSelectionDependencies {
   botId(): number;
@@ -53,11 +54,11 @@ export class FolderSelection {
       try {
         cwd = this.resolveFolder(path,false);
         initial = {kind:'create',path};
-        failure = `Create folder ${path}?`;
+        failure = `Create folder ${codeHtml(path)}?`;
       } catch (error) {
         logEvent('error', 'runtime-folder-selection-failed', {botId: this.dependencies.botId(), chatId: source.chat?.id, message: 'Runtime folder selection failed.', error});
         initial = {kind:'failed',path,create:false};
-        failure = `${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`;
+        failure = `${codeHtml(error instanceof Error ? error.message : String(error))}\nThe task is still pending.`;
       }
       if (cwd !== undefined) {
         if (active?.() === false || epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
@@ -71,7 +72,7 @@ export class FolderSelection {
       [[{text:initial.kind === 'create' ? 'Create folder' : 'Retry',callback_data:`folder:${token}:${initial.kind === 'create' ? 'create' : 'retry'}`},
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]];
     const message = await replyTo(source, contextDestination(source), failure ||
-      (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.'), {reply_markup:{inline_keyboard:rows}});
+      (authority ? 'Choose the runtime folder for this session.' : 'An administrator can approve this task by choosing its runtime folder.'), {parse_mode:'HTML', reply_markup:{inline_keyboard:rows}});
     if (this.dependencies.stopped() || refreshTermination(this.dependencies.config) || epoch !== this.dependencies.admissionEpoch() ||
         JSON.stringify(this.folderSettings(source.chat!.id)) !== JSON.stringify(settings))
       throw new Error('Folder settings or service state changed. Send the command again.');
@@ -150,7 +151,7 @@ export class FolderSelection {
     }
     token = randomBytes(16).toString('base64url');
     const restore = async (text: string, rows: {text:string;callback_data:string}[][]) => {
-      await ctx.editMessageText(text,{reply_markup:{inline_keyboard:rows}});
+      await ctx.editMessageText(text,{parse_mode:'HTML', reply_markup:{inline_keyboard:rows}});
       if (request.expires <= Date.now()) {
         await ctx.editMessageText('This folder request expired. Send the original task again.',{reply_markup:{inline_keyboard:[]}});
         return;
@@ -173,7 +174,7 @@ export class FolderSelection {
       const resolved = this.resolveFolder(path,create);
       if (resolved === undefined) {
         request.state = {kind:'create',path};
-        await restore(`Create folder ${path}?`,[[
+        await restore(`Create folder ${codeHtml(path)}?`,[[
           {text:'Create folder',callback_data:`folder:${token}:create`},
           ...(request.options.length > 1 ? [{text:'Choose another folder',callback_data:`folder:${token}:other`}] : []),
           {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
@@ -183,13 +184,13 @@ export class FolderSelection {
     } catch (error) {
       logEvent('error', 'runtime-folder-selection-failed', {botId: this.dependencies.botId(), chatId: ctx.chat.id, message: 'Runtime folder selection failed.', error});
       request.state = {kind:'failed',path,create};
-      await restore(`${error instanceof Error ? error.message : String(error)}\nThe task is still pending.`,[[
+      await restore(`${codeHtml(error instanceof Error ? error.message : String(error))}\nThe task is still pending.`,[[
         {text:'Retry',callback_data:`folder:${token}:retry`},
         ...(request.options.length > 1 ? [{text:'Choose another folder',callback_data:`folder:${token}:other`}] : []),
         {text:'Cancel',callback_data:`folder:${token}:cancel`}]]);
       return;
     }
-    await ctx.editMessageText(`Runtime folder: ${cwd}`,{reply_markup:{inline_keyboard:[]}});
+    await ctx.editMessageText(`Runtime folder: ${codeHtml(cwd)}`,{parse_mode:'HTML', reply_markup:{inline_keyboard:[]}});
     if (request.epoch !== this.dependencies.admissionEpoch() || this.dependencies.stopped() || refreshTermination(this.dependencies.config) ||
         JSON.stringify(this.folderSettings(ctx.chat.id)) !== request.fingerprint)
       throw new Error('This folder request is stale. Send the command again.');

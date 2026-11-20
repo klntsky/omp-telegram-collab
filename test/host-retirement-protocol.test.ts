@@ -48,17 +48,20 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
     const handlers = new Map();
     const intervals = [];
     let shutdowns = 0;
+    let idle = ${!options.busy};
     await lifecycle({on:(name, handler)=>handlers.set(name, handler)});
-    await handlers.get('session_start')({}, {
+    const context = {
       agent:{kind:'main'}, cwd:directory,
       sessionManager:{getSessionId:()=> 'protocol-session'},
-      isIdle:()=> ${!options.busy}, hasPendingMessages:()=> false,
+      isIdle:()=> idle, hasPendingMessages:()=> false, getAsyncJobSnapshot:()=> null,
       setInterval:(callback, interval)=> {const timer=setInterval(callback,interval);intervals.push(timer);return timer;},
       shutdown:()=> {fs.writeFileSync(join(directory,'shutdowns'),String(++shutdowns));},
-    });
+    };
+    await handlers.get('session_start')({}, context);
     while (!fs.existsSync(join(directory,'lifecycle.json'))) await delay(5);
     process.send({ready:JSON.parse(fs.readFileSync(join(directory,'lifecycle.json'),'utf8'))});
     process.on('message', message => {
+      if (message === 'settled') { idle = true; handlers.get('agent_end')?.({}, context); }
       if (message === 'pause') pause();
       if (message === 'stop') {
         for (const timer of intervals) clearInterval(timer);
@@ -125,6 +128,11 @@ async function fixture(options: { busy?: boolean; holdBeforeRename?: boolean } =
       return { value, grant };
     },
     async pause() { child.send('pause'); await waitForFile(preparedPath); },
+    async settle() {
+      const sent = Promise.withResolvers<void>();
+      child.send('settled', error => error ? sent.reject(error) : sent.resolve());
+      await sent.promise;
+    },
     async assertNotRetiring() {
       assert.notEqual(JSON.parse(await readFile(lifecyclePath, 'utf8')).retiring, true);
       await assert.rejects(readFile(join(directory, 'shutdowns')), { code: 'ENOENT' });
@@ -150,6 +158,8 @@ test('actual lifecycle host rejects busy idle retirement without consuming its g
   await app.assertNotRetiring();
   const forced = await app.prepare('none');
   assert.equal((await app.request(forced.value))?.outcome, 'requested');
+  await assert.rejects(readFile(join(app.directory, 'shutdowns')), { code: 'ENOENT' });
+  await app.settle();
   assert.ok(Number(await app.waitForFile(join(app.directory, 'shutdowns'))) >= 1);
 });
 

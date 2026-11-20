@@ -26,7 +26,7 @@ export async function cleanupSessions(
           failures.push(error);
         };
         try {
-          store.cancelInitialTask(session.id);
+          store.promptQueue.cancel(session.id);
         } catch (error) {
           record('Pending task cancellation', error);
         }

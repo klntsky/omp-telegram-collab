@@ -24,7 +24,7 @@ export interface CapacityDependencies {
   localCliCommand(): string;
   folderSettings(chatId: number): {instanceId: number; defaultDir: string; options: string[]};
   listen(session: TopicSession): Promise<void>;
-  sendInitial(session: TopicSession): Promise<void>;
+  drainPrompts(session: TopicSession): Promise<void>;
   routePrompt(ctx: Context, content: PromptContent, session?: TopicSession, extensions?: readonly PromptExtension[], worktree?: boolean, skills?: {names:string[];topicSkills:string[]}, cwd?: string): Promise<void>;
 }
 
@@ -54,7 +54,7 @@ export class CapacityAdmission {
     }
     const token = randomBytes(16).toString('base64url');
     const message = await sendTo(this.deps.bot.api, topicDestination(session.chatId, session.threadId),
-      `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by a group administrator is required. Approval saves the configuration, reconnects this topic and submits any pending initial task. Other instructions must be resent. This request expires in 5 minutes.`,
+      `OMP session limit reached (${limit}). Increase the shared configured limit from ${limit} to ${limit * 2}? Confirmation by a group administrator is required. Approval saves the configuration, reconnects this topic and resumes queued prompts. This request expires in 5 minutes.`,
       { reply_markup: { inline_keyboard: [[
         { text: `Confirm ${limit} → ${limit * 2}`, callback_data: `capacity:approve:${token}` },
         { text: 'Cancel', callback_data: `capacity:cancel:${token}` },
@@ -140,7 +140,7 @@ export class CapacityAdmission {
     this.deps.options.runtime.increaseSessionLimit(request.limit);
     await replyTo(ctx, contextDestination(ctx), `Configured session limit increased from ${request.limit} to ${request.limit * 2}. Reconnecting this topic.`)
       .catch(error => logEvent('warn', 'could-not-deliver-session-capacity-increase-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver session capacity increase notice (${session.id}).`, error}));
-    if (this.deps.options.store.hasPendingInitialTask(session.id)) await this.deps.sendInitial(session);
+    if (this.deps.options.store.promptQueue.has(session.id)) await this.deps.drainPrompts(session);
     else await this.deps.listen(session);
   }
 }

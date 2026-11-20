@@ -13,12 +13,6 @@ const PREFERENCE_ICON: Record<ThemePreference, LucideIcon> = {
 	dark: Moon,
 };
 
-const PREFERENCE_LABEL: Record<ThemePreference, string> = {
-	system: "System theme",
-	light: "Light theme",
-	dark: "Dark theme",
-};
-
 export function ThemeToggle() {
 	const { preference, setPreference } = useThemePreference();
 	const Icon = PREFERENCE_ICON[preference];
@@ -28,8 +22,8 @@ export function ThemeToggle() {
 			type="button"
 			className="sh-theme-toggle"
 			onClick={() => setPreference(NEXT_PREFERENCE[preference])}
-			aria-label={`${PREFERENCE_LABEL[preference]} (click to switch)`}
-			title={`${PREFERENCE_LABEL[preference]} — click to switch`}
+			aria-label="Switch theme"
+			title="Switch theme"
 		>
 			<Icon size={16} />
 		</button>

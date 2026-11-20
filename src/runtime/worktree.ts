@@ -102,13 +102,27 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     return target;
   }
 
+  async function canSkipConfirmation(cwd: string): Promise<boolean> {
+    if (await git(cwd, ['status', '--porcelain', '--untracked-files=all'])) return false;
+    const branch = await git(cwd, ['branch', '--show-current']);
+    if (!branch) return false;
+    const remotes = (await git(cwd, ['remote']))!.split('\n').filter(Boolean);
+    // Query the server because remote-tracking refs can outlive a deleted remote branch.
+    for (const remote of remotes) {
+      const heads = await git(cwd, ['ls-remote', '--heads', '--refs', remote, `refs/heads/${branch}`]);
+      if (heads!.split('\n').some(line => line.split('\t')[1] === `refs/heads/${branch}`)) return true;
+    }
+    return false;
+  }
+
   async function inspectWorktree(session: TopicSession): Promise<WorktreeTarget | undefined> {
     deps.assertActive();
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (session.runtime.kind !== 'managed') return undefined;
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
     const pin = await deps.readManagedBinding(session);
-    return pin ? inspectBinding(pin) : undefined;
+    const target = pin && await inspectBinding(pin);
+    return target ? { ...target, skipConfirmation: await canSkipConfirmation(target.path) } : undefined;
   }
 
   async function deleteWorktree(session: TopicSession, target: WorktreeTarget, beforeMutation: () => Promise<void>): Promise<void> {
@@ -136,6 +150,9 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
         if (host.sessionId === target.sessionId || contains(target.path, cwd) || contains(cwd, target.path)) {
           throw new Error('An OMP host still uses this worktree');
         }
+      }
+      if (target.skipConfirmation && !await canSkipConfirmation(target.path)) {
+        throw new Error('Worktree is no longer clean with a branch on a remote. Request deletion again to confirm.');
       }
       await beforeMutation();
       assertBoundary(operation);
@@ -173,12 +190,16 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
 
   async function switchWorktree(session: TopicSession, branch?: string, beforeMutation?: () => Promise<void>): Promise<string> {
     deps.assertActive();
+    if (session.status !== 'open') throw new Error('Session closed');
     if (session.runtime.kind !== 'managed') throw new Error('Attached OMP sessions cannot switch worktrees');
     if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     const activity = deps.hostActivity(session.id);
     if (activity.busy || activity.leases || deps.pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
-    await deps.ensure(session, beforeMutation);
+    const existing = deps.managed.get(session.id);
+    // Rejoining a retiring host is fenced; this operation instead owns waiting
+    // for its confirmed exit before opening the native worktree RPC.
+    if (!existing?.retiring || existing.exited) await deps.ensure(session, beforeMutation);
     const host = deps.managed.get(session.id);
     if (!host) throw new Error('Managed OMP host is not available');
     const registered = (await deps.list(Date.now() + deps.config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
@@ -189,7 +210,10 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     const operation = (async () => {
       await beforeMutation?.();
       await deps.shutdown(session.id, host, 'worktree');
-      if (!host.exited) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      if (!host.exited) {
+        if (host.retiring) throw new Error('OMP host accepted retirement but has not exited; worktree switching cannot continue until shutdown completes');
+        throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      }
       await beforeMutation?.();
       const { dir, pin } = await deps.prepare(session);
       await beforeMutation?.();

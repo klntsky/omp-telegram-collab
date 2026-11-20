@@ -10,6 +10,7 @@ export interface WorktreeTarget {
   sessionId: string;
   dev: number;
   ino: number;
+  skipConfirmation?: boolean;
 }
 
 export interface Omp {
@@ -43,6 +44,6 @@ export interface Omp {
   increaseSessionLimit(expectedLimit: number): boolean;
   observeFrame(sessionId: string, frame: HostFrame): void;
   markPrompt(sessionId: string): void;
-  retain(sessionId: string): () => void;
+  retain(sessionId: string, access?: 'read' | 'write'): () => void;
   close(): Promise<void>;
 }

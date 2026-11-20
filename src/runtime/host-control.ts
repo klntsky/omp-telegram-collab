@@ -5,6 +5,11 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import { SessionTitleUnsupportedError, type RegistryHost, type DurableBinding, type ManagedHost, type HostLifecycle } from './types.js';
+import { SessionRetiringError } from './types.js';
+import { procIdentity } from './process.js';
+import { delay } from './values.js';
+import { managedLifecycleIdentity } from './lifecycle-identity.js';
+import { isDiscoveryDeadlineError } from './discovery.js';
 interface HostControlDependencies {
   readonly config: AppConfig;
   list(deadline: number): Promise<RegistryHost[]>;
@@ -27,12 +32,63 @@ export interface RuntimeHostControl {
 }
 
 export function createHostControl(deps: HostControlDependencies): RuntimeHostControl {
+  async function visibleHosts(
+    deadline: number,
+    matches: (host: RegistryHost) => boolean,
+    pinned: { pid: number; start: string } | undefined,
+    diagnostic: string,
+  ): Promise<RegistryHost[]> {
+    const missing = new Error(diagnostic);
+    let omitted = false;
+    for (;;) {
+      deps.assertActive();
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      let hosts: RegistryHost[];
+      try {
+        hosts = (await deps.list(deadline)).filter(matches);
+      } catch (error) {
+        if (omitted && Date.now() >= deadline && isDiscoveryDeadlineError(error)) {
+          Object.defineProperty(missing, 'cause', { value: error, configurable: true });
+          throw missing;
+        }
+        throw error;
+      }
+      if (hosts.length) {
+        if (pinned) {
+          const current = await procIdentity(pinned.pid);
+          if (!current || current.start !== pinned.start || current.state === 'Z' || current.state === 'X') throw missing;
+        }
+        return hosts;
+      }
+      // A missing IPC status reply is not proof of exit; wait only for this
+      // independently pinned lifetime, then require a fresh registry snapshot.
+      omitted = true;
+      const current = pinned && await procIdentity(pinned.pid);
+      if (!current || current.start !== pinned!.start || current.state === 'Z' || current.state === 'X' ||
+          Date.now() >= deadline) throw missing;
+      await delay(Math.min(200, Math.max(1, deadline - Date.now())));
+    }
+  }
 
   async function runningTitleBinding(session: TopicSession): Promise<HostBinding> {
     const pin = JSON.parse(await readFile(path.join(deps.config.dataDir, 'sessions', session.id, 'binding.json'), 'utf8')) as DurableBinding;
     const deadline = Date.now() + deps.config.omp.startupTimeoutMs;
-    const hosts = (await deps.list(deadline)).filter(host => host.sessionId === pin.sessionId && host.cwd === session.cwd);
-    if (hosts.length !== 1) throw new Error('OMP host stopped or changed during session title control');
+    const owned = deps.managed.get(session.id);
+    let identity = owned?.identity;
+    if (!identity) {
+      const lifecycle = await deps.lifecycle(session.id);
+      if (lifecycle) {
+        const current = await managedLifecycleIdentity(deps.config.dataDir, session.id,
+          owned ?? { sessionId: pin.sessionId, cwd: session.cwd, exited: false, retiring: false }, lifecycle);
+        if (current) identity = { pid: lifecycle.pid, start: current.start };
+      }
+    }
+    const hosts = await visibleHosts(deadline, host => host.sessionId === pin.sessionId, identity,
+      'OMP host stopped or changed during session title control');
+    if (hosts.length !== 1 || hosts[0]!.cwd !== session.cwd ||
+        (identity && hosts[0]!.pid !== identity.pid) ||
+        (owned?.binding && (hosts[0]!.instanceId !== owned.binding.instanceId ||
+          hosts[0]!.generation !== owned.binding.generation))) throw new Error('OMP host stopped or changed during session title control');
     return deps.resolve(hosts[0]!, deadline);
   }
 
@@ -69,18 +125,26 @@ export function createHostControl(deps: HostControlDependencies): RuntimeHostCon
       if (!lifecycle || lifecycle.modelPresets !== 2) {
         throw new Error('OMP host does not support model preset control. Retire this managed host and rejoin to load the updated lifecycle extension.');
       }
+      const processIdentity = await procIdentity(lifecycle.pid);
+      const pinned = processIdentity ? { pid: lifecycle.pid, start: processIdentity.start } : undefined;
       const validate = async () => {
         deps.assertActive();
         if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-        const current = (await deps.list(deadline)).find(host => host.instanceId === binding.instanceId);
+        const hosts = await visibleHosts(deadline,
+          host => host.instanceId === binding.instanceId || host.sessionId === binding.sessionId, pinned,
+          'OMP host identity changed during model preset control');
+        const current = hosts.length === 1 ? hosts[0] : undefined;
+        const process = pinned && await procIdentity(pinned.pid);
         const descriptor = await deps.lifecycle(session.id);
-        if (!current || current.sessionId !== binding.sessionId || current.generation !== binding.generation ||
+        if (!current || current.instanceId !== binding.instanceId ||
+            (pinned && (!process || process.start !== pinned.start || process.state === 'Z' || process.state === 'X')) ||
+            current.sessionId !== binding.sessionId || current.generation !== binding.generation ||
             current.pid !== lifecycle.pid || current.cwd !== session.cwd ||
             descriptor?.pid !== lifecycle.pid || descriptor.sessionId !== binding.sessionId ||
             descriptor.socketPath !== lifecycle.socketPath || descriptor.modelPresets !== 2) {
           throw new Error('OMP host identity changed during model preset control');
         }
-        if (descriptor.retiring || deps.managed.get(session.id)?.retiring) throw new Error('Session is retiring; rejoin after it settles');
+        if (descriptor.retiring || deps.managed.get(session.id)?.retiring) throw new SessionRetiringError('Session is retiring; rejoin after it settles');
       };
       if (lifecycle.sessionId !== binding.sessionId ||
           path.dirname(lifecycle.socketPath) !== tmpdir() ||

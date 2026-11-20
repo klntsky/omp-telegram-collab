@@ -103,7 +103,7 @@ export class TopicMetadataOwners {
     )
       return 'unknown';
     const status = this.deps.options.store.getSession(session.id)?.status;
-    if (status === 'open' && this.deps.options.store.hasPendingInitialTask(session.id)) return 'running';
+    if (status === 'open' && this.deps.options.store.promptQueue.has(session.id)) return 'running';
     const activity = owner.activity;
     const closed = this.closedSessions.get(session.id);
     if (

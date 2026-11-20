@@ -47,7 +47,7 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
     assert.equal(session.cwd, app.omp.workspace);
     assert.equal(session.runtime.kind, 'managed');
     assert.equal(session.status, 'open');
-    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.equal(app.store.promptQueue.has(session.id), false);
     assert.equal(reply.replyToMessage?.threadId, session.threadId);
     assert.equal(app.omp.provider.requests.get(tasks.initial.name)![1]!.model, 'e2e-model');
     const history: SessionEntry[] = (await readSessionHistory(app.omp.dataDir, session.id)).trim().split('\n').map(line => JSON.parse(line));

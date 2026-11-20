@@ -8,6 +8,9 @@ import { promisify } from 'node:util';
 import type { AppConfig, TopicSession } from '../shared/contracts.js';
 import { writeConfig } from '../src/config.js';
 import { OmpRuntime } from '../src/runtime.js';
+import { createHostControl } from '../src/runtime/host-control.js';
+import { procIdentity } from '../src/runtime/process.js';
+import { DiscoveryTimeoutError, isDiscoveryDeadlineError } from '../src/runtime/discovery.js';
 
 const execute = promisify(execFile);
 
@@ -94,4 +97,69 @@ test('unexpected Git failures retain their subprocess diagnostics', async t => {
     assert.equal(error.code, original.code);
     return true;
   });
+});
+
+for (const outcome of ['recovered', 'deadline', 'permission', 'invalid-json'] as const) {
+  test(`session title registry omission reconciles conservatively: ${outcome}`, async t => {
+    if (process.platform !== 'linux') return t.skip('Requires Linux process lifetime identity');
+    const directory = await mkdtemp(join(tmpdir(), 'omp-title-visibility-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const session: TopicSession = {
+      id: 'title', botId: 1, chatId: -100, threadId: 2, instanceId: 1, cwd: directory,
+      name: 'Title', status: 'open', createdAt: Date.now(), runtime: { kind: 'managed' },
+    };
+    const config: AppConfig = {
+      bots: [], instances: [], configPath: join(directory, 'config.yaml'),
+      publicUrl: '', host: '127.0.0.1', port: 3000, dataDir: directory,
+      omp: { executable: 'unused', args: [], maxSessions: 1, startupTimeoutMs: 5000 },
+    };
+    await mkdir(join(directory, 'sessions', session.id), { recursive: true });
+    await writeFile(join(directory, 'sessions', session.id, 'binding.json'),
+      JSON.stringify({ version: 1, sessionId: 'pinned-session', cwd: directory, sessionFile: 'unused' }));
+    const identity = await procIdentity(process.pid);
+    assert.ok(identity);
+    const host = { instanceId: 'host', sessionId: 'pinned-session', generation: 1,
+      pid: process.pid, cwd: directory, access: 'control' as const, relayConnected: true };
+    const reachedResolution = new Error('Reached fresh capability resolution');
+    const failure = outcome === 'deadline' ? new DiscoveryTimeoutError() :
+      new Error(outcome === 'permission' ? 'permission denied' : 'OMP discovery returned invalid JSON');
+    let calls = 0;
+    let resolutions = 0;
+    const deadline = Date.now() + config.omp.startupTimeoutMs;
+    const control = createHostControl({
+      config, closed: false, stopping: new Map(), assertActive() {}, retain: () => () => {},
+      managed: new Map([[session.id, { sessionId: host.sessionId, cwd: directory, exited: false,
+        retiring: false, identity: { pid: process.pid, start: identity.start } }]]),
+      async isRunning() { return true; }, async lifecycle() { return undefined; },
+      async ensure() { assert.fail('Title synchronization must never launch a host'); },
+      async resolve(current) { resolutions++; assert.deepEqual(current, host); throw reachedResolution; },
+      async list() {
+        if (++calls === 1) return [];
+        if (outcome === 'recovered') return [host];
+        t.mock.method(Date, 'now', () => deadline + 1000);
+        throw failure;
+      },
+    });
+    // Exercise the actual bounded retry against Linux process identity; no guessed test sleep.
+    await assert.rejects(control.setSessionTitle(session, 'Updated'), error => {
+      if (outcome === 'recovered') assert.equal(error, reachedResolution);
+      else if (outcome === 'deadline') {
+        assert.ok(error instanceof Error);
+        assert.equal(error.message, 'OMP host stopped or changed during session title control');
+        assert.equal(error.cause, failure);
+      } else assert.equal(error, failure);
+      return true;
+    });
+    assert.equal(calls, 2);
+    assert.equal(resolutions, outcome === 'recovered' ? 1 : 0);
+  });
+}
+
+test('discovery deadline classification rejects unrelated and incomplete native failures', () => {
+  assert.ok(isDiscoveryDeadlineError(new DiscoveryTimeoutError()));
+  const native = Object.assign(new Error('native timeout'), { killed: true, code: null, signal: 'SIGKILL' });
+  assert.ok(isDiscoveryDeadlineError(native));
+  assert.equal(isDiscoveryDeadlineError(new Error('OMP discovery timed out')), false);
+  assert.equal(isDiscoveryDeadlineError(Object.assign(new Error('permission'), { killed: true, code: 23, signal: 'SIGKILL' })), false);
+  assert.equal(isDiscoveryDeadlineError(Object.assign(new Error('signal only'), { killed: true, signal: 'SIGKILL' })), false);
 });

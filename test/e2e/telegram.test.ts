@@ -17,13 +17,16 @@ import { registerTermination } from './scenarios/termination.js';
 import { registerForkFailures } from './scenarios/fork-failures.js';
 import { registerMiniAppRecovery } from './scenarios/miniapp-recovery.js';
 import { registerWorktreeCleanup } from './scenarios/worktree-cleanup.js';
-import { registerWorktreeCleanupAuthorization } from './scenarios/worktree-cleanup-authorization.js';
 import { registerWorktreeCleanupConfirmations } from './scenarios/worktree-cleanup-confirmations.js';
 import { registerWorktreeCleanupSafety, worktreeCleanupSafetyScenarios } from './scenarios/worktree-cleanup-safety.js';
 import { registerCompositePreparations } from './scenarios/composite-preparations.js';
 import { registerFolderSettings } from './scenarios/folder-settings.js';
 import { registerProviderSetup } from './scenarios/provider-setup.js';
 import { registerChatIsolation } from './scenarios/chat-isolation.js';
+import { registerPromptQueue } from './scenarios/prompt-queue.js';
+import { registerReplyRecovery } from './scenarios/reply-recovery.js';
+import { registerReplyBaselineRecovery } from './scenarios/reply-baseline-recovery.js';
+import { registerReplyReceiptRecovery } from './scenarios/reply-receipt-recovery.js';
 
 // Register in this entry point only: imported scenarios must not provision concurrent forums.
 registerForkFailures();
@@ -77,7 +80,6 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
     );
   });
   registerWorktreeCleanup(() => app);
-  registerWorktreeCleanupAuthorization(() => app);
   registerWorktreeCleanupSafety(() => app);
   registerWorktreeCleanupConfirmations(() => app);
   registerFolderSettings(() => app);
@@ -95,3 +97,7 @@ describe('Telegram workflows', { concurrency: false, timeout: 1200000 }, suite =
 // Keep independent provisioning last to respect Telegram's forum-creation flood limits.
 registerMiniAppRecovery();
 registerProviderSetup();
+registerPromptQueue();
+registerReplyRecovery();
+registerReplyBaselineRecovery();
+registerReplyReceiptRecovery();

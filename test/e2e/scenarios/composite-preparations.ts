@@ -57,7 +57,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     await prepare('/p /modelpreset openia', session.threadId);
     assertSkillsIntact();
     await assertModel(session.id, 'e2e-alternate');
-    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.equal(app.store.promptQueue.has(session.id), false);
     app.store.clearPendingSkills(skillKey);
     app.store.clearNewTopicSkills(session.id);
     await run(tasks.compositeSelected, 'e2e-alternate', session.threadId);
@@ -71,7 +71,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     }
     await assertModel(session.id, 'e2e-model');
     assert.equal(app.store.getSession(session.id)!.cwd, session.cwd);
-    assert.equal(app.store.hasPendingInitialTask(session.id), false);
+    assert.equal(app.store.promptQueue.has(session.id), false);
     await run(tasks.compositeRecovered, 'e2e-model', session.threadId);
     await app.sendAndWait('/kill', session.threadId);
 
@@ -84,7 +84,7 @@ export function registerCompositePreparations(getApp: () => CollaborationTest, t
     assert.deepEqual(fresh.runtime, { kind: 'managed' });
     assert.notEqual(fresh.cwd, app.omp.workspace);
     assert.equal(await app.omp.git(fresh.cwd, 'rev-parse', '--show-toplevel'), fresh.cwd);
-    assert.equal(app.store.hasPendingInitialTask(fresh.id), false);
+    assert.equal(app.store.promptQueue.has(fresh.id), false);
     await assertModel(fresh.id, 'e2e-alternate');
     await run(tasks.compositeNew, 'e2e-alternate', fresh.threadId);
     app.omp.provider.assertComplete([

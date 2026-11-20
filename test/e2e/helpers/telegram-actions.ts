@@ -15,7 +15,7 @@ export interface TelegramWorkflow {
   omp: { step<T>(name: string, action: () => Promise<T>): Promise<T> };
   store: Pick<Store, 'isEnrolled'>;
   send(text: string, threadId?: number): Promise<Message>;
-  waitForCondition(predicate: () => boolean): Promise<void>;
+  waitForCondition(predicate: () => boolean, phase?: string, timeoutMs?: number): Promise<void>;
   sendAndWait(text: string, threadId?: number): Promise<Message>;
   waitForMessageHandled(messageId: number): Promise<void>;
 }
@@ -168,10 +168,10 @@ export function sendDocument(app: TelegramWorkflow, fileName: string, bytes: Buf
   ));
 }
 
-export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string, files: readonly {name:string;bytes:Buffer}[]) {
+export function sendDocumentAlbum(app: TelegramWorkflow, threadId: number, caption: string | readonly string[], files: readonly {name:string;bytes:Buffer}[]) {
   const media = files.map((file, index) => ({
     ...InputMedia.document(file.bytes, {fileName:file.name, fileMime:'text/plain'}),
-    ...(index === 0 ? {caption} : {}),
+    ...(typeof caption === 'string' ? index === 0 ? {caption} : {} : {caption:caption[index]}),
   }));
   return app.omp.step('telegram.user.send-document-album', () =>
     app.telegram.user.client.sendMediaGroup(app.telegram.forum.chat, media, {threadId}));
@@ -262,8 +262,8 @@ export async function setTopicClosed(app: LifecycleWorkflow, session: TopicSessi
 
 export async function waitForBackgroundCompletion(app: {
   omp: {logDirectory:string}; waitForCondition: TelegramWorkflow['waitForCondition'];
-}, phase: string): Promise<void> {
-  const since = Date.now();
+}, phase: string, options: {since?: number; timeoutMs?: number} = {}): Promise<void> {
+  const since = options.since ?? Date.now();
   await app.waitForCondition(() => {
     const lines = readFileSync(join(app.omp.logDirectory, 'events.jsonl'), 'utf8').trimEnd().split('\n');
     for (let index = lines.length - 1; index >= 0; index--) {
@@ -273,5 +273,5 @@ export async function waitForBackgroundCompletion(app: {
       if (entry.data.phase === phase) return true;
     }
     return false;
-  });
+  }, `background ${phase} completion`, options.timeoutMs);
 }
