@@ -58,8 +58,13 @@ test('Mini App observes draining work across restart without reopening mutation 
   await assert.rejects(app.runtime.ensure(session), SessionRetiringError);
   assert.throws(() => app.runtime.retain(session.id), SessionRetiringError);
   assert.throws(() => app.runtime.markPrompt(session.id), SessionRetiringError);
+  await waitForPanel(app, 'question', 'ask:', restored, session.threadId);
+  let reconnected = app.apiCalls.length;
   const browser = await observeBrowser(t, app, session, {
-    interruptSetup: () => interruptManagedRelay(app.omp.dataDir),
+    interruptSetup: async () => {
+      reconnected = app.apiCalls.length;
+      await interruptManagedRelay(app.omp.dataDir);
+    },
   });
   assert.ok(browser.recovery.phases.has('reconnecting'));
   assert.ok(!browser.recovery.phases.has('ended'));
@@ -68,7 +73,9 @@ test('Mini App observes draining work across restart without reopening mutation 
   // The retirement assertions concern this host, not the viewer's normal
   // reconnect-and-resume behavior after a host has fully exited.
   browser.client.close();
-  const question = await waitForPanel(app, 'question', 'ask:', restored, session.threadId);
+  // Relay recovery ends the old question controls and republishes the same
+  // pending native request. Answer the current control, not its stale copy.
+  const question = await waitForPanel(app, 'question', 'ask:', reconnected, session.threadId);
   await clickPanel(app, question, 1);
   await completeWriteTask(app, task, instruction, session.threadId);
   await waitUntil(() => app.omp.listHosts(), hosts => !hosts.some(value => value.pid === host.pid),
