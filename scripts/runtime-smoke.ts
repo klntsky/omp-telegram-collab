@@ -13,6 +13,7 @@ import { verifyBusyHostRetirement } from './host-lifecycle-smoke.js';
 import { verifyRuntimeKill } from './runtime-kill-smoke.js';
 import { readConfig, writeConfig } from '../src/config.js';
 import { Store } from '../src/store.js';
+import { logEvent } from '../src/logging.js';
 
 const dir = await mkdtemp(join(tmpdir(), 'omp-telegram-smoke-'));
 const relay = await startLocalRelay();
@@ -103,7 +104,7 @@ try {
     clearTimeout(titleTimer);
   }
   guest.close();
-  console.log('PASS actual OMP denies a forged write capability despite a valid encryption key; the genuine capability still receives the snapshot and live title updates.');
+  logEvent('info', 'collab-capability-verified', { forgedCapabilityRejected: true, snapshotReceived: true, liveTitleReceived: true });
   const attached = await runtime.attach(first.instanceId, selectedFolder);
   assert.equal(attached.sessionId, first.sessionId);
   runtime.markPrompt(session.id);
@@ -177,7 +178,7 @@ try {
     await runtime.close();
     reopenedStore.close();
   }
-  console.log('PASS current database/config reopen preserves actual OMP history bytes, topic identity, pending task, and live host binding.');
+  logEvent('info', 'runtime-reopen-verified', { checks: ['history-bytes', 'topic-identity', 'pending-task', 'host-binding'] });
   const worktreeRepository = join(dir, 'worktree-repository');
   await mkdir(worktreeRepository);
   execFileSync('git', ['init', '--quiet', worktreeRepository]);
@@ -219,14 +220,13 @@ try {
     assert.equal(resumed.sessionId, binding.sessionId);
     await runtime.kill(worktreeSession);
     execFileSync('git', ['-C', worktreeRepository, 'worktree', 'remove', '--force', worktreePath]);
-    console.log('PASS native /worktree carries dirty tracked/untracked bytes, retains session identity, and resumes relocated history after runtime restart.');
+    logEvent('info', 'native-worktree-resume-verified', { checks: ['dirty-tracked-files', 'untracked-files', 'session-identity', 'relocated-history'] });
   } finally {
     await runtime.close();
   }
   await verifyBusyHostRetirement(await mkdtemp(join(dir,'guard-')),config.omp.executable,relay.url);
   await verifyRuntimeKill(await mkdtemp(join(dir,'kill-')),config.omp.executable,relay.url);
-  console.log('PASS actual OMP PTY startup, encrypted guest welcome, multiple instance paths, wrong-path attachment denial, capacity rejection, exact-history restart, and session mismatch denial.');
-  console.log('No model prompt or live Telegram API request was sent.');
+  logEvent('info', 'runtime-smoke-completed', { modelRequests: 0, telegramRequests: 0, checks: ['pty-startup', 'encrypted-welcome', 'instance-paths', 'attachment-authorization', 'capacity', 'history-restart', 'session-identity'] });
 } finally {
   await runtime.close();
   await relay.close();

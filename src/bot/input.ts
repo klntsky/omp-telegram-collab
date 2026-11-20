@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import { GrammyError, HttpError, type Bot, type Context } from 'grammy';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
@@ -68,7 +69,7 @@ install(): void {
       } catch (error) {
         if (!ctx.chat || error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) {
           primaryFailure = { error };
-          console.error('Fatal Telegram update failed.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,updateId:ctx.update.update_id});
+          logEvent('error', 'fatal-telegram-update-failed', {botId:this.deps.botId(),chatId:ctx.chat?.id,updateId:ctx.update.update_id,error});
           throw error;
         }
         try { await this.reportError(ctx, error); }
@@ -77,7 +78,7 @@ install(): void {
         if (queued) this.queuedUpdates--;
         if (ctx.callbackQuery && !callbackAnswered)
           await ctx.answerCallbackQuery().catch(error => {
-            console.warn('Could not acknowledge Telegram callback.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'answerCallbackQuery',originalError:primaryFailure?.error});
+            logEvent('warn', 'could-not-acknowledge-telegram-callback', {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'answerCallbackQuery',originalError:primaryFailure?.error,error});
             if (!primaryFailure && error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
           });
       }
@@ -97,7 +98,7 @@ install(): void {
       inputKind: intent?.kind,
       action: intent?.kind === 'command' ? intent.action : undefined,
     };
-    console.error('Telegram operation failed.', error, context);
+    logEvent('error', 'telegram-operation-failed', {...context,error});
     try {
       if (ctx.chat && ctx.message && !(intent?.kind === 'command' && intent.action === 'status')) {
         const session = this.deps.store.getTopic({botId:this.deps.botId(),destination:contextDestination(ctx)});
@@ -117,7 +118,7 @@ install(): void {
         parse_mode: 'HTML',
       });
     } catch (deliveryError) {
-      console.error('Could not report Telegram operation error.', deliveryError, { ...context, originalError:error });
+      logEvent('error', 'telegram-operation-report-failed', {...context,originalError:error,error:deliveryError});
       if (deliveryError instanceof GrammyError && (deliveryError.error_code === 401 || deliveryError.error_code === 409)) throw deliveryError;
     }
   }
@@ -149,7 +150,7 @@ install(): void {
         if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
         return this.reportError(ctx,error);
       }).catch(error => {
-        console.error('Could not finish Telegram album operation.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'album'});
+        logEvent('error', 'telegram-album-operation-failed', {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'album',error});
         if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) this.deps.fail(error);
       }).finally(() => { this.queuedUpdates--; });
     }
@@ -201,7 +202,7 @@ install(): void {
       () => !this.deps.stopped() && findInstance(this.deps.config,this.deps.botId(),ctx.chat!.id)?.instance.id === assigned.instance.id)
       .catch(error => {
         if (error instanceof GrammyError && (error.error_code === 401 || error.error_code === 409)) throw error;
-        console.warn('Could not show message receipt reaction.', error, {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'setMessageReaction'});
+        logEvent('warn', 'could-not-show-message-receipt-reaction', {botId:this.deps.botId(),chatId:ctx.chat?.id,operation:'setMessageReaction',error});
       });
   }
 }

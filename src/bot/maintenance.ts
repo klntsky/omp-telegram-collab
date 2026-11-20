@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
@@ -87,7 +88,7 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
     const startedAt = performance.now();
     const task = Promise.resolve().then(() => operation(signal)).catch(error => {
       if (error !== signal.reason) {
-        console.error(`Bot ${this.deps.botId()} background ${phase} failed.`, error);
+        logEvent('error', 'bot-background-failed', {botId:this.deps.botId(),operation:phase,error});
         const failure = {operation:phase,at:Date.now(),error};
         if (phase.startsWith('skills:')) {
           const path = Number(phase.slice('skills:'.length));
@@ -100,13 +101,13 @@ runBackground(phase: string, operation: (signal: AbortSignal) => Promise<void>, 
           try {
             this.deps.sessionObservation(sessionId).failure = failure;
           } catch (reportError) {
-            console.error('Could not record background operation failure.', reportError, {botId:this.deps.botId(),phase,sessionId,originalError:error});
+            logEvent('error', 'background-failure-record-failed', {botId:this.deps.botId(),phase,sessionId,originalError:error,error:reportError});
           }
         }
       }
     }).finally(() => {
       this.backgroundTasks.delete(task);
-      console.log(JSON.stringify({event:'bot-background',botId:this.deps.botId(),phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted}));
+      logEvent('info', 'bot-background', {botId:this.deps.botId(),phase,durationMs:Math.round(performance.now()-startedAt),cancelled:signal.aborted});
     });
     this.backgroundTasks.add(task);
     return task;

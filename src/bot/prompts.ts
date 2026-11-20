@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession, PromptContent } from '../../shared/contracts.js';
 import type { CustomMessageEntry } from '@oh-my-pi/pi-wire';
@@ -148,6 +149,6 @@ ${content.text}`,
     void this.deps.delivery.run(session.chatId,
       () => this.deps.bot.api.setMessageReaction(session.chatId,messageId,[{type:'emoji',emoji:'🤝'}]),
       () => !this.deps.stopped() && this.deps.sessionAssigned(session) && (listener === undefined || this.deps.getListener(session.id) === listener))
-      .catch(error => console.warn(`Could not show message acceptance reaction (${session.id}).`, error));
+      .catch(error => logEvent('warn', 'could-not-show-message-acceptance-reaction', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not show message acceptance reaction (${session.id}).`, error}));
   }
 }

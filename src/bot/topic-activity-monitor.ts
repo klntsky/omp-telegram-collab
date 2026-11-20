@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { TopicSession } from '../../shared/contracts.js';
 import { withCancellation } from '../cancellation.js';
 import type { TopicActivity } from './types.js';
@@ -51,7 +52,7 @@ export class TopicActivityMonitor {
           this.owners.metadataOwners.get(session.id)?.metadata === metadata &&
           this.deps.sessionAssigned(session) &&
           this.deps.options.store.getSessionGeneration(session.id) === metadata.generation) {
-        console.warn(`Could not synchronize topic icon (${session.id}).`, error);
+        logEvent('warn', 'could-not-synchronize-topic-icon', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not synchronize topic icon (${session.id}).`, error});
         this.deps.sessionObservation(session.id).failure = {
           operation: 'Topic icon synchronization',
           at: Date.now(),
@@ -108,7 +109,7 @@ export class TopicActivityMonitor {
     })()
       .catch((error) => {
         if (active()) {
-          console.warn(`Could not look up host activity (${session.id}).`, error);
+          logEvent('warn', 'could-not-look-up-host-activity', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not look up host activity (${session.id}).`, error});
           void this.setTopicStatus(session, 'unknown');
           this.deps.sessionObservation(session.id).failure = {
             operation: 'Host status lookup',

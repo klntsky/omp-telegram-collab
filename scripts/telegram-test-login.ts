@@ -38,7 +38,7 @@ signal.addEventListener('abort', closeOnAbort, { once: true });
 try {
   const config = await client.call({ _: 'help.getConfig' }, { timeout: 30000, abortSignal: signal });
   if (!config.testMode) throw new Error('Refusing to authorize an account outside the Telegram test network');
-  console.log("Use the phone number registered in Telegram's test environment and the actual code delivered to that account.");
+  process.stdout.write(String("Use the phone number registered in Telegram's test environment and the actual code delivered to that account.") + '\n');
   const user = await client.start({
     phone: () => ask('Test account phone number: '),
     code: () => ask('Verification code (hidden): ', true),
@@ -49,7 +49,7 @@ try {
   const session = await exportTelegramTestSession(client, signal);
   signal.throwIfAborted();
   await appendTelegramTestSession(filename, session);
-  console.log(`Saved the session in TELEGRAM_TEST_SESSIONS in ${filename} with permissions 0600. No sessions were printed.`);
+  process.stdout.write(String(`Saved the session in TELEGRAM_TEST_SESSIONS in ${filename} with permissions 0600. No sessions were printed.`) + '\n');
 } catch (error) {
   if (signal.aborted && error !== signal.reason) errors.push(signal.reason);
   errors.push(error);

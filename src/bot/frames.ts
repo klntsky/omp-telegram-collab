@@ -1,3 +1,4 @@
+import { logEvent } from '../logging.js';
 import type { Bot, Context } from 'grammy';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { HostFrame, CollabUiRequest, CustomMessageEntry, SessionEntry } from '@oh-my-pi/pi-wire';
@@ -104,7 +105,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         `⛔️${interruptedBy} interrupted the chat`,
         {},
-      ).catch(error => console.warn(`Could not deliver interruption notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-interruption-notice', {botId: session.botId, sessionId: session.id, chatId: session.chatId, threadId: session.threadId, message: `Could not deliver interruption notice (${session.id}).`, error}));
     }
     if (frame.t === 'welcome' || frame.t === 'state') {
       listener.queuedMessages = frame.state.queuedMessageCount;
@@ -161,7 +162,7 @@ export class FrameProjection {
       };
       if (pending) this.deps.settlePrompt(session, pending.submissionId, isStartupRejection(frame) ? 'startup-rejected' : 'uncertain');
       if (pending && isStartupRejection(frame)) {
-        console.warn('OMP startup rejected prompt.', frame.message, {sessionId: session.id, submissionId: pending.submissionId});
+        logEvent('warn', 'omp-startup-rejected-prompt', {sessionId:session.id,submissionId:pending.submissionId,error:frame.message});
         listener.pendingAnswers.clear();
         listener.pendingStops.length = 0;
         return;
@@ -184,7 +185,7 @@ export class FrameProjection {
         topicDestination(session.chatId, session.threadId),
         escapeHtml(prefix) + preHtml(frame.message),
         { parse_mode: 'HTML' },
-      ).catch(error => console.warn(`Could not deliver OMP error notice (${session.id}).`, error));
+      ).catch(error => logEvent('warn', 'could-not-deliver-omp-error-notice', {botId:session.botId,sessionId:session.id,chatId:session.chatId,threadId:session.threadId,error}));
       return;
     }
     if (frame.t === 'snapshot-chunk') {
