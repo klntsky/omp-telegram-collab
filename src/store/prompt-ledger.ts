@@ -188,10 +188,6 @@ export class PromptLedger {
     this.db.prepare('INSERT INTO message_anchors VALUES (?,?,?,?,?,?,?,?)')
       .run(sessionId, anchor.ompSessionId, chatId, messageId, anchor.entryId, anchor.parentEntryId, anchor.kind, anchor.partIndex);
   }
-  rememberReply(id: string, ompSessionId: string, entryId: string): boolean {
-    const result = this.db.prepare('INSERT OR IGNORE INTO replies VALUES (?,?,?)').run(id, ompSessionId, entryId);
-    return Number(result.changes) === 1;
-  }
   hasSnapshot(id: string): boolean {
     return Boolean(this.db.prepare('SELECT 1 FROM snapshot_baselines WHERE session_id=?').get(id));
   }
