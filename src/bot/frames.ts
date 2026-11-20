@@ -205,8 +205,6 @@ export class FrameProjection {
         )
           this.onFrame(session, listener, { t: 'entry', entry }, true);
         else this.deps.queueReply(session, ompSessionId, entry, undefined, true);
-        if (entry.type === 'message' && entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying')
-          activity.turnOutcome = entry.message.stopReason === 'error' ? 'failed' : undefined;
       }
       if (frame.final) {
         this.deps.options.store.markSnapshot(session.id);
@@ -218,16 +216,6 @@ export class FrameProjection {
     }
     if (frame.t !== 'entry' || frame.entry.type !== 'message') return;
     const entry = frame.entry;
-    if (entry.message.role === 'assistant' && entry.message.stopReason === 'error') {
-      if (activity.turnOutcome !== 'retrying') activity.turnOutcome = 'failed';
-      this.deps.sessionObservation(session.id).failure = {
-        operation: 'OMP provider',
-        at: Date.now(),
-        error: entry.message.errorMessage,
-      };
-    } else if (entry.message.role === 'assistant' && activity.turnOutcome !== 'retrying') {
-      activity.turnOutcome = undefined;
-    }
     this.deps.queueReply(session, ompSessionId, entry,
       replay ? listener.snapshotReplyTarget : this.deps.options.store.getReplyTarget(session.id));
   }

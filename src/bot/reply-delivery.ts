@@ -1,6 +1,6 @@
 import type { Bot, Context } from 'grammy';
 import { stat } from 'node:fs/promises';
-import type { CustomMessageEntry, SessionEntry } from '@oh-my-pi/pi-wire';
+import type { CustomMessageEntry, SessionEntry, WireMessage } from '@oh-my-pi/pi-wire';
 import type { TopicSession } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
@@ -17,6 +17,7 @@ interface ReplyDeliveryDependencies {
   stopped(): boolean;
   runBackground(phase: string, operation: () => Promise<void>): Promise<void>;
   recordReceipt(session: TopicSession, entry: CustomMessageEntry, ompSessionId: string, boundary: number): {messageId?: number};
+  observeAssistant(session: TopicSession, message: WireMessage): void;
 }
 
 // Volatile coordination only; SQLite owns payloads and confirmed delivery progress.
@@ -32,6 +33,7 @@ export class ReplyDelivery {
 
   accept(session: TopicSession, ompSessionId: string, entry: SessionEntry, replyTo?: number, historical = false): void {
     if (entry.type !== 'message' || entry.message.role !== 'assistant') return;
+    this.deps.observeAssistant(session, entry.message);
     let text = entry.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
     if (entry.message.stopReason === 'error') {
       const diagnostic = entry.message.errorMessage ?? 'The provider returned an error without a diagnostic.';
