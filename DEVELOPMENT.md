@@ -25,9 +25,9 @@ Configure model credentials for the development account through OMP. Do not reus
 
 ## Change the database schema
 
-Keep one current schema in `src/migrations.ts`; collapse schema changes into that definition rather than appending compatibility migrations. Update fixtures and callers together. Older schemas are unsupported and must not be imported automatically.
+Add one forward migration per pull request in `src/database-migrations.ts`; retain the deployed baseline in `src/database-schema.ts`. Keep persisted-format transformations in the migration layer and update runtime callers to use the resulting current format. See `AGENTS.md` for the migration policy.
 
-Store startup initializes a new database atomically and rejects unsupported schemas. Schema initialization failures preserve the original SQLite diagnostic.
+Run `pnpm test:one test/database-migrations.test.ts test/prompt-provenance.test.ts` for migration changes. Migration tests execute the previous application's real storage code from local Git history and create databases through its public operations. Do not use copied SQL schemas, saved database samples, or fabricated historical rows. Store startup performs the upgrade before runtime work, and migration failures retain the original diagnostic.
 
 ## Modify the Mini App
 

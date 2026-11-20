@@ -1,73 +1,59 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { baselineSchema } from './database-schema.js';
+import { databaseMigrations } from './database-migrations.js';
+import { backupDatabase } from './database-backup.js';
 
-const schema = `
-      CREATE TABLE IF NOT EXISTS groups (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id));
-      CREATE TABLE IF NOT EXISTS bot_status_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL CHECK(thread_id>1),PRIMARY KEY(bot_id,chat_id));
-      CREATE TABLE IF NOT EXISTS detached_topics (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id));
-      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,instance_id INTEGER NOT NULL CHECK(instance_id>0 AND instance_id<=9007199254740991),cwd TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,runtime TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,thread_id));
-      CREATE TABLE IF NOT EXISTS snapshot_baselines (session_id TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS reply_targets (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_generations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),generation INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_topic_finish_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id),icon_id TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_pending_close_icons (session_id TEXT PRIMARY KEY REFERENCES sessions(id));
-      CREATE TABLE IF NOT EXISTS session_pending_titles (session_id TEXT PRIMARY KEY REFERENCES sessions(id),title TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_topic_title_prefixes (session_id TEXT PRIMARY KEY REFERENCES sessions(id),prefix TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS session_entries (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,markup TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS new_topic_skills (session_id TEXT PRIMARY KEY REFERENCES sessions(id),names TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS pending_skills (bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,user_id INTEGER NOT NULL,name TEXT NOT NULL,PRIMARY KEY(bot_id,chat_id,thread_id,user_id,name));
-      CREATE TABLE IF NOT EXISTS skill_catalogs (instance_id INTEGER PRIMARY KEY,skills TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS setup_requests (code TEXT PRIMARY KEY,bot_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,username TEXT,title TEXT NOT NULL,expires_at INTEGER NOT NULL,UNIQUE(bot_id,chat_id,user_id));
-      CREATE TABLE IF NOT EXISTS settings_panels (bot_id INTEGER NOT NULL,token TEXT NOT NULL,panel TEXT NOT NULL,PRIMARY KEY(bot_id,token));
-      CREATE TABLE prompt_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,sender TEXT NOT NULL,message_id INTEGER,text TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','uncertain','ambiguous')),UNIQUE(session_id,omp_session_id,message_id));
-      CREATE TABLE prompt_receipts (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,message_id INTEGER,submitted_locally INTEGER NOT NULL CHECK(submitted_locally IN (0,1)),PRIMARY KEY(session_id,omp_session_id,entry_id));
-      CREATE TABLE replies (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,entry_id TEXT NOT NULL,PRIMARY KEY(session_id,omp_session_id,entry_id));
-      CREATE TABLE prompt_message_aliases (session_id TEXT NOT NULL REFERENCES sessions(id),source_message_id INTEGER NOT NULL,message_id INTEGER NOT NULL,PRIMARY KEY(session_id,source_message_id,message_id));
-      CREATE TABLE message_anchors (session_id TEXT NOT NULL REFERENCES sessions(id),omp_session_id TEXT NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,kind TEXT NOT NULL CHECK(kind IN ('collab-prompt','assistant')),part_index INTEGER NOT NULL CHECK(part_index>=0),PRIMARY KEY(session_id,omp_session_id,chat_id,message_id));
-      CREATE TABLE session_preparations (session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id),kind TEXT NOT NULL DEFAULT 'topic' CHECK(kind IN ('topic','fork')));
-      CREATE TABLE worktree_confirmations (session_id TEXT PRIMARY KEY REFERENCES sessions(id),message_id INTEGER NOT NULL,admin_id INTEGER NOT NULL,token TEXT NOT NULL,identity TEXT NOT NULL);
-`;
+export const databaseVersion = 11;
 
-const promptQueueSchema = `CREATE TABLE IF NOT EXISTS prompt_queue (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  message_id INTEGER NOT NULL,
-  user_id INTEGER NOT NULL,
-  authority_user_id INTEGER NOT NULL,
-  content TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','submitted')),
-  submission_id INTEGER UNIQUE,
-  acceptance_deadline INTEGER,
-  available_at INTEGER NOT NULL DEFAULT 0,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(session_id,message_id)
-);
--- Keep only source identity after dequeue, including session deletion; no prompt payload or session cascade belongs here.
-CREATE TABLE IF NOT EXISTS prompt_admissions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL,
-  message_id INTEGER NOT NULL,
-  UNIQUE(session_id,message_id)
-);
-CREATE TABLE IF NOT EXISTS prompt_queue_preparations (
-  prompt_id INTEGER PRIMARY KEY REFERENCES prompt_queue(id) ON DELETE CASCADE,
-  preparation TEXT NOT NULL
-);`;
+function validateVersion(db: DatabaseSync, version: number): void {
+  if (version !== 0 && version !== 10 && version !== databaseVersion) {
+    throw new Error(`Unsupported database schema version ${version}`);
+  }
+  if (version === 0 && db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get()) {
+    throw new Error('Unsupported existing database');
+  }
+}
+
 
 export function initializeDatabase(db: DatabaseSync): void {
+  db.exec('PRAGMA busy_timeout=5000');
+  const initialVersion = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+  validateVersion(db, initialVersion);
+  if (initialVersion === databaseVersion) return;
+  // Keep backup creation and the version change under one writer lock so another
+  // startup cannot change the database between its backup and upgrade.
+  // https://www.sqlite.org/lang_transaction.html
   db.exec('BEGIN IMMEDIATE');
   try {
-    const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 10) throw new Error(`Unsupported database schema version ${version}`);
-    if (version === 0) {
-      const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
-      if (existing) throw new Error('Unsupported existing database');
-      db.exec(schema);
-      db.exec('PRAGMA user_version=10');
+    let version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+    validateVersion(db, version);
+    if (version === databaseVersion) {
+      db.exec('COMMIT');
+      return;
     }
-    db.exec(promptQueueSchema);
+    if (version === 0) {
+      db.exec(baselineSchema);
+      db.exec('PRAGMA user_version=10');
+      version = 10;
+    } else {
+      backupDatabase(db);
+    }
+    for (const migration of databaseMigrations) {
+      if (migration.from !== version) continue;
+      migration.apply(db);
+      db.exec(`PRAGMA user_version=${migration.to}`);
+      version = migration.to;
+    }
+    if (version !== databaseVersion) throw new Error(`Missing database migration from version ${version}`);
     db.exec('COMMIT');
   } catch (error) {
-    if (db.isTransaction) db.exec('ROLLBACK');
+    try {
+      if (db.isTransaction) db.exec('ROLLBACK');
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError],
+        `${error instanceof Error ? error.message : String(error)}\nDatabase migration rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        { cause: error });
+    }
     throw error;
   }
 }

@@ -1,18 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { createHash } from 'node:crypto';
 import type { PromptContent, TopicSession } from '../../shared/contracts.js';
 import type { MessageAnchor } from '../store.js';
-
-function promptFingerprint(content: PromptContent): string {
-  return createHash('sha256')
-    .update(
-      JSON.stringify([
-        content.text,
-        (content.images ?? []).map((image) => [image.mimeType, image.data]),
-      ]),
-    )
-    .digest('hex');
-}
+import { promptFingerprint } from '../prompt-fingerprint.js';
 
 // Queries share Store's connection so receipt/anchor updates stay in one transaction.
 // Store alone owns connection initialization and closure.
@@ -92,47 +81,29 @@ export class PromptLedger {
           ...(previous.message_id === null ? {} : { messageId: Number(previous.message_id) }),
         };
       }
-      const column = content.images === undefined ? 'text' : 'fingerprint';
-      const value = column === 'text' ? content.text : promptFingerprint(content);
-      let condition = `session_id=? AND omp_session_id=? AND sender=? AND ${column}=? AND (? IS NULL OR id<=?)`;
-      let parameters = [
+      const condition = 'session_id=? AND omp_session_id=? AND sender=? AND (fingerprint=? OR (fingerprint IS NULL AND text=?)) AND (? IS NULL OR id<=?)';
+      const parameters = [
         sessionId,
         anchor.ompSessionId,
         sender ?? '',
-        value,
+        promptFingerprint(content),
+        content.text,
         snapshotBoundary ?? null,
         snapshotBoundary ?? null,
       ];
-      let candidates =
+      const candidates =
         sender === undefined
           ? []
           : this.db
               .prepare(
-                `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
+                `SELECT id,message_id,state,fingerprint FROM prompt_submissions WHERE ${condition} ORDER BY id`,
               )
               .all(...parameters);
-      let uncorrelated = false;
-      if (sender !== undefined && column === 'fingerprint' && candidates.length === 0) {
-        condition = 'session_id=? AND omp_session_id=? AND sender=? AND text=? AND (? IS NULL OR id<=?)';
-        parameters = [
-          sessionId,
-          anchor.ompSessionId,
-          sender,
-          content.text,
-          snapshotBoundary ?? null,
-          snapshotBoundary ?? null,
-        ];
-        candidates = this.db
-          .prepare(
-            `SELECT id,message_id,state FROM prompt_submissions WHERE ${condition} ORDER BY id`,
-          )
-          .all(...parameters);
-        uncorrelated = candidates.length > 0;
-      }
-      const pending = candidates[0];
-      const conflicting =
-        uncorrelated ||
-        (candidates.length > 1 && candidates.some((row) => row.state !== 'pending'));
+      // An unrecoverable identity can also explain this receipt. Keep every candidate
+      // rather than consuming one and falsely making a later identical input unique.
+      const unresolved = candidates.some(row => row.fingerprint === null);
+      const pending = unresolved ? undefined : candidates[0];
+      const conflicting = unresolved || (candidates.length > 1 && candidates.some(row => row.state !== 'pending'));
       if (conflicting)
         this.db
           .prepare(`UPDATE prompt_submissions SET state='ambiguous' WHERE ${condition}`)
@@ -141,7 +112,7 @@ export class PromptLedger {
       const messageId = ambiguous ? undefined : pending?.message_id;
       this.db
         .prepare('INSERT INTO prompt_receipts VALUES (?,?,?,?,?)')
-        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null, pending ? 1 : 0);
+        .run(sessionId, anchor.ompSessionId, anchor.entryId, messageId ?? null, pending ? 1 : unresolved ? null : 0);
       if (typeof messageId === 'number') {
         const session = this.getSession(sessionId)!;
         const aliases = this.db.prepare('SELECT message_id FROM prompt_message_aliases WHERE session_id=? AND source_message_id=?').all(sessionId, messageId);

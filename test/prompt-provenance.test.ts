@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { Store } from '../src/store.js';
 
@@ -51,7 +52,7 @@ test('receipt replay respects its submission boundary, sender, entry identity an
   }
 });
 
-test('image provenance supports partial receipts and refuses ambiguous interrupted duplicates', () => {
+test('image provenance matches persisted blob identities and refuses ambiguous interrupted duplicates', () => {
   const { store, id } = fixture();
   const image = {
     text: '',
@@ -61,29 +62,33 @@ test('image provenance supports partial receipts and refuses ambiguous interrupt
     text: '',
     images: [{ type: 'image' as const, mimeType: 'image/png', data: 'BBBB' }],
   };
+  const persisted = (content: typeof image) => ({
+    ...content,
+    images: content.images.map(part => ({
+      ...part,
+      data: `blob:sha256:${createHash('sha256').update(Buffer.from(part.data, 'base64')).digest('hex')}`,
+    })),
+  });
   try {
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 200);
     store.recordPromptSubmission(id, 'omp-fixture', sender, otherImage, 201);
-    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'full-image',parentEntryId:null}, sender, otherImage).messageId, 201);
-    assert.equal(
-      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'partial-image',parentEntryId:null}, sender, { text: '' }).messageId,
-      200,
-    );
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'full-image',parentEntryId:null}, sender, persisted(otherImage)).messageId, 201);
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'persisted-image',parentEntryId:null}, sender, persisted(image)).messageId, 200);
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 202);
     store.beginPromptReceiptSnapshot(id, 'omp-fixture');
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 203);
-    const first = store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, image);
+    const first = store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, persisted(image));
     assert.equal(first.messageId, undefined);
     assert.equal(first.submissionId, undefined);
     assert.deepEqual(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-one',parentEntryId:null}, sender, image), {
       fresh: false,
     });
     assert.equal(
-      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-two',parentEntryId:null}, sender, image).messageId,
+      store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'ambiguous-two',parentEntryId:null}, sender, persisted(image)).messageId,
       undefined,
     );
     store.recordPromptSubmission(id, 'omp-fixture', sender, image, 204);
-    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'unambiguous-again',parentEntryId:null}, sender, image).messageId, 204);
+    assert.equal(store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'unambiguous-again',parentEntryId:null}, sender, persisted(image)).messageId, 204);
   } finally {
     store.close();
   }
@@ -111,6 +116,46 @@ test('an uncorrelated shrunk image receipt cannot steal a later text-only destin
       store.recordPromptReceipt(id, {ompSessionId:'omp-fixture',entryId:'subsequent-text',parentEntryId:null}, sender, { text: image.text }).messageId,
       301,
     );
+  } finally {
+    store.close();
+  }
+});
+
+test('unresolved image identities block guessing without consuming pending submissions or aliases', () => {
+  const { store, id } = fixture();
+  const image = { text: '', images: [{ type: 'image' as const, mimeType: 'image/png', data: 'AAAA' }] };
+  try {
+    const unresolved = store.recordPromptSubmission(id, 'omp-fixture', sender, image, 400);
+    store.db.prepare('UPDATE prompt_submissions SET unresolved_fingerprint=fingerprint,fingerprint=NULL WHERE id=?').run(unresolved);
+    store.recordPromptMessageAlias(id, 400, 401);
+    const current = store.recordPromptSubmission(id, 'omp-fixture', sender, image, 402);
+    for (const entryId of ['unresolved-receipt', 'another-identical-receipt']) {
+      const receipt = store.recordPromptReceipt(
+        id, { ompSessionId: 'omp-fixture', entryId, parentEntryId: null }, sender, image,
+      );
+      assert.equal(receipt.messageId, undefined);
+      assert.equal(receipt.submissionId, undefined);
+      assert.deepEqual(
+        store.db.prepare('SELECT id,state FROM prompt_submissions WHERE session_id=? ORDER BY id').all(id).map(row => ({ ...row })),
+        [{ id: unresolved, state: 'ambiguous' }, { id: current, state: 'ambiguous' }],
+      );
+      assert.equal(store.db.prepare('SELECT submitted_locally FROM prompt_receipts WHERE entry_id=?').get(entryId)?.submitted_locally, null);
+    }
+    assert.deepEqual(
+      store.db.prepare('SELECT source_message_id,message_id FROM prompt_message_aliases WHERE session_id=?').all(id).map(row => ({ ...row })),
+      [{ source_message_id: 400, message_id: 401 }],
+    );
+    assert.equal(store.getMessageAnchor(id, 'omp-fixture', -100, 400), undefined);
+    assert.equal(store.getMessageAnchor(id, 'omp-fixture', -100, 402), undefined);
+    store.recordPromptSubmission(id, 'omp-fixture', sender, { text: 'Distinct task' }, 403);
+    assert.equal(store.recordPromptReceipt(
+      id, { ompSessionId: 'omp-fixture', entryId: 'distinct-task', parentEntryId: null }, sender, { text: 'Distinct task' },
+    ).messageId, 403);
+    const otherSender = 'Telegram @other_bot';
+    store.recordPromptSubmission(id, 'omp-fixture', otherSender, image, 404);
+    assert.equal(store.recordPromptReceipt(
+      id, { ompSessionId: 'omp-fixture', entryId: 'other-sender', parentEntryId: null }, otherSender, image,
+    ).messageId, 404);
   } finally {
     store.close();
   }

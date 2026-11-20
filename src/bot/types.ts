@@ -7,6 +7,7 @@ import type { PromptExtension } from '../telegram-commands.js';
 import type { TopicWriter } from '../topic-writer.js';
 import type { SessionFeed } from '../session-feed.js';
 import type { SessionHistory } from '../session-history.js';
+import type { HistorySource } from '../history-watch.js';
 
 export class AuthorizationDeniedError extends Error {}
 export class PromptPreparationRejectedError extends Error {}
@@ -61,6 +62,7 @@ export interface Listener {
   promise?: Promise<CollabConnection>;
   feed: SessionFeed;
   history?: SessionHistory;
+  promptHistory?: HistorySource;
   readers: Set<{feed: SessionFeed; connection?: CollabConnection; controller: AbortController}>;
   tail: Promise<void>;
   queued: number;

@@ -183,6 +183,17 @@ export class SessionConnections {
         if (!active()) throw closed;
         listener.ompSessionId = binding.sessionId;
         if (session.runtime.kind === 'managed') {
+          listener.promptHistory = await this.deps.options.runtime.historySource(session);
+          if (!listener.promptHistory || listener.promptHistory.sessionId !== binding.sessionId)
+            throw new Error(
+              'Managed OMP history source does not match the connected session' +
+              '\nAsk the bot operator to restart the bot, then reconnect this topic. ' +
+              'If this persists, stop the bot and back up its data directory. ' +
+              `Check sessions/${session.id}/binding.json and its referenced sessionFile: ` +
+              'both must identify this topic’s intended OMP conversation. ' +
+              'Repair the binding only after verifying that conversation. ' +
+              'Preserve history and pending prompts; do not edit history IDs, delete session data, or resend the task.',
+            );
           listener.history = new SessionHistory(listener.feed, {
             sessionId: binding.sessionId,
             source: () => this.deps.options.runtime.historySource(session),

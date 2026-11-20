@@ -45,15 +45,21 @@ export class Store {
   constructor(filename: string) {
     if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
-    this.prompts = new PromptLedger(this.db, id => this.getSession(id));
-    this.promptQueue = new PromptQueue(this.db);
-    if (filename !== ':memory:') chmodSync(filename, 0o600);
-    this.worktreeConfirmations = new WorktreeConfirmations(this.db);
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     try {
+      this.db.exec('PRAGMA foreign_keys=ON;');
       initializeDatabase(this.db);
+      if (filename !== ':memory:') chmodSync(filename, 0o600);
+      this.db.exec('PRAGMA journal_mode=WAL;');
+      this.prompts = new PromptLedger(this.db, id => this.getSession(id));
+      this.promptQueue = new PromptQueue(this.db);
+      this.worktreeConfirmations = new WorktreeConfirmations(this.db);
     } catch (error) {
-      this.db.close();
+      try { this.db.close(); }
+      catch (closeError) {
+        throw new AggregateError([error, closeError],
+          `${error instanceof Error ? error.message : String(error)}\nClosing database after initialization failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`,
+          { cause: error });
+      }
       throw error;
     }
     for (const row of this.db

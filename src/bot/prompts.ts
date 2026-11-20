@@ -6,6 +6,7 @@ import type { Listener, SessionObservation, TaskObservation } from './types.js';
 import type { TelegramDelivery } from '../telegram-delivery.js';
 import { isAdministrator } from '../auth.js';
 import { AuthorizationDeniedError } from './types.js';
+import { readPromptReceipt } from '../prompt-receipt.js';
 
 export interface PromptReceiptsDependencies {
   authorize: (chatId: number, userId: number) => Promise<void>;
@@ -110,6 +111,7 @@ ${content.text}`,
     replay: boolean,
     ompSessionId: string,
   ): void {
+    if (listener.promptHistory) entry = readPromptReceipt(listener.promptHistory, entry.id);
     const text =
       typeof entry.content === 'string'
         ? entry.content
