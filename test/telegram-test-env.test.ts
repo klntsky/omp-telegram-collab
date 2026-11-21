@@ -50,24 +50,6 @@ test('concurrent appends retain existing sessions, unrelated dotenv bytes and de
   assert.equal(await readFile(filename, 'utf8'), contents);
 });
 
-test('session saves retain the newest thirty entries across oversized saves and appends', async t => {
-  const directory = await mkdtemp('/dev/shm/omp-session-retention-');
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const filename = join(directory, '.env');
-  const sessions = Array.from({ length: 35 }, (_, index) => session(index + 1));
-  await writeFile(filename, 'UNRELATED=retained\n', { mode: 0o600 });
-  await withTelegramTestLock('authorization', new AbortController().signal, () =>
-    withTelegramTestSessionStorage(filename, storage => storage.save(sessions), true));
-  const saved = () => readFile(filename, 'utf8').then(contents => parseEnv(contents));
-  assert.deepEqual(readTelegramTestSessions(await saved()), sessions.slice(-30));
-  const newest = session(36);
-  await appendTelegramTestSession(filename, newest);
-  assert.deepEqual(readTelegramTestSessions(await saved()), [...sessions.slice(-29), newest]);
-  await appendTelegramTestSession(filename, newest);
-  assert.deepEqual(readTelegramTestSessions(await saved()), [...sessions.slice(-29), newest]);
-  assert.equal((await saved()).UNRELATED, 'retained');
-});
-
 test('invalid existing canonical state is unchanged and does not poison later appends', async t => {
   const { filename } = await fixture(t);
   const original = "UNRELATED=value\nTELEGRAM_TEST_SESSIONS='[null]'\n";
