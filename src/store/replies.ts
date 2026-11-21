@@ -26,10 +26,15 @@ export class ReplyLedger {
 
   stage(sessionId: string, ompSessionId: string, entryId: string, parentEntryId: string | null,
     parts: string[], replyTo: number | undefined, generation: number, historical = false): void {
+    // Ignored uniqueness conflicts still advance AUTOINCREMENT and commit a write.
+    // Filter replayed identities before insertion so reconnects do not fsync old replies.
     this.db.prepare(`INSERT OR IGNORE INTO replies
       (session_id,omp_session_id,entry_id,parent_entry_id,parts,reply_to,generation,state)
-      VALUES (?,?,?,?,?,?,?,?)`).run(sessionId, ompSessionId, entryId, parentEntryId,
-      JSON.stringify(parts), replyTo ?? null, generation, historical || !parts.length ? 'done' : 'pending');
+      SELECT ?,?,?,?,?,?,?,?
+      WHERE NOT EXISTS (SELECT 1 FROM replies WHERE session_id=? AND omp_session_id=? AND entry_id=?)`)
+      .run(sessionId, ompSessionId, entryId, parentEntryId,
+        JSON.stringify(parts), replyTo ?? null, generation, historical || !parts.length ? 'done' : 'pending',
+        sessionId, ompSessionId, entryId);
   }
 
   pending(sessionId: string): Reply[] {
