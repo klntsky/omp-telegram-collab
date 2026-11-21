@@ -25,7 +25,8 @@ export async function withTelegramTestSessionStorage<T>(filename: string, callba
     return callback({ env: storage.env, sessions, async save(next) {
       for (const session of next) validateTelegramTestSession(session);
       if (new Set(next).size !== next.length) throw new Error('Duplicate Telegram test sessions');
-      await storage.save('TELEGRAM_TEST_SESSIONS', JSON.stringify(next).replaceAll("'", '\\u0027'));
+      // Drop only local credentials, never revoke authorizations that another worker may still use.
+      await storage.save('TELEGRAM_TEST_SESSIONS', JSON.stringify(next.slice(-30)).replaceAll("'", '\\u0027'));
     } });
   });
 }
