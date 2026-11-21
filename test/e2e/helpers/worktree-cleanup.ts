@@ -29,12 +29,15 @@ export async function requestCleanupConfirmation(app: CollaborationTest, session
   return waitForPanel(app, 'worktree-cleanup', 'wtcleanup:c:', start, session.threadId);
 }
 
-export async function applicationErrors(app: CollaborationTest): Promise<unknown[][]> {
-  const failure = z.object({ event: z.literal('application.console.error'), data: z.array(z.unknown()) });
+export async function applicationErrors(app: CollaborationTest): Promise<unknown[]> {
+  const failure = z.object({
+    event: z.literal('application.log'),
+    data: z.object({ level: z.literal('error'), error: z.unknown() }),
+  });
   await app.omp.flushLogs();
   return (await readFile(join(app.omp.logDirectory, 'events.jsonl'), 'utf8')).split('\n').slice(0, -1).flatMap(line => {
     if (!line) return [];
     const parsed = failure.safeParse(JSON.parse(line));
-    return parsed.success ? [parsed.data.data] : [];
+    return parsed.success ? [parsed.data.data.error] : [];
   });
 }
