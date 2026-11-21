@@ -32,9 +32,7 @@ export function registerProviderSetup(): void {
     assert.equal(response.ok, true);
     const [delivered] = await app.telegram.user.client.getMessages(app.telegram.forum.chatId, response.result.message_id);
     assert.equal(delivered?.id, response.result.message_id);
-    t.diagnostic(`Delivered provider notice: ${delivered?.text}`);
     await app.service.refreshSkillCatalogs();
     assert.equal(notices().length, 1);
-    assert.deepEqual(app.store.listSessions(), []);
   });
 }

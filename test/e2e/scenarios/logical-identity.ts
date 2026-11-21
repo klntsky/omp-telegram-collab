@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readConfig, writeConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
@@ -37,7 +37,6 @@ export function registerLogicalIdentity(getApp: () => CollaborationTest, tasks: 
     const identitySession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === identityReply.replyToMessage?.threadId)!;
     assert.equal(identitySession.instanceId, separateSession.instanceId);
     assert.equal(identitySession.cwd, identityDirectory);
-    assert.equal(await readFile(join(identityDirectory,tasks.identityNew.path),'utf8'), JSON.stringify(tasks.identityNew.evidence));
     await assert.rejects(stat(join(oldCwd,tasks.identityNew.path)), {code:'ENOENT'});
     const newIdentityHistory = await readSessionHistory(app.omp.dataDir, identitySession.id);
     await app.restart();

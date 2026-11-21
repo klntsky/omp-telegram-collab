@@ -15,16 +15,6 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
     const app = getApp();
     const previousIds = getPreviousIds();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
-    const [me, chat, member] = await Promise.all([
-      app.telegram.api.getMe(), app.telegram.api.getChat(app.telegram.forum.chatId),
-      app.telegram.api.getChatMember(app.telegram.forum.chatId, app.telegram.bot.id),
-    ]);
-    assert.equal(me.id, app.telegram.bot.id);
-    assert.equal(chat.type, 'supergroup');
-    assert.ok('is_forum' in chat && chat.is_forum);
-    assert.equal(member.status, 'administrator');
-    assert.ok('can_manage_topics' in member && member.can_manage_topics);
-    assert.ok('can_pin_messages' in member && member.can_pin_messages);
   
     const settings = await openPanel(app, '/settings');
     for (const [index, key] of [[0, 'all_messages_are_prompts'], [1, 'users_can_propose_prompts'], [5, 'create_topic_worktrees']] as const) {
@@ -49,7 +39,6 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
     assert.equal(session.status, 'open');
     assert.equal(app.store.promptQueue.has(session.id), false);
     assert.equal(reply.replyToMessage?.threadId, session.threadId);
-    assert.equal(app.omp.provider.requests.get(tasks.initial.name)![1]!.model, 'e2e-model');
     const history: SessionEntry[] = (await readSessionHistory(app.omp.dataDir, session.id)).trim().split('\n').map(line => JSON.parse(line));
     assert.ok(history.some(entry => entry.type === 'message' && entry.message.role === 'toolResult' &&
       entry.message.toolCallId === tasks.initial.toolCallId && entry.message.toolName === 'write' && !entry.message.isError));

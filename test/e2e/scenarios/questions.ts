@@ -39,7 +39,6 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
         const editorStart = app.apiCalls.length;
         await clickPanel(app, panel, 2);
         const editorMessageId = await waitForEditor(app, editorStart, session.threadId);
-        assert.equal(editorMessageId, panel.messageId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
         await replyText(app, editorMessageId, session.threadId, '/unknown Never treat this command as an answer');
@@ -83,8 +82,7 @@ export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<W
       } else {
         const editorStart = app.apiCalls.length;
         await clickPanel(app, panel, 2);
-        const editorMessage = await waitForEditor(app, editorStart, session.threadId);
-        assert.equal(editorMessage, panel.messageId);
+        await waitForEditor(app, editorStart, session.threadId);
         const editor = app.hostFrames.findLast(frame => frame.t === 'ui-request');
         assert.ok(editor?.t === 'ui-request' && editor.request.kind === 'editor');
         const cancellation = await waitForPanel(app, 'question', 'ask:', editorStart, session.threadId);

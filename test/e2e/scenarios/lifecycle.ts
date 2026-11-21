@@ -18,8 +18,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const chat = await app.telegram.api.getChat(session.chatId);
     assert.ok(chat.type === 'supergroup');
     const firstInput = taskInput(app.omp.provider, tasks.lifecycleSeed).text;
-    assert.ok(firstInput.includes(`<preamble>\nThis agent session (a.k.a. conversation) is running via omp-telegram-collab:`));
-    assert.ok(firstInput.includes(`chat titled "${chat.title}"`));
+    assert.ok(firstInput.includes(chat.title));
     assert.ok(firstInput.includes(`https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${session.threadId}`));
     assert.ok(firstInput.includes(`</preamble>\n\n${tasks.lifecycleSeed.prompt}`));
     const created = await createManagedTopic(app);

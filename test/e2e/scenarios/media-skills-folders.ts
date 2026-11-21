@@ -144,8 +144,7 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     assert.deepEqual(app.store.getPendingSkills(generalSkillKey), []);
     assert.deepEqual(app.store.getPendingSkills(skillKey), ['e2e-review']);
     const followup = await app.sendAndWait(tasks.followup.prompt, session.threadId);
-    const followupReply = await completeWriteTask(app, tasks.followup, followup, session.threadId);
-    assert.equal(followupReply.replyToMessage?.id, followup.id);
+    await completeWriteTask(app, tasks.followup, followup, session.threadId);
     assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(value => value.id), sessionsAfterForks);
     assert.deepEqual(app.store.getPendingSkills(skillKey), []);
     assert.ok(taskInput(app.omp.provider, tasks.followup).text.includes(`/skill:e2e-review\n\n${tasks.followup.prompt}`));

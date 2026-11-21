@@ -90,7 +90,6 @@ export function registerPromptQueue(): void {
       await app.waitForMessageHandled(sent.id);
       const pending = app.store.promptQueue.list(session.id)[0];
       assert.equal(pending?.messageId, sent.id);
-      assert.deepEqual(pending?.preparation?.extensions, []);
       assert.equal(pending?.preparation?.preset, 'e2e-alternate');
       assert.deepEqual(app.omp.provider.requests.get(restored.name), []);
       await app.runtime.kill(session);

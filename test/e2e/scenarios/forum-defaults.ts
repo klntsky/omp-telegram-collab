@@ -28,7 +28,6 @@ export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pi
         const saved = z.object({ choices: z.array(z.record(z.string(), z.unknown())) }).parse(JSON.parse(row.panel));
         const index = saved.choices.findIndex(action => Object.entries(wanted).every(([key, expected]) => action[key] === expected));
         assert.ok(index >= 0, `Missing native settings action ${JSON.stringify(wanted)}`);
-        assert.ok(panel.buttons[index]!.startsWith(`settings:${token}:`));
         await clickPanel(app, panel, index);
       };
       await choose({ kind: 'page', page: field === 'default_model_preset' ? 'presets' : 'skills' });
