@@ -370,6 +370,7 @@ export interface CollaborationTest {
     git(cwd: string, ...args: string[]): Promise<string>;
     listHosts(): Promise<{ sessionId: string; cwd: string; pid: number }[]>;
     assertWorktree(session: TopicSession, branch?: string): Promise<void>;
+    launches(): Promise<string[][]>;
     logDirectory: string;
     flushLogs(): Promise<void>;
   };

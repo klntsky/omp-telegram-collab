@@ -125,6 +125,10 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const separateSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === separateReply.replyToMessage?.threadId)!;
     assert.notEqual(separateSession.id, session.id);
     await app.omp.assertWorktree(separateSession);
+    const managedLaunches = (await app.omp.launches()).filter(args =>
+      args.includes('--session-dir') &&
+      args[args.indexOf('--session-dir') + 1] === join(app.omp.dataDir, 'sessions', separateSession.id));
+    assert.deepEqual(managedLaunches.map(args => args[args.indexOf('--cwd') + 1]), [separateSession.cwd]);
     assert.ok(app.apiCalls.some(call => {
       if (call.method !== 'forwardMessage') return false;
       const payload = call.payload as {chat_id: number; message_id: number; message_thread_id: number};

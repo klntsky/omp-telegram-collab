@@ -5,9 +5,10 @@ import path from 'node:path';
 import type { AppConfig, HostBinding, TopicSession } from '../../shared/contracts.js';
 import type { WorktreeTarget } from '../omp.js';
 import { type RegistryHost, type DurableBinding, type ManagedHost, type HostActivity } from './types.js';
-import { writeBinding, readHeader } from './files.js';
+import { privateFile, writeBinding, readHeader } from './files.js';
 import { errno, record } from './values.js';
 import { childEnvironment } from './environment.js';
+import { acquireHostOwnership } from '../host-ownership.mjs';
 interface WorktreeDependencies {
   readonly config: AppConfig;
   reserveSession(sessionId?: string, beforeMutation?: () => Promise<void>): Promise<{ bind(id: string): void; release(): void }>;
@@ -16,7 +17,7 @@ interface WorktreeDependencies {
   readonly stopping: Map<string, Promise<void>>;
   hostActivity(id: string): HostActivity;
   readonly pending: Map<string, Promise<HostBinding>>;
-  ensure(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<HostBinding>;
+  presetLaunch(session: TopicSession): Promise<{ overlay: Record<string, unknown>; args: string[]; preset?: string }>;
   readonly managed: Map<string, ManagedHost | null>;
   list(deadline: number): Promise<RegistryHost[]>;
   shutdown(id: string, host: ManagedHost, guard?: 'idle' | 'worktree'): Promise<void>;
@@ -196,28 +197,42 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
     if (!deps.config.instances.some(instance => instance.id === session.instanceId)) throw new Error('Instance path is not configured');
     const activity = deps.hostActivity(session.id);
     if (activity.busy || activity.leases || deps.pending.has(session.id)) throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
-    const existing = deps.managed.get(session.id);
-    // Rejoining a retiring host is fenced; this operation instead owns waiting
-    // for its confirmed exit before opening the native worktree RPC.
-    if (!existing?.retiring || existing.exited) await deps.ensure(session, beforeMutation);
-    const host = deps.managed.get(session.id);
-    if (!host) throw new Error('Managed OMP host is not available');
-    const registered = (await deps.list(Date.now() + deps.config.omp.startupTimeoutMs)).find(value => value.sessionId === host.sessionId);
-    if (deps.closed || deps.stopping.has(session.id)) throw new Error('OMP runtime is stopping');
-    if (deps.hostActivity(session.id).busy || deps.hostActivity(session.id).leases || registered?.busy === true) {
-      throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
-    }
-    const operation = (async () => {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(session.id)) throw new Error('Invalid managed session identifier');
+    // Fence before the first await: even a dormant session's history must have
+    // only one writer while native /worktree relocates it.
+    const operation = Promise.resolve().then(async () => {
+      const { dir, pin } = await deps.prepare(session);
+      const known = deps.managed.get(session.id);
+      if (known && known.sessionId !== pin.sessionId) throw new Error('Managed OMP history identity changed');
+      const host = known && !known.exited ? known : { sessionId: pin.sessionId, cwd: pin.cwd, exited: false, retiring: false };
       await beforeMutation?.();
+      deps.assertActive();
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      if (deps.hostActivity(session.id).busy || deps.hostActivity(session.id).leases) {
+        throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
+      }
+      // Retirement owns registry and offline lifecycle/PID checks. A missing
+      // registry entry alone must never authorize another history writer.
       await deps.shutdown(session.id, host, 'worktree');
       if (!host.exited) {
         if (host.retiring) throw new Error('OMP host accepted retirement but has not exited; worktree switching cannot continue until shutdown completes');
         throw new Error('OMP host is busy; wait for the current turn and queued messages to finish before switching worktrees');
       }
+      // Missing lifecycle/registry entries cannot prove that an initializing
+      // supervisor has released the session. Keep exclusion through publication.
+      using ownership = await acquireHostOwnership(dir);
       await beforeMutation?.();
-      const { dir, pin } = await deps.prepare(session);
+      const launch = await deps.presetLaunch(session);
+      const config = path.join(dir, 'worktree.yml');
+      // RPC needs the session's model settings, but no Collab room or managed
+      // host lifecycle. The final host starts only after relocation completes.
+      await privateFile(config, JSON.stringify({
+        ...launch.overlay, collab: { autoStart: false }, startup: { checkUpdate: false, setupWizard: false },
+      }));
       await beforeMutation?.();
-      const result = await worktreeRpc(dir, pin, branch);
+      deps.assertActive();
+      if (deps.closed) throw new Error('OMP runtime is stopping');
+      const result = await worktreeRpc(config, pin, launch.args, branch);
       const state = result.state;
       if (state.sessionId !== pin.sessionId || typeof state.sessionFile !== 'string') {
         throw new Error('Native OMP worktree returned an invalid session identity');
@@ -234,16 +249,16 @@ export function createWorktree(deps: WorktreeDependencies): RuntimeWorktree {
       session.cwd = cwd;
       if (cwd === pin.cwd) throw new Error(result.text || 'OMP worktree command did not move the session');
       return result.text;
-    })();
+    });
     deps.stopping.set(session.id, operation.then(() => undefined, () => undefined));
     try { return await operation; }
     finally { deps.stopping.delete(session.id); }
   }
 
-  async function worktreeRpc(dir: string, pin: DurableBinding, branch?: string): Promise<{ text: string; state: Record<string, unknown> }> {
+  async function worktreeRpc(config: string, pin: DurableBinding, args: string[], branch?: string): Promise<{ text: string; state: Record<string, unknown> }> {
     const child = spawn(deps.config.omp.executable, [
-      ...deps.config.omp.args, '--mode', 'rpc', '--resume', pin.sessionFile,
-      '--cwd', pin.cwd, '--config', path.join(dir, 'runtime.yml'), '--no-title',
+      ...args, '--mode', 'rpc', '--resume', pin.sessionFile,
+      '--cwd', pin.cwd, '--config', config, '--no-title',
     ], { cwd: pin.cwd, env: childEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
     deps.skillProcesses.add(child);
     let buffer = '';

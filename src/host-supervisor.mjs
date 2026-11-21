@@ -1,7 +1,7 @@
 import * as pty from '@lydell/node-pty';
 import { closeSync, constants, fchmodSync, openSync, renameSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { acquireHostOwnership } from './host-ownership.mjs';
 
 const filename = join(process.env.OMP_TELEGRAM_SESSION_DIR, 'terminal.log');
 const limit = 1024 * 1024;
@@ -34,18 +34,7 @@ process.on('uncaughtException', error => {
   finally { process.exit(1); }
 });
 
-// A registry timeout says nothing about process exit. Hold kernel-owned session
-// exclusion from before PTY creation until native exit, even across bot restarts.
-// Reusing the runtime's SQLite lock convention also releases ownership on crash.
-const ownerPath = join(process.env.OMP_TELEGRAM_SESSION_DIR, 'host-owner.sqlite');
-const ownerFd = openSync(ownerPath, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-fchmodSync(ownerFd, 0o600);
-closeSync(ownerFd);
-const owner = new DatabaseSync(ownerPath);
-// Native exit can precede the old supervisor's PTY exit callback and lock
-// release. Allow that bounded handoff without ever running two native hosts.
-owner.exec('PRAGMA busy_timeout=5000; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner (pid INTEGER NOT NULL); DELETE FROM owner;');
-owner.prepare('INSERT INTO owner (pid) VALUES (?)').run(process.pid);
+const owner = await acquireHostOwnership(process.env.OMP_TELEGRAM_SESSION_DIR);
 
 const [executable, ...args] = process.argv.slice(2);
 const terminal = pty.spawn(executable, args, {

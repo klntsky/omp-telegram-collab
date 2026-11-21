@@ -22,5 +22,5 @@ await build({
   sourcemap: true,
   external: ['ws'],
 });
-await Promise.all(['host-supervisor.mjs','host-lifecycle.mjs'].map(name => copyFile(`src/${name}`,`dist/${name}`)));
+await Promise.all(['host-supervisor.mjs','host-lifecycle.mjs','host-ownership.mjs'].map(name => copyFile(`src/${name}`,`dist/${name}`)));
 await chmod('dist/cli.js', 0o755);

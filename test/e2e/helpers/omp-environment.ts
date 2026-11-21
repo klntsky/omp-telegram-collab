@@ -164,6 +164,12 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   };
   const executable = join(root, 'omp');
   const actualOmp = process.env.OMP_EXECUTABLE ?? 'omp';
+  const launchDirectory = join(logDirectory, 'launches');
+  await mkdir(launchDirectory, { mode: 0o700 });
+  const launches = async (): Promise<string[][]> => Promise.all(
+    (await readdir(launchDirectory)).map(async name =>
+      (await readFile(join(launchDirectory, name), 'utf8')).split('\0').slice(0, -1)),
+  );
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const assignments = Object.entries(env).map(([key, value]) => quote(`${key}=${value}`));
   const lifecycleKeys = ['OMP_TELEGRAM_SESSION_DIR', 'OMP_TELEGRAM_DEFAULT_PRESET', 'OMP_TELEGRAM_SUPERVISOR_PID'];
@@ -171,6 +177,7 @@ export async function setupOmpEnvironment(t: Pick<TestContext, 'after' | 'signal
   const launch = `command=$1
 shift
 args=("$@")
+printf '%s\\0' "\${args[@]}" > ${quote(launchDirectory)}/"$$"
 headless=false
 for value in "\${args[@]}"; do
   if [[ "$value" == "--mode" ]]; then headless=true; fi
@@ -197,5 +204,5 @@ exec -a "$0" "$command" "\${args[@]}"`;
     '--system-prompt', 'Complete the requested task with the available tools.',
   ];
   log('environment-ready', { workspace, dataDir, executable, actualOmp, args, environmentKeys: Object.keys(env), providerUrl: provider.baseUrl });
-  return { workspace, dataDir, executable, agentConfigPath, args, provider, log, step, git, listHosts, assertWorktree, logDirectory, flushLogs };
+  return { workspace, dataDir, executable, agentConfigPath, args, provider, log, step, git, listHosts, assertWorktree, launches, logDirectory, flushLogs };
 }
