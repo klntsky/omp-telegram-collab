@@ -7,6 +7,8 @@ import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, openPanel, replyText, waitForPanel } from '../helpers/telegram-actions.js';
 
 export function registerFolderSettings(getApp: () => CollaborationTest): void {
+  // Permanent: Folder approval must bind a manually created, existing topic without starting
+  // work or creating another topic; /new coverage does not exercise this enrollment boundary.
   it('manual topics choose their runtime folder in the same topic', async () => {
     const app = getApp();
     const folder = 'manual-selected & <code> "😀`';
@@ -33,6 +35,8 @@ export function registerFolderSettings(getApp: () => CollaborationTest): void {
     assert.equal(app.apiCalls.slice(start).some(call => call.method === 'createForumTopic'), false);
   });
 
+  // Permanent: Retired native settings replies must stay inert even after panel history reloads
+  // on restart; normal settings edits cannot detect stale replies changing folders or spawning tasks.
   it('folder entry requests native replies and saves paths without reviving retired input', async () => {
     const app = getApp();
     const panel = await openPanel(app, '/settings');

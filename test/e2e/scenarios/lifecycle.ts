@@ -8,6 +8,9 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 import { installRetirementGate } from '../helpers/retirement-gate.js';
 export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'lifecycleSeed' | 'lifecyclePeer' | 'resumed' | 'reopened' | 'idle' | 'separate' | 'restarted'>): void {
+  // Permanent: kill must preserve resumable history, detach must suppress intake
+  // without killing the host, and restart must retain bindings and pending work.
+  // Unlike termination coverage, these transitions keep individual sessions reusable.
   it('lifecycle, idle, detach, and restart', async () => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;

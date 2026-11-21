@@ -29,6 +29,9 @@ function resultText(entry: SessionEntry): string {
   return entry.message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
 }
 
+// Permanent: rewritten native history must converge for warm/new readers and
+// invalidate stale pagination cursors. Gateway reconnect tests do not exercise
+// an in-place history rewrite while the original host and connection remain live.
 test('stock OMP rewrites a watched native read result for warm and newly joined Mini App readers', { timeout: 480000 }, async t => {
   const original = createWriteTask('history-original', '', 'e2e-history-rewrite.txt');
   const replacement = createWriteTask('history-replacement', '', original.path);

@@ -9,6 +9,9 @@ import { holdTelegramAcknowledgement } from '../helpers/telegram-acknowledgement
 import { installRetirementGate } from '../helpers/retirement-gate.js';
 
 export function registerPromptQueue(): void {
+  // Permanent: Real Telegram redelivery after restart must not submit an accepted task twice,
+  // and deferred preset/skill preparation must survive retirement. A permanently rejected
+  // attachment must leave later work runnable rather than poison the durable queue.
   it('durable queue survives real Telegram redelivery, deferred preparations, and a rejected attachment', { timeout: 360000 }, async t => {
     const seed = createWriteTask('queue-seed');
     const queued = createWriteTask('queue-recovered');
@@ -68,6 +71,9 @@ export function registerPromptQueue(): void {
     app.omp.provider.assertComplete([seed.name, queued.name, following.name]);
   });
 
+  // Permanent: Invalid preset/skill requests must leave no blocking queue item, while a
+  // retryable attachment failure must retain its preset checkpoint across host replacement.
+  // Unlike redelivery recovery, this protects preparation state when the original host is gone.
   it('queued validation failures do not block a checkpointed preset after host replacement', { timeout: 240000 }, async t => {
     const seed = createWriteTask('queue-checkpoint-seed');
     const restored = createWriteTask('queue-checkpoint-restored');
@@ -104,6 +110,9 @@ export function registerPromptQueue(): void {
     }
   });
 
+  // Permanent: Initial /new work and later /p intake must recover through one FIFO after
+  // model setup fails, preserving the prepared worktree and attachment without resubmission.
+  // Reading the first task's output proves ordering beyond the separate preset-checkpoint case.
   it('initial and subsequent tasks share durable FIFO recovery without repeating preparation', { timeout: 240000 }, async t => {
     const initial = createWriteTask('unified-queue-initial');
     const following = createWriteTask('unified-queue-following');

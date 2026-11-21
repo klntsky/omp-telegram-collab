@@ -8,6 +8,8 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerLogicalIdentity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'identitySeed' | 'identityOld' | 'identityNew' | 'identityOldRestarted' | 'identityNewRestarted'>): void {
+  // Permanent: Reordering instances and changing the default directory must preserve old
+  // conversations while routing new ones correctly across restart; binding units lack live history.
   it('logical identity', async () => {
     const app = getApp();
     const seed = await app.sendAndWait(`/new ${tasks.identitySeed.prompt}`);

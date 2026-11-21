@@ -7,6 +7,9 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerTermination(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'terminationSeed' | 'terminationPeer' | 'restored'>): void {
+  // Permanent: a persisted global stop must kill all hosts and block admission
+  // across restart until explicitly cleared. Per-session stop/kill/detach cannot
+  // detect a restart that accidentally bypasses this global fence.
   it('termination', async () => {
     const app = getApp();
     const seed = await app.sendAndWait(`/new ${tasks.terminationSeed.prompt}`);

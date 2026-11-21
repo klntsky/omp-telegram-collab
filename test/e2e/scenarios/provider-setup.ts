@@ -8,6 +8,9 @@ import { setupCollaborationTest } from '../helpers/collaboration-fixture.js';
 import { enrollForum } from '../helpers/telegram-actions.js';
 
 export function registerProviderSetup(): void {
+  // Permanent: Removing actual provider configuration must yield the setup-error category
+  // and one delivered notice routed to the enrolled forum despite repeated catalog refreshes.
+  // Unlike chat isolation, this protects actionable configuration reporting, not API fault handling.
   test('missing OMP providers notify the enrolled forum once across catalog refreshes', { timeout: 240000 }, async t => {
     const app = await setupCollaborationTest(t, { scenarios: [] });
     await enrollForum(app);

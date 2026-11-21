@@ -13,6 +13,9 @@ export function registerMiniAppRecovery(): void {
 // consecutive forum creations produced account-wide FLOOD_WAIT_40 cooldowns.
 // TDLib also accounts server-requested delays against a total query budget:
 // https://github.com/tdlib/td/blob/master/td/telegram/net/NetQueryDelayer.cpp (NetQueryDelayer::delay).
+// Permanent: A relay lost during gateway setup must reconnect to the same live host,
+// not end the viewer or advance its generation; explicit /kill must still end it.
+// Unlike draining recovery, this distinguishes transient setup loss from terminal shutdown.
 test('Mini App recovers when the managed local relay stops during gateway setup', {timeout: 480000}, async t => {
   const task = createWriteTask('miniapp-setup-recovery');
   const app = await setupCollaborationTest(t, {scenarios: [writeScenario(task)]});
@@ -38,6 +41,9 @@ test('Mini App recovers when the managed local relay stops during gateway setup'
   await browser.waitForSnapshot(snapshot => snapshot.phase === 'ended');
   assert.ok(app.store.getSessionGeneration(session.id) > generation);
 });
+// Permanent: Restarted draining hosts must remain readable without admitting new writes.
+// Relay recovery and rejected queued work must preserve the existing feed until admitted
+// work finishes, unlike the active-host setup recovery case above.
 test('Mini App observes draining work across restart without reopening mutation admission', {timeout: 480000}, async t => {
   const task = createWriteTask('miniapp-draining-work');
   const nextTask = createWriteTask('miniapp-after-draining');

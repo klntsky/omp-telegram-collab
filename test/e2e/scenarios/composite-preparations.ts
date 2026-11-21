@@ -6,6 +6,8 @@ import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerCompositePreparations(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks,
   'compositeSeed' | 'compositeSelected' | 'compositeRecovered' | 'compositeNew'>): void {
+  // Permanent: Preparation-only commands must preserve stale skills and earlier successful
+  // changes after a later failure, without queuing a task; task-bearing queue cases cannot prove this.
   it('composite preparations preserve stale skills, survive later failures, and create without tasks', async t => {
     const app = getApp();
 

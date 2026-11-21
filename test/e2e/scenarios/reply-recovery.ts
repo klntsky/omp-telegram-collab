@@ -15,6 +15,9 @@ const requestPayload = z.object({ message_thread_id: z.number().optional() });
 const successfulReply = z.object({ ok: z.literal(true), result: z.object({ message_id: z.number() }) });
 
 export function registerReplyRecovery(): void {
+  // Permanent: Committed output must outlive its host, listener, and service owner.
+  // Real sends with failed checkpoints must retain cooldowns, while confirmed chunks
+  // resume without duplication; unlike receipt recovery, this protects outbound durability.
   test('durable replies survive host exit, listener replacement, and service restart', { timeout: 480000 }, async t => {
     const disconnected = createWriteTask('reply-disconnected', '', 'shutdown-after-turn');
     const replaced = createWriteTask('reply-replaced');

@@ -10,6 +10,8 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerForumDefaults(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'defaultsFirst' | 'defaultsUnchanged' | 'defaultsSwitched' | 'defaultsBusy' | 'defaultsManual' | 'defaultsNext'>): void {
+  // Permanent: New topics must snapshot defaults and consume first-prompt skills exactly once,
+  // despite later settings changes; explicit preparations do not exercise inherited state.
   it('forum model presets and first-prompt skills', async t => {
     const app = getApp();
     const originalAgentConfig = await readFile(app.omp.agentConfigPath, 'utf8');

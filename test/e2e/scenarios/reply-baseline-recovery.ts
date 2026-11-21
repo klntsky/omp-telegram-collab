@@ -17,6 +17,9 @@ const replyCall = z.object({
 });
 
 export function registerReplyBaselineRecovery(): void {
+  // Permanent: A baseline DB failure must retry even when native history size and mtime
+  // stay unchanged; otherwise later output can be silently swallowed as historical.
+  // Unlike outbound-delivery recovery, this proves capture retries without a welcome or cooldown.
   test('unchanged native history retries a failed baseline before delivering new output', { timeout: 480000 }, async t => {
     const initial = createWriteTask('baseline-historical');
     const subsequent = createWriteTask('baseline-new-output');

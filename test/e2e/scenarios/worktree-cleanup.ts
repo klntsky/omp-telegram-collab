@@ -10,6 +10,9 @@ import { applicationErrors, closeForConfirmation, createCleanupWorktree } from '
 import { readSessionHistory } from '../helpers/model-tasks.js';
 
 export function registerWorktreeCleanup(getApp: () => CollaborationTest): void {
+  // Permanent: destructive cleanup must honor confirmation/cancellation, preserve
+  // history and neighboring directories, and remain retryable after Git refuses
+  // dirty data. Identity-attack cases do not cover this complete authorized lifecycle.
   it('closed-topic worktree cleanup requires confirmation and preserves other directories and history', async t => {
     const app = getApp();
     const ordinary = await createManagedTopic(app);

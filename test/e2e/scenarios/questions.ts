@@ -8,6 +8,8 @@ import { it } from 'node:test';
 import type { WorkflowTasks, WorkflowControls } from './workflow-tasks.js';
 
 export function registerQuestions(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'question' | 'customAnswer' | 'askHandoff' | 'chatHandoff'>, controls: WorkflowControls): void {
+  // Permanent: Live question routing must preserve native select/editor responses and cancel
+  // stale questions on command handoff; parser-only cases cannot catch leaked UI answers.
   it('questions', async t => {
     const app = getApp();
     const { interrupted, cancelledQuestion, questionControls } = controls;

@@ -14,6 +14,9 @@ const delivered = z.object({
 });
 
 export function registerReplyReceiptRecovery(): void {
+  // Permanent: Losing the live prompt receipt must not lose the Telegram reply origin.
+  // Actual native history must recover both anchors and the delivered reply relationship
+  // before reconnect, independently of baseline persistence or outbound chunk retries.
   test('history recovery correlates a prompt receipt missed before ingestion to the originating Telegram message', { timeout: 240000 }, async t => {
     const task = createWriteTask('reply-missed-receipt');
     const model = Promise.withResolvers<void>();

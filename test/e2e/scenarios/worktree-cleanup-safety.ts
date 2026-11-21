@@ -41,6 +41,9 @@ async function evidence(app: CollaborationTest, session: TopicSession, target: W
 }
 
 export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): void {
+  // Permanent: another stored session can still reference this directory without
+  // a running host. Runtime-only process checks cannot protect that dormant peer
+  // when a closed topic's administrator requests deletion.
   it('cleanup confirmation refuses paths shared with another stored session', async () => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -65,6 +68,9 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
     }
   });
 
+  // Permanent: current configuration and symlinked parents can place protected
+  // data inside a deletion target. Stale-confirmation and inode tests do not
+  // exercise this independent configured-path containment boundary.
   it('runtime cleanup protects configured folders and symlinked configured parents', async () => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -87,6 +93,9 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
     }
   });
 
+  // Permanent: a pathname can be replaced after inspection while Git metadata
+  // still looks valid. Unlike callback approval matching, runtime identity checks
+  // must protect both the displaced original and the replacement directory.
   it('runtime cleanup rejects symlink and directory replacement without touching either directory', async () => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -122,6 +131,9 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
     }
   });
 
+  // Permanent: recovered runtimes lack local turn observations and must consult
+  // native activity before cleanup. Path/confirmation guards cannot detect a
+  // deletion attempt that would stop an actively executing host.
   it('runtime cleanup refuses a busy native host before stopping it', async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);

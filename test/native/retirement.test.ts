@@ -9,6 +9,9 @@ import { OmpRuntime } from '../../src/runtime.js';
 import { bounded, waitUntil } from '../e2e/helpers/async.js';
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
 
+// Permanent: a finished main turn can still own a running native background job.
+// Idle retirement must inspect that work rather than infer safety from streaming
+// state; foreground-question draining tests leave the main turn active instead.
 test('idle retirement does not fence a native session waiting for its background job', { timeout: 180000 }, async t => {
   const cleanup: Array<() => unknown | Promise<unknown>> = [];
   t.after(async () => {

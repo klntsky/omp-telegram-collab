@@ -10,6 +10,8 @@ import { combineTelegramErrors } from '../helpers/errors.js';
 import test from 'node:test';
 
 export function registerForkFailures(): void {
+// Permanent: Shared live Telegram fixture seeds source history and binding for the two fork
+// failure checkpoints below; this container supplies setup rather than another behavior case.
 test('Telegram fork failures preserve completed forks and reject interrupted preparation', { timeout: 480000 }, async t => {
   const seed = createWriteTask('fork-failure-seed');
   const recovery = createWriteTask('fork-notification-recovery');
@@ -26,6 +28,8 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
   assert.ok(sourceHistory.includes(seed.toolCallId));
   assert.ok(sourceHistory.includes(seed.evidence.nonce));
 
+  // Permanent: A committed fork must remain usable when delivery of its final source notice
+  // fails; interrupted prepublication preparation has no completed destination to preserve.
   await t.test('completed fork survives lost source notification', async () => {
     const existing = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
     const diagnostic = new Error('E2E transport dropped the delivered final fork source-link response');
@@ -79,6 +83,8 @@ test('Telegram fork failures preserve completed forks and reject interrupted pre
     }
   });
 
+  // Permanent: An interrupted prepublication fork must not resume with empty history;
+  // postcommit delivery-failure coverage instead starts with an already complete fork.
   await t.test('interrupted fork cannot resume with empty history', async child => {
     const before = app.store.getSession(source.id)!;
     app.config.omp.maxSessions = 4;

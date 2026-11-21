@@ -10,6 +10,8 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'image' | 'explicitImage' | 'mention' | 'mentionImage' | 'replyPrompt' | 'replyMention' | 'replyImage' | 'replyDocument' | 'replyQuoted' | 'document' | 'documentOverwrite' | 'documentOnly' | 'documentAlbum' | 'documentMentionAlbum' | 'documentFinalAuthority' | 'settingsReply' | 'followup' | 'general'>): void {
+  // Permanent: Live media must deliver actual bytes to the right prompt, with selected skills
+  // and folder approval intact; text-only routing checks miss file loss or premature submission.
   it('media, skills, and folders', async t => {
     const app = getApp();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
@@ -198,6 +200,8 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
     app.omp.provider.assertComplete([tasks.image.name, tasks.explicitImage.name, tasks.mention.name, tasks.mentionImage.name, tasks.document.name, tasks.documentOverwrite.name, tasks.documentOnly.name, tasks.settingsReply.name, tasks.followup.name, tasks.general.name]);
     app.omp.provider.assertComplete([tasks.replyPrompt.name, tasks.replyMention.name, tasks.replyImage.name, tasks.replyDocument.name, tasks.replyQuoted.name]);
   });
+  // Permanent: Losing final authority after a successful file write must suppress the prompt
+  // without undoing the bytes; cancellation-before-write cases cover a different checkpoint.
   it('existing-session upload rechecks authority before submitting its prompt', async () => {
     const app = getApp();
     const session = await createManagedTopic(app);
@@ -233,6 +237,8 @@ export function registerMediaSkillsAndFolders(getApp: () => CollaborationTest, t
       intercept = false;
     }
   });
+  // Permanent: Telegram album aggregation must submit every file once with shared reply anchors;
+  // single-upload cases cannot expose split prompts or mismatched album acknowledgements.
   it('document albums submit all files in one explicit prompt', async () => {
     const app = getApp();
     const session = await createManagedTopic(app);

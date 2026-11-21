@@ -12,6 +12,9 @@ import { applicationErrors, closeForConfirmation, createCleanupWorktree, request
 import { bounded } from '../helpers/async.js';
 
 export function registerWorktreeCleanupConfirmations(getApp: () => CollaborationTest): void {
+  // Permanent: a cached remote-tracking ref can outlive its server-side branch.
+  // Deletion must recheck remote durability and dirtiness; ordinary confirmed
+  // cleanup does not exercise the decision to skip a second confirmation.
   it('clean remote branch deletes from the offer while local dirty and stale remote branches require confirmation', async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -51,6 +54,9 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.equal(binding.removedWorktree, true);
   });
 
+  // Permanent: Telegram may enqueue Confirm with the pre-Cancel button snapshot.
+  // Durable revocation must beat that stale update across restart/new approval;
+  // valid-approval persistence tests do not cover revoked-token reuse.
   it('worktree cleanup queued Confirm stays revoked after Cancel and fresh confirmation across restart', { timeout: 120000 }, async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -118,6 +124,9 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.equal(existsSync(target.path), false);
   });
 
+  // Permanent: valid approvals must survive restart, remain inactive while the
+  // topic is reopened, and tolerate duplicate delivery without repeated deletion.
+  // The queued-Cancel case instead exercises an approval that has been revoked.
   it('worktree cleanup offers and confirmations survive restart and reopen while duplicate callbacks delete once', async () => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);
@@ -149,6 +158,9 @@ export function registerWorktreeCleanupConfirmations(getApp: () => Collaboration
     assert.deepEqual((await applicationErrors(app)).slice(errorsBefore), []);
   });
 
+  // Permanent: replacing a Git registration at the same pathname must invalidate
+  // its old approval. This tests bot confirmation identity before deletion,
+  // separately from the runtime's lower-level filesystem identity checks.
   it('worktree cleanup confirmation cannot delete a different registered directory at the same path', async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);

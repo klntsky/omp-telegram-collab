@@ -25,6 +25,9 @@ const observedCall = z.object({
 // synthetic Bot API update.
 // https://github.com/tdlib/td/blob/master/td/telegram/ChatManager.cpp (DeleteChannelQuery)
 export function registerChatIsolation(): void {
+  // Permanent: An inaccessible assigned forum must not block healthy startup or execution,
+  // but real 401s must remain fatal in detached album and callback paths.
+  // Cleanup failures must preserve the primary error, not turn isolation into blanket suppression.
   test('a deleted assigned forum cannot prevent another forum from restarting and executing tasks', { timeout: 300000 }, async t => {
     const task = createWriteTask('chat-isolation');
     const app = await setupCollaborationTest(t, { scenarios: [writeScenario(task)] });

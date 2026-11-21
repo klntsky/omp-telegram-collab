@@ -21,6 +21,9 @@ import { createWriteTask, readSessionHistory, writeScenario, type WriteTask } fr
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
 import { interruptManagedRelay } from '../e2e/helpers/relay.js';
 
+// Permanent: supported upgrades can encounter live legacy hosts on another relay.
+// Cutover, registry omission and relay/service failure must preserve history and
+// exclude a second writer; normal Telegram startup never establishes those states.
 test('managed relay preserves native history through foreign-relay cutover, service restart and relay crash', { timeout: 240000 }, async t => {
   const tasks = [createWriteTask('before-cutover'), createWriteTask('after-relay-crash')];
   const cleanup: Array<() => unknown | Promise<unknown>> = [];

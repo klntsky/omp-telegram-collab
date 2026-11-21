@@ -10,6 +10,8 @@ import type { WorkflowTasks } from './workflow-tasks.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
 export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentCancellation' | 'documentAuthorization'>): void {
+  // Permanent: Capacity approval must reject cancelled/stale tokens, preserve queued uploads,
+  // and synchronize persisted and runtime limits; ordinary admission misses this deferred boundary.
   it('managed process capacity confirmation', async t => {
     const app = getApp();
     const limit = readConfig(app.config.configPath).omp.maxSessions;
@@ -105,6 +107,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     }
     app.omp.provider.assertComplete([...prerequisites.map(task => task.name), tasks.capacityPending.name]);
   });
+  // Permanent: Stopping during download must preserve existing destination bytes and suppress
+  // submission; permitted recovery uploads do not exercise cancellation before the write.
   it('stop prevents an in-flight initial document from replacing an existing file', async t => {
     const app = getApp();
     const filename = 'cancelled-initial-document.txt';
@@ -153,6 +157,8 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await writeFile(app.omp.agentConfigPath, nativeSettings);
     }
   });
+  // Permanent: Authorization transport failure after automatic worktree completion must not
+  // replay that checkpoint; explicit preparation extensions exercise a different recovery path.
   it('authorization transport failure does not replay a completed automatic worktree', async t => {
     const app = getApp();
     const settings = await openPanel(app, '/settings');

@@ -10,6 +10,9 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 
 export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'initial' | 'worktree' | 'worktreeRestarted' | 'forkTip' | 'forkAnswer' | 'forkPrompt'>, getPreviousIds: () => Set<string>): void {
+  // Permanent: relocation/restart must preserve conversation identity, and normal
+  // forks must select the correct Telegram prompt/answer anchor without changing
+  // the source. Failure-only fork cases do not establish successful anchor selection.
   it('worktrees and forks', async t => {
     const app = getApp();
     const previousIds = getPreviousIds();

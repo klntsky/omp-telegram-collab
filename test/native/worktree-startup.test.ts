@@ -13,6 +13,9 @@ import { SessionRetiringError } from '../../src/runtime/types.js';
 import { bounded, waitUntil } from '../e2e/helpers/async.js';
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
 
+// Permanent: relocation must exclude concurrent admission and an unpublished
+// supervisor holding history ownership; authorization refusal must release its
+// admission fence. Published-host retirement tests cannot expose that startup race.
 test('worktree preparation excludes concurrent writers and releases its admission fence after authorization failure', { timeout: 120000 }, async t => {
   const cleanup: Array<() => unknown | Promise<unknown>> = [];
   t.after(async () => {
