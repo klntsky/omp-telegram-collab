@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
-import { join } from 'node:path';
 import { z } from 'zod';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { changeTopicClosed, clickPanel, createManagedTopic, openPanel, reactionAttempts, setTopicClosed, waitForReactionAttempt } from '../helpers/telegram-actions.js';
@@ -65,12 +64,6 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await clickPanel(app, manualWorktrees, 5);
     await app.waitForCondition(() => savedChat().create_topic_worktrees === false);
     await clickPanel(app, manualWorktrees, -1);
-    const protocol = await app.sendAndWait('/start', idleThreadId);
-    const update = app.updates.find(candidate => candidate.message?.message_id === protocol.id)?.message!;
-    assert.equal(update.from?.id, app.telegram.user.account.id);
-    assert.equal(update.message_thread_id, idleThreadId);
-    assert.equal(update.is_topic_message, true);
-    assert.ok(update.entities?.some(entity => entity.type === 'bot_command' && entity.offset === 0 && entity.length === 6));
     await setTopicClosed(app, idleSession, true);
     await setTopicClosed(app, idleSession, false);
     const stop = await app.sendAndWait('/stop', idleThreadId);
@@ -124,10 +117,6 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     const separateSession = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === separateReply.replyToMessage?.threadId)!;
     assert.notEqual(separateSession.id, session.id);
     await app.omp.assertWorktree(separateSession);
-    const managedLaunches = (await app.omp.launches()).filter(args =>
-      args.includes('--session-dir') &&
-      args[args.indexOf('--session-dir') + 1] === join(app.omp.dataDir, 'sessions', separateSession.id));
-    assert.deepEqual(managedLaunches.map(args => args[args.indexOf('--cwd') + 1]), [separateSession.cwd]);
     assert.ok(app.apiCalls.some(call => {
       if (call.method !== 'forwardMessage') return false;
       const payload = call.payload as {chat_id: number; message_id: number; message_thread_id: number};

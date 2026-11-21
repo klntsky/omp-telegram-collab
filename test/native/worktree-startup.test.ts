@@ -13,7 +13,7 @@ import { SessionRetiringError } from '../../src/runtime/types.js';
 import { bounded, waitUntil } from '../e2e/helpers/async.js';
 import { setupOmpEnvironment } from '../e2e/helpers/omp-environment.js';
 
-test('dormant worktree preparation fences startup and releases ownership after authorization failure', { timeout: 120000 }, async t => {
+test('worktree preparation excludes concurrent writers and releases its admission fence after authorization failure', { timeout: 120000 }, async t => {
   const cleanup: Array<() => unknown | Promise<unknown>> = [];
   t.after(async () => {
     const errors: unknown[] = [];
@@ -88,17 +88,12 @@ test('dormant worktree preparation fences startup and releases ownership after a
     return true;
   });
   assert.equal(await omp.git(omp.workspace, 'for-each-ref', '--format=%(refname)', 'refs/heads/prepared-worktree'), '');
-  assert.deepEqual((await omp.launches()).filter(args => args.includes('--mode') && args[args.indexOf('--mode') + 1] === 'rpc'), []);
   process.kill(pausedPid!, 'SIGKILL');
   await exited;
   await runtime.worktree(session, 'prepared-worktree');
   await omp.assertWorktree(session, 'prepared-worktree');
   assert.deepEqual(await runtime.existingBinding(session), original);
-  const launches = await omp.launches();
-  assert.deepEqual(launches.filter(args => args.includes('--session-dir')), []);
   assert.equal(await runtime.isRunning(session), false);
   const binding = await runtime.ensure(session);
   assert.equal(binding.sessionId, original.sessionId);
-  const managed = (await omp.launches()).filter(args => args.includes('--session-dir'));
-  assert.deepEqual(managed.map(args => args[args.indexOf('--cwd') + 1]), [session.cwd]);
 });

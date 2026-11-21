@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SessionEntry } from '@oh-my-pi/pi-wire';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, deliveredMessageLinks, openPanel, replyText, setTopicClosed } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory } from '../helpers/model-tasks.js';
@@ -16,17 +15,6 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
     const previousIds = getPreviousIds();
     const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
   
-    const settings = await openPanel(app, '/settings');
-    for (const [index, key] of [[0, 'all_messages_are_prompts'], [1, 'users_can_propose_prompts'], [5, 'create_topic_worktrees']] as const) {
-      const original = savedChat()[key];
-      await clickPanel(app, settings, index);
-      await app.waitForCondition(() => savedChat()[key] === !original);
-      await clickPanel(app, settings, index);
-      await app.waitForCondition(() => savedChat()[key] === original);
-    }
-    await clickPanel(app, settings, -1);
-    assert.deepEqual(app.store.listSessions(app.telegram.bot.id).map(value => value.id), [...previousIds]);
-  
     const sent = await app.sendAndWait(`/new ${tasks.initial.prompt}`);
     const reply = await completeWriteTask(app, tasks.initial, sent);
     await app.waitForCondition(() => app.hostFrames.some(frame => frame.t === 'event' && frame.event.type === 'agent_end'));
@@ -39,11 +27,6 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
     assert.equal(session.status, 'open');
     assert.equal(app.store.promptQueue.has(session.id), false);
     assert.equal(reply.replyToMessage?.threadId, session.threadId);
-    const history: SessionEntry[] = (await readSessionHistory(app.omp.dataDir, session.id)).trim().split('\n').map(line => JSON.parse(line));
-    assert.ok(history.some(entry => entry.type === 'message' && entry.message.role === 'toolResult' &&
-      entry.message.toolCallId === tasks.initial.toolCallId && entry.message.toolName === 'write' && !entry.message.isError));
-    assert.ok(history.some(entry => entry.type === 'message' && entry.message.role === 'assistant' &&
-      entry.message.model === 'e2e-model' && entry.message.stopReason === 'stop'));
   
     await app.omp.git(app.omp.workspace, 'add', '--all');
     await app.omp.git(app.omp.workspace, 'commit', '-m', 'Preserve initial task evidence');

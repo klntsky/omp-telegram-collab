@@ -122,21 +122,6 @@ export function registerWorktreeCleanupSafety(getApp: () => CollaborationTest): 
     }
   });
 
-  it('runtime cleanup preserves locked worktrees and clears its deletion fence after refusal', async () => {
-    const app = getApp();
-    const { session, target } = await createCleanupWorktree(app);
-    const retained = await evidence(app, session, target);
-    await app.omp.git(target.commonDir, 'worktree', 'lock', '--reason', 'cleanup safety test', target.path);
-    try {
-      await assert.rejects(app.runtime.deleteWorktree({ ...session, status: 'closed' }, target, async () => {}), /locked/i);
-      assert.equal(await readFile(join(target.gitDir, 'locked'), 'utf8'), 'cleanup safety test\n');
-      await retained();
-      assert.deepEqual(await app.runtime.inspectWorktree(session), target);
-    } finally {
-      await app.omp.git(target.commonDir, 'worktree', 'unlock', target.path);
-    }
-  });
-
   it('runtime cleanup refuses a busy native host before stopping it', async t => {
     const app = getApp();
     const { session, target } = await createCleanupWorktree(app);

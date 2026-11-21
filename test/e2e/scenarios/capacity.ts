@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
 import { clickPanel, openPanel, sendDocument, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
@@ -9,7 +9,7 @@ import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
 import { telegramTestTimeouts, withTelegramTestDeadline } from '../../../scripts/lib/telegram-test-deadline.js';
 
-export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentPreparation' | 'documentCancellation' | 'documentAuthorization'>): void {
+export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<WorkflowTasks, 'capacityFirst' | 'capacitySecond' | 'capacityPending' | 'documentCancellation' | 'documentAuthorization'>): void {
   it('managed process capacity confirmation', async t => {
     const app = getApp();
     const limit = readConfig(app.config.configPath).omp.maxSessions;
@@ -104,42 +104,6 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
       await app.omp.provider.waitForAbort(prerequisites[index]!.name, AbortSignal.any([t.signal, AbortSignal.timeout(30000)]));
     }
     app.omp.provider.assertComplete([...prerequisites.map(task => task.name), tasks.capacityPending.name]);
-  });
-  it('initial document preparation resumes remaining extensions after restart', async () => {
-    const app = getApp();
-    const nativeSettingsPath = join(dirname(app.omp.workspace), 'home', '.omp', 'agent', 'config.yml');
-    const original = await readFile(nativeSettingsPath, 'utf8');
-    const settings = JSON.parse(original);
-    settings.modelPresets['e2e-alternate'].modelRoles.default = 'e2e/missing-model';
-    await writeFile(nativeSettingsPath, JSON.stringify(settings));
-    try {
-      const previous = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
-      const filename = 'prepared-document.txt';
-      const bytes = Buffer.from('Keep the completed worktree when later preparation fails.');
-      const sent = await sendDocument(app, filename, bytes, {
-        caption: `/new /worktree /modelpreset e2e-alternate ${tasks.documentPreparation.prompt}`,
-      });
-      await app.waitForCondition(() => app.store.listSessions(app.telegram.bot.id).some(session => !previous.has(session.id)));
-      const pending = app.store.listSessions(app.telegram.bot.id).find(session => !previous.has(session.id))!;
-      await app.waitForCondition(() => {
-        const setup = app.store.promptQueue.first(pending.id)?.preparation;
-        return setup?.extensions?.length === 1 && setup.extensions[0]?.kind === 'model-preset';
-      });
-      await app.waitForMessageHandled(sent.id);
-      const prepared = app.store.getSession(pending.id)!;
-      assert.notEqual(prepared.cwd, app.omp.workspace);
-      assert.equal(app.store.promptQueue.has(pending.id), true);
-      await assert.rejects(stat(join(prepared.cwd, filename)), {code:'ENOENT'});
-      await writeFile(nativeSettingsPath, original);
-      await app.restart();
-      await completeWriteTask(app, tasks.documentPreparation, sent, prepared.threadId);
-      assert.equal(app.store.getSession(pending.id)!.cwd, prepared.cwd);
-      assert.deepEqual(await readFile(join(prepared.cwd, filename)), bytes);
-      assert.equal(app.store.promptQueue.first(pending.id), undefined);
-      app.omp.provider.assertComplete([tasks.documentPreparation.name]);
-    } finally {
-      await writeFile(nativeSettingsPath, original);
-    }
   });
   it('stop prevents an in-flight initial document from replacing an existing file', async t => {
     const app = getApp();

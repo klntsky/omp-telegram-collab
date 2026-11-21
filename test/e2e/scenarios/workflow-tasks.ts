@@ -29,7 +29,6 @@ export function createWorkflowTasks() {
     documentOnly: { ...createWriteTask('document-only'), prompt: 'e2e-file-only-attachment.txt' },
     documentAlbum: createWriteTask('document-album'),
     documentMentionAlbum: createWriteTask('document-mention-album'),
-    documentPreparation: createWriteTask('document-preparation'),
     documentCancellation: createWriteTask('document-cancellation'),
     documentAuthorization: createWriteTask('document-authorization'),
     documentFinalAuthority: createWriteTask('document-final-authority'),

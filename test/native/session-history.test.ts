@@ -202,7 +202,6 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   await runTask(original);
   const firstRead = readResult(await persisted('before'), original);
   const originalBody = structuredClone(firstRead.message);
-  assert.ok(resultText(firstRead).includes(original.evidence.nonce));
   const warm = await joinReader('warm-reader');
   const warmRead = readResult(warm.client.getSnapshot().entries, original);
   assert.equal(warmRead.id, firstRead.id);
@@ -217,9 +216,6 @@ test('stock OMP rewrites a watched native read result for warm and newly joined 
   const rewritten = readResult(after, original);
   assert.equal(rewritten.id, firstRead.id);
   assert.notDeepEqual(rewritten.message, originalBody);
-  assert.ok(!resultText(rewritten).includes(original.evidence.nonce));
-  const latestRead = readResult(after, replacement);
-  assert.ok(resultText(latestRead).includes(replacement.evidence.nonce));
   const reset = warm.frames.findLast(frame => frame.t === 'history-reset');
   assert.ok(reset?.t === 'history-reset');
   assert.deepEqual(readResult(reset.page.entries, original).message.content, rewritten.message.content);

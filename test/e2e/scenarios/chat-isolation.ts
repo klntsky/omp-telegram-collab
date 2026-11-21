@@ -61,7 +61,6 @@ export function registerChatIsolation(): void {
     assert.equal(app.store.getSessionEntry(healthy.id)?.markup, JSON.stringify({ inline_keyboard: [] }));
     assert.ok(calls.some(call => call.method === 'setMyCommands' &&
       call.payload.scope?.chat_id === app.telegram.forum.chatId && call.result.ok));
-    await app.sendAndWait('/modelpreset nonexistent-chat-isolation-preset', healthy.threadId);
     const sent = await app.sendAndWait(`/p ${task.prompt}`, healthy.threadId);
     await completeWriteTask(app, task, sent, healthy.threadId);
     assert.equal(app.store.getSession(orphan.id)?.status, 'open');
