@@ -2,7 +2,7 @@ import { stdout } from 'node:process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { existsSync, realpathSync } from 'node:fs';
-import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { readConfig, defaultConfigPath } from './config.js';
 import { registerAdminCommands } from './cli-admin.js';
 import { notifyReload } from './cli/reload.js';
@@ -41,24 +41,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     await notifyReload(readConfig(path));
     stdout.write(`Reload requested for ${path}\n`);
   });
-  program.command('session').description('Connect a local terminal to a topic session.')
-    .command('join').description('Continue a session in your terminal')
-    .addOption(new Option('--chat <CHAT_ID>', 'Telegram supergroup ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
-      if (previous !== undefined) throw new InvalidArgumentError('Specify --chat only once');
-      const id = Number(value);
-      if (!/^-\d+$/.test(value) || !Number.isSafeInteger(id) || id >= 0)
-        throw new InvalidArgumentError('Chat ID must be a negative safe integer.');
-      return id;
-    }))
-    .addOption(new Option('--topic <TOPIC_ID>', 'Session topic ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
-      if (previous !== undefined) throw new InvalidArgumentError('Specify --topic only once');
-      const id = Number(value);
-      if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 1)
-        throw new InvalidArgumentError('Topic ID must be a safe integer greater than one.');
-      return id;
-    }))
-    .action(async (options: { chat: number; topic: number }) => {
-      await joinSession(options, configPath());
+  program.command('join <topic-url>').description('Continue a topic session in your terminal')
+    .action(async (topicUrl: string) => {
+      const url = new URL(topicUrl.includes('://') ? topicUrl : `https://${topicUrl}`);
+      const match = /^\/c\/([1-9]\d*)\/([1-9]\d*)(?:\/([1-9]\d*))?\/?$/.exec(url.pathname);
+      if (!['https:', 'http:'].includes(url.protocol) || url.hostname !== 't.me' || url.port || url.username || url.password || !match)
+        throw new InvalidArgumentError('Expected a Telegram topic URL such as https://t.me/c/1234567890/42.');
+      const chat = Number(`-100${match[1]}`);
+      // Telegram topic IDs are creation-message IDs. Message links can instead
+      // carry the topic in the path or thread query. https://core.telegram.org/api/links#message-links
+      const topicValue = url.searchParams.get('thread') ?? match[2];
+      const topic = Number(topicValue);
+      if (!Number.isSafeInteger(chat) || !/^[1-9]\d*$/.test(topicValue) || !Number.isSafeInteger(topic) || topic <= 1)
+        throw new InvalidArgumentError('Topic URL must contain a safe chat ID and a topic ID greater than one.');
+      await joinSession({ chat, topic }, configPath());
     });
   try {
     await program.parseAsync(argv, { from: 'user' });
