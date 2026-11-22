@@ -8,6 +8,7 @@ import { registerAdminCommands } from './cli-admin.js';
 import { notifyReload } from './cli/reload.js';
 import { joinSession } from './session-cli.js';
 import { startService } from './cli/service.js';
+import { parseTopicUrl } from './cli/topic-url.js';
 import { pollingFailureReported } from './cli/polling-failure.js';
 import { logEvent } from './logging.js';
 
@@ -43,18 +44,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   });
   program.command('join <topic-url>').description('Continue a topic session in your terminal')
     .action(async (topicUrl: string) => {
-      const url = new URL(topicUrl.includes('://') ? topicUrl : `https://${topicUrl}`);
-      const match = /^\/c\/([1-9]\d*)\/([1-9]\d*)(?:\/([1-9]\d*))?\/?$/.exec(url.pathname);
-      if (!['https:', 'http:'].includes(url.protocol) || url.hostname !== 't.me' || url.port || url.username || url.password || !match)
-        throw new InvalidArgumentError('Expected a Telegram topic URL such as https://t.me/c/1234567890/42.');
-      const chat = Number(`-100${match[1]}`);
-      // Telegram topic IDs are creation-message IDs. Message links can instead
-      // carry the topic in the path or thread query. https://core.telegram.org/api/links#message-links
-      const topicValue = url.searchParams.get('thread') ?? match[2];
-      const topic = Number(topicValue);
-      if (!Number.isSafeInteger(chat) || !/^[1-9]\d*$/.test(topicValue) || !Number.isSafeInteger(topic) || topic <= 1)
-        throw new InvalidArgumentError('Topic URL must contain a safe chat ID and a topic ID greater than one.');
-      await joinSession({ chat, topic }, configPath());
+      await joinSession(parseTopicUrl(topicUrl), configPath());
     });
   try {
     await program.parseAsync(argv, { from: 'user' });
