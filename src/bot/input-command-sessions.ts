@@ -116,7 +116,7 @@ export async function inputCommandSessions(deps: InputCommandSessionsDependencie
         }
         deps.requireSessionAssignment(session);
         if (session.status !== 'open') { await replyTo(ctx, destination, 'This session is archived. Reopen the topic before joining.'); return true; }
-        const command = `omp-telegram-collab session join --chat ${destination.chatId} --topic ${destination.threadId}`;
+        const command = `omp-telegram-collab join https://t.me/c/${String(destination.chatId).replace(/^-100/, '')}/${destination.threadId}`;
         await replyTo(ctx, destination, `Run this on the bot machine as the service OS account. If needed, supply --config with your operator configuration path. Copying the command does not grant access.\n${preHtml(command)}`, {
           parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'Copy command',copy_text:{text:command}}]]},
         });

@@ -80,7 +80,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
       message_thread_id: z.literal(idleThreadId),
       reply_markup: z.object({ inline_keyboard: z.array(z.array(z.object({ copy_text: z.object({ text: z.string() }).optional() }))) }),
     });
-    const expectedCommand = `omp-telegram-collab session join --chat ${session.chatId} --topic ${idleThreadId}`;
+    const expectedCommand = `omp-telegram-collab join https://t.me/c/${String(session.chatId).replace(/^-100/, '')}/${idleThreadId}`;
     assert.ok(app.apiCalls.some(call => {
       if (call.method !== 'sendMessage') return false;
       const parsed = copyPayload.safeParse(call.payload);

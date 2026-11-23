@@ -2,12 +2,13 @@ import { stdout } from 'node:process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { existsSync, realpathSync } from 'node:fs';
-import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { readConfig, defaultConfigPath } from './config.js';
 import { registerAdminCommands } from './cli-admin.js';
 import { notifyReload } from './cli/reload.js';
 import { joinSession } from './session-cli.js';
 import { startService } from './cli/service.js';
+import { parseTopicUrl } from './cli/topic-url.js';
 import { pollingFailureReported } from './cli/polling-failure.js';
 import { logEvent } from './logging.js';
 
@@ -41,24 +42,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     await notifyReload(readConfig(path));
     stdout.write(`Reload requested for ${path}\n`);
   });
-  program.command('session').description('Connect a local terminal to a topic session.')
-    .command('join').description('Continue a session in your terminal')
-    .addOption(new Option('--chat <CHAT_ID>', 'Telegram supergroup ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
-      if (previous !== undefined) throw new InvalidArgumentError('Specify --chat only once');
-      const id = Number(value);
-      if (!/^-\d+$/.test(value) || !Number.isSafeInteger(id) || id >= 0)
-        throw new InvalidArgumentError('Chat ID must be a negative safe integer.');
-      return id;
-    }))
-    .addOption(new Option('--topic <TOPIC_ID>', 'Session topic ID').makeOptionMandatory().argParser((value: string, previous?: number) => {
-      if (previous !== undefined) throw new InvalidArgumentError('Specify --topic only once');
-      const id = Number(value);
-      if (!/^\d+$/.test(value) || !Number.isSafeInteger(id) || id <= 1)
-        throw new InvalidArgumentError('Topic ID must be a safe integer greater than one.');
-      return id;
-    }))
-    .action(async (options: { chat: number; topic: number }) => {
-      await joinSession(options, configPath());
+  program.command('join <topic-url>').description('Continue a topic session in your terminal')
+    .action(async (topicUrl: string) => {
+      await joinSession(parseTopicUrl(topicUrl), configPath());
     });
   try {
     await program.parseAsync(argv, { from: 'user' });
