@@ -2,23 +2,117 @@
 
 # [ca802773aff82a6740dedf6df87e3ba23f0c3eed](https://github.com/klntsky/omp-telegram-collab/commit/ca802773aff82a6740dedf6df87e3ba23f0c3eed)
 
+Expose local OMP coding conversations through user-owned Telegram bots and forum topics, with Telegram and an integrated Mini App controlling the same session. Keep deployment self-hosted, using the operator's OMP installation, model credentials, groups, and public HTTPS endpoint.
+
+Configure the service through environment variables and load the working directory's `.env` during startup, with exported values taking precedence. Require bot credentials, owner usernames, and a public HTTPS origin. Match usernames case-insensitively with an optional `@`. Support multiple named bots with independent credentials, owners, and Mini App names. Allow configuration of the listener, data directory, OMP executable and working directory, process limit, startup timeout, relay, and numbered literal OMP arguments without shell evaluation. Reject invalid configuration without exposing credentials.
+
+Require explicit `/setup` enrollment by a configured owner who is currently a group administrator in a Topics-enabled supergroup where the bot can manage topics. Provide private onboarding, an add-to-group link, readiness guidance, Check Again, `/status`, and `/help`. Verify the caller's current username and administrator status for enrollment and attachment rather than reusing a remembered identity.
+
+Allow current members to create a dedicated session topic with `/new task` or provide its task interactively through bare `/new` or New Session. Bind interactive requests to their requesting user. Initialize sessions for manually created topics except General, announce readiness, and expose Open Session and `/session` links.
+
+Accept session-topic instructions through bot mentions or replies to this bot, removing addressing mentions from the submitted text. Ignore ordinary discussion, forwarded instructions, bot-authored instructions, and commands addressed to another bot. Allow current members to interrupt work with `/stop`. Mirror completed assistant text into the topic and split long messages without breaking Unicode surrogate pairs.
+
+Allow an owner who is currently a group administrator to attach a control-enabled local OMP host with `/attach INSTANCE_ID [topic name]`, creating a new topic without posting a capability link. Preserve its identity and terminal ownership, leaving attached processes running when the service stops.
+
+Persist enrollment and bot/topic/session mappings across restarts. Resume managed sessions using their exact saved history and identity, rejecting incompatible or changed histories. Prevent two service instances from managing the same data directory and enforce the configured managed-process limit. Save topic renames, archive closed topics, reject archived instructions, and permit instructions after reopening. Preserve histories on closure and shutdown and allow read-only Mini App access to archived sessions.
+
+Authenticate Mini App launches using signed, time-limited Telegram data and the signed session selection. Require current membership in the enrolled forum and the bot's required permissions. Authorize live connections, actions, and deliveries independently so forwarding a link does not grant access. Keep OMP room capabilities and write credentials server-side and require fresh authorization on rejoin.
+
+Provide a Mini App transcript with live assistant output, earlier history, Markdown, mathematics, message images, expandable thinking, tool-call and result details, and visible failures or aborted responses. Preserve the reader's position when inspecting earlier messages. Show connection state, title, working directory, model, thinking level, context usage, and participants.
+
+Allow writable Mini App participants to submit prompts, inspect queued-message counts, interrupt turns, and answer or cancel selection and text-entry questions. Use Enter to submit and Shift+Enter for a newline without submitting during input-method composition. Disable instruction controls for read-only or unavailable sessions.
+
+Provide an agent panel with main-agent and subagent activity, lifecycle state, and available token, cost, timing, model, and context information. Allow transcript inspection, agent messages, stopping running agents, and reviving parked or aborted agents. Hide mutation controls for read-only sessions and report unavailable transcripts. Adapt to Telegram viewport and theme changes, offer system/light/dark themes, and provide Leave, Retry, and Rejoin.
+
+Retry unexpected mirroring disconnections up to five times with backoff, recovering unseen assistant entries without replaying possibly executed prompts. Notify the topic after recovery fails and allow a later mention to reconnect. Retry initial tasks only after explicit startup rejection and explain when resubmission is required. Retry temporary Telegram polling failures, rate limits, and server errors; stop for invalid credentials or polling conflicts.
+
 # [dcabad02f50b0b733836261a44e11113ee1340e4](https://github.com/klntsky/omp-telegram-collab/commit/dcabad02f50b0b733836261a44e11113ee1340e4)
 
+Route General `/p` through new-session creation in either prompt mode, including bot-qualified commands and interactive task replies. Publish `/p` and the other supported commands in group-wide and chat-specific menus. Keep General separate from sessions.
+
+Default session-topic ordinary-message prompting to enabled and non-admin proposals to disabled for each bot/chat assignment. In explicit-command mode, accept `/p <prompt>` and ignore ordinary discussion, mentions, and replies. Allow configured instance admins who are current members to submit directly without requiring Telegram administrator status. When proposals are enabled, show non-admin prompt text for one-time admin approval, including new-topic tasks. Preserve original text and reply targets, expire proposals after ten minutes or restart, and invalidate them after policy or assignment changes, archival, kill, or proposer departure.
+
+Let current group administrators request local-operator approval for unassigned forums through `/setup`. Let assigned-instance admins enroll groups and change prompt settings without Telegram administrator status. Require Manage Topics and Pin Messages permissions and recheck assignment and administrator authority before saving settings. Respect protected configuration instead of changing only runtime state.
+
+Create empty manually made topics without starting a host until an instruction or Mini App visit. Quietly pin Open Session before host startup. Reply to topic-creation requests with a direct link in the originating conversation. Copy the initial task below the pin with participant attribution without submitting it twice.
+
+Provide instance-admin preset listing and switching inside open managed topics, without model prompts. Start the host on demand, require idle switching, recheck access after startup, preserve native results, and reject archived, attached, or unsupported hosts.
+
+Show agent questions in Telegram with complete Unicode-safe text, option descriptions, checked selections, and numbered buttons in rows of up to five with Cancel separate. Accept multiline custom answers through a native reply prompt and send them as question responses rather than tasks. Permit current members to answer, close controls after external answers or disconnection, and reject stale question replies. Replace answered controls with a persistent number-and-label receipt that retains long labels.
+
+React with 👀 on eligible input and replace it with 🤝 only after matching live prompt receipt, custom-answer completion, interruption confirmation, or verified kill completion. Do not acknowledge rejected input, unrelated completions, transcript replay, or a stop with no running host. Preserve native reply targets on every assistant chunk and across restarts; clear Telegram targeting when another participant supplies the prompt. Include the underlying operation error literally in failure replies.
+
+Use ⚡ for running work, ✅ for a live idle host, and 🏁 for a stopped or unstarted host. Observe local-terminal and Mini App activity, distinguish relay loss from process exit, and check liveness every 30 seconds without starting empty topics. Persist confirmed icons to avoid unchanged writes across restarts. Delete the bot's own icon-only service notices while preserving human edits and rename notices.
+
+Restrict `/stop` and `/kill` to session topics and current members, without starting idle hosts. Cancel pending initial work, startup retries, and capacity confirmations. Preserve history after force-kill, advance the persistent session generation before invalidating joins, and permit later explicit resumption. Offer an expiring, one-time instance-admin confirmation to double and persist the shared capacity limit, rejecting stale or replayed approvals and requiring local updates for protected configuration.
+
+Allow instance admins to detach a topic permanently, cancelling interactions, mirroring, prompts, reactions, approvals, and Mini App joins while preserving history and the host. Set the ordinary conversation icon after pending activity writes settle, and prevent lifecycle events or restarts from restoring bot activity icons.
+
+Require PM2 restarts to use `--no-treekill` so independently supervised OMP hosts retain accepted work instead of receiving recursive deployment-stop signals.
+
 # [546984725347ec84228b042607caefa84fc859a3](https://github.com/klntsky/omp-telegram-collab/commit/546984725347ec84228b042607caefa84fc859a3)
+
+Reject fresh and existing Mini App access to detached topics and disconnect affected viewers on detachment or kill. Check persisted session generations before and after asynchronous authorization and during WebSocket admission, returning terminal HTTP 409 for stale refreshes. Reject changed or unavailable canonical project assignments.
+
+Identify Mini App participants and new transcript prompts by signed `@username`, falling back to `user ID <id>`. Mirror Mini App prompts literally into the matching Telegram topic with authenticated attribution and Unicode-safe splitting.
+
+Authorize frozen outbound frame batches with a fresh membership check, leaving frames arriving during that check for the next batch. Preserve ordered streaming without checking membership for every token or reusing an earlier batch's authorization.
+
+Retain hosts while Mini App viewers are connected, ensure Telegram mirroring when a viewer joins, and report capacity refusal without endless reconnection. Keep closed sessions read-only. Permit interactive new-session task replies from detached topics to create a separate session, and clean up the bot's icon-change notices without restoring detached-topic activity.
 
 # [8ce98bffd958717010bfe5213215a0d52c6a075e](https://github.com/klntsky/omp-telegram-collab/commit/8ce98bffd958717010bfe5213215a0d52c6a075e)
 
 # [c1b5b923a7fb7b24df7d1741cf88836a3c75c2ee](https://github.com/klntsky/omp-telegram-collab/commit/c1b5b923a7fb7b24df7d1741cf88836a3c75c2ee)
 
+Replace environment-only configuration with CLI-managed YAML selected by `--config PATH`, defaulting to the XDG configuration directory or `~/.config/omp-telegram/config.yaml`. Support multiple bots, canonical project-directory instances, instance admins, and unique bot/forum assignments with independent prompt settings. Allow incomplete setup but require bots and a public HTTPS origin before startup. Reject invalid fields, duplicate keys or assignments, mismatched bot identities, unsafe OMP arguments, and symlink configuration files. Create credentials privately, preserve existing ownership and mode, and refuse protected or concurrently changed configuration writes.
+
+Provide interactive setup and scriptable commands for instance registration, inspection, removal, administrator management, chat assignment, and bot management. Require an existing canonical directory and an administrator for registration. Require explicit bot selection in ambiguous automation. Preserve histories on removal and prevent deleting registrations with assigned forums. Accept bot tokens through hidden prompts, standard input, or a selected environment variable, verify their Telegram identity, reject duplicates, and omit tokens from listings.
+
+Validate forum Topics and bot Manage Topics and Pin Messages permissions before assignment. Preserve omitted prompt-policy choices on updates. Reject assignment changes that retarget stored histories. Persist setup requests for ten minutes, replacing the same requester's earlier request. Allow local approval into an existing or newly registered project, rechecking requester identity, administrator status, expiry, and confirmation before saving. Preserve unsuccessful requests, consume successful ones, grant the requesting username instance-admin access, and notify the forum.
+
+Apply saved configuration automatically or through `reload`. Apply instance, administrator, chat, and limit changes without restarting bots. Restart runtime components for other service changes and restore the previous configuration if replacement startup fails. Reject history-conflicting reloads and control requests for another configuration file. Report configuration that was saved but could not be applied. Notify assigned enrolled forums after successful polling startup and during orderly shutdown; stop the service on fatal polling failure.
+
+Allow instance admins to list project presets in General without starting a host and save a validated default independently per bot/forum. Show that default when listing presets in work topics. Apply its role models and thinking settings before new or resumed managed hosts accept instructions or joins, overriding restored settings and model-selection flags without changing running hosts. Use ordinary OMP selection when no default exists and fail explicitly for missing, invalid, unavailable, or unusable saved presets.
+
+Make idle work-topic preset switches affect only the running session without persisting shared OMP settings, restoring prior overrides on failure. Reject attached, unsupported, retiring, or identity-changed hosts. Discover presets using the project's native settings and configured profile or config-file selection.
+
+Pin topic histories to their canonical project directories and reject mismatched bindings, history identities, or attachment directories. Preserve active managed work across service shutdown and rediscover surviving hosts after restart. Retire eligible hosts after five idle minutes or reclaim least-recently-used idle hosts under capacity pressure. Count surviving hosts toward capacity and protect busy work and active interactions. Use guarded shutdown without escalating retirement to signals.
+
+Implement force-kill for identified managed and attached processes while preserving history. Support startup cancellation and serialize competing starts and kills. Refuse termination when process, executable, registry, project, session, or history identity cannot be established. Release terminated managed ownership so a later explicit launch can resume saved history.
+
+Pace queued Telegram operations independently per chat at 3.1-second intervals, prioritize foreground interactions over icons, honor explicit rate-limit delays, discard stale operations, and cancel queued delivery at shutdown. Keep ambiguous network failures from automatically replaying operations.
+
+Render assistant Markdown with Telegram-supported headings, emphasis, strikethrough, code, quotations, lists, and safe links. Keep raw HTML literal and unsupported links readable, render tables and images as text, preserve code whitespace, and split long output into independently valid formatted messages without breaking Unicode or counting markup against decoded-text limits.
+
+Accept live Collab broadcasts before welcome while retaining snapshot and session validation and rejecting snapshots that precede welcome.
+
 # [5c3d29bc3b0f5c2c7fb1d61a095624f869751bae](https://github.com/klntsky/omp-telegram-collab/commit/5c3d29bc3b0f5c2c7fb1d61a095624f869751bae)
+
+Reject older managed-host preset controls that persist shared role settings and require retirement and restart before work-topic preset commands. Permit controls that change only the running session.
+
+Reject startup or reload when any assigned session, including an attached session, is pinned to another configured project directory or its path no longer resolves to the same canonical directory. Validate managed bindings and histories against the session's pinned directory.
 
 # [fa0953aca0f47c9fc8596983583425e1001f95c3](https://github.com/klntsky/omp-telegram-collab/commit/fa0953aca0f47c9fc8596983583425e1001f95c3)
 
+Support only the current CLI-managed YAML and SQLite schema, without importing environment deployments or backfilling missing session paths. Initialize the current database tables transactionally and require a canonical pinned directory when assigning chats with saved histories.
+
 # [9cc0f0c21a706ced87eb17176f0066349d4c0b44](https://github.com/klntsky/omp-telegram-collab/commit/9cc0f0c21a706ced87eb17176f0066349d4c0b44)
+
+Forward the original Telegram task immediately below the pinned session entry and before host startup for both `/new task` and interactive initial-task replies. Preserve native forwarding and formatting instead of rewriting the task with participant attribution, without submitting it twice.
 
 # [191c218cb7d33be6d303584671b7b0b1a42db6ff](https://github.com/klntsky/omp-telegram-collab/commit/191c218cb7d33be6d303584671b7b0b1a42db6ff)
 
+Keep the ⚡ activity icon throughout an active agent turn, including idle streaming snapshots and tool work, until the turn ends or is interrupted.
+
 # [e096c08020e314ecafc3e73b55efe565e11d2203](https://github.com/klntsky/omp-telegram-collab/commit/e096c08020e314ecafc3e73b55efe565e11d2203)
+
+Automatically reconnect the Mini App after transient transport failures, authorization-service outages, welcome timeouts, and stalled snapshots. Obtain fresh single-use tickets, retain the current transcript and draft, and use exponential backoff from one second capped at 30 seconds. Do not queue or replay unsent or uncertain instructions.
+
+Retain the original session generation during automatic reconnect. Stop automatic reconnect for killed sessions, denied or expired authentication, unavailable sessions, invalid protocol actions, capacity refusal, and explicit Leave. Require explicit Rejoin to adopt a killed session's current generation. Keep the reconnecting state until replacement history arrives.
+
+Collapse recognized IRC, system-notice, reminder, notification, injection, interruption, and task-result envelopes and displayed custom notices into expandable transcript disclosures. Preserve ordinary prose, attachment order, code examples, unknown tags, and incomplete envelopes. Keep hidden custom entries hidden.
+
+Clear running activity, active tools, aborting state, and queued-message state when a Mini App interruption is observed, and mark unfinished streamed output aborted. Derive participant avatar initials from the username without its `@`.
 
 # [b45e7076d60acdb87047bc89e4c0de4373cca877](https://github.com/klntsky/omp-telegram-collab/commit/b45e7076d60acdb87047bc89e4c0de4373cca877)
 
