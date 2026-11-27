@@ -2,11 +2,55 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { readConfig } from '../../../src/config.js';
 import { realpathSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, openPanel, replyText, waitForPanel } from '../helpers/telegram-actions.js';
+import { chooseSettingsAction, clickPanel, openPanel, replyText, setDefaultWorktrees, waitForPanel } from '../helpers/telegram-actions.js';
 
 export function registerFolderSettings(getApp: () => CollaborationTest): void {
+  // Permanent: Persisted per-directory policy must survive restart and drive real topic
+  // enrollment; default-only worktree coverage cannot catch ignored or overwritten overrides.
+  it('worktree settings persist independent directory choices and apply them to new topics', async () => {
+    const app = getApp();
+    const folder = 'worktree-policy-selected';
+    await mkdir(join(app.omp.workspace, folder), { recursive: true });
+    await writeFile(join(app.omp.workspace, folder, 'policy-marker.txt'), 'Worktree policy fixture\n');
+    await app.omp.git(app.omp.workspace, 'add', '--all');
+    await app.omp.git(app.omp.workspace, 'commit', '-m', 'Preserve worktree policy fixture');
+    app.setFolderOptions(['.', `./${folder}/`]);
+    const panel = await openPanel(app, '/settings');
+    await setDefaultWorktrees(app, panel, true);
+    await chooseSettingsAction(app, panel, { kind: 'worktrees', folder: '.', value: false });
+    await chooseSettingsAction(app, panel, { kind: 'worktrees', folder, value: true });
+    await setDefaultWorktrees(app, panel, false);
+    const saved = readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
+    assert.equal(saved.create_topic_worktrees, false);
+    assert.deepEqual(saved.folder_worktree_overrides, { '.': false, [folder]: true });
+    await chooseSettingsAction(app, panel, { kind: 'close' }, false);
+    await app.restart();
+    for (const [index, enabled] of [false, true].entries()) {
+      const start = app.apiCalls.length;
+      const topic = await app.telegram.user.client.createForumTopic({
+        chatId: app.telegram.forum.chat, title: `Directory worktree policy ${index}`,
+      });
+      await app.waitForMessageHandled(topic.id);
+      const folders = await waitForPanel(app, 'folder', 'folder:', start, topic.id);
+      await clickPanel(app, folders, index);
+      await app.waitForCondition(() => {
+        const session = app.store.listSessions(app.telegram.bot.id).find(session => session.threadId === topic.id);
+        return session !== undefined && !app.store.promptQueue.has(session.id) &&
+          (!enabled || session.cwd !== join(app.omp.workspace, folder));
+      });
+      const session = app.store.listSessions(app.telegram.bot.id).find(session => session.threadId === topic.id)!;
+      if (enabled) await app.omp.assertWorktree(session);
+      else assert.equal(session.cwd, app.omp.workspace);
+      assert.equal(app.store.promptQueue.has(session.id), false);
+      assert.equal(await app.runtime.isRunning(session), false);
+    }
+    assert.deepEqual(readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!.folder_worktree_overrides,
+      { '.': false, [folder]: true });
+  });
+
   // Permanent: Folder approval must bind a manually created, existing topic without starting
   // work or creating another topic; /new coverage does not exercise this enrollment boundary.
   it('manual topics choose their runtime folder in the same topic', async () => {
@@ -40,19 +84,13 @@ export function registerFolderSettings(getApp: () => CollaborationTest): void {
   it('folder entry requests native replies and saves paths without reviving retired input', async () => {
     const app = getApp();
     const panel = await openPanel(app, '/settings');
-    const token = panel.buttons[0]!.split(':')[1]!;
     const sessions = app.store.listSessions(app.telegram.bot.id).map(session => session.id);
     const frameStart = app.guestFrames.length;
     const entries: number[] = [];
     const savedFolders = () => readConfig(app.config.configPath).instances
       .find(instance => instance.id === 1)!.chats[0]!.folder_options ?? [];
     const choose = async (wanted: Record<string, string>) => {
-      const stored = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
-        .get(app.telegram.bot.id, token) as { panel: string };
-      const state = JSON.parse(stored.panel) as { choices: Record<string, unknown>[] };
-      const index = state.choices.findIndex(action => Object.entries(wanted).every(([key, value]) => action[key] === value));
-      assert.ok(index >= 0);
-      await clickPanel(app, panel, index, wanted.kind !== 'folders');
+      await chooseSettingsAction(app, panel, wanted, wanted.kind !== 'folders');
     };
     const enter = async (input: string) => {
       const oldMessageId = panel.messageId;

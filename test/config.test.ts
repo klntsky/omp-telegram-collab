@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -7,6 +8,7 @@ import { stringify } from 'yaml';
 import type { AppConfig } from '../shared/contracts.js';
 import { canonicalPath, ConfigError, configWritable, emptyConfig, readConfig, validateStart, writeConfig } from '../src/config.js';
 import { botId, botToken, chatId } from './telegram-data.js';
+import { BotAuthorization } from '../src/bot/authorization.js';
 
 function fixture(t: TestContext) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'omp-config-test-')));
@@ -140,6 +142,67 @@ test('YAML defaults forum boolean options independently and rejects nonboolean v
       assertInvalid(path, () => readConfig(path), `instances.0.chats.0.${option}`);
     }
   }
+});
+// Permanent configuration boundary: prior boolean tests do not cover version upgrades or normalized override round trips.
+test('worktree configuration upgrades preserve defaults and persist normalized overrides', async t => {
+  const dir = await mkdtemp('/dev/shm/omp-worktree-config-');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'config.yaml');
+  const { configPath: _, ...input } = validConfig(path, dir);
+  for (const version of [undefined, 1, 2]) {
+    for (const enabled of [false, true]) {
+      await writeFile(path, stringify({ ...input, version, instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, create_topic_worktrees: enabled, folder_options: ['./project/'] }] }] }));
+      const before = await readFile(path, 'utf8');
+      const config = readConfig(path);
+      assert.equal(config.instances[0]!.chats[0]!.create_topic_worktrees, enabled);
+      assert.equal(await readFile(path, 'utf8'), before);
+      config.instances[0]!.chats[0]!.folder_worktree_overrides = { './project/': !enabled, '.': enabled };
+      writeConfig(config);
+      assert.match(await readFile(path, 'utf8'), /version: 2/);
+      assert.deepEqual(readConfig(path).instances[0]!.chats[0]!.folder_worktree_overrides, { project: !enabled, '.': enabled });
+    }
+  }
+  for (const overrides of [{ project: 'true' }, { '/absolute': true }, { '': false }]) {
+    await writeFile(path, stringify({ ...input, instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, folder_options: ['project'], folder_worktree_overrides: overrides }] }] }));
+    assertInvalid(path, () => readConfig(path));
+  }
+  await writeFile(path, stringify({ ...input, instances: [{ id: 1, defaultDir: dir, chats: [{ botId, chatId, folder_worktree_overrides: { removed: true } }] }] }));
+  assert.deepEqual(readConfig(path).instances[0]!.chats[0]!.folder_worktree_overrides, { removed: true });
+  await writeFile(path, stringify({ ...input, version: 3 }));
+  assertInvalid(path, () => readConfig(path), 'version');
+});
+
+// Permanent policy boundary: existing forum-default tests do not cover canonical aliases or unavailable-folder inheritance.
+test('automatic worktree policy resolves canonical folders independently of the forum default', async t => {
+  const dir = await mkdtemp('/dev/shm/omp-worktree-policy-');
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'project'));
+  await symlink(join(dir, 'project'), join(dir, 'alias'));
+  const config = validConfig(join(dir, 'config.yaml'), dir);
+  const chat = config.instances[0]!.chats[0]!;
+  chat.folder_options = ['alias', 'missing'];
+  chat.folder_worktree_overrides = { '.': true, alias: false };
+  const authorization = new BotAuthorization({ config, botId: () => botId } as ConstructorParameters<typeof BotAuthorization>[0]);
+  for (const enabled of [false, true]) {
+    chat.create_topic_worktrees = enabled;
+    assert.equal(authorization.createsTopicWorktrees(chatId), true);
+    assert.equal(authorization.createsTopicWorktrees(chatId, join(dir, 'project')), false);
+    assert.equal(authorization.createsTopicWorktrees(chatId, join(dir, 'unrelated')), enabled);
+    assert.equal(authorization.createsTopicWorktrees(chatId, join(dir, 'missing')), enabled);
+  }
+  delete chat.folder_worktree_overrides;
+  assert.equal(authorization.createsTopicWorktrees(chatId, join(dir, 'project')), true);
+  await mkdir(join(dir, 'constructor'));
+  chat.folder_options = ['constructor', 'alias'];
+  chat.folder_worktree_overrides = { alias: false };
+  for (const enabled of [false, true]) {
+    chat.create_topic_worktrees = enabled;
+    assert.equal(authorization.createsTopicWorktrees(chatId, join(dir, 'constructor')), enabled);
+  }
+  await symlink('loop', join(dir, 'loop'));
+  chat.folder_options = ['loop'];
+  chat.folder_worktree_overrides = { loop: true };
+  assert.throws(() => authorization.createsTopicWorktrees(chatId, join(dir, 'unrelated')), /ELOOP/);
 });
 
 test('default directories must remain existing canonical directories when reading and writing', t => {

@@ -97,7 +97,12 @@ export class SettingsPanels {
     }
     const action = panel.choices[Number(match![3])];
     if (!action) return;
-    if (action.kind === 'set' && !['all_messages_are_prompts','users_can_propose_prompts','create_topic_worktrees'].includes(action.field)) {
+    if (action.kind === 'set' && !['all_messages_are_prompts','users_can_propose_prompts'].includes(action.field)) {
+      await ctx.answerCallbackQuery('This setting is no longer available. Open /settings again.');
+      return;
+    }
+    if (action.kind === 'worktrees' &&
+        (typeof action.value !== 'boolean' || (action.folder !== undefined && typeof action.folder !== 'string'))) {
       await ctx.answerCallbackQuery('This setting is no longer available. Open /settings again.');
       return;
     }
@@ -140,7 +145,8 @@ export class SettingsPanels {
       panel,
       action.kind === 'set' ||
         action.kind === 'default' ||
-        action.kind === 'typing',
+        action.kind === 'typing' ||
+        action.kind === 'worktrees',
     );
     if (action.kind === 'close') {
       const changes = [...panel.changes.values()].map(

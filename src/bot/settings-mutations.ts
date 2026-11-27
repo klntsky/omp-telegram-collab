@@ -54,7 +54,7 @@ export class SettingsMutations {
     this.deps.panels.save(panel);
     await this.deps.render(panel, config, 'root');
   }
-  async apply(ctx: Context, panel: SettingsPanel, action: Extract<SettingsAction, {kind: 'set' | 'default' | 'typing'}>): Promise<void> {
+  async apply(ctx: Context, panel: SettingsPanel, action: Extract<SettingsAction, {kind: 'set' | 'default' | 'typing' | 'worktrees'}>): Promise<void> {
     const recordChange = (page: SettingsKey, label: string, before: string, after: string) => {
       const original = panel.changes.get(page)?.before ?? before;
       if (original === after) panel.changes.delete(page);
@@ -74,6 +74,33 @@ export class SettingsMutations {
       const chat = findInstance(current, this.deps.id(), panel.chatId)!.instance.chats.find(
         (chat) => chat.botId === this.deps.id() && chat.chatId === panel.chatId,
       )!;
+      if (action.kind === 'worktrees') {
+        const folder = action.folder;
+        if (typeof action.value !== 'boolean' || (folder !== undefined &&
+            (typeof folder !== 'string' || !chat.folder_options?.some(path => normalize(path).replace(/\/+$/, '') === folder)))) {
+          throw new Error('The configured directory changed. Open worktree settings again. No settings were saved.');
+        }
+        const overrides = chat.folder_worktree_overrides;
+        const explicit = folder !== undefined && overrides !== undefined && Object.hasOwn(overrides, folder);
+        const inherited = folder !== undefined && !explicit;
+        const before = folder !== undefined && explicit ? overrides![folder]! : chat.create_topic_worktrees === true;
+        if (folder === undefined) chat.create_topic_worktrees = action.value;
+        else chat.folder_worktree_overrides = { ...chat.folder_worktree_overrides, [folder]: action.value };
+        writeConfig(current);
+        recordChange(folder === undefined ? 'worktrees' : `worktrees:${folder}`,
+          `Worktree behavior: ${folder === undefined ? 'Default behavior' : folder === '.' ? '<Default>' : folder}`,
+          `${before ? 'Create worktrees for new topics' : 'No worktrees for new topics'}${inherited ? ' (default behavior)' : ''}`,
+          action.value ? 'Create worktrees for new topics' : 'No worktrees for new topics');
+        Object.assign(
+          findInstance(this.deps.config, this.deps.id(), panel.chatId)!.instance.chats.find(
+            entry => entry.botId === this.deps.id() && entry.chatId === panel.chatId,
+          )!, chat,
+        );
+        this.deps.panels.save(panel);
+        await this.deps.syncCommandMenus();
+        await this.deps.render(panel, current, 'worktrees', panel.offset);
+        return;
+      }
       const page: SettingsKey =
         action.kind === 'typing'
           ? 'typing'

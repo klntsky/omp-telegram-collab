@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readConfig } from '../../../src/config.js';
 import { z } from 'zod';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { changeTopicClosed, clickPanel, createManagedTopic, openPanel, reactionAttempts, setTopicClosed, waitForReactionAttempt } from '../helpers/telegram-actions.js';
+import { changeTopicClosed, chooseSettingsAction, clickPanel, createManagedTopic, openPanel, reactionAttempts, setDefaultWorktrees, setTopicClosed, waitForReactionAttempt } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
@@ -13,7 +13,6 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
   // Unlike termination coverage, these transitions keep individual sessions reusable.
   it('lifecycle, idle, detach, and restart', async () => {
     const app = getApp();
-    const savedChat = () => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!;
     const seed = await app.sendAndWait(`/new ${tasks.lifecycleSeed.prompt}`);
     const seedReply = await completeWriteTask(app, tasks.lifecycleSeed, seed);
     const session = app.store.listSessions(app.telegram.bot.id).find(value => value.threadId === seedReply.replyToMessage?.threadId)!;
@@ -54,8 +53,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await app.omp.git(app.omp.workspace, 'add', '--all');
     await app.omp.git(app.omp.workspace, 'commit', '-m', 'Preserve selected-folder task evidence');
     const manualWorktrees = await openPanel(app, '/settings');
-    await clickPanel(app, manualWorktrees, 5);
-    await app.waitForCondition(() => savedChat().create_topic_worktrees === true);
+    await setDefaultWorktrees(app, manualWorktrees, true);
     const requestsBeforeManualTopic = Array.from(app.omp.provider.requests, ([name, requests]) => [name, requests.length]);
     const idleTopic = await app.telegram.user.client.createForumTopic({ chatId: app.telegram.forum.chat, title: 'Idle command checks' });
     const idleThreadId = idleTopic.id;
@@ -64,8 +62,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await app.omp.assertWorktree(idleSession);
     assert.deepEqual(Array.from(app.omp.provider.requests, ([name, requests]) => [name, requests.length]), requestsBeforeManualTopic);
     assert.equal(app.store.promptQueue.has(idleSession.id), false);
-    await clickPanel(app, manualWorktrees, 5);
-    await app.waitForCondition(() => savedChat().create_topic_worktrees === false);
+    await setDefaultWorktrees(app, manualWorktrees, false);
     await clickPanel(app, manualWorktrees, -1);
     await setTopicClosed(app, idleSession, true);
     await setTopicClosed(app, idleSession, false);
@@ -111,8 +108,7 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     await changeTopicClosed(app, session.threadId, true);
     await changeTopicClosed(app, session.threadId, false);
     const automaticWorktrees = await openPanel(app, '/settings');
-    await clickPanel(app, automaticWorktrees, 5);
-    await app.waitForCondition(() => savedChat().create_topic_worktrees === true);
+    await setDefaultWorktrees(app, automaticWorktrees, true);
     await clickPanel(app, automaticWorktrees, -1);
     const retirementGate = await installRetirementGate(app);
     const separate = await app.sendAndWait(`/new ${tasks.separate.prompt}`, session.threadId);
@@ -133,8 +129,8 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     for (const message of ignored) assert.deepEqual(reactionAttempts(app, message.id), []);
   
     const persistedSettings = await openPanel(app, '/settings', separateSession.threadId);
-    await clickPanel(app, persistedSettings, 5);
-    await app.waitForCondition(() => savedChat().create_topic_worktrees === false);
+    await setDefaultWorktrees(app, persistedSettings, false);
+    await chooseSettingsAction(app, persistedSettings, { kind: 'page', page: 'root' });
     await app.sendAndWait('/skill_e2e_review', separateSession.threadId);
     const persistedSkillKey = { ...skillKey, destination: { kind: 'topic' as const, chatId: session.chatId, threadId: separateSession.threadId } };
     const historyBeforeRestart = await readSessionHistory(app.omp.dataDir, separateSession.id);
@@ -160,9 +156,9 @@ export function registerLifecycle(getApp: () => CollaborationTest, tasks: Pick<W
     assert.deepEqual(app.store.getPendingSkills(persistedSkillKey), []);
     assert.ok((await readSessionHistory(app.omp.dataDir, separateSession.id)).startsWith(historyBeforeRestart));
     await clickPanel(app, persistedSettings, 0);
-    await app.waitForCondition(() => savedChat().all_messages_are_prompts === false);
+    await app.waitForCondition(() => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!.all_messages_are_prompts === false);
     await clickPanel(app, persistedSettings, 0);
-    await app.waitForCondition(() => savedChat().all_messages_are_prompts === true);
+    await app.waitForCondition(() => readConfig(app.config.configPath).instances.find(instance => instance.id === 1)!.chats[0]!.all_messages_are_prompts === true);
     assert.ok(restarted);
     await completeWriteTask(app, tasks.restarted, restarted, separateSession.threadId);
     assert.ok(!taskInput(app.omp.provider, tasks.restarted).text.includes('<preamble>'));

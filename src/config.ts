@@ -39,7 +39,7 @@ const argumentSchema = literal.refine(value => {
   return !Object.hasOwn(forbiddenArgs, flag) && !flag.startsWith('--from-');
 });
 const configSchema = z.object({
-  version: z.literal(1).optional(),
+  version: z.literal(2).optional(),
   terminated: z.boolean().optional(),
   bots: z.array(z.object({
     id: positiveInteger,
@@ -55,6 +55,7 @@ const configSchema = z.object({
       all_messages_are_prompts: z.boolean().default(true),
       users_can_propose_prompts: z.boolean().default(false),
       create_topic_worktrees: z.boolean().default(false),
+      folder_worktree_overrides: z.record(relativeFolderPath, z.boolean()).optional(),
       folder_options: z.array(relativeFolderPath).default([]).transform(paths => [...new Set(paths)]),
       typing_indicators: z.enum(['disabled', 'streaming', 'inference']).default('disabled'),
       default_model_preset: z.string().regex(/^[A-Za-z][\w-]*$/).optional(),
@@ -93,8 +94,16 @@ function cleanupFailure(primary: ConfigError | undefined, error: unknown, diagno
   return Object.assign(result, { cleanupErrors: [...previous, error] });
 }
 
+function upgradeConfig(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const document = value as Record<string, unknown>;
+  // Version 1 used one forum-wide default; inheriting that value preserves every folder's policy.
+  if (document.version === undefined || document.version === 1) return { ...document, version: 2 };
+  return value;
+}
+
 function validate(value: unknown, configPath: string): AppConfig {
-  const result = configSchema.safeParse(value);
+  const result = configSchema.safeParse(upgradeConfig(value));
   if (!result.success) {
     const keys = [...new Set(result.error.issues.map(issue => issue.path.join('.') || 'config'))];
     throw failure(configPath, keys, 'Invalid configuration fields; check types, paths, bot credentials, URLs, and runtime settings.');
@@ -138,7 +147,7 @@ export function canonicalPath(input: string): string {
     const path = realpathSync(resolve(input));
     if (!statSync(path).isDirectory()) throw new Error(`Not a directory: ${path}`);
     return path;
-  } catch (error) { throw new ConfigError(['path'], `Choose an existing accessible directory. ${error instanceof Error ? error.message : String(error)}`); }
+  } catch (error) { throw Object.assign(new ConfigError(['path'], `Choose an existing accessible directory. ${error instanceof Error ? error.message : String(error)}`), { cause: error }); }
 }
 
 export function emptyConfig(configPath: string): AppConfig {
@@ -245,7 +254,7 @@ export function writeConfig(config: AppConfig): void {
     const parentPath = realpathSync(dirname(path));
     temporary = join(dirname(path), `.${randomBytes(16).toString('hex')}.tmp`);
     fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    writeFileSync(fd, stringify({ version: 1, ...document }), 'utf8');
+    writeFileSync(fd, stringify({ version: 2, ...document }), 'utf8');
     if (before.file) {
       const temp = fstatSync(fd);
       if (temp.uid !== before.file.uid || temp.gid !== before.file.gid) fchownSync(fd, before.file.uid, before.file.gid);

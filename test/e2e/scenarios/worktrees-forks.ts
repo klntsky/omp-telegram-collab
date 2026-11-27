@@ -3,7 +3,7 @@ import { readConfig } from '../../../src/config.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, deliveredMessageLinks, openPanel, replyText, setTopicClosed } from '../helpers/telegram-actions.js';
+import { clickPanel, deliveredMessageLinks, openPanel, replyText, setDefaultWorktrees, setTopicClosed } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory } from '../helpers/model-tasks.js';
 import { observeBrowser } from '../helpers/browser-observer.js';
 import { it } from 'node:test';
@@ -74,8 +74,7 @@ export function registerWorktreesAndForks(getApp: () => CollaborationTest, tasks
       [tasks.forkPrompt, worktreeRestarted.id, false],
     ] as const) {
       if ((savedChat().create_topic_worktrees === true) !== automaticWorktree) {
-        await clickPanel(app, forkSettings, 5);
-        await app.waitForCondition(() => savedChat().create_topic_worktrees === automaticWorktree);
+        await setDefaultWorktrees(app, forkSettings, automaticWorktree);
       }
       const previousSessions = new Set(app.store.listSessions(app.telegram.bot.id).map(value => value.id));
       const sourceHistory = await readSessionHistory(app.omp.dataDir, session.id);

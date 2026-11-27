@@ -3,7 +3,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readConfig } from '../../../src/config.js';
 import { type CollaborationTest } from '../helpers/collaboration-fixture.js';
-import { clickPanel, openPanel, sendDocument, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
+import { clickPanel, openPanel, sendDocument, setDefaultWorktrees, waitForBackgroundCompletion, waitForPanel } from '../helpers/telegram-actions.js';
 import { completeWriteTask, readSessionHistory, taskInput } from '../helpers/model-tasks.js';
 import { it } from 'node:test';
 import type { WorkflowTasks } from './workflow-tasks.js';
@@ -29,8 +29,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
     }
     assert.equal((await app.omp.listHosts()).length, limit);
     const worktrees = await openPanel(app, '/settings');
-    await clickPanel(app, worktrees, 5);
-    await app.waitForCondition(() => readConfig(app.config.configPath).instances[0]!.chats[0]!.create_topic_worktrees === true);
+    await setDefaultWorktrees(app, worktrees, true);
     await clickPanel(app, worktrees, -1);
     const start = app.apiCalls.length;
     const documentName = 'capacity-pending-upload.txt';
@@ -162,8 +161,7 @@ export function registerCapacity(getApp: () => CollaborationTest, tasks: Pick<Wo
   it('authorization transport failure does not replay a completed automatic worktree', async t => {
     const app = getApp();
     const settings = await openPanel(app, '/settings');
-    await clickPanel(app, settings, 5);
-    await app.waitForCondition(() => readConfig(app.config.configPath).instances[0]!.chats[0]!.create_topic_worktrees === true);
+    await setDefaultWorktrees(app, settings, true);
     await clickPanel(app, settings, -1);
     const existing = new Set(app.store.listSessions(app.telegram.bot.id).map(session => session.id));
     const diagnostic = new Error('E2E lost authorization lookup response after native worktree completion');

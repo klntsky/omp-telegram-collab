@@ -1,4 +1,5 @@
 import type { Bot, Context } from 'grammy';
+import { normalize } from 'node:path';
 import type { AppConfig, TypingMode } from '../../shared/contracts.js';
 import type { BotOptions } from '../bot.js';
 import type { SettingsPanel, SettingsPage, SettingsAction } from './types.js';
@@ -74,16 +75,31 @@ export async function renderSettings(
         kind: 'page',
         page: 'capacity',
       });
-      button(`🌳 Worktrees: ${chat.create_topic_worktrees === true ? 'Enabled' : 'Disabled'}`, {
-        kind: 'set',
-        field: 'create_topic_worktrees',
-        value: chat.create_topic_worktrees !== true,
-      });
+      button('🌳 Configure worktree behavior', { kind: 'page', page: 'worktrees' });
       button(`⌨️ Typing indicators: ${typingLabels[chat.typing_indicators ?? 'disabled']}`, {
         kind: 'page',
         page: 'typing',
       });
       button('📁 Runtime folders', {kind:'page',page:'folders'});
+    } else if (page === 'worktrees') {
+      text = 'Worktree behavior\nApplies to new topics only. Directories without an explicit choice use the default behavior.';
+      const choicesFor = (label: string, folder?: string) => {
+        const selected = folder === undefined
+          ? chat.create_topic_worktrees === true
+          : chat.folder_worktree_overrides && Object.hasOwn(chat.folder_worktree_overrides, folder)
+            ? chat.folder_worktree_overrides[folder]!
+            : chat.create_topic_worktrees === true;
+        button(`${label}: Create worktrees for new topics`, { kind: 'worktrees', folder, value: true }, selected);
+        button(`${label}: No worktrees for new topics`, { kind: 'worktrees', folder, value: false }, !selected);
+      };
+      choicesFor('Default behavior');
+      const folders = [...new Set((chat.folder_options ?? []).map(folder => normalize(folder).replace(/\/+$/, '')))];
+      const visibleFolders = folders.slice(offset, offset + 8);
+      text += visibleFolders.map((folder, index) =>
+        `\nDirectory ${offset + index + 1}: ${folder === '.' ? '<Default>' : folder}`).join('');
+      visibleFolders.forEach((folder, index) => choicesFor(`Directory ${offset + index + 1}`, folder));
+      if (offset > 0) button('⬅️ Previous directories', { kind: 'page', page, offset: Math.max(0, offset - 8) });
+      if (offset + 8 < folders.length) button('➡️ Next directories', { kind: 'page', page, offset: offset + 8 });
     } else if (page === 'folders') {
       const folders = chat.folder_options ?? [];
       const sole = folders[0] ?? '.';

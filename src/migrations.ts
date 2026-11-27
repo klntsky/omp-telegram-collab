@@ -79,7 +79,7 @@ export function initializeDatabase(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
     const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-    if (version !== 0 && version !== 10 && version !== 11 && version !== 12)
+    if (version !== 0 && version !== 10 && version !== 11 && version !== 12 && version !== 13)
       throw new Error(`Unsupported database schema version ${version}`);
     if (version === 0) {
       const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
@@ -88,7 +88,11 @@ export function initializeDatabase(db: DatabaseSync): void {
     }
     if (version === 10 || version === 11) upgradeReplies(db, version);
     db.exec(promptQueueSchema);
-    if (version !== 12) db.exec('PRAGMA user_version=12');
+    if (version !== 13) {
+      db.exec('ALTER TABLE sessions ADD COLUMN worktree_policy_cwd TEXT');
+      db.exec('UPDATE sessions SET worktree_policy_cwd=cwd');
+    }
+    if (version !== 13) db.exec('PRAGMA user_version=13');
     db.exec('COMMIT');
   } catch (error) {
     try { if (db.isTransaction) db.exec('ROLLBACK'); }

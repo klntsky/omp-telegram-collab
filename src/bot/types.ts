@@ -128,18 +128,20 @@ export type SettingsKey =
   | 'presets'
   | 'capacity'
   | 'worktrees'
+  | `worktrees:${string}`
   | 'folders'
   | 'typing';
-export type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing' | 'folders';
+export type SettingsPage = 'root' | 'skills' | 'presets' | 'capacity' | 'typing' | 'folders' | 'worktrees';
 export type SettingsAction =
   | { kind: 'page'; page: SettingsPage; offset?: number }
   | {
       kind: 'set';
-      field: 'all_messages_are_prompts' | 'users_can_propose_prompts' | 'create_topic_worktrees';
+      field: 'all_messages_are_prompts' | 'users_can_propose_prompts';
       value: boolean;
     }
   | { kind: 'default'; field: 'default_new_topic_skills' | 'default_model_preset'; value?: string }
   | { kind: 'typing'; field: 'typing_indicators'; value: TypingMode }
+  | { kind: 'worktrees'; folder?: string; value: boolean }
   | { kind: 'folders'; remove?: number; clear?: boolean; input?: 'append' | 'replace' }
   | { kind: 'close' };
 export interface SettingsPanel {
