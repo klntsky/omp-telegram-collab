@@ -1,10 +1,11 @@
+import { resolve } from 'node:path';
 import { GrammyError, type Bot, type Context } from 'grammy';
 import { AbortController as TelegramAbortController } from 'abort-controller';
 import type { AppConfig, TopicSession } from '../../shared/contracts.js';
 import type { Store } from '../store.js';
 import type { Omp } from '../omp.js';
 import { AuthorizationUnavailableError, isActiveMember, isAdministrator } from '../auth.js';
-import { findInstance, readConfig, refreshTermination } from '../config.js';
+import { canonicalPath, findInstance, readConfig, refreshTermination } from '../config.js';
 import { withCancellation } from '../cancellation.js';
 import { contextDestination, replyTo } from '../telegram-destination.js';
 import { AuthorizationDeniedError } from './types.js';
@@ -109,9 +110,24 @@ usersCanProposePrompts(chatId: number): boolean {
       .find(chat => chat.botId === this.deps.botId() && chat.chatId === chatId)?.users_can_propose_prompts === true;
   }
 
-createsTopicWorktrees(chatId: number): boolean {
-    return findInstance(this.deps.config, this.deps.botId(), chatId)?.instance.chats
-      .find(chat => chat.botId === this.deps.botId() && chat.chatId === chatId)?.create_topic_worktrees === true;
+createsTopicWorktrees(chatId: number, cwd?: string): boolean {
+    const assigned = findInstance(this.deps.config, this.deps.botId(), chatId);
+    const chat = assigned?.instance.chats.find(chat => chat.botId === this.deps.botId() && chat.chatId === chatId);
+    if (!assigned || !chat) return false;
+    const fallback = chat.create_topic_worktrees === true;
+    const selected = cwd ?? assigned.instance.defaultDir;
+    for (const folder of ['.', ...(chat.folder_options ?? []).filter(folder => folder !== '.')]) {
+      try {
+        if (canonicalPath(resolve(assigned.instance.defaultDir, folder)) === selected) {
+          const overrides = chat.folder_worktree_overrides;
+          return overrides && Object.hasOwn(overrides, folder) ? overrides[folder]! : fallback;
+        }
+      } catch (error) {
+        const cause = error instanceof Error ? error.cause : undefined;
+        if (!(cause instanceof Error) || !('code' in cause) || (cause.code !== 'ENOENT' && cause.code !== 'ENOTDIR')) throw error;
+      }
+    }
+    return fallback;
   }
 
 promptHelp(chatId: number): string {

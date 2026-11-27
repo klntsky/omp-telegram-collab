@@ -15,7 +15,7 @@ export interface SessionForkDependencies {
   currentAdmin(ctx: Context): Promise<boolean>;
   requireSessionAssignment(session: TopicSession): void;
   defaultNewTopicSkills(chatId: number): string[];
-  createsTopicWorktrees(chatId: number): boolean;
+  createsTopicWorktrees(chatId: number, cwd?: string): boolean;
   createTopicWorktree(session: TopicSession, beforeMutation?: () => Promise<void>): Promise<void>;
   announce(session: TopicSession): Promise<void>;
   listen(session: TopicSession, binding?: HostBinding, beforeMutation?: () => Promise<void>): Promise<unknown>;
@@ -64,7 +64,7 @@ export class SessionFork {
       topic = await this.dependencies.bot.api.createForumTopic(source.chatId, title.slice(0, 128) || 'OMP session');
       await check();
       destination = this.dependencies.options.store.createSession(
-        {botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd},
+        {botId:this.dependencies.id,chatId:source.chatId,threadId:topic.message_thread_id,instanceId:source.instanceId,cwd:source.cwd,worktreePolicyCwd:source.worktreePolicyCwd ?? source.cwd},
         title, {kind:'managed'}, {preparation:'fork'},
       );
       reservation.bind(destination.id);
@@ -81,7 +81,7 @@ export class SessionFork {
       await beforeMutation();
       this.dependencies.options.store.setSessionCwd(destination.id, destination.cwd);
       if (defaultSkills.length) this.dependencies.options.store.setNewTopicSkills(destination.id, defaultSkills);
-      if (this.dependencies.createsTopicWorktrees(source.chatId)) {
+      if (this.dependencies.createsTopicWorktrees(source.chatId, source.worktreePolicyCwd ?? source.cwd)) {
         await this.dependencies.createTopicWorktree(destination, beforeMutation);
       }
       await beforeMutation();

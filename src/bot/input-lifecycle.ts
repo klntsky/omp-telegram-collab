@@ -22,7 +22,7 @@ export interface InputLifecycleDependencies {
   bot: Bot<Context>;
   chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>, active?: () => boolean): Promise<boolean>;
   closedSessions: Map<string, { generation: number; settled: boolean; pending?: Promise<void>; }>;
-  createsTopicWorktrees(chatId: number): boolean;
+  createsTopicWorktrees(chatId: number, cwd?: string): boolean;
   currentAdmin(ctx: Context): Promise<boolean>;
   defaultNewTopicSkills(chatId: number): string[];
   delivery: TelegramDelivery;
@@ -83,7 +83,7 @@ export async function routeLifecycle(deps: InputLifecycleDependencies, ctx: Mess
             {kind:'managed'},
             {
               preparation: 'topic',
-              prompt: deps.createsTopicWorktrees(ctx.chat!.id)
+              prompt: deps.createsTopicWorktrees(ctx.chat!.id, cwd)
                 ? {messageId: message.message_id, userId: ctx.from!.id, authorityUserId: authority.from!.id, content: {text:''}, preparation: {automaticWorktree:true}}
                 : undefined,
             },

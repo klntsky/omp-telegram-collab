@@ -152,6 +152,35 @@ export async function clickPanel(app: TelegramWorkflow, panel: TelegramPanel, in
   });
 }
 
+export async function chooseSettingsAction(
+  app: TelegramWorkflow & { store: Pick<Store, 'isEnrolled' | 'db'> },
+  panel: TelegramPanel,
+  wanted: Record<string, unknown>,
+  waitForEdit = true,
+): Promise<void> {
+  const token = panel.buttons[0]!.split(':')[1]!;
+  const stored = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
+    .get(app.telegram.bot.id, token) as { panel: string };
+  const state = JSON.parse(stored.panel) as { choices: Record<string, unknown>[] };
+  const index = state.choices.findIndex(action => Object.entries(wanted).every(([key, value]) => action[key] === value));
+  assert.ok(index >= 0, `Missing settings action: ${JSON.stringify(wanted)}`);
+  await clickPanel(app, panel, index, waitForEdit);
+}
+
+export async function setDefaultWorktrees(
+  app: TelegramWorkflow & { store: Pick<Store, 'isEnrolled' | 'db'> },
+  panel: TelegramPanel,
+  value: boolean,
+): Promise<void> {
+  const token = panel.buttons[0]!.split(':')[1]!;
+  const stored = app.store.db.prepare('SELECT panel FROM settings_panels WHERE bot_id=? AND token=?')
+    .get(app.telegram.bot.id, token) as { panel: string };
+  const state = JSON.parse(stored.panel) as { choices: { kind: string }[] };
+  if (!state.choices.some(action => action.kind === 'worktrees'))
+    await chooseSettingsAction(app, panel, { kind: 'page', page: 'worktrees' });
+  await chooseSettingsAction(app, panel, { kind: 'worktrees', folder: undefined, value });
+}
+
 export function sendPhoto(app: TelegramWorkflow, threadId: number, caption: string, base64: string) {
   const image = InputMedia.photo(Buffer.from(base64, 'base64'));
   return app.omp.step('telegram.user.send-photo', () => app.telegram.user.client.sendMedia(

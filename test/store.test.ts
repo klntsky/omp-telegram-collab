@@ -8,6 +8,7 @@ import { Store } from '../src/store.js';
 import { topicDestination } from '../shared/topic-destination.js';
 import { OmpRuntime } from '../src/runtime.js';
 import { botId, chatId } from './telegram-data.js';
+import { initializeDatabase } from '../src/migrations.js';
 
 const topic = { botId, chatId, threadId: 17, instanceId: 1, cwd: '/work/project-a' };
 
@@ -23,6 +24,38 @@ test('status identities include legacy stored rows and remain detached after rep
     assert.equal(store.getTopicKind({...topic,threadId:18}), 'detached');
     assert.throws(() => store.createSession({...topic,threadId:18}, 'Current status'));
     assert.deepEqual(store.listSessions(botId), []);
+  } finally { store.close(); }
+});
+// Permanent persistence boundary: existing cwd tests do not cover configured policy identity surviving relocation and fork inheritance.
+test('worktree policy identity survives relocation and is inherited by forks', () => {
+  const store = new Store(':memory:');
+  try {
+    const source = store.createSession(topic, 'Source');
+    store.setSessionCwd(source.id, '/work/worktree');
+    const relocated = store.getSession(source.id)!;
+    assert.equal(relocated.worktreePolicyCwd, topic.cwd);
+    const fork = store.createSession({ ...topic, threadId: 18, cwd: relocated.cwd, worktreePolicyCwd: relocated.worktreePolicyCwd }, 'Fork');
+    store.setSessionCwd(fork.id, '/work/fork-worktree');
+    assert.equal(store.getSession(fork.id)?.worktreePolicyCwd, topic.cwd);
+    assert.equal(store.getSession(fork.id)?.cwd, '/work/fork-worktree');
+  } finally { store.close(); }
+});
+
+// Permanent migration boundary: existing schema rejection tests do not cover preserving legacy sessions through the policy upgrade.
+test('version 12 upgrade preserves sessions and initializes policy identity conservatively', () => {
+  const store = new Store(':memory:');
+  try {
+    const source = store.createSession(topic, 'Legacy');
+    store.setSessionCwd(source.id, '/work/legacy-worktree');
+    store.db.exec('ALTER TABLE sessions DROP COLUMN worktree_policy_cwd; PRAGMA user_version=12');
+    initializeDatabase(store.db);
+    assert.equal(store.db.prepare('PRAGMA user_version').get()!.user_version, 13);
+    const restored = store.getSession(source.id)!;
+    assert.equal(restored.worktreePolicyCwd, '/work/legacy-worktree');
+    assert.equal(restored.name, 'Legacy');
+    assert.equal(restored.instanceId, topic.instanceId);
+    initializeDatabase(store.db);
+    assert.deepEqual(store.getSession(source.id), restored);
   } finally { store.close(); }
 });
 

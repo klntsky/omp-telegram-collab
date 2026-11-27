@@ -22,7 +22,7 @@ export interface TopicCreationDependencies {
   assignedCwd(chatId: number): string;
   chooseFolder(source: Context, authority: Context | undefined, resume: (cwd: string, authority: Context) => Promise<void>): Promise<boolean>;
   getIconIds(): Promise<Record<'running' | 'finished', string>>;
-  createsTopicWorktrees(chatId: number): boolean;
+  createsTopicWorktrees(chatId: number, cwd?: string): boolean;
   skillKey(ctx: Context): PendingSkillKey;
   defaultNewTopicSkills(chatId: number): string[];
   albumContexts(ctx: Context): readonly Context[];
@@ -93,7 +93,7 @@ export class TopicCreation {
       throw new Error('The group instance assignment changed');
     if (epoch !== this.dependencies.admissionEpoch || folderFingerprint !== JSON.stringify(this.dependencies.folderSettings(ctx.chat!.id)))
       throw new Error('Folder settings changed during topic creation. Send the command again.');
-    const automaticWorktree = !attached && !worktree && !extensions.some(extension => extension.kind === 'worktree') && this.dependencies.createsTopicWorktrees(ctx.chat!.id);
+    const automaticWorktree = !attached && !worktree && !extensions.some(extension => extension.kind === 'worktree') && this.dependencies.createsTopicWorktrees(ctx.chat!.id, cwd ?? this.dependencies.assignedCwd(ctx.chat!.id));
     const session = this.dependencies.options.store.createSession(
       { botId: this.dependencies.id, chatId: ctx.chat!.id, threadId: topic.message_thread_id, instanceId, cwd: attached?.cwd ?? cwd ?? this.dependencies.assignedCwd(ctx.chat!.id) },
       title,

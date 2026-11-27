@@ -35,7 +35,7 @@ function setupRequest(row: Row): SetupRequest {
 }
 function session(row: Row | undefined): TopicSession | undefined {
   if (!row) return undefined;
-  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instanceId: Number(row.instance_id), cwd: String(row.cwd), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
+  return { id: String(row.id), botId: Number(row.bot_id), chatId: Number(row.chat_id), threadId: Number(row.thread_id), instanceId: Number(row.instance_id), cwd: String(row.cwd), worktreePolicyCwd: String(row.worktree_policy_cwd), name: String(row.name), status: row.status as TopicSession['status'], runtime: JSON.parse(String(row.runtime)) as TopicSession['runtime'], createdAt: Number(row.created_at) };
 }
 import { PromptLedger } from './store/prompt-ledger.js';
 export class Store {
@@ -140,14 +140,15 @@ export class Store {
     if (key.destination.kind === 'general') return undefined;
     return session(this.db.prepare('SELECT * FROM sessions WHERE bot_id=? AND chat_id=? AND thread_id=?').get(key.botId, key.destination.chatId, storedThreadId(key.destination)) as Row | undefined);
   }
-  createSession(key: TopicKey & { instanceId: number; cwd: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, options?: { prompt?: NewSessionPrompt; preparation?: 'topic' | 'fork'; onAdmitted?: () => void }): TopicSession {
+  createSession(key: TopicKey & { instanceId: number; cwd: string; worktreePolicyCwd?: string }, name: string, runtime: TopicSession['runtime'] = { kind: 'managed' }, options?: { prompt?: NewSessionPrompt; preparation?: 'topic' | 'fork'; onAdmitted?: () => void }): TopicSession {
     if (!Number.isSafeInteger(key.instanceId) || key.instanceId <= 0) throw new Error('A session requires a positive safe integer instance ID');
     if (!isAbsolute(key.cwd)) throw new Error('A session requires an absolute working directory');
+    if (key.worktreePolicyCwd !== undefined && !isAbsolute(key.worktreePolicyCwd)) throw new Error('A session requires an absolute worktree policy directory');
     if (topicDestination(key.chatId, key.threadId).kind === 'general') throw new Error('A session requires a non-General topic');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (this.getTopicKind(key) === 'detached') throw new Error('A detached topic cannot have a session');
-      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,instance_id,cwd) VALUES (?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), key.instanceId, key.cwd);
+      const result = this.db.prepare('INSERT OR IGNORE INTO sessions (id,bot_id,chat_id,thread_id,name,status,runtime,created_at,instance_id,cwd,worktree_policy_cwd) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomBytes(16).toString('base64url'), key.botId, key.chatId, key.threadId, name, 'open', JSON.stringify(runtime), Date.now(), key.instanceId, key.cwd, key.worktreePolicyCwd ?? key.cwd);
       const created = this.getTopic({ botId: key.botId, destination: topicDestination(key.chatId, key.threadId) })!;
       if (created.instanceId !== key.instanceId) throw new Error('This topic history belongs to a different instance ID');
       if (Number(result.changes) && runtime.kind === 'managed') this.setPendingSessionTitle(created.id,name);
